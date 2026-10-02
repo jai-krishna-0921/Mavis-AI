@@ -16,6 +16,7 @@ from mavis.bus.base import EventBus
 from mavis.config import get_settings
 from mavis.logging import configure_logging
 from mavis.store.db import dispose_engine, init_db
+from mavis.tools.integrations import close_provider
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Mavis personal assistant")
 log = structlog.get_logger(__name__)
@@ -82,7 +83,10 @@ async def _cleanup(tasks: list[asyncio.Task], bus: EventBus) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
         await bus.close()
     finally:
-        await dispose_engine()
+        try:
+            await close_provider()
+        finally:
+            await dispose_engine()
 
 
 async def _run_tasks(tasks: list[asyncio.Task], bus: EventBus) -> None:

@@ -1,0 +1,215 @@
+"""Production wiring for integrations: the only module that binds concrete deps to the flows.
+
+`register_integrations()` is safe to call any number of times: handler, job and wakeup registration
+runs on every call (tests clear the registries between runs), and hook / brief-source appends are
+guarded by membership checks.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from functools import lru_cache
+
+import structlog
+
+from mavis.agents.buttons import dispatch_button, register_button_handler
+from mavis.bus import get_bus
+from mavis.config import get_settings
+from mavis.domain import timeutil
+from mavis.domain.decisions import NotifyIntent
+from mavis.domain.events import Event, EventType, Job, JobKind
+from mavis.domain.messages import Outbound
+from mavis.domain.policy import Capability
+from mavis.domain.wakeups import WakeupKind
+from mavis.initiative import hooks, routines
+from mavis.initiative import wiring as initiative_wiring
+from mavis.initiative.briefs_integrations import CalendarBrief, InboxBrief
+from mavis.initiative.email_triage import EmailTriage, email_prefilter
+from mavis.initiative.untrusted import wrap_untrusted
+from mavis.timers.system import register_system_wakeup
+from mavis.tools.integrations import get_connection_cache, get_provider
+from mavis.tools.integrations.actions import DISPLAY_NAMES
+from mavis.tools.integrations.activation import Activator
+from mavis.tools.integrations.connect_flow import CHECK_KIND, ConnectFlow, RepoUserState
+from mavis.tools.integrations.first_sync import FirstSync
+from mavis.tools.integrations.poller import POLL_KIND, Poller
+from mavis.worker.runner import register_event_handler, register_job_handler
+
+log = structlog.get_logger(__name__)
+
+
+class _LazyBus:
+    """Resolves the process bus at use time, so cached flows never hold a stale bus."""
+
+    async def publish(self, event: Event) -> bool:
+        return await get_bus().publish(event)
+
+    async def enqueue(self, job: Job) -> None:
+        await get_bus().enqueue(job)
+
+
+class JobLearner:
+    """FirstSync's memory port: third-party text goes through an untrusted LEARN job, never inline."""
+
+    async def learn(self, user_id: int, text: str, source_ref: str) -> None:
+        await get_bus().enqueue(Job(
+            id=f"learn:{source_ref}", user_id=user_id, kind=JobKind.LEARN,
+            payload={"text": text, "source_ref": source_ref, "trust": "untrusted", "conversation": False},
+        ))
+
+
+async def outbox_notify(msg: Outbound) -> None:
+    from mavis.store.db import Session
+    from mavis.store.repo import outbox
+
+    async with Session() as session:
+        await outbox.enqueue(session, msg)
+        await session.commit()
+
+
+async def wakeup_schedule(user_id: int, at: datetime, reason: str, kind: str) -> int:
+    """Schedule a system wakeup. Poll wakeups collapse onto an existing pending one (one chain per
+    user and capability); connection checks do not dedupe."""
+    from mavis.timers.service import WakeupService
+
+    service = WakeupService()
+    if kind == POLL_KIND:
+        now = timeutil.now()
+        for w in await service.pending(user_id, WakeupKind.SYSTEM_POLL):
+            if w.reason != reason:
+                continue
+            # Any pending poll absorbs an immediate request (the Activator asks for "now"). A request
+            # for a later time (the poller's own reschedule) must not dedupe onto the row that is
+            # firing right now (due, still PENDING until commit), or the chain would die.
+            if w.due_at > now or at <= now:
+                return w.id
+    return await service.wake_me(user_id, at, reason, kind=kind)
+
+
+async def user_timezone(user_id: int) -> str:
+    from mavis.store.repo import users
+
+    return (await users.get(user_id)).timezone
+
+
+async def known_names(user_id: int) -> set[str]:
+    from mavis.memory.service import get_memory
+
+    names: set[str] = set()
+    for entity in await get_memory().graph.entities(user_id):
+        names.add(entity.name.lower())
+        names.update(a.lower() for a in entity.aliases)
+    return names
+
+
+@lru_cache
+def get_activator() -> Activator:
+    s = get_settings()
+    # Without a webhook secret every webhook is rejected, so polling is the only inbound path.
+    return Activator(provider=get_provider(), state=RepoUserState(), schedule=wakeup_schedule,
+                     polling_forced=s.integration_polling or not s.composio_webhook_secret)
+
+
+@lru_cache
+def get_connect_flow() -> ConnectFlow:
+    return ConnectFlow(
+        provider=get_provider(), cache=get_connection_cache(), bus=_LazyBus(), notify=outbox_notify,
+        schedule=wakeup_schedule, state=RepoUserState(), base_url=get_settings().public_base_url,
+        on_active=get_activator().on_active,
+    )
+
+
+@lru_cache
+def get_poller() -> Poller:
+    return Poller(provider=get_provider(), cache=get_connection_cache(), bus=_LazyBus(),
+                  state=RepoUserState(), schedule=wakeup_schedule)
+
+
+@lru_cache
+def get_first_sync() -> FirstSync:
+    from mavis.loops.service import LoopService
+
+    # Phase 4 / later: loops stay unused, third-party content never creates loops.
+    return FirstSync(provider=get_provider(), memory=JobLearner(), loops=LoopService(get_bus()),
+                     bus=_LazyBus(), tz_of=user_timezone)
+
+
+@lru_cache
+def get_email_triage() -> EmailTriage:
+    return EmailTriage(known_names)
+
+
+WIRING_GETTERS = (get_activator, get_connect_flow, get_poller, get_first_sync, get_email_triage)
+
+
+async def _connection_check_job(job: Job) -> None:
+    await get_connect_flow().check(int(job.payload["pending_id"]))
+
+
+async def _first_sync_job(job: Job) -> None:
+    await get_first_sync().run(job.user_id, Capability(job.payload["capability"]))
+
+
+async def _poll_job(job: Job) -> None:
+    await get_poller().poll(job.user_id, Capability(job.payload["capability"]))
+
+
+async def _notify_first_sync(event: Event) -> None:
+    from mavis.store.repo import users
+
+    noticed = [str(n) for n in event.payload.get("noticed") or []]
+    if not noticed:
+        return
+    capability = str(event.payload.get("capability", ""))
+    try:
+        name = DISPLAY_NAMES[Capability(capability)]
+    except ValueError:
+        name = capability
+    user = await users.get(event.user_id)
+    intent = NotifyIntent(
+        urgency=3,
+        intent=f"Tell the user what you noticed after connecting {name}:\n"
+               + wrap_untrusted("\n".join(noticed), "first_sync"),
+        dedupe_key=f"first_sync:{event.user_id}:{capability}",
+    )
+    # untrusted: the lines carry email subjects; the executor caps urgency
+    await initiative_wiring.current().executor.notify(user, intent, untrusted=True)
+
+
+async def dispatch_task_completed(event: Event) -> None:
+    """Owns TASK_COMPLETED until Phase 4. Phase 4's owner must keep the first_sync branch."""
+    if event.payload.get("kind") == "first_sync":
+        await _notify_first_sync(event)
+        return
+    await initiative_wiring.current().handler.handle(event)
+
+
+def register_integrations(registry: object | None = None) -> None:
+    """Hook integrations into the worker. `registry` is the Phase 4 ToolRegistry (unused here)."""
+    # Phase 4: register_integration_tools(registry), registry.capability_check = capability_check
+    # Phase 4: register_interrupt_handler("connect", flow.on_connect_interrupt), specialists
+    flow = get_connect_flow()
+    register_event_handler(EventType.BUTTON_PRESSED, dispatch_button)
+    register_button_handler("conn:", flow.on_button)
+    register_event_handler(EventType.CONNECTION_CHANGED, flow.on_connection_changed, replace=True)
+    register_event_handler(EventType.TASK_COMPLETED, dispatch_task_completed, replace=True)
+    register_job_handler(JobKind.CONNECTION_CHECK, _connection_check_job)
+    register_job_handler(JobKind.FIRST_SYNC, _first_sync_job)
+    register_job_handler(JobKind.POLL_PROVIDER, _poll_job)
+    register_system_wakeup(CHECK_KIND, flow.on_check_wakeup)
+    register_system_wakeup(POLL_KIND, get_poller().on_wakeup)
+
+    triage = get_email_triage()
+    if email_prefilter not in hooks.PREFILTERS:
+        hooks.PREFILTERS.append(email_prefilter)
+    if triage.enrich not in hooks.ENRICHERS:
+        hooks.ENRICHERS.append(triage.enrich)
+    if triage.apply_policy not in hooks.DECISION_POLICIES:
+        hooks.DECISION_POLICIES.append(triage.apply_policy)
+    # Phase 4: connect suggestions enrich/apply_policy hooks
+
+    present = {s.name for s in routines.brief_sources()}
+    if "calendar" not in present:
+        routines.register_brief_source(CalendarBrief(get_provider(), get_connection_cache(), user_timezone))
+    if "inbox" not in present:
+        routines.register_brief_source(InboxBrief(get_provider(), get_connection_cache()))

@@ -55,7 +55,7 @@ async def run_polling(bus: EventBus, token: str, bot: Any | None = None) -> None
             continue
         for upd in updates:
             try:
-                await ingest_update(upd.to_dict(), bus)
+                await ingest_update(upd.to_dict(), bus, answer=getattr(bot, "answer_callback_query", None))
             except Exception:
                 # keep the offset at this update so the next poll re-fetches it; publishing is deduped
                 log.exception("telegram.ingest_failed", update_id=upd.update_id)
