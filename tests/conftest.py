@@ -38,3 +38,14 @@ def settings(tmp_path, monkeypatch) -> Iterator:
     get_settings.cache_clear()
     yield get_settings()
     get_settings.cache_clear()
+
+
+@pytest.fixture
+async def db(settings):
+    """Fresh SQLite schema per test (create_all). Disposes the engine afterwards."""
+    from zento.store.db import dispose_engine, init_db
+
+    await dispose_engine()
+    await init_db()
+    yield
+    await dispose_engine()
