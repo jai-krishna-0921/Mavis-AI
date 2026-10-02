@@ -25,8 +25,9 @@ async def test_prompt_style_and_capabilities(db) -> None:
     assert "Never use em dashes or en dashes" in prompt
     assert "No headings, no tables" in prompt
     assert "Available now:" in prompt and "Coming soon" in prompt
-    for item in ("remember", "Gmail", "Morning check-ins", "decks"):
+    for item in ("remember", "Gmail", "morning check-in", "follow up after them", "decks"):
         assert item in prompt
+    assert prompt.index("morning check-in") < prompt.index("Coming soon")
     assert "tech support" not in prompt.lower()
 
 
