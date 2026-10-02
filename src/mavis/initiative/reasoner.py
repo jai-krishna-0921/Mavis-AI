@@ -89,7 +89,9 @@ class Reasoner:
         )
         if result.extra:
             prompt += f"\n\n## Mavis signals (computed, trusted)\n{result.extra}"
-        decision = await llm.structured(InitiativeDecision, system, prompt, tier=tier, priority="background")
+        decision = await llm.structured(
+            InitiativeDecision, system, prompt, tier=tier, priority="background", fallback=True
+        )
         log.info(
             "initiative.decided",
             event_id=event.id,
