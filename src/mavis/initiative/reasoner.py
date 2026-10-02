@@ -87,6 +87,8 @@ class Reasoner:
             f"## Related open loops\n{loops}\n\n"
             f"{recall}\n\n## Recent conversation\n{history}"
         )
+        if result.extra:
+            prompt += f"\n\n## Mavis signals (computed, trusted)\n{result.extra}"
         decision = await llm.structured(InitiativeDecision, system, prompt, tier=tier, priority="background")
         log.info(
             "initiative.decided",

@@ -12,7 +12,8 @@ class Role(StrEnum):
 
 class Button(BaseModel):
     label: str
-    data: str = Field(max_length=64, description="Telegram callback_data limit is 64 bytes")
+    data: str = Field(default="", max_length=64, description="Telegram callback_data limit is 64 bytes")
+    url: str | None = Field(default=None, description="If set, rendered as a URL button (no callback)")
 
 
 class Outbound(BaseModel):
