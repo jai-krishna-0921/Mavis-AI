@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
@@ -38,6 +40,29 @@ def _local_midnight(local: datetime) -> datetime:
     return local.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def _keys(dedupe_key: str | None, extra: Sequence[str]) -> list[str]:
+    return list(dict.fromkeys(k for k in (dedupe_key, *extra) if k))
+
+
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_dedupe_key(key: str | None) -> str | None:
+    """Model-chosen keys drift ("thank_you_jawahar" vs "thankyou_jawahar"): compare them lowercased,
+    alphanumerics only, without a date (keys are scoped per local day anyway)."""
+    if not key:
+        return None
+    return _NON_ALNUM.sub("", _ISO_DATE.sub("", key.lower())) or None
+
+
+def loop_ping_key(loop_id: int | str | None, kind: str | None) -> str | None:
+    """One ping per loop and kind of ping per day, whatever key the model chose."""
+    if loop_id in (None, "") or not kind:
+        return None
+    return f"loop:{loop_id}:{kind}"
+
+
 def _day_key(dedupe_key: str, local_now: datetime) -> str:
     """Scope a key to the local day; keys that already carry today's date are not dated twice."""
     day = local_now.date().isoformat()
@@ -47,11 +72,14 @@ def _day_key(dedupe_key: str, local_now: datetime) -> str:
 
 
 class PingPolicy:
-    async def check(self, user, urgency: int, dedupe_key: str | None, now: datetime) -> PolicyVerdict:
+    async def check(self, user, urgency: int, dedupe_key: str | None, now: datetime,
+                    extra_keys: Sequence[str] = ()) -> PolicyVerdict:
+        """`extra_keys` are further dedupe keys (e.g. one per loop and kind of ping): any seen one blocks."""
         s = get_settings()
         local = timeutil.to_local(now, user.timezone)
-        if dedupe_key and await self._seen(user.id, _day_key(dedupe_key, local)):
-            return PolicyVerdict(allow=False, reason="duplicate")
+        for key in _keys(dedupe_key, extra_keys):
+            if await self._seen(user.id, _day_key(key, local)):
+                return PolicyVerdict(allow=False, reason="duplicate")
         urgent = urgency >= URGENT  # urgent bypasses quiet hours only, never the daily budget (spec 8.4)
         if not urgent and in_quiet_hours(local.hour, s.quiet_start, s.quiet_end) and not await self._awake(
             user.id, now, s.quiet_awake_window_min
@@ -93,18 +121,19 @@ class PingPolicy:
             )
         return int(count or 0)
 
-    async def record(self, user, dedupe_key: str | None, urgency: int, now: datetime) -> None:
-        if not dedupe_key:
-            return
-        key = _day_key(dedupe_key, timeutil.to_local(now, user.timezone))
-        async with Session() as session:
-            session.add(
-                PingLogRow(user_id=user.id, key=key, urgency=urgency, sent_at=timeutil.ensure_utc(now))
-            )
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()  # already recorded: dedupe is the point
+    async def record(self, user, dedupe_key: str | None, urgency: int, now: datetime,
+                     extra_keys: Sequence[str] = ()) -> None:
+        local = timeutil.to_local(now, user.timezone)
+        for raw in _keys(dedupe_key, extra_keys):
+            key = _day_key(raw, local)
+            async with Session() as session:
+                session.add(
+                    PingLogRow(user_id=user.id, key=key, urgency=urgency, sent_at=timeutil.ensure_utc(now))
+                )
+                try:
+                    await session.commit()
+                except IntegrityError:
+                    await session.rollback()  # already recorded: dedupe is the point
 
     async def _seen(self, user_id: int, key: str) -> bool:
         async with Session() as session:
