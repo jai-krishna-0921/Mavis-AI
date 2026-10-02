@@ -29,6 +29,9 @@ from mavis.worker.runner import register_event_handler
 
 log = structlog.get_logger()
 MAX_WAKEUP_LATENESS = timedelta(hours=2)
+MAX_LLM_URGENCY = 4
+URGENT_URGENCY = 5
+IMMINENT = timedelta(minutes=15)
 HANDLED_TYPES = tuple(t for t in EventType if t not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED))
 
 
@@ -93,7 +96,7 @@ class InitiativeHandler:
             return
         result.extra = await hooks.gather_enrichments(event)
         try:
-            decision = await self._reasoner.decide(user, event, result)
+            decision = _cap_llm_urgency(await self._reasoner.decide(user, event, result))
         except LLMError as exc:
             log.warning("initiative.reasoner_failed", event_id=event.id, error=str(exc))
             decision = fallback_decision(event, result)
@@ -104,6 +107,7 @@ class InitiativeHandler:
                 await schedule_default_signals(self._wakeups, loop)
 
         decision = await hooks.apply_decision_policies(event, decision)
+        decision = _imminent_floor(event, decision, result.matched_loops)
         decision = _with_default_dedupe(decision, event)
         context = result.summary
         if event.trust is Trust.UNTRUSTED:
@@ -135,6 +139,29 @@ class InitiativeHandler:
             derived = [WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED]
             await self._wakeups.cancel_where(loop.user_id, derived, loop_id=loop.id)
             await schedule_default_signals(self._wakeups, loop)
+
+
+def _cap_llm_urgency(decision: InitiativeDecision) -> InitiativeDecision:
+    """The model tends to call every pre-event nudge a 5. Only deterministic rules may produce 5
+    (it bypasses quiet hours), so a model-proposed urgency is capped at 4."""
+    if decision.notify is None or decision.notify.urgency <= MAX_LLM_URGENCY:
+        return decision
+    notify = decision.notify.model_copy(update={"urgency": MAX_LLM_URGENCY})
+    return decision.model_copy(update={"notify": notify})
+
+
+def _imminent_floor(event: Event, decision: InitiativeDecision, loops: list[Loop]) -> InitiativeDecision:
+    """Deterministic rule: a nudge about a commitment starting within 15 minutes is urgent."""
+    if event.type is not EventType.EVENT_STARTING or decision.notify is None:
+        return decision
+    loop_id = event.payload.get("loop_id")
+    loop = next((lp for lp in loops if lp.id == loop_id), None)
+    if loop is None or loop.due_at is None:
+        return decision
+    if not timedelta(0) < timeutil.ensure_utc(loop.due_at) - timeutil.now() <= IMMINENT:
+        return decision
+    notify = decision.notify.model_copy(update={"urgency": URGENT_URGENCY})
+    return decision.model_copy(update={"notify": notify})
 
 
 def _too_late(event: Event) -> bool:
