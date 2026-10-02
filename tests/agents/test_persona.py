@@ -18,6 +18,18 @@ async def test_system_prompt_has_identity_time_and_rules(db) -> None:
     assert prompt.rstrip().endswith("- Jawahar is a friend")
 
 
+async def test_prompt_style_and_capabilities(db) -> None:
+    user, _ = await users.get_or_create_by_chat(4, "Jai")
+    prompt = system_prompt(user, NOW)
+    assert "—" not in prompt and "–" not in prompt
+    assert "Never use em dashes or en dashes" in prompt
+    assert "No headings, no tables" in prompt
+    assert "Available now:" in prompt and "Coming soon" in prompt
+    for item in ("remember", "Gmail", "Morning check-ins", "decks"):
+        assert item in prompt
+    assert "tech support" not in prompt.lower()
+
+
 async def test_system_prompt_uses_configured_agent_name(db, monkeypatch) -> None:
     from mavis.config import get_settings
 
