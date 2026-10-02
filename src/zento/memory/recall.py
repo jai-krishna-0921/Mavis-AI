@@ -18,6 +18,8 @@ from zento.memory.vector import VectorStore
 log = logging.getLogger(__name__)
 
 RECALL_TOKEN_BUDGET = 1200
+RECALL_SOURCE_TIMEOUT_S = 0.5
+DUE_SOON = timedelta(hours=48)
 
 
 class LoopsReader(Protocol):
@@ -64,10 +66,22 @@ def assemble(
 
 async def _safe[T](what: str, coro, default: T) -> T:
     try:
-        return await coro
+        return await asyncio.wait_for(coro, RECALL_SOURCE_TIMEOUT_S)
+    except TimeoutError:
+        log.warning("recall: %s timed out after %.2fs; degrading to empty", what, RECALL_SOURCE_TIMEOUT_S)
     except Exception:
         log.warning("recall: %s failed; degrading to empty", what, exc_info=True)
-        return default
+    return default
+
+
+def _render_loops(found: list[Loop], tz: str) -> list[str]:
+    out: list[str] = []
+    for loop in found:
+        try:
+            out.append(render_loop(loop, tz))
+        except Exception:
+            log.warning("recall: skipping unrenderable loop %s", getattr(loop, "id", "?"), exc_info=True)
+    return out
 
 
 async def recall(
@@ -82,13 +96,12 @@ async def recall(
     loops: LoopsReader | None = None,
     budget: int = RECALL_TOKEN_BUDGET,
 ) -> RecallContext:
-    """LLM-free, parallel recall. Never raises: a failing store yields an empty section."""
-    try:
-        spotter = await spotters.get(user_id)
-        names = spotter.spot(text)
-    except Exception:
-        log.warning("recall: entity spotting failed", exc_info=True)
-        names = []
+    """LLM-free, parallel recall. Never raises or blocks: a failing or slow store yields an empty section."""
+
+    async def _spot() -> list[str]:
+        return (await spotters.get(user_id)).spot(text)
+
+    names = await _safe("entity spotting", _spot(), [])
 
     async def _graph() -> list[str]:
         return await graph.neighborhood(user_id, names) if names else []
@@ -96,8 +109,18 @@ async def recall(
     async def _loops() -> list[str]:
         if loops is None:
             return []
-        found = await loops.active(user_id, names or None)
-        return [render_loop(x, tz) for x in found]
+        linked, soon = await asyncio.gather(
+            _safe("linked loops", loops.active(user_id, entities=names), []) if names else _none(),
+            _safe("due-soon loops", loops.active(user_id, entities=None, due_within=DUE_SOON), []),
+        )
+        soon = sorted(soon, key=lambda x: (x.due_at is None, x.due_at))
+        seen: set[int] = set()
+        merged: list[Loop] = []
+        for loop in [*linked, *soon]:
+            if loop.id not in seen:
+                seen.add(loop.id)
+                merged.append(loop)
+        return _render_loops(merged, tz)
 
     facts, episodes, loop_lines = await asyncio.gather(
         _safe("graph", _graph(), []),
@@ -105,3 +128,7 @@ async def recall(
         _safe("loops", _loops(), []),
     )
     return assemble(profile, loop_lines, facts, episodes, budget)
+
+
+async def _none() -> list[Loop]:
+    return []
