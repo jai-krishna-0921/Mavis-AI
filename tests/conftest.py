@@ -293,7 +293,16 @@ def _reset_integrations():
     from mavis.worker import locks
 
     locks._claims.clear()
-    # Task 16 extends this with the wiring getters, hooks lists and brief sources.
+    from mavis.agents import buttons
+    from mavis.initiative import hooks, routines
+    from mavis.tools.integrations import wiring
+
+    for getter in wiring.WIRING_GETTERS:
+        getter.cache_clear()
+    for hook_list in (hooks.PREFILTERS, hooks.ENRICHERS, hooks.DECISION_POLICIES):
+        hook_list.clear()
+    routines.clear_brief_sources()
+    buttons.BUTTON_HANDLERS.clear()
 
 
 @pytest.fixture

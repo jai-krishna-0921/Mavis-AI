@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 from mavis.domain.integrations import ToolResult
 from mavis.domain.policy import Capability, RiskClass
+from mavis.memory.extractor import wrap_untrusted
 from mavis.tools.integrations.actions import (
     ACTIONS,
     CalendarCreateArgs,
@@ -81,4 +82,5 @@ def test_render_result_truncates():
 
 
 def test_render_result_error():
-    assert render_result(ToolResult(ok=False, error="nope")) == "error: nope"
+    out = render_result(ToolResult(ok=False, error="nope"))
+    assert out == "error: " + wrap_untrusted("nope", "provider_error")
