@@ -110,3 +110,15 @@ async def test_webhook_mode_without_secret_refuses_to_start(settings, monkeypatc
     with pytest.raises(RuntimeError, match="TELEGRAM_WEBHOOK_SECRET"):
         async with create_app().router.lifespan_context(create_app()):
             pass
+
+
+@pytest.mark.parametrize(("text", "command"), [
+    ("/", None), ("/ hi", None), ("/start", "start"), ("/start@Mavis247_bot hello", "start"),
+    ("/Start", "start"), ("/start!", None),
+])
+async def test_command_parsing(client, bus, text, command) -> None:
+    r = await client.post("/webhooks/telegram", json=update(20, text=text))
+    assert r.json()["published"] is True
+    [event] = await _published(bus)
+    assert event.payload.get("command") == command
+    assert event.payload["text"] == text
