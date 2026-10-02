@@ -27,6 +27,7 @@ log = structlog.get_logger()
 MAX_UNTRUSTED_URGENCY = 4  # only a trusted origin may bypass quiet hours (urgency 5)
 DELAY_NOTE_AFTER = timedelta(minutes=30)
 RELEASE_DELAY = timedelta(seconds=20)  # let the user's reply go out first
+DEFERRED_TTL = timedelta(hours=12)  # a deferred ping with no better bound goes stale after this
 
 
 class InitiativeExecutor:
@@ -110,10 +111,13 @@ class InitiativeExecutor:
             log.info("initiative.notify_blocked", user=user.id, reason=verdict.reason,
                      defer_until=verdict.defer_until)
             if verdict.defer_until is not None:
+                due = original_due or timeutil.now()
+                valid_until = (origin or {}).get("valid_until") or (due + DEFERRED_TTL).isoformat()
                 await self._wakeups.wake_me(
-                    user.id, verdict.defer_until, f"deferred: {intent.intent[:80]}", kind=WakeupKind.DEFERRED,
+                    user.id, verdict.defer_until, f"deferred: {intent.intent[:80]}", _loop_id(origin),
+                    kind=WakeupKind.DEFERRED,
                     payload={"notify": intent.model_dump(mode="json"), "untrusted": untrusted,
-                             "original_due": (original_due or timeutil.now()).isoformat(), "origin": origin},
+                             "original_due": due.isoformat(), "origin": origin, "valid_until": valid_until},
                     scale=False,
                     dedupe_key=f"deferred:{intent.dedupe_key}" if intent.dedupe_key else None,
                 )
@@ -161,6 +165,14 @@ class InitiativeExecutor:
         await self._policy.record(user, dedupe_key, urgency, now, extra_keys=extra_keys or ())
         if quiet_streak > 0:  # only a USER_QUIET nudge continues its chain; other proactive never arm one
             await self._quiet.after_assistant_message(user.id, bubbles[-1], streak=quiet_streak)
+
+
+def _loop_id(origin: dict[str, Any] | None) -> int | None:
+    raw = (origin or {}).get("loop_id")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _with_delay_note(context: str, original_due: datetime | None, user) -> str:
