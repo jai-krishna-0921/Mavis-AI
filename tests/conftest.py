@@ -6,11 +6,11 @@ from collections.abc import Iterator
 
 import pytest
 
+from mavis.memory.embeddings import set_embedder
+from mavis.memory.graph import SqliteGraphStore
+from mavis.memory.service import MemoryService, set_memory
+from mavis.memory.vector import QdrantVectorStore
 from tests.memory.fakes import HashEmbedder
-from zento.memory.embeddings import set_embedder
-from zento.memory.graph import SqliteGraphStore
-from zento.memory.service import MemoryService, set_memory
-from zento.memory.vector import QdrantVectorStore
 
 TEST_ENV = {
     "ENV": "dev",
@@ -33,7 +33,7 @@ TEST_ENV = {
 @pytest.fixture
 def settings(tmp_path, monkeypatch) -> Iterator:
     """Isolated Settings: temp data dir, temp SQLite, no external services, no developer .env."""
-    from zento.config import get_settings
+    from mavis.config import get_settings
 
     for key, value in TEST_ENV.items():
         monkeypatch.setenv(key, value)
@@ -49,7 +49,7 @@ def settings(tmp_path, monkeypatch) -> Iterator:
 @pytest.fixture
 async def db(settings):
     """Fresh SQLite schema per test (create_all). Disposes the engine afterwards."""
-    from zento.store.db import dispose_engine, init_db
+    from mavis.store.db import dispose_engine, init_db
 
     await dispose_engine()
     await init_db()
@@ -59,9 +59,9 @@ async def db(settings):
 
 @pytest.fixture
 def fake_llm(monkeypatch):
-    """Replaces zento.llm.models.chat_model and .structured with a scripted FakeLLM."""
+    """Replaces mavis.llm.models.chat_model and .structured with a scripted FakeLLM."""
+    from mavis.llm import models
     from tests.fakes.llm import FakeLLM
-    from zento.llm import models
 
     fake = FakeLLM()
     monkeypatch.setattr(models, "chat_model", fake.chat_model)
@@ -73,8 +73,8 @@ def fake_llm(monkeypatch):
 @pytest.fixture
 def channel():
     """A FakeChannel installed as the process channel; inspect `.sent` / `.texts`."""
-    from zento.channels import set_channel
-    from zento.channels.fake import FakeChannel
+    from mavis.channels import set_channel
+    from mavis.channels.fake import FakeChannel
 
     ch = FakeChannel()
     set_channel(ch)
@@ -85,8 +85,8 @@ def channel():
 @pytest.fixture
 async def bus(settings):
     """An InProcessBus installed as the process bus."""
-    from zento.bus import set_bus
-    from zento.bus.inprocess import InProcessBus
+    from mavis.bus import set_bus
+    from mavis.bus.inprocess import InProcessBus
 
     b = InProcessBus()
     set_bus(b)
@@ -99,14 +99,14 @@ async def bus(settings):
 def _reset_worker_registry():
     """Handlers registered by one test must not leak into the next."""
     yield
-    from zento.worker.runner import clear_handlers
+    from mavis.worker.runner import clear_handlers
 
     clear_handlers()
 
 
 @pytest.fixture
 async def user(db):
-    from zento.store.repo import users
+    from mavis.store.repo import users
 
     u, _ = await users.get_or_create_by_chat(111, "Jai")
     return u

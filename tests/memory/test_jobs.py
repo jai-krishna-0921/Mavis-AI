@@ -1,9 +1,9 @@
 import asyncio
 
-from zento.domain.events import Job, JobKind
-from zento.domain.memory import Entity, Extraction, Relation
-from zento.memory import jobs
-from zento.worker import locks, runner
+from mavis.domain.events import Job, JobKind
+from mavis.domain.memory import Entity, Extraction, Relation
+from mavis.memory import jobs
+from mavis.worker import locks, runner
 
 
 async def test_handle_learn_runs_learn_and_summary(memory, user, fake_llm, monkeypatch):
@@ -70,7 +70,7 @@ async def test_register_wires_both_kinds(monkeypatch):
 
 
 async def test_default_handlers_register_memory_jobs():
-    from zento.worker.handlers import register_default_handlers
+    from mavis.worker.handlers import register_default_handlers
 
     register_default_handlers()
     assert runner._job_handlers[JobKind.LEARN] is jobs.handle_learn

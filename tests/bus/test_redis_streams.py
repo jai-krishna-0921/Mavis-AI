@@ -4,10 +4,10 @@ from datetime import UTC, datetime
 import pytest
 from fakeredis import FakeAsyncRedis
 
+from mavis.bus.base import Stream
+from mavis.bus.redis_streams import RedisStreamsBus
+from mavis.domain.events import Event, EventType, Job, JobKind
 from tests.fakes import wait_until
-from zento.bus.base import Stream
-from zento.bus.redis_streams import RedisStreamsBus
-from zento.domain.events import Event, EventType, Job, JobKind
 
 
 def ev(event_id: str) -> Event:
@@ -38,7 +38,7 @@ async def test_publish_dedupes(rbus) -> None:
     assert await bus.publish(ev("tg:update:7"))
     assert not await bus.publish(ev("tg:update:7"))
     assert await client.xlen(Stream.EVENTS.value) == 1
-    assert 0 < await client.ttl("zento:seen:tg:update:7") <= 7 * 24 * 3600
+    assert 0 < await client.ttl("mavis:seen:tg:update:7") <= 7 * 24 * 3600
 
 
 async def test_publish_releases_dedupe_key_when_xadd_fails(rbus) -> None:
@@ -56,7 +56,7 @@ async def test_publish_releases_dedupe_key_when_xadd_fails(rbus) -> None:
     client.xadd = flaky_xadd
     with pytest.raises(ConnectionError):
         await bus.publish(ev("tg:update:9"))
-    assert await client.exists("zento:seen:tg:update:9") == 0
+    assert await client.exists("mavis:seen:tg:update:9") == 0
     assert await bus.publish(ev("tg:update:9"))
     assert await client.xlen(Stream.EVENTS.value) == 1
 
@@ -116,8 +116,8 @@ async def test_jobs_round_trip(rbus) -> None:
 
 
 def test_get_bus_selects_in_process_without_redis(settings) -> None:
-    from zento.bus import get_bus, get_redis, set_bus
-    from zento.bus.inprocess import InProcessBus
+    from mavis.bus import get_bus, get_redis, set_bus
+    from mavis.bus.inprocess import InProcessBus
 
     set_bus(None)
     try:
@@ -191,13 +191,13 @@ async def test_nogroup_after_redis_restart_recreates_group(rbus) -> None:
 
 
 def test_claim_idle_ms_comes_from_settings(settings, monkeypatch) -> None:
-    from zento.bus import get_bus, set_bus
+    from mavis.bus import get_bus, set_bus
 
     assert settings.bus_claim_idle_ms == 900_000
     assert settings.worker_concurrency == 4
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6399/0")
     monkeypatch.setenv("BUS_CLAIM_IDLE_MS", "1234")
-    from zento.config import get_settings
+    from mavis.config import get_settings
 
     get_settings.cache_clear()
     set_bus(None)

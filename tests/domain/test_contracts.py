@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from zento.domain.decisions import (
+from mavis.domain.decisions import (
     ComposedMessage,
     InitiativeDecision,
     NotifyIntent,
@@ -12,11 +12,11 @@ from zento.domain.decisions import (
     TaskRequest,
     WakeupRequest,
 )
-from zento.domain.errors import ApprovalRequired, BudgetExceeded, ConnectionRequired, LLMError, ZentoError
-from zento.domain.events import Event, EventType, Job, JobKind, Trust
-from zento.domain.integrations import ConnectionState, Toolkit, ToolResult, UserRef
-from zento.domain.loops import Loop, LoopKind, LoopStatus, LoopUpsert, WatchSpec
-from zento.domain.memory import (
+from mavis.domain.errors import ApprovalRequired, BudgetExceeded, ConnectionRequired, LLMError, MavisError
+from mavis.domain.events import Event, EventType, Job, JobKind, Trust
+from mavis.domain.integrations import ConnectionState, Toolkit, ToolResult, UserRef
+from mavis.domain.loops import Loop, LoopKind, LoopStatus, LoopUpsert, WatchSpec
+from mavis.domain.memory import (
     REL_TYPES,
     SINGLE_VALUED_RELS,
     Entity,
@@ -27,9 +27,9 @@ from zento.domain.memory import (
     RecallContext,
     Relation,
 )
-from zento.domain.messages import Button, InboundFile, Outbound, Role
-from zento.domain.plans import CriticVerdict, DeckOutline, DocOutline, DocSection, Plan, PlanStep, SlideSpec
-from zento.domain.policy import Capability, PolicyVerdict, RiskClass
+from mavis.domain.messages import Button, InboundFile, Outbound, Role
+from mavis.domain.plans import CriticVerdict, DeckOutline, DocOutline, DocSection, Plan, PlanStep, SlideSpec
+from mavis.domain.policy import Capability, PolicyVerdict, RiskClass
 
 NOW = datetime(2026, 10, 2, 4, 30, tzinfo=UTC)
 
@@ -91,7 +91,7 @@ def test_risk_classes_needing_approval() -> None:
 
 
 def test_user_ref_provider_id() -> None:
-    assert UserRef(user_id=7).provider_id == "zento-7"
+    assert UserRef(user_id=7).provider_id == "mavis-7"
 
 
 def test_recall_render_sections() -> None:
@@ -109,7 +109,7 @@ def test_errors_carry_details() -> None:
     assert e.capability is Capability.GMAIL and e.reason == "need inbox access" and "gmail" in str(e)
     a = ApprovalRequired("mail.send", "To: x", {"to": "x"})
     assert a.action == "mail.send" and a.arguments == {"to": "x"}
-    assert issubclass(LLMError, ZentoError) and issubclass(BudgetExceeded, ZentoError)
+    assert issubclass(LLMError, MavisError) and issubclass(BudgetExceeded, MavisError)
 
 
 def test_button_data_limit() -> None:

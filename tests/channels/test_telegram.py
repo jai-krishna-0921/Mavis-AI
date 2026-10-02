@@ -3,9 +3,9 @@ from types import SimpleNamespace
 import pytest
 from telegram.error import RetryAfter
 
-from zento.channels.base import ChannelRateLimited
-from zento.channels.telegram import TelegramChannel
-from zento.domain.messages import Button
+from mavis.channels.base import ChannelRateLimited
+from mavis.channels.telegram import TelegramChannel
+from mavis.domain.messages import Button
 
 
 class StubBot:
@@ -63,8 +63,8 @@ async def test_send_document_and_typing(tmp_path) -> None:
 
 
 def test_get_channel_defaults_to_console_without_token(settings) -> None:
-    from zento.channels import get_channel, set_channel
-    from zento.channels.fake import ConsoleChannel
+    from mavis.channels import get_channel, set_channel
+    from mavis.channels.fake import ConsoleChannel
 
     set_channel(None)
     try:

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from telegram.error import NetworkError
 
-from zento.channels.telegram_poller import run_polling
+from mavis.channels.telegram_poller import run_polling
 
 _real_sleep = asyncio.sleep
 
@@ -49,7 +49,7 @@ async def test_poller_feeds_ingest_and_advances_offset(db, bus) -> None:
 
 
 async def test_failed_ingest_is_retried_not_lost(db, bus, monkeypatch) -> None:
-    from zento.channels import telegram_poller
+    from mavis.channels import telegram_poller
 
     monkeypatch.setattr(telegram_poller.asyncio, "sleep", _fast_sleep)
     real = telegram_poller.ingest_update
@@ -78,7 +78,7 @@ async def test_failed_ingest_is_retried_not_lost(db, bus, monkeypatch) -> None:
 
 
 async def test_startup_retries_on_transient_network_errors(db, bus, monkeypatch) -> None:
-    from zento.channels import telegram_poller
+    from mavis.channels import telegram_poller
 
     monkeypatch.setattr(telegram_poller.asyncio, "sleep", _fast_sleep)
 

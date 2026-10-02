@@ -1,6 +1,6 @@
+from mavis.domain.memory import Entity, Extraction, Relation
+from mavis.memory.resolver import resolve
 from tests.memory.fakes import HashEmbedder, TableEmbedder
-from zento.domain.memory import Entity, Extraction, Relation
-from zento.memory.resolver import resolve
 
 
 def x(entities, relations=()):

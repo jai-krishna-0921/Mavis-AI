@@ -1,6 +1,6 @@
 import pytest
 
-from zento.memory import neo4j_graph as q
+from mavis.memory import neo4j_graph as q
 
 
 def test_upsert_entity_uses_sanitised_label():
@@ -100,7 +100,7 @@ class FakeDriver:
 def test_edge_score_and_rank_candidates():
     from datetime import UTC, datetime, timedelta
 
-    from zento.memory.graph import edge_score
+    from mavis.memory.graph import edge_score
 
     now = datetime(2026, 1, 1, tzinfo=UTC)
     assert edge_score(1.0, now, now) == 1.0
@@ -174,7 +174,7 @@ async def test_neighborhood_resolves_user_alias_and_ranks():
 
 
 async def test_single_valued_closed_only_when_creating_new_edge():
-    from zento.domain.memory import Relation
+    from mavis.domain.memory import Relation
 
     rel = Relation(subject="User", rel="WORKS_AT", object="Siemens", statement="s")
 

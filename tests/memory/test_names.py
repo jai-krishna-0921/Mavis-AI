@@ -1,4 +1,4 @@
-from zento.memory.names import USER_KEY, is_user, node_key, normalize_name, sanitize_label, sanitize_rel
+from mavis.memory.names import USER_KEY, is_user, node_key, normalize_name, sanitize_label, sanitize_rel
 
 
 def test_normalize_name():

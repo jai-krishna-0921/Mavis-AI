@@ -1,4 +1,4 @@
-from zento.channels.text import split_text
+from mavis.channels.text import split_text
 
 
 def test_short_text_is_one_chunk() -> None:

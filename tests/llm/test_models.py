@@ -2,10 +2,10 @@ import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
+from mavis.domain.errors import LLMError
+from mavis.llm import models
+from mavis.llm.models import Tier
 from tests.fakes.llm import FakeLLM
-from zento.domain.errors import LLMError
-from zento.llm import models
-from zento.llm.models import Tier
 
 
 class Sample(BaseModel):

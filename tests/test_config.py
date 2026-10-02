@@ -1,4 +1,4 @@
-from zento.config import Settings, get_settings
+from mavis.config import Settings, get_settings
 
 
 def test_defaults(settings) -> None:
@@ -25,10 +25,10 @@ def test_db_url_defaults_to_sqlite_in_data_dir(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     s = Settings(data_dir=tmp_path / "d")
-    assert s.db_url == f"sqlite+aiosqlite:///{(tmp_path / 'd' / 'zento.db').as_posix()}"
+    assert s.db_url == f"sqlite+aiosqlite:///{(tmp_path / 'd' / 'mavis.db').as_posix()}"
 
 
 def test_postgres_url_is_not_sqlite(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    s = Settings(database_url="postgresql+psycopg://u:p@localhost/zento")
+    s = Settings(database_url="postgresql+psycopg://u:p@localhost/mavis")
     assert not s.is_sqlite

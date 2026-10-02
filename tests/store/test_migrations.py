@@ -4,9 +4,9 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine
 
-from zento.store import models  # noqa: F401
-from zento.store.db import Base
-from zento.store.migrate import upgrade
+from mavis.store import models  # noqa: F401
+from mavis.store.db import Base
+from mavis.store.migrate import upgrade
 
 
 def test_upgrade_creates_tables(tmp_path) -> None:

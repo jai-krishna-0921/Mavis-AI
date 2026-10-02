@@ -1,5 +1,5 @@
 [project]
-name = "zento"
+name = "mavis"
 version = "0.1.0"
 description = "Mavis AI: a 24/7 proactive personal assistant agent"
 readme = "README.md"
@@ -50,7 +50,7 @@ dev = [
 ]
 
 [project.scripts]
-zento = "zento.cli:app"
+mavis = "mavis.cli:app"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

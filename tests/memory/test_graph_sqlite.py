@@ -1,8 +1,8 @@
 from sqlalchemy import select
 
-from zento.domain.memory import Entity, Relation
-from zento.store import db as dbm
-from zento.store.models import GraphEdge
+from mavis.domain.memory import Entity, Relation
+from mavis.store import db as dbm
+from mavis.store.models import GraphEdge
 
 
 def rel(s, r, o, st, conf=0.8):
@@ -93,8 +93,8 @@ async def test_merge_entities_repoints_edges(graph):
 async def test_ranking_prefers_confident_older_edge(graph):
     from datetime import timedelta
 
-    from zento.memory.graph import edge_score
-    from zento.store.db import utcnow
+    from mavis.memory.graph import edge_score
+    from mavis.store.db import utcnow
 
     now = utcnow()
     assert edge_score(0.9, now - timedelta(days=5), now) > edge_score(0.2, now, now)
