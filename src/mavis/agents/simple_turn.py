@@ -16,6 +16,7 @@ from mavis.bus import get_bus
 from mavis.channels import get_channel
 from mavis.domain.events import Event, Job, JobKind
 from mavis.domain.messages import Outbound, Role
+from mavis.initiative import wiring
 from mavis.llm import models as llm
 from mavis.memory.service import get_memory
 from mavis.store.db import Session, utcnow
@@ -24,6 +25,14 @@ from mavis.store.repo import messages, outbox, users
 from mavis.store.repo import summaries as summaries_repo
 
 log = structlog.get_logger(__name__)
+
+
+async def _initiative_hook(name: str, call) -> None:
+    """Initiative bookkeeping around a turn is best-effort: it must never break the user's reply."""
+    try:
+        await call(wiring.current())
+    except Exception:
+        log.warning("simple_turn.initiative_hook_failed", hook=name, exc_info=True)
 
 HISTORY_LIMIT = 20
 START_HINT = (
@@ -95,11 +104,15 @@ async def run_turn(event: Event) -> None:
     user = await users.get(event.user_id)
     text = user_text(event)
     await messages.log(user.id, Role.USER, text, event_id=event.id)
+    await _initiative_hook("quiet.on_user_message", lambda i: i.quiet.on_user_message(user.id))
+    await _initiative_hook("routines.on_user_message", lambda i: i.routines.on_user_message(user))
 
     # Retry after the reply was enqueued: don't call the LLM again (it could split differently).
     enqueued = await outbox.texts_with_dedupe_prefix(f"reply:{event.id}:")
     if enqueued:
         await messages.log(user.id, Role.ASSISTANT, "\n\n".join(enqueued), event_id=f"reply:{event.id}")
+        await _initiative_hook("quiet.after_assistant_message",
+                               lambda i: i.quiet.after_assistant_message(user.id, enqueued[-1]))
         # The first attempt may have died before enqueuing LEARN, so enqueue again. The bus does not
         # dedupe by job id; the LEARN handler skips a source_ref already recorded as processed.
         history = await messages.recent(user.id, HISTORY_LIMIT)
@@ -117,6 +130,8 @@ async def run_turn(event: Event) -> None:
             await outbox.enqueue(s, Outbound(user_id=user.id, text=question, dedupe_key=key))
             await s.commit()
         await messages.log(user.id, Role.ASSISTANT, question, event_id=f"reply:{event.id}")
+        await _initiative_hook("quiet.after_assistant_message",
+                               lambda i: i.quiet.after_assistant_message(user.id, question))
         # The request still carries information (people, titles); the hooks skip its ambiguous time.
         await enqueue_learn(user.id, event, text, previous, _clarified_request(history))
         return
@@ -141,3 +156,5 @@ async def run_turn(event: Event) -> None:
         await s.commit()
     await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles), event_id=f"reply:{event.id}")
     await enqueue_learn(user.id, event, text, previous_reply, _clarified_request(history))
+    await _initiative_hook("quiet.after_assistant_message",
+                           lambda i: i.quiet.after_assistant_message(user.id, bubbles[-1]))
