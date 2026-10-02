@@ -86,7 +86,15 @@ class ComposioProvider:
             raise IntegrationError(f"could not reach Composio: {type(exc).__name__}") from None
         if resp.status_code >= 400:
             raise IntegrationError(f"Composio answered {resp.status_code} for {method} {path}") from None
-        return resp.json() if resp.content else {}
+        if not resp.content:
+            return {}
+        try:
+            data = resp.json()
+        except ValueError:
+            raise IntegrationError(f"Composio answered {resp.status_code} with a non-JSON body") from None
+        if not isinstance(data, dict):
+            raise IntegrationError(f"Composio answered {resp.status_code} with an unexpected JSON shape")
+        return data
 
     # --- connections -------------------------------------------------------------------------------
 

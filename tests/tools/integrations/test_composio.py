@@ -169,3 +169,22 @@ async def test_subscribe_without_active_account_fails(provider):
     respx.get(f"{BASE}/connected_accounts").mock(return_value=httpx.Response(200, json={"items": []}))
     with pytest.raises(IntegrationError, match="no ACTIVE"):
         await provider.subscribe(USER, "mail.new_message", {})
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, content=b"<html>gateway</html>"),
+        httpx.Response(200, json=["not", "a", "dict"]),
+        httpx.Response(200, json="text"),
+    ],
+)
+async def test_malformed_success_body_is_integration_error(provider, response):
+    respx.post(url__startswith=f"{BASE}/tools/execute/").mock(return_value=response)
+    result = await provider.execute(USER, "mail.search", {"query": "x"})
+    assert result.ok is False
+    assert KEY not in (result.error or "")
+    respx.get(f"{BASE}/connected_accounts").mock(return_value=response)
+    with pytest.raises(IntegrationError):
+        await provider.status(USER)
