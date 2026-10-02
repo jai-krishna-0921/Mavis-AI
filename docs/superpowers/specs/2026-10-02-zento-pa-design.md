@@ -490,6 +490,8 @@ Secrets come from env (dev) or AWS Secrets Manager (prod); never logged (structl
 
 ## 14. Build stages (each ends demoable)
 
+> Plan note: stages 4 and 5 are executed in swapped order (orchestrator before integrations) because connection prompting relies on the orchestrator's interrupt/resume machinery. See `docs/superpowers/plans/2026-10-02-zento-00-index.md`.
+
 1. **Foundation**: config, domain types, LLM layer, Postgres + Alembic, event bus (Redis + in-process), worker/api/timer/dev entrypoints, Telegram channel + outbox, persona chat with working memory.
 2. **Memory**: extraction, entity resolution, Neo4j + SQLite graph, Qdrant episodes, profile card, recall.
 3. **Initiative**: loops, wakeups/timer, initiative agent, composer, policy (quiet hours/budget/dedupe), onboarding routines. *Demo: interview → pep talk → "how'd it go?"*
