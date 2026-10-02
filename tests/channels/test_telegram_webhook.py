@@ -30,7 +30,7 @@ async def test_set_webhook_sends_url_secret_and_updates() -> None:
     assert json.loads(route.calls.last.request.content) == {
         "url": "https://1-2-3-4.sslip.io/telegram/webhook",
         "secret_token": "shh",
-        "allowed_updates": ["message", "callback_query"],
+        "allowed_updates": ["message", "edited_message", "callback_query"],
         "drop_pending_updates": False,
     }
 
