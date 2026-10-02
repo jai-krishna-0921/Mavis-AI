@@ -1,4 +1,4 @@
-"""initiative engine: loops (wakeups and ping_log added in later tasks)"""
+"""initiative engine: loops, wakeups (ping_log added in Task 6)"""
 
 from __future__ import annotations
 
@@ -26,13 +26,33 @@ def upgrade() -> None:
         sa.Column("source", sa.String(200), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("version", sa.Integer, nullable=False),
     )
     op.create_index("ix_loops_user_id", "loops", ["user_id"])
     op.create_index("ix_loops_due_at", "loops", ["due_at"])
     op.create_index("ix_loops_status", "loops", ["status"])
+    op.create_table(
+        "wakeups",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("user_id", sa.Integer, sa.ForeignKey("users.id"), nullable=False),
+        sa.Column("due_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("kind", sa.String(24), nullable=False),
+        sa.Column("reason", sa.Text, nullable=False),
+        sa.Column("loop_id", sa.Integer, nullable=True),
+        sa.Column("payload", sa.JSON, nullable=False),
+        sa.Column("status", sa.String(12), nullable=False),
+        sa.Column("dedupe_key", sa.String(200), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("fired_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    op.create_index("ix_wakeups_user_id", "wakeups", ["user_id"])
+    op.create_index("ix_wakeups_loop_id", "wakeups", ["loop_id"])
+    op.create_index("ix_wakeups_dedupe_key", "wakeups", ["dedupe_key"])
+    op.create_index("ix_wakeups_status_due", "wakeups", ["status", "due_at"])
 
 
 def downgrade() -> None:
+    op.drop_table("wakeups")
     op.drop_index("ix_loops_status", table_name="loops")
     op.drop_index("ix_loops_due_at", table_name="loops")
     op.drop_index("ix_loops_user_id", table_name="loops")
