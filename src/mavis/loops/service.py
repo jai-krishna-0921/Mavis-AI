@@ -7,9 +7,9 @@ can plan its own wakeups around it.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
 
 import structlog
+from sqlalchemy.exc import NoResultFound
 
 from mavis.bus.base import EventBus
 from mavis.domain import timeutil
@@ -23,6 +23,8 @@ from mavis.worker.locks import lock
 log = structlog.get_logger()
 _FAR_FUTURE = datetime.max.replace(tzinfo=UTC)
 MIN_EVENT_IMPORTANCE = 3
+TITLE_MAX = 300
+REOPEN_GUARD = timedelta(days=7)
 # Loops are created only from conversation turns the user typed (spec 8.3). LEARN's source_ref is the
 # originating event id: "tg:update:N" (Telegram) or "cli:<uuid>" (`mavis chat`). Anything else
 # (email, web, task output) is untrusted data and never creates loops here.
@@ -40,19 +42,26 @@ class LoopService:
     async def upsert(self, user_id: int, data: LoopUpsert) -> Loop:
         # Distinct key from `user:{id}`: turn hooks already hold that one, so this cannot self-deadlock.
         async with lock(f"loops:{user_id}"):
+            changed = False
             if data.id is not None:
-                loop = await repo.update(data.id, data)
-                if loop is None:
+                result = await repo.update(user_id, data.id, data)
+                if result is None:
                     raise ValueError(f"loop {data.id} does not exist")
+                loop, changed = result
                 created = False
             elif (existing := await repo.find_open_duplicate(user_id, data)) is not None:
-                loop = await repo.update(existing.id, data)
-                assert loop is not None
+                result = await repo.update(user_id, existing.id, data)
+                assert result is not None
+                loop, changed = result
                 created = False
             else:
                 loop = await repo.insert(user_id, data)
                 created = True
-        await self._emit(loop, created)
+            # Re-publish LOOP_CREATED on every path: the bus dedupes by id, so a retry after a crash
+            # between commit and publish still gets the event out.
+            await self._emit(loop, EventType.LOOP_CREATED)
+            if changed and not created:
+                await self._emit(loop, EventType.LOOP_UPDATED)
         return loop
 
     async def active(
@@ -75,28 +84,51 @@ class LoopService:
         return await repo.get(loop_id)
 
     async def close(self, loop_id: int, status: LoopStatus = LoopStatus.DONE) -> Loop | None:
-        loop = await repo.set_status(loop_id, status)
-        if loop is not None:
-            await self._emit(loop, created=False)
+        current = await repo.get(loop_id)
+        if current is None:
+            return None
+        async with lock(f"loops:{current.user_id}"):
+            result = await repo.set_status(current.user_id, loop_id, status)
+            if result is None:
+                return None
+            loop, changed = result
+            if changed:
+                await self._emit(loop, EventType.LOOP_UPDATED)
         return loop
 
     async def expire_stale(self) -> int:
-        expired = await repo.expire(timeutil.now())
-        for loop in expired:
-            await self._emit(loop, created=False)
-        return len(expired)
+        total = 0
+        for user_id in await repo.open_user_ids():
+            async with lock(f"loops:{user_id}"):
+                expired = await repo.expire(user_id, timeutil.now())
+                for loop in expired:
+                    await self._emit(loop, EventType.LOOP_UPDATED)
+            total += len(expired)
+        return total
 
-    async def _emit(self, loop: Loop, created: bool) -> None:
+    async def _emit(self, loop: Loop, event_type: EventType) -> None:
+        created = event_type is EventType.LOOP_CREATED
         event = Event(
-            id=f"loop:{loop.id}:created" if created else f"loop:{loop.id}:updated:{uuid4().hex[:12]}",
+            id=f"loop:{loop.id}:created" if created else f"loop:{loop.id}:updated:{loop.version}",
             user_id=loop.user_id,
-            type=EventType.LOOP_CREATED if created else EventType.LOOP_UPDATED,
+            type=event_type,
             occurred_at=timeutil.now(),
             source="agent",
             payload=loop.model_dump(mode="json"),
             trust=Trust.SYSTEM,
         )
         await self._bus.publish(event)
+
+
+async def _upsert_unless_closed(service: LoopService, user_id: int, data: LoopUpsert) -> None:
+    """Skip a loop the user already closed in the last week: re-extraction must not resurrect it."""
+    data.title = data.title.strip()[:TITLE_MAX]
+    if not data.title:
+        return
+    if await repo.find_recently_closed(user_id, data.title, timeutil.now() - REOPEN_GUARD):
+        log.info("loops.reopen_skipped", user_id=user_id)
+        return
+    await service.upsert(user_id, data)
 
 
 async def loops_from_extraction(
@@ -106,14 +138,19 @@ async def loops_from_extraction(
     if not source_ref.startswith(TRUSTED_SOURCE_PREFIXES):
         log.info("loops.untrusted_source_skipped", source_ref=source_ref[:40])
         return
-    user = await users.get(user_id)
+    try:
+        user = await users.get(user_id)
+    except NoResultFound:
+        log.warning("loops.user_missing", user_id=user_id)
+        return
     for draft in extraction.loops:
         try:
             kind = LoopKind(draft.kind.strip().upper())
         except ValueError:
             kind = LoopKind.COMMITMENT
         due = timeutil.to_utc(draft.due_at, user.timezone) if draft.due_at else None
-        await service.upsert(
+        await _upsert_unless_closed(
+            service,
             user_id,
             LoopUpsert(
                 kind=kind,
@@ -127,7 +164,8 @@ async def loops_from_extraction(
     for ev in extraction.events:
         if ev.ambiguous or ev.starts_at is None or ev.importance < MIN_EVENT_IMPORTANCE:
             continue
-        await service.upsert(
+        await _upsert_unless_closed(
+            service,
             user_id,
             LoopUpsert(
                 kind=LoopKind.COMMITMENT,

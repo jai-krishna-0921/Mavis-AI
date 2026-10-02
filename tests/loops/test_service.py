@@ -143,3 +143,61 @@ async def test_real_conversation_turn_creates_loop(user, memory, recording_bus, 
     fake_llm.push_structured(_one_loop_extraction())
     await memory.learn(user.id, "User: I'll send the deck", source_ref="tg:update:42", trust=Trust.USER)
     assert [lp.source for lp in await svc.active(user.id)] == ["tg:update:42"]
+
+
+async def test_learn_retry_yields_one_loop_and_one_created_event(user, recording_bus, clock):
+    svc = LoopService(recording_bus)
+    for _ in range(2):
+        await loops_from_extraction(svc, user.id, _one_loop_extraction(), "tg:update:5")
+    assert len(await svc.active(user.id)) == 1
+    ids = [e.id for e in recording_bus.events]
+    assert [i for i in ids if i.endswith(":created")] == [ids[0]]
+    assert len(ids) == 1
+
+
+async def test_unchanged_update_emits_no_updated_event(user, recording_bus, clock):
+    svc = LoopService(recording_bus)
+    data = LoopUpsert(kind=LoopKind.COMMITMENT, title="Same", due_at=DUE)
+    first = await svc.upsert(user.id, data)
+    await svc.upsert(user.id, data)
+    await svc.upsert(user.id, data)
+    assert [e.type for e in recording_bus.events] == [EventType.LOOP_CREATED]
+    await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Same", due_at=DUE, entities=["A"]))
+    assert recording_bus.events[-1].id == f"loop:{first.id}:updated:2"
+
+
+async def test_close_emits_deterministic_id_and_is_idempotent(user, recording_bus, clock):
+    svc = LoopService(recording_bus)
+    loop = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.GOAL, title="g"))
+    recording_bus.take()
+    await svc.close(loop.id)
+    await svc.close(loop.id)
+    assert [e.id for e in recording_bus.take()] == [f"loop:{loop.id}:updated:2"]
+
+
+async def test_hook_does_not_resurrect_recently_closed_loop(user, recording_bus, clock):
+    svc = LoopService(recording_bus)
+    await loops_from_extraction(svc, user.id, _one_loop_extraction(), "tg:update:1")
+    [loop] = await svc.active(user.id)
+    await svc.close(loop.id)
+    again = Extraction(loops=[LoopDraft(kind="commitment", title="  send the DECK! ")])
+    await loops_from_extraction(svc, user.id, again, "tg:update:2")
+    assert await svc.active(user.id) == []
+    clock.advance(days=8)
+    await loops_from_extraction(svc, user.id, again, "tg:update:3")
+    assert len(await svc.active(user.id)) == 1
+
+
+async def test_hook_truncates_long_title_and_skips_missing_user(user, recording_bus, clock):
+    svc = LoopService(recording_bus)
+    long = Extraction(loops=[LoopDraft(kind="goal", title="x" * 500)])
+    await loops_from_extraction(svc, user.id, long, "tg:update:1")
+    assert len((await svc.active(user.id))[0].title) == 300
+    await loops_from_extraction(svc, 9999, long, "tg:update:2")
+
+
+async def test_upsert_cannot_touch_another_users_loop(user, recording_bus, clock):
+    svc = LoopService(recording_bus)
+    loop = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.GOAL, title="g"))
+    with pytest.raises(ValueError):
+        await svc.upsert(user.id + 1, LoopUpsert(id=loop.id, kind=LoopKind.GOAL, title="hijack"))
