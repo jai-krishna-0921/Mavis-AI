@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from zento.domain.messages import Role
 from zento.store.db import Session, utcnow
@@ -15,8 +16,15 @@ async def log(
     async with Session() as s:
         if event_id and await s.scalar(select(Message.id).where(Message.event_id == event_id)):
             return False
-        s.add(Message(user_id=user_id, role=role.value, content=content, proactive=proactive,
-                      event_id=event_id, created_at=now))
+        try:
+            async with s.begin_nested():  # SAVEPOINT: a concurrent duplicate must not poison the session
+                s.add(Message(user_id=user_id, role=role.value, content=content, proactive=proactive,
+                              event_id=event_id, created_at=now))
+                await s.flush()
+        except IntegrityError:
+            if event_id is None:
+                raise
+            return False  # lost the race on the unique event_id
         column = "last_user_msg_at" if role is Role.USER else "last_agent_msg_at"
         await s.execute(update(User).where(User.id == user_id).values({column: now}))
         await s.commit()

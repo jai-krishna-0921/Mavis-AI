@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from zento.domain.messages import Button, Outbound
@@ -31,8 +32,17 @@ async def enqueue(session: AsyncSession, msg: Outbound) -> int:
         proactive=msg.proactive,
         dedupe_key=msg.dedupe_key,
     )
-    session.add(row)
-    await session.flush()
+    try:
+        async with session.begin_nested():  # SAVEPOINT: keeps the caller's transaction usable on a race
+            session.add(row)
+            await session.flush()
+    except IntegrityError:
+        if not msg.dedupe_key:
+            raise
+        existing = (
+            await session.execute(select(OutboxMessage.id).where(OutboxMessage.dedupe_key == msg.dedupe_key))
+        ).scalar_one()
+        return existing
     return row.id
 
 
