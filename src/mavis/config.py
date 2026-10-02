@@ -24,13 +24,23 @@ class Settings(BaseSettings):
     ollama_base_url: str = "https://ollama.com/v1"
     model_fast: str = "gpt-oss:20b"
     model_smart: str = "gpt-oss:120b"
-    # tried in order when the tier's primary model times out / is unreachable / 5xx / 429
+    # tried in order ONLY on model-specific errors (404 / 5xx); timeouts and 429 are account-wide
     model_fast_fallbacks: list[str] = ["gemma4:31b", "gpt-oss:120b"]
     model_smart_fallbacks: list[str] = ["gpt-oss:20b"]
     # process-wide cap on in-flight LLM calls (Ollama Cloud free tier 429s on concurrent requests)
     llm_max_concurrency: int = 1
-    llm_timeout_fast_s: float = 12.0
+    llm_timeout_fast_s: float = 30.0
     llm_timeout_smart_s: float = 60.0
+    # after a client-side timeout the request still runs server-side and holds the account's slot
+    llm_timeout_cooldown_s: float = 45.0
+    # optional secondary OpenAI-compatible provider (e.g. Groq); off while base url / model are empty
+    llm_secondary_base_url: str = ""
+    llm_secondary_api_key: str = ""
+    llm_secondary_model_fast: str = ""
+    llm_secondary_model_smart: str = ""
+    llm_secondary_max_concurrency: int = 2
+    # emoji reacted onto each incoming Telegram message; empty = off (typing indicator stays)
+    presence_reaction: str = ""
 
     # --- Telegram -------------------------------------------------------------
     telegram_bot_token: str = ""

@@ -34,6 +34,12 @@ def is_transient(exc: BaseException) -> bool:
 SELF_RETRYING = "mavis_self_retrying"
 
 
+def _llm_backoff_remaining() -> float:
+    from mavis.llm import models  # local: keep the bus importable without the LLM stack
+
+    return models._ollama.backoff_remaining()
+
+
 async def _sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
@@ -58,6 +64,8 @@ async def run_with_inline_retries(call: Callable[[], Awaitable[None]], *, what: 
         except Exception as exc:
             if delay is None or not is_transient(exc):
                 raise
+            # never retry into an active Ollama 429 backoff: that would just burn the attempt
+            delay = max(delay, _llm_backoff_remaining())
             log.warning("bus.inline_retry", what=what, ref=ref, attempt=attempt + 1, retry_in_s=delay)
             await _sleep(delay)
 

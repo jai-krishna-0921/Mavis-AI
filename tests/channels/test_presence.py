@@ -63,3 +63,21 @@ async def test_worker_skips_reaction_for_cli_events(user, channel):
                   source="cli", payload={"text": "hi"}, trust=Trust.USER)
     await runner._acknowledge(event)
     assert channel.reactions == []
+
+
+def test_reaction_is_off_by_default() -> None:
+    from mavis.config import Settings
+
+    assert Settings.model_fields["presence_reaction"].default == ""
+
+
+async def test_no_reaction_when_setting_empty(settings, channel, monkeypatch) -> None:
+    from mavis.config import get_settings
+
+    monkeypatch.setenv("PRESENCE_REACTION", "")
+    get_settings.cache_clear()
+    await presence.react(7, 3)
+    assert channel.reactions == []
+    async with presence.typing(7, interval_s=0.01):  # typing indicator is unaffected
+        await asyncio.sleep(0.03)
+    assert any(s.kind == "typing" for s in channel.sent)
