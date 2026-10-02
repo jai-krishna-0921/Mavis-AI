@@ -304,3 +304,67 @@ async def test_failed_event_without_waiting_pending_is_silent(db, provider, cach
                payload={"capability": "slack", "state": "FAILED"})
     await flow.on_connection_changed(ev)
     assert rec.sent == []
+
+
+async def test_check_keeps_waiting_when_reconnect_prompt_sees_old_failed_account(
+    db, provider, cache, fake_bus, rec, state
+):
+    provider.set_state(1, Capability.GMAIL, ConnectionState.FAILED)
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    assert await flow.prompt_reconnect(1, Capability.GMAIL) is True
+    [pending] = await connections.open_for(1, Capability.GMAIL)
+    sent = len(rec.sent)
+    await flow.check(pending.id)
+    assert fake_bus.events == [] and len(rec.sent) == sent
+    assert (await connections.get_pending(pending.id)).status == PendingStatus.PENDING
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    await flow.check(pending.id)
+    assert fake_bus.events[0].payload["state"] == "ACTIVE"
+
+
+async def test_check_still_reports_failed_for_a_first_connect(db, provider, cache, fake_bus, rec, state):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    pid = await flow.start(1, Capability.GMAIL, "")
+    provider.set_state(1, Capability.GMAIL, ConnectionState.FAILED)
+    await flow.check(pid)
+    assert fake_bus.events[0].payload["state"] == "FAILED"
+
+
+async def test_prompt_reconnect_not_recorded_if_link_fails(db, provider, cache, fake_bus, rec, state):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    provider.fail_link = True
+    assert await flow.prompt_reconnect(1, Capability.GMAIL) is False
+    assert "reconnect_prompted" not in await state.get(1)
+    provider.fail_link = False
+    assert await flow.prompt_reconnect(1, Capability.GMAIL) is True
+
+
+async def test_concurrent_activation_enqueues_first_sync_once(db, provider, cache, fake_bus, rec, state):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+
+    class RacyState:  # both callers read "not synced" before either writes
+        async def get(self, user_id):
+            return {}
+
+        async def update(self, user_id, patch):
+            return patch
+
+    flow.state = RacyState()
+    await flow.reconcile(1, Capability.GMAIL)
+    await flow.reconcile(1, Capability.GMAIL)
+    assert len([j for j in fake_bus.jobs if j.kind is JobKind.FIRST_SYNC]) == 1
+
+
+async def test_resolving_a_pending_cancels_its_checks(db, provider, cache, fake_bus, rec, state):
+    cancelled = []
+
+    async def cancel(user_id, pending_id):
+        cancelled.append((user_id, pending_id))
+
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    flow.cancel_checks = cancel
+    pid = await flow.start(1, Capability.GMAIL, "")
+    ev = Event(id="c5", user_id=1, type=EventType.CONNECTION_CHANGED, occurred_at=NOW, source="integrations",
+               payload={"capability": "gmail", "state": "ACTIVE"})
+    await flow.on_connection_changed(ev)
+    assert cancelled == [(1, pid)]
