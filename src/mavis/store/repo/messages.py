@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -39,3 +41,12 @@ async def recent(user_id: int, limit: int = 20) -> list[Message]:
             .order_by(Message.created_at.desc(), Message.id.desc()).limit(limit)
         )
         return list(reversed(list(rows)))
+
+
+async def has_user_message_since(user_id: int, since: datetime) -> bool:
+    async with Session() as s:
+        found = await s.scalar(
+            select(Message.id).where(Message.user_id == user_id, Message.role == Role.USER.value,
+                                     Message.created_at > since).limit(1)
+        )
+        return found is not None

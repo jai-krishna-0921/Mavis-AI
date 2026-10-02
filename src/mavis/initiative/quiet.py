@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 
 from mavis.config import get_settings
 from mavis.domain import timeutil
-from mavis.domain.messages import Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.store.repo import messages
 from mavis.timers.service import WakeupService
@@ -40,7 +39,4 @@ class QuietTracker:
 
     async def still_quiet(self, user_id: int, asked_at: datetime) -> bool:
         asked_at = timeutil.ensure_utc(asked_at)
-        return not any(
-            m.role == Role.USER and timeutil.ensure_utc(m.created_at) > asked_at
-            for m in await messages.recent(user_id, 10)
-        )
+        return not await messages.has_user_message_since(user_id, asked_at)
