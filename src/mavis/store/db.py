@@ -12,6 +12,7 @@ from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.types import TypeDecorator
 
 from mavis.config import get_settings
+from mavis.domain import timeutil
 
 NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
@@ -23,7 +24,8 @@ NAMING_CONVENTION = {
 
 
 def utcnow() -> datetime:
-    return datetime.now(UTC)
+    """Tz-aware UTC now, via the injectable clock so tests and demos can move time."""
+    return timeutil.now()
 
 
 class UTCDateTime(TypeDecorator[datetime]):
