@@ -3,6 +3,7 @@ import pytest
 from tests.memory.fakes import HashEmbedder
 from zento.memory.embeddings import set_embedder
 from zento.memory.graph import SqliteGraphStore
+from zento.memory.service import MemoryService, set_memory
 from zento.memory.vector import QdrantVectorStore
 
 
@@ -27,3 +28,11 @@ async def graph(db):
     g = SqliteGraphStore()
     await g.init()
     return g
+
+
+@pytest.fixture
+async def memory(graph, vector, embedder):
+    svc = MemoryService(graph, vector, embedder)
+    set_memory(svc)
+    yield svc
+    set_memory(None)

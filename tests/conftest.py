@@ -96,3 +96,11 @@ def _reset_worker_registry():
     from zento.worker.runner import clear_handlers
 
     clear_handlers()
+
+
+@pytest.fixture
+async def user(db):
+    from zento.store.repo import users
+
+    u, _ = await users.get_or_create_by_chat(111, "Jai")
+    return u
