@@ -309,3 +309,25 @@ async def test_slow_reaction_does_not_reorder_a_users_messages(user, channel, mo
     await asyncio.gather(*runner._ack_tasks)  # acks are fire-and-forget; let the slow one land
     assert {r[1] for r in channel.reactions} == {77, 78}
     assert not runner._ack_tasks
+
+
+async def test_run_worker_runs_startup_hooks_and_survives_a_failing_one(bus) -> None:
+    from mavis.worker.runner import register_startup_hook
+
+    ran: list[str] = []
+
+    async def bad() -> None:
+        raise RuntimeError("boom")
+
+    async def good() -> None:
+        ran.append("good")
+
+    register_startup_hook(bad)
+    register_startup_hook(good)
+    register_startup_hook(good)  # idempotent
+    from tests.fakes import wait_until
+
+    task = asyncio.create_task(run_worker(bus, "w-hook"))
+    await wait_until(lambda: ran)
+    task.cancel()
+    assert ran == ["good"]

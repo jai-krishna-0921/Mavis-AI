@@ -45,7 +45,7 @@ def v3(trigger_slug: str, data: dict, user="mavis-7"):
 def test_gmail_v3_payload_becomes_email_event():
     headers, body = signed(v3("GMAIL_NEW_GMAIL_MESSAGE", GMAIL_RAW))
     [ev] = parse_composio_webhook(headers, body, SECRET)
-    assert ev.id == "gmail:msg:abc"
+    assert ev.id == "gmail:7:msg:abc"
     assert ev.type is EventType.EMAIL_RECEIVED
     assert ev.user_id == 7
     assert ev.trust is Trust.UNTRUSTED
@@ -64,13 +64,13 @@ def test_calendar_slack_notion_payloads():
     }
     h, b = signed(v3("GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CHANGE_TRIGGER", cal))
     [ev] = parse_composio_webhook(h, b, SECRET)
-    assert ev.type is EventType.CALENDAR_CHANGED and ev.id == "gcal:ev1:2026-10-04T10:00:00Z"
+    assert ev.type is EventType.CALENDAR_CHANGED and ev.id == "gcal:7:ev1:2026-10-04T10:00:00Z"
     h, b = signed(v3("SLACK_RECEIVE_MESSAGE", {"channel": "C1", "ts": "171.2", "user": "U1", "text": "hey"}))
     [ev] = parse_composio_webhook(h, b, SECRET)
-    assert ev.type is EventType.SLACK_MESSAGE and ev.id == "slack:C1:171.2"
+    assert ev.type is EventType.SLACK_MESSAGE and ev.id == "slack:7:C1:171.2"
     h, b = signed(v3("NOTION_PAGE_UPDATED_TRIGGER", {"id": "p1", "last_edited_time": "2026-10-04T09:00:00Z"}))
     [ev] = parse_composio_webhook(h, b, SECRET)
-    assert ev.type is EventType.NOTION_CHANGED and ev.id == "notion:p1:2026-10-04T09:00:00Z"
+    assert ev.type is EventType.NOTION_CHANGED and ev.id == "notion:7:p1:2026-10-04T09:00:00Z"
 
 
 def test_bad_signature_rejected():
@@ -178,3 +178,12 @@ def test_non_object_payload_shapes_raise_integration_error(payload):
     headers, body = signed(payload)
     with pytest.raises(IntegrationError):
         parse_composio_webhook(headers, body, SECRET)
+
+
+def test_provider_event_ids_are_user_scoped():
+    from mavis.tools.integrations.normalize import calendar_event, email_event
+
+    raw = {"messageId": "m1", "sender": "a <a@x.com>"}
+    assert email_event(1, raw, "x").id != email_event(2, raw, "x").id
+    cal = {"id": "ev1", "updated": "2026-10-04T10:00:00Z"}
+    assert calendar_event(1, cal, "x").id != calendar_event(2, cal, "x").id

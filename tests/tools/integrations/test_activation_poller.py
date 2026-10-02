@@ -153,3 +153,120 @@ async def test_gmail_cursor_ignores_missing_timestamp_and_clamps(provider, cache
     provider.results["mail.search"] = ToolResult(ok=True, data={"messages": [future]})
     await poller.poll(1, Capability.GMAIL)
     assert (await state.get(1))["cursors"]["gmail_after"] == int(NOW.timestamp())
+
+
+class StaleCache:
+    """Another process cached 'not active' for this user; only fresh=True tells the truth."""
+
+    def __init__(self, truth):
+        self.truth, self.fresh_calls = truth, 0
+
+    async def is_active(self, user_id, capability, *, fresh=False):
+        return (await self.status(user_id, fresh=fresh)).get(capability.value) is ConnectionState.ACTIVE
+
+    async def status(self, user_id, *, fresh=False):
+        if fresh:
+            self.fresh_calls += 1
+            return {c.value: s for c, s in self.truth.items()}
+        return {c.value: ConnectionState.INITIATED for c in self.truth}
+
+
+async def test_stale_cache_does_not_kill_the_chain(provider, fake_bus, state, rec):
+    cache = StaleCache({Capability.GMAIL: ConnectionState.ACTIVE})
+    poller = make_poller(provider, cache, fake_bus, state, rec)
+    await state.update(1, {"polling": {"gmail": True}})
+    await poller.poll(1, Capability.GMAIL)
+    assert cache.fresh_calls == 1 and len(provider.executed) == 1
+    assert rec.scheduled == [(1, NOW + POLL_INTERVAL, "gmail", POLL_KIND)]
+
+
+async def test_state_read_failure_keeps_the_chain(provider, cache, fake_bus, state, rec):
+    poller = make_poller(provider, cache, fake_bus, state, rec)
+
+    async def boom(user_id):
+        raise RuntimeError("db down")
+
+    state.get = boom
+    assert await poller.poll(1, Capability.GMAIL) == 0
+    assert rec.scheduled == [(1, NOW + POLL_INTERVAL, "gmail", POLL_KIND)]
+
+
+async def test_ensure_chains_rearms_every_polling_capability(provider, cache, fake_bus, state, rec):
+    poller = make_poller(provider, cache, fake_bus, state, rec)
+    await state.update(1, {"polling": {"gmail": True, "googlecalendar": False, "slack": True}})
+    assert await poller.ensure_chains(1) == 1  # slack is not pollable, calendar polling is off
+    assert rec.scheduled == [(1, NOW, "gmail", POLL_KIND)]
+    await state.update(2, {})
+    assert await poller.ensure_chains(2) == 0
+
+
+async def test_ensure_all_chains_covers_every_user(provider, cache, fake_bus, state, rec):
+    async def ids():
+        return [1, 2, 3]
+
+    poller = Poller(provider=provider, cache=cache, bus=fake_bus, state=state, schedule=rec.schedule,
+                    user_ids=ids, clock=lambda: NOW)
+    await state.update(1, {"polling": {"gmail": True}})
+    await state.update(3, {"polling": {"googlecalendar": True}})
+    assert await poller.ensure_all_chains() == 2
+    assert sorted((u, r) for u, _, r, _ in rec.scheduled) == [(1, "gmail"), (3, "googlecalendar")]
+
+
+async def test_failed_connection_prompts_once_and_stops_the_chain(provider, cache, fake_bus, state, rec):
+    prompts = []
+
+    async def on_failed(user_id, capability):
+        prompts.append((user_id, capability))
+
+    poller = Poller(provider=provider, cache=cache, bus=fake_bus, state=state, schedule=rec.schedule,
+                    on_failed=on_failed, clock=lambda: NOW)
+    provider.set_state(1, Capability.GMAIL, ConnectionState.FAILED)
+    await state.update(1, {"polling": {"gmail": True}})
+    assert await poller.poll(1, Capability.GMAIL) == 0
+    assert prompts == [(1, Capability.GMAIL)]
+    assert rec.scheduled == [] and "gmail" not in (await state.get(1))["polling"]
+    assert await poller.poll(1, Capability.GMAIL) == 0  # chain is over: no second prompt
+    assert len(prompts) == 1
+
+
+async def test_failed_prompt_error_keeps_chain_for_retry(provider, cache, fake_bus, state, rec):
+    async def on_failed(user_id, capability):
+        raise RuntimeError("outbox down")
+
+    poller = Poller(provider=provider, cache=cache, bus=fake_bus, state=state, schedule=rec.schedule,
+                    on_failed=on_failed, clock=lambda: NOW)
+    provider.set_state(1, Capability.GMAIL, ConnectionState.FAILED)
+    await state.update(1, {"polling": {"gmail": True}})
+    await poller.poll(1, Capability.GMAIL)
+    assert (await state.get(1))["polling"]["gmail"] is True
+    assert rec.scheduled == [(1, NOW + POLL_INTERVAL, "gmail", POLL_KIND)]
+
+
+async def test_auth_error_with_failed_status_prompts_and_stops(provider, fake_bus, state, rec):
+    prompts = []
+
+    async def on_failed(user_id, capability):
+        prompts.append(capability)
+
+    class Cache:  # the cached view says ACTIVE; the fresh view (after the 401) says FAILED
+        async def is_active(self, user_id, capability, *, fresh=False):
+            return True
+
+        async def status(self, user_id, *, fresh=False):
+            return {"gmail": ConnectionState.FAILED if fresh else ConnectionState.ACTIVE}
+
+    poller = Poller(provider=provider, cache=Cache(), bus=fake_bus, state=state, schedule=rec.schedule,
+                    on_failed=on_failed, clock=lambda: NOW)
+    await state.update(1, {"polling": {"gmail": True}})
+    provider.results["mail.search"] = ToolResult(ok=False, error="Composio answered 401 for POST /tools")
+    await poller.poll(1, Capability.GMAIL)
+    assert prompts == [Capability.GMAIL] and rec.scheduled == []
+
+
+async def test_auth_error_while_provider_says_active_keeps_polling(provider, cache, fake_bus, state, rec):
+    poller = make_poller(provider, cache, fake_bus, state, rec)
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    provider.results["mail.search"] = ToolResult(ok=False, error="Composio answered 403 for POST /tools")
+    await state.update(1, {"polling": {"gmail": True}})
+    await poller.poll(1, Capability.GMAIL)
+    assert rec.scheduled == [(1, NOW + POLL_INTERVAL, "gmail", POLL_KIND)]

@@ -302,6 +302,7 @@ def _reset_integrations():
     for hook_list in (hooks.PREFILTERS, hooks.ENRICHERS, hooks.DECISION_POLICIES):
         hook_list.clear()
     routines.clear_brief_sources()
+    routines.clear_morning_hooks()
     buttons.BUTTON_HANDLERS.clear()
     from mavis.timers import system
     from mavis.tools.integrations.connect_flow import CHECK_KIND

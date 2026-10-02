@@ -136,10 +136,13 @@ class MemoryService:
             extraction = extraction.model_copy(update={"mood": None})
 
         resolution = await resolve(extraction, await self.graph.entities(user_id), self.embedder)
-        for entity in resolution.entities:
-            await self.graph.upsert_entity(user_id, entity)
-        facts = [r.statement for r in resolution.relations]
         trusted = trust is Trust.USER
+        if trusted:
+            # Third-party text must not seed graph entities: an email sender listed as an alias would
+            # otherwise count as a "known sender" in the trusted triage signals.
+            for entity in resolution.entities:
+                await self.graph.upsert_entity(user_id, entity)
+        facts = [r.statement for r in resolution.relations]
         if trusted:
             for rel in resolution.relations:
                 await self.graph.upsert_relation(user_id, rel, source_ref=source_ref)

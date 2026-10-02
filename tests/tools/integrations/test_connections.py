@@ -95,3 +95,20 @@ async def test_status_returns_copy_callers_cannot_mutate():
     assert second["gmail"] is ConnectionState.NONE
     second["gmail"] = ConnectionState.ACTIVE
     assert (await c.status(1))["gmail"] is ConnectionState.NONE
+
+
+async def test_ensure_marks_failed_connection_as_revoked():
+    p = FakeProvider()
+    p.set_state(1, Capability.GMAIL, ConnectionState.FAILED)
+    with pytest.raises(ConnectionRequired) as exc:
+        await ConnectionCache(p).ensure(1, Capability.GMAIL, "x")
+    assert exc.value.revoked is True
+
+
+def test_is_auth_error():
+    from mavis.tools.integrations.connections import is_auth_error
+
+    assert is_auth_error("Composio answered 401 for POST /tools/execute/x")
+    assert is_auth_error("invalid_grant: Token has been expired or revoked")
+    assert not is_auth_error("Composio answered 429 for POST /tools/execute/x")
+    assert not is_auth_error(None)

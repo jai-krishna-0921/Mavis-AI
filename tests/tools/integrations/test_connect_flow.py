@@ -4,7 +4,12 @@ from mavis.domain.events import Event, EventType, JobKind, Trust
 from mavis.domain.integrations import ConnectionState, PendingStatus
 from mavis.domain.policy import Capability
 from mavis.store.repo import connections
-from mavis.tools.integrations.connect_flow import CHECK_KIND, ConnectFlow
+from mavis.tools.integrations.connect_flow import (
+    CHECK_DELAYS,
+    CHECK_KIND,
+    PENDING_TTL,
+    ConnectFlow,
+)
 from tests.tools.integrations.fakes import NOW
 
 
@@ -22,11 +27,48 @@ async def test_start_sends_url_button_and_schedules_checks(db, provider, cache, 
     assert msg.buttons[1][0].data == f"conn:no:{pid}"
     assert provider.links[0][2] == f"https://mavis.test/connect/callback?p={pid}"
     assert [(at - NOW, reason, kind) for _, at, reason, kind in rec.scheduled] == [
-        (timedelta(minutes=m), str(pid), CHECK_KIND) for m in (1, 3, 10)
+        (delay, str(pid), CHECK_KIND) for delay in CHECK_DELAYS
     ]
+    assert [d // timedelta(minutes=1) for d in CHECK_DELAYS[:5]] == [1, 3, 10, 30, 60]
+    assert CHECK_DELAYS[-1] > PENDING_TTL  # the 24h expiry is reachable
 
 
-async def test_start_reuses_recent_link_without_resending(db, provider, cache, fake_bus, rec, state):
+async def test_start_reuses_recent_pending_and_resends_link_for_user_commands(
+    db, provider, cache, fake_bus, rec, state
+):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    first = await flow.start(1, Capability.GMAIL, "")
+    again = await flow.start(1, Capability.GMAIL, "")
+    assert again == first and len(await connections.open_for(1, Capability.GMAIL)) == 1
+    assert len(rec.sent) == 2
+    assert rec.sent[-1].text.startswith("Here's your link again")
+    assert rec.sent[-1].buttons[0][0].url == "https://connect.example/gmail"
+    assert provider.links[-1][2].endswith(f"p={first}")
+
+
+async def test_reused_pending_gets_checks_only_when_none_are_scheduled(
+    db, provider, cache, fake_bus, rec, state
+):
+    async def no_checks(user_id, pending_id):
+        return False
+
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    flow.has_checks = no_checks
+    pid = await flow.start(1, Capability.GMAIL, "")
+    rec.scheduled.clear()  # pretend the first batch never made it (crash after send)
+    await flow.start(1, Capability.GMAIL, "")
+    assert len(rec.scheduled) == len(CHECK_DELAYS) and {r for _, _, r, _ in rec.scheduled} == {str(pid)}
+
+    async def has_checks(user_id, pending_id):
+        return True
+
+    flow.has_checks = has_checks
+    rec.scheduled.clear()
+    await flow.start(1, Capability.GMAIL, "")
+    assert rec.scheduled == []
+
+
+async def test_start_reuse_with_task_remembers_run_silently(db, provider, cache, fake_bus, rec, state):
     flow = make_flow(provider, cache, fake_bus, rec, state)
     await flow.start(1, Capability.GMAIL, "check and handle your email", task_id="a")
     await flow.start(1, Capability.GMAIL, "check and handle your email", task_id="b")
@@ -34,12 +76,70 @@ async def test_start_reuses_recent_link_without_resending(db, provider, cache, f
     assert {p.task_id for p in await connections.open_for(1, Capability.GMAIL)} == {"a", "b"}
 
 
+async def test_connect_when_provider_active_but_never_activated_runs_first_sync(
+    db, provider, cache, fake_bus, rec, state
+):
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    activated = []
+
+    async def on_active(user_id, capability):
+        activated.append((user_id, capability))
+
+    flow = make_flow(provider, cache, fake_bus, rec, state, on_active=on_active)
+    await flow.start(1, Capability.GMAIL, "")
+    assert [j.kind for j in fake_bus.jobs] == [JobKind.FIRST_SYNC] and activated == [(1, Capability.GMAIL)]
+    assert "Connected" in rec.sent[-1].text and "already" not in rec.sent[-1].text
+    # fully activated now (the activator would record polling): a second /connect just confirms
+    await state.update(1, {"polling": {"gmail": True}})
+    await flow.start(1, Capability.GMAIL, "")
+    assert len(fake_bus.jobs) == 1 and rec.sent[-1].text == "Gmail is already connected ✓"
+
+
+async def test_connections_command_reconciles_provider_state(db, provider, cache, fake_bus, rec, state):
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    provider.set_state(1, Capability.SLACK, ConnectionState.FAILED)
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    text = await flow.status_text(1)
+    assert "✅ Gmail: connected" in text and "Slack: needs reconnecting" in text
+    assert [j.kind for j in fake_bus.jobs] == [JobKind.FIRST_SYNC]
+    assert (await state.get(1))["synced"].get("gmail")
+
+
+async def test_reconcile_resolves_pending_that_finished_unseen(db, provider, cache, fake_bus, rec, state):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    pid = await flow.start(1, Capability.GMAIL, "", task_id="t")
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    cache.invalidate(1)
+    await flow.reconcile(1, Capability.GMAIL)
+    assert (await connections.get_pending(pid)).status == PendingStatus.ACTIVE
+    assert any(j.kind is JobKind.RESUME_TASK for j in fake_bus.jobs)
+
+
+async def test_prompt_reconnect_is_deduped_per_capability_per_day(db, provider, cache, fake_bus, rec, state):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    assert await flow.prompt_reconnect(1, Capability.GMAIL) is True
+    assert rec.sent[-1].text.startswith("Your Gmail access has expired")
+    assert rec.sent[-1].buttons[0][0].url
+    assert await flow.prompt_reconnect(1, Capability.GMAIL) is False
+    assert await flow.prompt_reconnect(1, Capability.CALENDAR) is True
+    assert len(rec.sent) == 2
+    later = NOW + timedelta(days=1, minutes=30)
+    tomorrow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: later)
+    assert await tomorrow.prompt_reconnect(1, Capability.GMAIL) is True
+    # reconnecting clears the marker
+    ev = Event(id="c9", user_id=1, type=EventType.CONNECTION_CHANGED, occurred_at=NOW, source="integrations",
+               payload={"capability": "gmail", "state": "ACTIVE"})
+    await flow.on_connection_changed(ev)
+    assert "gmail" not in (await state.get(1)).get("reconnect_prompted", {})
+
+
 async def test_start_when_already_active_resumes_task(db, provider, cache, fake_bus, rec, state):
     provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
     flow = make_flow(provider, cache, fake_bus, rec, state)
     assert await flow.start(1, Capability.GMAIL, "", task_id="t") is None
-    assert fake_bus.jobs[0].kind is JobKind.RESUME_TASK
-    assert fake_bus.jobs[0].payload == {"task_id": "t", "value": {"connected": True}}
+    [resume] = [j for j in fake_bus.jobs if j.kind is JobKind.RESUME_TASK]
+    assert resume.payload == {"task_id": "t", "value": {"connected": True}}
+    assert rec.sent == []  # a resumed run is not announced
 
 
 async def test_start_when_provider_unconfigured_tells_user(db, provider, cache, fake_bus, rec, state):
@@ -204,3 +304,67 @@ async def test_failed_event_without_waiting_pending_is_silent(db, provider, cach
                payload={"capability": "slack", "state": "FAILED"})
     await flow.on_connection_changed(ev)
     assert rec.sent == []
+
+
+async def test_check_keeps_waiting_when_reconnect_prompt_sees_old_failed_account(
+    db, provider, cache, fake_bus, rec, state
+):
+    provider.set_state(1, Capability.GMAIL, ConnectionState.FAILED)
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    assert await flow.prompt_reconnect(1, Capability.GMAIL) is True
+    [pending] = await connections.open_for(1, Capability.GMAIL)
+    sent = len(rec.sent)
+    await flow.check(pending.id)
+    assert fake_bus.events == [] and len(rec.sent) == sent
+    assert (await connections.get_pending(pending.id)).status == PendingStatus.PENDING
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    await flow.check(pending.id)
+    assert fake_bus.events[0].payload["state"] == "ACTIVE"
+
+
+async def test_check_still_reports_failed_for_a_first_connect(db, provider, cache, fake_bus, rec, state):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    pid = await flow.start(1, Capability.GMAIL, "")
+    provider.set_state(1, Capability.GMAIL, ConnectionState.FAILED)
+    await flow.check(pid)
+    assert fake_bus.events[0].payload["state"] == "FAILED"
+
+
+async def test_prompt_reconnect_not_recorded_if_link_fails(db, provider, cache, fake_bus, rec, state):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    provider.fail_link = True
+    assert await flow.prompt_reconnect(1, Capability.GMAIL) is False
+    assert "reconnect_prompted" not in await state.get(1)
+    provider.fail_link = False
+    assert await flow.prompt_reconnect(1, Capability.GMAIL) is True
+
+
+async def test_concurrent_activation_enqueues_first_sync_once(db, provider, cache, fake_bus, rec, state):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+
+    class RacyState:  # both callers read "not synced" before either writes
+        async def get(self, user_id):
+            return {}
+
+        async def update(self, user_id, patch):
+            return patch
+
+    flow.state = RacyState()
+    await flow.reconcile(1, Capability.GMAIL)
+    await flow.reconcile(1, Capability.GMAIL)
+    assert len([j for j in fake_bus.jobs if j.kind is JobKind.FIRST_SYNC]) == 1
+
+
+async def test_resolving_a_pending_cancels_its_checks(db, provider, cache, fake_bus, rec, state):
+    cancelled = []
+
+    async def cancel(user_id, pending_id):
+        cancelled.append((user_id, pending_id))
+
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    flow.cancel_checks = cancel
+    pid = await flow.start(1, Capability.GMAIL, "")
+    ev = Event(id="c5", user_id=1, type=EventType.CONNECTION_CHANGED, occurred_at=NOW, source="integrations",
+               payload={"capability": "gmail", "state": "ACTIVE"})
+    await flow.on_connection_changed(ev)
+    assert cancelled == [(1, pid)]

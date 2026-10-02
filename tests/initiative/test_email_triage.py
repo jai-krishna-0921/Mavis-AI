@@ -102,7 +102,7 @@ async def test_security_alert_forces_notify_urgency_ge_4():
     out = await EmailTriage(known).apply_policy(SECURITY, InitiativeDecision(ignore_reason="automated mail"))
     assert out.notify is not None and out.notify.urgency >= 4
     assert out.ignore_reason is None
-    assert out.notify.dedupe_key == "email:m1"
+    assert out.notify.dedupe_key == "email:1:m1"
     assert "—" not in out.notify.intent and "–" not in out.notify.intent
 
 
