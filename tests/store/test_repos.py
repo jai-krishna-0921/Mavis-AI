@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 import pytest
@@ -109,3 +110,35 @@ async def test_processed_event_claim_once(db) -> None:
 def test_utc_datetime_rejects_naive() -> None:
     with pytest.raises(ValueError):
         UTCDateTime().process_bind_param(datetime(2026, 1, 1), sqlite.dialect())
+
+
+@contextmanager
+def _blind_precheck(monkeypatch):
+    """Make the SELECT pre-check miss, as if a concurrent writer inserted after it."""
+
+    async def _none(self, *args, **kwargs):
+        return None
+
+    with monkeypatch.context() as m:
+        m.setattr("sqlalchemy.ext.asyncio.AsyncSession.scalar", _none)
+        yield
+
+
+async def test_messages_log_duplicate_event_id_race_returns_false(db, monkeypatch) -> None:
+    u, _ = await users.get_or_create_by_chat(42, "Jai")
+    assert await messages.log(u.id, Role.USER, "hi", event_id="e1")
+    with _blind_precheck(monkeypatch):
+        assert not await messages.log(u.id, Role.USER, "hi again", event_id="e1")
+    assert [r.content for r in await messages.recent(u.id)] == ["hi"]
+
+
+async def test_outbox_enqueue_duplicate_race_returns_existing_and_keeps_transaction(db, monkeypatch) -> None:
+    u, _ = await users.get_or_create_by_chat(42, "Jai")
+    first = await outbox.enqueue_now(Outbound(user_id=u.id, text="x", dedupe_key="k"))
+    with _blind_precheck(monkeypatch):
+        async with Session() as s:
+            again = await outbox.enqueue(s, Outbound(user_id=u.id, text="x", dedupe_key="k"))
+            other = await outbox.enqueue(s, Outbound(user_id=u.id, text="y", dedupe_key="k2"))
+            await s.commit()  # transaction still usable after the conflict
+    assert again == first and other != first
+    assert len(await outbox.due(utcnow())) == 2
