@@ -11,6 +11,7 @@ from uuid import uuid4
 import structlog
 import typer
 
+from mavis import cli_telegram
 from mavis.bus import get_bus, set_bus
 from mavis.bus.base import EventBus
 from mavis.config import get_settings
@@ -19,6 +20,7 @@ from mavis.store.db import dispose_engine, init_db
 from mavis.tools.integrations import close_provider
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Mavis personal assistant")
+app.add_typer(cli_telegram.app, name="telegram")
 log = structlog.get_logger(__name__)
 LOCAL_CHAT_ID = -1
 _background: set[asyncio.Task] = set()
