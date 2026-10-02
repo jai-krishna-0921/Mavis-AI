@@ -34,10 +34,20 @@ class InitiativeExecutor:
             if untrusted and not await self._owns_existing_loop(user.id, upsert.id):
                 log.warning("initiative.untrusted_track_skipped", event_id=event.id, title=upsert.title[:80])
                 continue
-            await self._loops.upsert(user.id, upsert.model_copy(update={"source": upsert.source or event.id}))
+            try:
+                source = upsert.source or event.id
+                await self._loops.upsert(user.id, upsert.model_copy(update={"source": source}))
+            except ValueError as exc:  # e.g. the LLM named a loop id that does not exist: not retryable
+                log.warning("initiative.track_failed", event_id=event.id, title=upsert.title[:80],
+                            error=str(exc))
         for i, w in enumerate(decision.wakeups):
             key = f"agent:{w.loop_id}:{w.reason[:60]}" if w.loop_id else f"agent:{event.id}:{i}"
-            await self._wakeups.wake_me(user.id, w.at, w.reason, w.loop_id, WakeupKind.AGENT, dedupe_key=key)
+            try:
+                await self._wakeups.wake_me(user.id, w.at, w.reason, w.loop_id, WakeupKind.AGENT,
+                                            dedupe_key=key)
+            except ValueError as exc:
+                log.warning("initiative.wakeup_failed", event_id=event.id, reason=w.reason[:80],
+                            error=str(exc))
         for i, task in enumerate(decision.act):
             if untrusted:
                 log.warning("initiative.untrusted_act_skipped", event_id=event.id, index=i)
@@ -72,12 +82,27 @@ class InitiativeExecutor:
                     dedupe_key=f"deferred:{intent.dedupe_key}" if intent.dedupe_key else None,
                 )
             return False
+        if intent.dedupe_key and await self._recover_partial(user, intent):
+            return False
         message = await self._composer.compose(user, intent.intent, intent.urgency, context,
                                                 untrusted=untrusted)
         if not message.send:
             log.info("initiative.composer_dropped", user=user.id, intent=intent.intent[:80])
             return False
         await self.deliver(user, message.messages, intent.dedupe_key, intent.urgency, quiet_streak)
+        return True
+
+    async def _recover_partial(self, user, intent: NotifyIntent) -> bool:
+        """A prior attempt enqueued bubbles but died before log/record: finish that, send nothing new."""
+        now = timeutil.now()
+        local_date = timeutil.to_local(now, user.timezone).date().isoformat()
+        sent = await outbox.texts_with_dedupe_prefix(f"{intent.dedupe_key}:{local_date}:")
+        if not sent:
+            return False
+        await messages.log(user.id, Role.ASSISTANT, "\n".join(sent), proactive=True,
+                           event_id=f"proactive:{intent.dedupe_key}:{local_date}:0")
+        await self._policy.record(user, intent.dedupe_key, intent.urgency, now)
+        log.info("initiative.notify_recovered", user=user.id, key=intent.dedupe_key)
         return True
 
     async def deliver(self, user, bubbles: list[str], dedupe_key: str | None = None, urgency: int = 3,

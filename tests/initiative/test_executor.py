@@ -160,3 +160,45 @@ async def test_untrusted_notify_passes_flag_to_composer_and_deferral(
     await executor.apply(user, decision, untrusted_ev().model_copy(update={"id": "gmail:msg:10"}))
     [w] = await wakeups.pending(user.id, WakeupKind.DEFERRED)
     assert w.payload["untrusted"] is True
+
+
+async def test_bad_loop_id_does_not_abort_rest_of_apply(user, clock, recording_bus, fake_memory, fake_llm):
+    executor, _, wakeups = build(recording_bus, fake_memory)
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["Still here."]))
+    decision = InitiativeDecision(
+        track=[LoopUpsert(id=9999, kind=LoopKind.GOAL, title="ghost")],
+        wakeups=[WakeupRequest(at=timeutil.now() + timedelta(days=1), reason="later")],
+        notify=NotifyIntent(urgency=3, intent="ping"),
+    )
+    await executor.apply(user, decision, ev())
+    assert len(await wakeups.pending(user.id, WakeupKind.AGENT)) == 1
+    assert (await messages.recent(user.id, 1))[-1].content == "Still here."
+
+
+async def test_same_event_twice_with_different_bubble_count_sends_once(
+    user, clock, recording_bus, fake_memory, fake_llm, channel
+):
+    executor, _, _ = build(recording_bus, fake_memory)
+    decision = InitiativeDecision(notify=NotifyIntent(urgency=3, intent="ping", dedupe_key="k:9"))
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["one", "two"]))
+    await executor.apply(user, decision, ev())
+    # simulate crash after enqueue: policy record and log are gone
+    from sqlalchemy import delete
+
+    from mavis.store.db import Session
+    from mavis.store.models import Message, PingLogRow
+
+    async with Session() as s:
+        await s.execute(delete(PingLogRow))
+        await s.execute(delete(Message))
+        await s.commit()
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["a", "b", "c"]))
+    assert not await executor.notify(user, decision.notify)
+    assert await deliver_pending(channel) == 2
+    assert (await messages.recent(user.id, 1))[-1].content == "one\ntwo"
+
+
+async def test_deliver_question_schedules_user_quiet(user, clock, recording_bus, fake_memory):
+    executor, _, wakeups = build(recording_bus, fake_memory)
+    await executor.deliver(user, ["Noted.", "Want me to follow up?"], dedupe_key="q:1")
+    assert len(await wakeups.pending(user.id, WakeupKind.USER_QUIET)) == 1
