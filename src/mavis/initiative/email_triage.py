@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 
 from pydantic import BaseModel
@@ -33,6 +34,11 @@ CATEGORY_WORDS: dict[str, tuple[str, ...]] = {
         "shortlisted",
     ),
 }
+CATEGORY_PATTERNS: dict[str, re.Pattern[str]] = {
+    cat: re.compile(r"\b(?:" + "|".join(re.escape(w) for w in words) + r")s?\b")
+    for cat, words in CATEGORY_WORDS.items()
+}
+DEAD_LABELS = frozenset({"SPAM", "TRASH"})  # never ping for these, even a lookalike security alert
 DROP_LABELS = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS", "SPAM", "TRASH"})
 AUTOMATED = ("no-reply", "noreply", "notifications", "mailer-daemon", "donotreply", "do-not-reply")
 SECURITY_INTENT = (
@@ -49,7 +55,7 @@ GUIDANCE = (
 
 def classify(payload: dict) -> list[str]:
     text = f"{payload.get('subject', '')} {payload.get('snippet', '')}".lower()
-    return [cat for cat, words in CATEGORY_WORDS.items() if any(w in text for w in words)]
+    return [cat for cat, pattern in CATEGORY_PATTERNS.items() if pattern.search(text)]
 
 
 class EmailSignals(BaseModel):
@@ -62,10 +68,8 @@ class EmailSignals(BaseModel):
 def compute_signals(event: Event, known_names: set[str]) -> EmailSignals:
     p = event.payload
     address = str(p.get("from_address", "")).lower()
-    name = str(p.get("from_name", "")).lower()
-    known = bool(address and address in known_names) or any(
-        part and part in known_names for part in (name, name.split(" ")[0] if name else "")
-    )
+    # Address only: the display name is attacker-controlled and this feeds the "trusted" prompt section.
+    known = bool(address) and address in {n.lower() for n in known_names}
     return EmailSignals(
         categories=classify(p),
         known_sender=known,
@@ -78,9 +82,11 @@ async def email_prefilter(event: Event) -> str | None:
     if event.type is not EventType.EMAIL_RECEIVED:
         return None
     p = event.payload
+    labels = set(p.get("labels") or [])
+    if labels & DEAD_LABELS:
+        return "spam/trash"
     if "security" in classify(p):
         return None  # never drop a possible account compromise
-    labels = set(p.get("labels") or [])
     if "SENT" in labels:
         return "own sent mail"
     if labels & DROP_LABELS:
@@ -111,6 +117,8 @@ class EmailTriage:
 
     async def apply_policy(self, event: Event, decision: InitiativeDecision) -> InitiativeDecision:
         if event.type is not EventType.EMAIL_RECEIVED or "security" not in classify(event.payload):
+            return decision
+        if set(event.payload.get("labels") or []) & DEAD_LABELS:
             return decision
         if decision.notify is not None and decision.notify.urgency >= 4:
             return decision
