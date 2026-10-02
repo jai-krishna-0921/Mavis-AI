@@ -85,5 +85,28 @@ def test_dashes() -> None:
 
 @pytest.mark.parametrize("fn", [H, to_plain])
 def test_no_dashes_survive(fn) -> None:
-    out = fn("**x**—y\n# a – b\n1–2\n```\ncode — here\n```\n`c—d` [l—m](https://x.io)")
+    out = fn("**x**—y\n# a – b\n1–2 [l—m](https://x.io)")
     assert "—" not in out and "–" not in out
+
+
+@pytest.mark.parametrize("fn", [H, to_plain])
+def test_dashes_kept_in_code(fn) -> None:
+    out = fn("a—b `c—d`\n```\ne — f\n```")
+    assert "c—d" in out and "e — f" in out and "a, b" in out
+
+
+def test_link_text_with_code() -> None:
+    out = H("see [`foo`](https://x.io) now")
+    assert out == 'see <a href="https://x.io"><code>foo</code></a> now'
+    assert "\x00" not in out
+
+
+def test_heading_keeps_trailing_hash() -> None:
+    assert H("# C#") == "<b>C#</b>"
+    assert to_plain("## F# rocks") == "F# rocks"
+
+
+def test_no_italic_inside_bare_url() -> None:
+    url = "https://x.io/a_b_c/*d*"
+    assert H(f"go {url} ok") == f"go {url} ok"
+    assert to_plain(f"go {url} ok") == f"go {url} ok"

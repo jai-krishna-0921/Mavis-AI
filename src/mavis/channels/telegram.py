@@ -7,16 +7,18 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, RetryAfter
 
 from mavis.channels.base import ChannelRateLimited
 from mavis.channels.formatting import to_plain, to_telegram_html
-from mavis.channels.text import split_text
+from mavis.channels.text import TELEGRAM_LIMIT, split_text
 from mavis.domain.messages import Button
 
 _CHUNK_LIMIT = 3500  # leave room for HTML tags under Telegram's 4096 cap
+
+_NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 log = structlog.get_logger(__name__)
 
@@ -52,32 +54,49 @@ class TelegramChannel:
         for i, chunk in enumerate(chunks):
             markup = self._markup(buttons) if i == len(chunks) - 1 else None
             try:
-                msg = await self._send_chunk(chat_id, chunk, markup)
+                ids.extend(await self._send_markdown(chat_id, chunk, markup))
             except RetryAfter as exc:
                 raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
-            ids.append(msg.message_id)
         return ids
 
-    async def _send_chunk(self, chat_id: int, chunk: str, markup: InlineKeyboardMarkup | None) -> Any:
+    async def _send_markdown(
+        self, chat_id: int, chunk: str, markup: InlineKeyboardMarkup | None
+    ) -> list[int]:
+        """Send one markdown chunk; re-split smaller if the HTML is too long for Telegram."""
+        body = to_telegram_html(chunk)
+        if len(body) > TELEGRAM_LIMIT and len(chunk) > 1:
+            return await self._send_halves(chat_id, chunk, markup)
         try:
-            return await self._bot.send_message(
+            msg = await self._bot.send_message(
                 chat_id=chat_id,
-                text=to_telegram_html(chunk),
+                text=body,
                 parse_mode="HTML",
-                disable_web_page_preview=True,
+                link_preview_options=_NO_PREVIEW,
                 reply_markup=markup,
             )
         except BadRequest as exc:
             message = str(exc).lower()
+            if "too long" in message and len(chunk) > 1:
+                return await self._send_halves(chat_id, chunk, markup)
             if "parse" not in message and "entities" not in message:
                 raise
             log.warning("telegram.html_rejected", error=str(exc))
-            return await self._bot.send_message(
+            msg = await self._bot.send_message(
                 chat_id=chat_id,
                 text=to_plain(chunk),
-                disable_web_page_preview=True,
+                link_preview_options=_NO_PREVIEW,
                 reply_markup=markup,
             )
+        return [msg.message_id]
+
+    async def _send_halves(
+        self, chat_id: int, chunk: str, markup: InlineKeyboardMarkup | None
+    ) -> list[int]:
+        parts = split_text(chunk, max(len(chunk) // 2, 1))
+        ids: list[int] = []
+        for i, part in enumerate(parts):
+            ids.extend(await self._send_markdown(chat_id, part, markup if i == len(parts) - 1 else None))
+        return ids
 
     async def send_document(self, chat_id: int, path: str, caption: str = "") -> int:
         await self._ensure()
