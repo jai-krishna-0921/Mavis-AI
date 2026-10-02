@@ -19,7 +19,10 @@ def test_redacts_secret_like_keys() -> None:
 
 def test_configure_logging_runs(settings, capsys) -> None:
     configure_logging()
-    structlog.get_logger().info("hello", telegram_token="should-not-appear")
-    err = capsys.readouterr().err
+    try:
+        structlog.get_logger().info("hello", telegram_token="should-not-appear")
+        err = capsys.readouterr().err
+    finally:
+        structlog.reset_defaults()  # don't leave a logger bound to a captured (later closed) stderr
     assert "hello" in err
     assert "should-not-appear" not in err
