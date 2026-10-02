@@ -59,3 +59,39 @@ def test_get_provider_is_composio(settings, monkeypatch):
     assert isinstance(get_provider(), ComposioProvider)
     get_provider.cache_clear()
     get_settings.cache_clear()
+
+
+async def test_invalidate_during_inflight_fetch_does_not_cache_stale_result():
+    import asyncio
+
+    p = FakeProvider()
+    gate, started = asyncio.Event(), asyncio.Event()
+    real = p.status
+
+    async def slow(user):
+        out = await real(user)
+        started.set()
+        await gate.wait()
+        return out
+
+    p.status = slow
+    c = ConnectionCache(p, ttl_s=60)
+    task = asyncio.create_task(c.status(1))
+    await started.wait()
+    c.invalidate(1)
+    gate.set()
+    await task
+    p.status = real
+    p.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    assert (await c.status(1))["gmail"] is ConnectionState.ACTIVE
+
+
+async def test_status_returns_copy_callers_cannot_mutate():
+    p = FakeProvider()
+    c = ConnectionCache(p, ttl_s=60)
+    first = await c.status(1)
+    first["gmail"] = ConnectionState.ACTIVE
+    second = await c.status(1)
+    assert second["gmail"] is ConnectionState.NONE
+    second["gmail"] = ConnectionState.ACTIVE
+    assert (await c.status(1))["gmail"] is ConnectionState.NONE

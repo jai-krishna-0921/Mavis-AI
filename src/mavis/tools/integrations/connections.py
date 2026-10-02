@@ -19,17 +19,22 @@ class ConnectionCache:
         self._ttl = ttl_s
         self._clock = clock
         self._entries: dict[int, tuple[float, dict[str, ConnectionState]]] = {}
+        self._generation: dict[int, int] = {}
 
     async def status(self, user_id: int, *, fresh: bool = False) -> dict[str, ConnectionState]:
         now = self._clock()
         hit = self._entries.get(user_id)
         if hit and not fresh and now < hit[0]:
-            return hit[1]
+            return dict(hit[1])
+        generation = self._generation.get(user_id, 0)
         states = await self._provider.status(UserRef(user_id=user_id))
-        self._entries[user_id] = (now + self._ttl, states)
-        return states
+        if self._generation.get(user_id, 0) == generation:
+            # Only cache if nobody invalidated while the fetch was in flight.
+            self._entries[user_id] = (now + self._ttl, dict(states))
+        return dict(states)
 
     def invalidate(self, user_id: int) -> None:
+        self._generation[user_id] = self._generation.get(user_id, 0) + 1
         self._entries.pop(user_id, None)
 
     async def is_active(self, user_id: int, capability: Capability, *, fresh: bool = False) -> bool:
