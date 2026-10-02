@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 
+import structlog
 from sqlalchemy import select, update
 
 from mavis.domain import timeutil
@@ -12,6 +13,7 @@ from mavis.domain.wakeups import Wakeup, WakeupKind, WakeupStatus
 from mavis.store.db import Session
 from mavis.store.models import WakeupRow
 
+log = structlog.get_logger()
 PENDING = WakeupStatus.PENDING.value
 
 
@@ -114,8 +116,13 @@ async def fire_due(now: datetime, limit: int,
                     if res.rowcount != 1:
                         continue  # another timer fired it between our select and update
                 fired.append(w)
-        finally:
-            await s.commit()
+        except BaseException:
+            try:
+                await s.commit()  # keep what was already published; never mask the original error
+            except Exception:  # noqa: BLE001
+                log.warning("wakeups.commit_after_error_failed", exc_info=True)
+            raise
+        await s.commit()
     return fired
 
 

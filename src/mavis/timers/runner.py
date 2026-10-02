@@ -27,8 +27,13 @@ def wakeup_event(w: Wakeup) -> Event:
         type=EVENT_TYPE_FOR_KIND[w.kind],
         occurred_at=w.due_at,
         source="timer",
-        payload={"wakeup_id": w.id, "kind": w.kind.value, "reason": w.reason, "loop_id": w.loop_id,
-                 **w.payload},
+        payload={
+            **w.payload,
+            "wakeup_id": w.id,
+            "kind": w.kind.value,
+            "reason": w.reason,
+            "loop_id": w.loop_id,
+        },
         trust=Trust.SYSTEM,
     )
 

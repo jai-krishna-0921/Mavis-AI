@@ -114,3 +114,49 @@ async def test_fire_due_publishes_before_marking_and_retries_on_failure(user, cl
 
     assert [w.reason for w in await svc.fire_due(timeutil.now(), ok)] == ["two"]
     assert seen == ["one", "two"] and await svc.pending(user.id) == []
+
+
+async def test_wake_me_rejects_reserved_payload_keys(user, clock):
+    import pytest
+
+    with pytest.raises(ValueError, match="kind"):
+        await WakeupService().wake_me(user.id, timeutil.now(), "x", payload={"kind": "system_poll"})
+
+
+async def test_dedupe_race_returns_existing_id(user, clock, monkeypatch):
+    from mavis.store.repo import wakeups as repo
+
+    svc = WakeupService()
+    a = await svc.wake_me(user.id, timeutil.now(), "a", dedupe_key="k")
+    monkeypatch.setattr(repo, "pending_by_key", _stale_then_real(repo.pending_by_key))
+    b = await svc.wake_me(user.id, timeutil.now(), "b", dedupe_key="k")
+    assert a == b and len(await svc.pending(user.id)) == 1
+
+
+def _stale_then_real(real):
+    calls = []
+
+    async def fake(user_id, key):
+        calls.append(1)
+        return None if len(calls) == 1 else await real(user_id, key)
+
+    return fake
+
+
+async def test_fire_due_commit_failure_does_not_mask_publish_error(user, clock, monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    svc = WakeupService()
+    await svc.wake_me(user.id, timeutil.now() - timedelta(seconds=1), "x")
+
+    async def bad_commit(self):
+        raise OSError("commit failed")
+
+    async def boom(w):
+        raise RuntimeError("publish failed")
+
+    monkeypatch.setattr(AsyncSession, "commit", bad_commit)
+    import pytest
+
+    with pytest.raises(RuntimeError, match="publish failed"):
+        await svc.fire_due(timeutil.now(), boom)

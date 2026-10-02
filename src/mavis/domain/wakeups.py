@@ -41,6 +41,9 @@ class Wakeup(BaseModel):
     status: WakeupStatus = WakeupStatus.PENDING
 
 
+# payload keys the timer sets itself; callers may not supply them
+RESERVED_PAYLOAD_KEYS = frozenset({"wakeup_id", "kind", "reason", "loop_id"})
+
 EVENT_TYPE_FOR_KIND: dict[WakeupKind, EventType] = {
     WakeupKind.AGENT: EventType.WAKEUP,
     WakeupKind.ROUTINE: EventType.WAKEUP,
