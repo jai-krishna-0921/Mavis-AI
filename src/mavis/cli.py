@@ -1,4 +1,4 @@
-"""Process entrypoints. One image, many roles: `mavis api | worker | dev | chat | migrate`."""
+"""Process entrypoints. One image, many roles: `mavis api | worker | timer | dev | chat | migrate`."""
 
 from __future__ import annotations
 
@@ -23,15 +23,20 @@ LOCAL_CHAT_ID = -1
 _background: set[asyncio.Task] = set()
 
 
-async def bootstrap(create_tables: bool) -> EventBus:
-    """Common start-up for worker-like roles: logging, schema (dev), handlers, bus."""
-    from mavis.worker.handlers import register_default_handlers
+async def bootstrap(create_tables: bool, *, handlers: bool = True, warm: bool = True) -> EventBus:
+    """Common start-up for worker-like roles: logging, schema (dev), handlers, bus.
 
+    Roles that only publish events (timer) skip the handlers and the embedding warm-up.
+    """
     configure_logging()
     if create_tables:
         await init_db()
-    register_default_handlers()
-    _start_memory_warmup()
+    if handlers:
+        from mavis.worker.handlers import register_default_handlers
+
+        register_default_handlers()
+    if warm:
+        _start_memory_warmup()
     return get_bus()
 
 
@@ -90,6 +95,7 @@ async def _run_tasks(tasks: list[asyncio.Task], bus: EventBus) -> None:
 async def _dev() -> None:
     from mavis.channels.outbox_sender import OutboxSender
     from mavis.channels.telegram_poller import run_polling
+    from mavis.timers.runner import run_timer
     from mavis.worker.runner import run_worker
 
     bus = await bootstrap(create_tables=True)
@@ -97,6 +103,7 @@ async def _dev() -> None:
     tasks = [
         asyncio.create_task(run_worker(bus, "dev")),
         asyncio.create_task(OutboxSender().run_forever()),
+        asyncio.create_task(run_timer()),
     ]
     if s.telegram_bot_token:
         tasks.append(asyncio.create_task(run_polling(bus, s.telegram_bot_token)))
@@ -114,6 +121,14 @@ async def _worker(name: str) -> None:
     tasks = [asyncio.create_task(run_worker(bus, name)), asyncio.create_task(OutboxSender().run_forever())]
     log.info("worker.started", consumer=name)
     await _run_tasks(tasks, bus)
+
+
+async def _timer() -> None:
+    from mavis.timers.runner import run_timer
+
+    bus = await bootstrap(create_tables=get_settings().is_sqlite, handlers=False, warm=False)
+    log.info("timer.started")
+    await _run_tasks([asyncio.create_task(run_timer())], bus)
 
 
 async def _chat() -> None:
@@ -166,7 +181,7 @@ def dev() -> None:
 
 
 def _require_redis(role: str) -> None:
-    """api/worker are multi-process roles: without Redis their in-process bus would drop messages."""
+    """api/worker/timer are multi-process roles: without Redis their in-process bus would drop messages."""
     if not get_settings().redis_url:
         typer.echo(f"error: REDIS_URL is required for the `{role}` role (use `mavis dev` for one process).",
                    err=True)
@@ -188,6 +203,13 @@ def worker(name: str = typer.Option(default_factory=lambda: f"worker-{socket.get
     """Consume events and jobs and deliver the outbox."""
     _require_redis("worker")
     _run(_worker(name))
+
+
+@app.command()
+def timer() -> None:
+    """Fire agent-owned wakeups (single active instance via Redis leader lock)."""
+    _require_redis("timer")
+    _run(_timer())
 
 
 @app.command()

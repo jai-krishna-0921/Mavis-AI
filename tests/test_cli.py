@@ -7,7 +7,7 @@ from mavis.cli import app
 def test_cli_lists_commands() -> None:
     result = CliRunner().invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("dev", "api", "worker", "chat", "migrate"):
+    for command in ("dev", "api", "worker", "timer", "chat", "migrate"):
         assert command in result.output
 
 
@@ -97,7 +97,7 @@ async def test_main_cancels_on_sigterm() -> None:
     assert cleaned == [True]
 
 
-@pytest.mark.parametrize("role", ["api", "worker"])
+@pytest.mark.parametrize("role", ["api", "worker", "timer"])
 def test_multi_process_roles_require_redis(settings, monkeypatch, role) -> None:
     monkeypatch.setenv("REDIS_URL", "")
     started: list[str] = []
