@@ -73,3 +73,25 @@ async def test_jobs_delivered_and_attempts_incremented_on_retry() -> None:
     await bus.wait_idle()
     task.cancel()
     assert attempts == [0, 1]
+
+
+async def test_wait_idle_waits_for_event_published_by_a_running_job() -> None:
+    """Regression: an event published by a job and still being handled must not count as idle."""
+    bus = InProcessBus()
+    done: list[str] = []
+
+    async def on_job(j: Job) -> None:
+        await bus.publish(ev("from-job"))
+        await asyncio.sleep(0.02)  # job ends while the event is dequeued and still in flight
+
+    async def on_event(e: Event) -> None:
+        await asyncio.sleep(0.2)
+        done.append(e.id)
+
+    await bus.enqueue(Job(id="j1", user_id=1, kind=JobKind.LEARN))
+    tasks = [asyncio.create_task(bus.consume_jobs("g", "c", on_job)),
+             asyncio.create_task(bus.consume_events("g", "c", on_event))]
+    await bus.wait_idle()
+    for t in tasks:
+        t.cancel()
+    assert done == ["from-job"]
