@@ -49,3 +49,16 @@ async def db(settings):
     await init_db()
     yield
     await dispose_engine()
+
+
+@pytest.fixture
+def fake_llm(monkeypatch):
+    """Replaces zento.llm.models.chat_model and .structured with a scripted FakeLLM."""
+    from tests.fakes.llm import FakeLLM
+    from zento.llm import models
+
+    fake = FakeLLM()
+    monkeypatch.setattr(models, "chat_model", fake.chat_model)
+    monkeypatch.setattr(models, "structured", fake.structured)
+    return fake
+
