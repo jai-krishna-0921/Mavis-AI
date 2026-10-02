@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 
 from mavis.agents import persona
@@ -12,6 +13,7 @@ from mavis.domain.messages import Role
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.llm import models as llm
 from mavis.store.repo import messages
+from mavis.store.repo import profile as profile_repo
 
 MAX_BUBBLES = 3
 
@@ -49,12 +51,18 @@ class Composer:
     ) -> ComposedMessage:
         """`untrusted=True` when the intent was derived from third-party content (see Reasoner)."""
         recall = (await self._memory.recall(user.id, intent)).render()
-        system = persona.system_prompt(user, timeutil.now(), recall) + "\n" + COMPOSER_RULES
+        recent = await messages.recent(user.id, 10)
+        now = timeutil.now()
+        card_name = None
+        with contextlib.suppress(Exception):  # the name is a nicety, never block a ping on it
+            card_name = (await profile_repo.get(user.id)).name
+        # proactive: never asks for a name and never says a greeting is fine (None omits that line)
+        system = persona.system_prompt(
+            user, now, recall, known_name=card_name, ask_name=False,
+            prior_turns=len(persona.recent_messages(recent, now)) or None,
+        ) + "\n" + COMPOSER_RULES
         history = (
-            "\n".join(
-                f"{'User' if m.role == Role.USER else 'You'}: {m.content}"
-                for m in await messages.recent(user.id, 10)
-            )
+            "\n".join(f"{'User' if m.role == Role.USER else 'You'}: {m.content}" for m in recent)
             or "(no messages yet)"
         )
         if untrusted:

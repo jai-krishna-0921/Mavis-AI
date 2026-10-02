@@ -6,7 +6,7 @@ Every user-facing LLM responder builds its system prompt here.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -57,8 +57,7 @@ If they ask for something outside all of this, say you can't do that yet.
 
 Right now
 - Local time for {who}: {local_time} ({tz}).
-- {name_line}
-- {convo_line}"""
+- {name_line}{convo_block}"""
 
 
 class _UserLike(Protocol):
@@ -71,21 +70,37 @@ def local_time(user: _UserLike, now: datetime) -> datetime:
 
 
 CONNECTION_LABELS = {"gmail": "Gmail", "googlecalendar": "Google Calendar"}
-_CONNECTION_COMMAND = {"gmail": "/connect gmail", "googlecalendar": "/connect calendar"}
+KNOWN_STATES = ("connected", "not connected", "pending", "needs reconnecting")
+RECENT_WINDOW = timedelta(hours=12)  # older messages do not count as "the conversation we are in"
 
 
 def connection_lines(connections: dict[str, str] | None) -> str:
-    """Per-user link state for the prompt. Missing or unknown entries are reported as unknown."""
-    lines = ["Their links right now (tell them plainly; do not say coming soon about these):"]
+    """Plain fact lines for the prompt, or "" when connection state is not being injected (None).
+
+    An empty dict means "looked, could not tell": every capability is reported as unknown.
+    """
+    if connections is None:
+        return ""
+    lines = ["Their links right now:"]
     for slug, label in CONNECTION_LABELS.items():
-        state = (connections or {}).get(slug, "unknown")
-        if state == "connected":
-            lines.append(f"- {label}: connected. Say they are connected; do not ask them to connect again.")
-        elif state == "not connected":
-            lines.append(f"- {label}: not connected. If it comes up, suggest {_CONNECTION_COMMAND[slug]}.")
-        else:
-            lines.append(f"- {label}: status unknown right now. Suggest /connections to check.")
+        state = connections.get(slug, "unknown")
+        lines.append(f"- {label}: {state if state in KNOWN_STATES else 'unknown'}")
+    lines.append(
+        "Use these facts when it comes up. Connected means just say so. Not connected: point them to "
+        "/connect gmail or /connect calendar. Pending or needs reconnecting: suggest /connect again. "
+        "Unknown: suggest /connections. Never call these coming soon."
+    )
     return "\n".join(lines)
+
+
+def recent_messages(history: list, now: datetime) -> list:
+    """Messages from the last RECENT_WINDOW (naive timestamps are UTC)."""
+    out = []
+    for m in history:
+        created = m.created_at if m.created_at.tzinfo else m.created_at.replace(tzinfo=UTC)
+        if timedelta(0) <= now - created <= RECENT_WINDOW:
+            out.append(m)
+    return out
 
 
 _NAME_ASKED = re.compile(r"call you|your name|who am i (talking|speaking)", re.IGNORECASE)
@@ -95,6 +110,7 @@ def should_ask_name(known_name: str | None, history: list, now: datetime, tz: st
     """Ask for a name only when none is known, and at most once per local conversation day."""
     if known_name:
         return False
+    history = recent_messages(history, now)
     zone = ZoneInfo(tz or get_settings().default_timezone)
     today = now.astimezone(zone).date()
     for m in history:
@@ -114,7 +130,7 @@ def system_prompt(
     connections: dict[str, str] | None = None,
     known_name: str | None = None,
     ask_name: bool = True,
-    prior_turns: int = 0,
+    prior_turns: int | None = None,
 ) -> str:
     local = local_time(user, now)
     name = user.name or known_name
@@ -128,20 +144,23 @@ def system_prompt(
         )
     else:
         name_line = "You don't know their name yet, but you already asked today. Do not ask again."
-    convo_line = (
-        f"You and {who} are mid-conversation ({prior_turns} earlier messages). Do not introduce yourself "
-        "or greet from scratch again. A short nudge like \"hello?\" just means they want your attention, "
-        "so answer it briefly and pick up the thread."
-        if prior_turns > 0
-        else "This is the start of your conversation, so a brief hello is fine."
-    )
+    if prior_turns is None:
+        convo_block = ""  # proactive callers: no claim about whether this is a first contact
+    elif prior_turns > 0:
+        convo_block = (
+            f"\n- You and {who} are mid-conversation ({prior_turns} recent messages). Do not introduce "
+            "yourself or greet from scratch again. A short nudge like \"hello?\" just means they want "
+            "your attention, so answer it briefly and pick up the thread."
+        )
+    else:
+        convo_block = "\n- This is a fresh conversation (nothing recent), so a brief hello is fine."
     prompt = PERSONA.format(
         agent=get_settings().agent_name,
         who=who,
         local_time=local.strftime("%A %d %B %Y, %H:%M"),
         tz=local.tzinfo,
         name_line=name_line,
-        convo_line=convo_line,
+        convo_block=convo_block,
         connection_lines=connection_lines(connections),
     )
     return f"{prompt}\n\n{context.strip()}" if context.strip() else prompt

@@ -6,6 +6,7 @@ Replaced by agents/conversation.py in Phase 4 (registered with replace=True).
 from __future__ import annotations
 
 import asyncio
+import time
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -93,19 +94,29 @@ def _clarified_request(history: list[Message]) -> str | None:
 
 
 CONNECTION_TIMEOUT_S = 1.5
+CONNECTION_RETRY_AFTER_S = 60.0
+_STATE_NAMES = {"ACTIVE": "connected", "INITIATED": "pending", "FAILED": "needs reconnecting"}
+_failed_until: dict[int, float] = {}  # user_id -> monotonic time before which we do not ask again
 
 
 async def connection_states(user_id: int) -> dict[str, str]:
-    """Per-capability "connected" / "not connected" for the persona. Best effort: {} means unknown."""
+    """Per-capability link state for the persona. Best effort: {} means unknown.
+
+    A failure or timeout is remembered for CONNECTION_RETRY_AFTER_S so a slow or down provider is not
+    hit (and waited on) every turn.
+    """
+    if time.monotonic() < _failed_until.get(user_id, 0.0):
+        return {}
     try:
         from mavis.tools.integrations import get_connection_cache, get_provider
 
         if not getattr(get_provider(), "configured", True):
             return {}  # no provider credentials: we cannot know, so the persona says unknown
         states = await asyncio.wait_for(get_connection_cache().status(user_id), CONNECTION_TIMEOUT_S)
-        return {slug: "connected" if str(getattr(st, "value", st)) == "ACTIVE" else "not connected"
+        return {slug: _STATE_NAMES.get(str(getattr(st, "value", st)), "not connected")
                 for slug, st in states.items()}
     except Exception:  # noqa: BLE001 - the prompt must never depend on integrations being up
+        _failed_until[user_id] = time.monotonic() + CONNECTION_RETRY_AFTER_S
         log.debug("simple_turn.connection_state_failed", exc_info=True)
         return {}
 
@@ -170,7 +181,10 @@ async def run_turn(event: Event) -> None:
 
     hint = ""
     if event.payload.get("command") == "start":
-        hint = RESTART_HINT if any(m.role == Role.ASSISTANT.value for m in history) else START_HINT
+        recent_assistant = any(
+            m.role == Role.ASSISTANT.value for m in persona.recent_messages(history, utcnow())
+        )
+        hint = RESTART_HINT if recent_assistant else START_HINT
     previous_reply = previous
     async with presence.typing(user.telegram_chat_id):  # refreshed until the reply is queued
         context, connections, card_name = await asyncio.gather(
@@ -178,10 +192,11 @@ async def run_turn(event: Event) -> None:
         )
         now = utcnow()
         known_name = user.name or card_name
+        recent = persona.recent_messages(history, now)
         prompt: list[BaseMessage] = [SystemMessage(persona.system_prompt(
             user, now, context=context, connections=connections, known_name=known_name,
             ask_name=persona.should_ask_name(known_name, history, now, user.timezone),
-            prior_turns=len(history) - 1,  # the current message is already in history
+            prior_turns=max(len(recent) - 1, 0),  # the current message is already in history
         ))]
         prompt += _to_langchain(history)
 

@@ -32,6 +32,8 @@ FALLBACK_TEXT = "Give me a sec, my brain is a bit slow right now. Try me again i
 
 CHAT_EVENT_TYPES = frozenset({EventType.USER_MESSAGE, EventType.BUTTON_PRESSED})
 
+_ack_tasks: set[asyncio.Task] = set()  # strong refs so fire-and-forget acks are not GC'd
+
 _event_handlers: dict[EventType, list[EventFn]] = defaultdict(list)
 _job_handlers: dict[JobKind, JobFn] = {}
 
@@ -92,7 +94,12 @@ async def handle_event(event: Event) -> None:
         log.debug("worker.no_handler", event_type=event.type)
         return
     with structlog.contextvars.bound_contextvars(event_id=event.id, user_id=event.user_id):
-        await _acknowledge(event)
+        # Ack off the critical path: create_task does not run until we suspend, and _event_lock joins
+        # the per-user FIFO before it suspends, so arrival order is kept and the reaction still goes
+        # out right away, even while a previous turn holds the lock.
+        ack = asyncio.create_task(_acknowledge(event))
+        _ack_tasks.add(ack)
+        ack.add_done_callback(_ack_tasks.discard)
         # The user lock is held across the inline retries (and their sleeps) so this user's next
         # event cannot overtake a retrying one. Other users run on the other consumer loops.
         async with _event_lock(event):
