@@ -8,6 +8,7 @@ from typing import Any
 import structlog
 
 from mavis.bus.base import EventBus
+from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision, NotifyIntent
 from mavis.domain.events import Event, Trust
@@ -16,7 +17,7 @@ from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.composer import Composer
 from mavis.initiative.quiet import QuietTracker
 from mavis.loops.service import LoopService
-from mavis.policy.pings import PingPolicy
+from mavis.policy.pings import PingPolicy, in_quiet_hours
 from mavis.store.db import Session
 from mavis.store.repo import messages, outbox
 from mavis.timers.service import WakeupService
@@ -25,6 +26,7 @@ log = structlog.get_logger()
 
 MAX_UNTRUSTED_URGENCY = 4  # only a trusted origin may bypass quiet hours (urgency 5)
 DELAY_NOTE_AFTER = timedelta(minutes=30)
+RELEASE_DELAY = timedelta(seconds=20)  # let the user's reply go out first
 
 
 class InitiativeExecutor:
@@ -69,6 +71,26 @@ class InitiativeExecutor:
                               origin=origin)
         elif decision.ignore_reason:
             log.info("initiative.ignored", event_id=event.id, reason=decision.ignore_reason)
+
+    async def release_deferred(self, user) -> int:
+        """The user wrote during quiet hours, so they are awake: make their deferred pings due shortly.
+
+        Each one still goes through the handler's origin check and notify(), so budget, dedupe and
+        send-time revalidation apply. Outside quiet hours, deferrals are budget-driven and stay put.
+        """
+        now = timeutil.now()
+        s = get_settings()
+        local = timeutil.to_local(now, user.timezone)
+        if not in_quiet_hours(local.hour, s.quiet_start, s.quiet_end) or s.quiet_awake_window_min <= 0:
+            return 0
+        due = now + RELEASE_DELAY
+        moved = 0
+        for w in await self._wakeups.pending(user.id, WakeupKind.DEFERRED):
+            if w.due_at > due and await self._wakeups.reschedule(w.id, due):
+                moved += 1
+        if moved:
+            log.info("initiative.deferred_released", user=user.id, count=moved)
+        return moved
 
     async def _owns_existing_loop(self, user_id: int, loop_id: int | None) -> bool:
         if loop_id is None:

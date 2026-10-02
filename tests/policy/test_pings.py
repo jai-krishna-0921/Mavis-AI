@@ -173,3 +173,51 @@ async def test_naive_message_timestamps_from_sqlite_still_count(user):
 @pytest.mark.parametrize("urgency", [1, 3, 4])
 async def test_non_urgent_levels_are_deferred_in_quiet_hours(user, urgency):
     assert not (await PingPolicy().check(user, urgency, None, LATE_NIGHT)).allow
+
+
+async def test_recent_user_message_lifts_quiet_hours(user, clock):
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    clock.set(LATE_NIGHT - timedelta(minutes=10))
+    await messages.log(user.id, Role.USER, "hi")
+    clock.set(LATE_NIGHT)
+    assert (await PingPolicy().check(user, 3, None, LATE_NIGHT)).allow
+
+
+async def test_old_user_message_does_not_lift_quiet_hours(user, clock):
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    clock.set(LATE_NIGHT - timedelta(minutes=61))
+    await messages.log(user.id, Role.USER, "hi")
+    clock.set(LATE_NIGHT)
+    verdict = await PingPolicy().check(user, 3, None, LATE_NIGHT)
+    assert not verdict.allow and verdict.reason == "quiet hours"
+
+
+async def test_awake_window_is_a_setting(user, clock, monkeypatch):
+    from mavis.config import get_settings
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    monkeypatch.setenv("QUIET_AWAKE_WINDOW_MIN", "5")
+    get_settings.cache_clear()
+    clock.set(LATE_NIGHT - timedelta(minutes=10))
+    await messages.log(user.id, Role.USER, "hi")
+    clock.set(LATE_NIGHT)
+    assert not (await PingPolicy().check(user, 3, None, LATE_NIGHT)).allow
+
+
+async def test_awake_still_respects_budget_and_dedupe(user, clock):
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    clock.set(LATE_NIGHT - timedelta(minutes=1))
+    await messages.log(user.id, Role.USER, "hi")
+    clock.set(LATE_NIGHT)
+    policy = PingPolicy()
+    await policy.record(user, "k", 3, LATE_NIGHT)
+    assert (await policy.check(user, 3, "k", LATE_NIGHT)).reason == "duplicate"
+    await _add_proactive(user.id, *[LATE_NIGHT - timedelta(minutes=i + 2) for i in range(6)])
+    assert (await policy.check(user, 3, None, LATE_NIGHT)).reason == "daily budget reached"
