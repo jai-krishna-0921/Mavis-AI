@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+from telegram.error import NetworkError
+
 from zento.channels.telegram_poller import run_polling
 
 _real_sleep = asyncio.sleep
@@ -73,3 +75,35 @@ async def test_failed_ingest_is_retried_not_lost(db, bus, monkeypatch) -> None:
     assert bus._events.qsize() == 1
     event, _ = bus._events.get_nowait()
     assert event.id == "tg:update:50"
+
+
+async def test_startup_retries_on_transient_network_errors(db, bus, monkeypatch) -> None:
+    from zento.channels import telegram_poller
+
+    monkeypatch.setattr(telegram_poller.asyncio, "sleep", _fast_sleep)
+
+    class FlakeInitBot(PollingBot):
+        def __init__(self, batches):
+            super().__init__(batches)
+            self.init_calls = 0
+
+        async def initialize(self):
+            self.init_calls += 1
+            if self.init_calls <= 2:
+                raise NetworkError("transient network error")
+
+    upd = {"update_id": 30, "message": {"message_id": 1, "date": 1790930000,
+                                        "chat": {"id": 7, "type": "private"},
+                                        "from": {"id": 7}, "text": "hi"}}
+    bot = FlakeInitBot([[upd]])
+    task = asyncio.create_task(run_polling(bus, "token", bot=bot))
+    for _ in range(200):
+        if len(bot.offsets) >= 2:
+            break
+        await _real_sleep(0.01)
+    task.cancel()
+    assert bot.init_calls == 3
+    assert bot.webhook_deleted
+    assert bot.offsets[:2] == [None, 31]
+    event, _ = bus._events.get_nowait()
+    assert event.id == "tg:update:30"
