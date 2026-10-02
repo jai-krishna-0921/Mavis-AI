@@ -155,14 +155,17 @@ class ConnectFlow:
 
     async def check(self, pending_id: int) -> None:
         p = await connections.get_pending(pending_id)
-        if p is None or p.status != PendingStatus.PENDING.value:
+        if p is None or p.status not in (PendingStatus.PENDING.value, PendingStatus.DECLINED.value):
             return
+        declined = p.status == PendingStatus.DECLINED.value
         capability = Capability(p.capability)
-        if self.clock() - _aware(p.created_at) > PENDING_TTL:
+        if not declined and self.clock() - _aware(p.created_at) > PENDING_TTL:
             await connections.resolve(pending_id, PendingStatus.EXPIRED, now=self.clock())
             return
         state = (await self.cache.status(p.user_id, fresh=True)).get(capability.value, ConnectionState.NONE)
-        if state not in (ConnectionState.ACTIVE, ConnectionState.FAILED):
+        # After "Not now" the user may still have finished the sign-in, so ACTIVE still counts.
+        accepted = (ConnectionState.ACTIVE,) if declined else (ConnectionState.ACTIVE, ConnectionState.FAILED)
+        if state not in accepted:
             return
         await self.bus.publish(Event(
             id=f"conn:{p.user_id}:{capability.value}:{state.value.lower()}:{pending_id}",
@@ -191,8 +194,9 @@ class ConnectFlow:
                 await connections.resolve(p.id, PendingStatus.FAILED, now=self.clock())
                 if p.task_id:
                     await self._resume(p.task_id, user_id, False, f"failed:{p.id}")
-            await self.send(user_id, f"Hmm, the {name} connection didn't go through. Want a fresh link?",
-                            [[Button(label="Try again", data=f"{RETRY_PREFIX}{capability.value}")]])
+            if waiting:
+                await self.send(user_id, f"Hmm, the {name} connection didn't go through. Want a fresh link?",
+                                [[Button(label="Try again", data=f"{RETRY_PREFIX}{capability.value}")]])
             return
         if state is not ConnectionState.ACTIVE:
             return
@@ -205,7 +209,8 @@ class ConnectFlow:
                 resumed = True
 
         synced = dict((await self.state.get(user_id)).get("synced", {}))
-        if not synced.get(capability.value):
+        first_time = not synced.get(capability.value)
+        if first_time:
             await self.bus.enqueue(Job(id=f"first_sync:{user_id}:{capability.value}", user_id=user_id,
                                        kind=JobKind.FIRST_SYNC, payload={"capability": capability.value}))
             synced[capability.value] = self.clock().isoformat()
@@ -213,7 +218,8 @@ class ConnectFlow:
 
         if self.on_active is not None:
             await self.on_active(user_id, capability)
-        if not resumed:
+        # One announcement per activation: later duplicate events (other pendings) stay quiet.
+        if not resumed and (waiting or first_time):
             await self.send(user_id, f"Connected ✓ I can see your {name} now. "
                                      "Give me a minute to get familiar with it.")
 
@@ -268,7 +274,11 @@ class ConnectFlow:
         try:
             await self.provider.disconnect(UserRef(user_id=user_id), capability.value)
         except IntegrationError as exc:
-            await self.send(user_id, f"Couldn't disconnect {name}: {exc}")
+            log.warning("connect.disconnect_failed", capability=capability.value, error=str(exc))
+            await self.send(user_id, f"I couldn't disconnect {name} just now. Mind trying again in a bit?")
             return
         self.cache.invalidate(user_id)
+        synced = dict((await self.state.get(user_id)).get("synced", {}))
+        if synced.pop(capability.value, None) is not None:
+            await self.state.update(user_id, {"synced": synced})
         await self.send(user_id, f"Disconnected {name}. I can't see it anymore.")

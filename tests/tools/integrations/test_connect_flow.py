@@ -147,3 +147,60 @@ async def test_user_facing_copy_has_no_dashes(db, provider, cache, fake_bus, rec
     texts += [b.label for m in rec.sent for row in m.buttons for b in row]
     assert texts
     assert not any("\u2014" in t or "\u2013" in t for t in texts)
+
+
+async def test_disconnect_failure_hides_exception_text(db, provider, cache, fake_bus, rec, state):
+    from mavis.domain.errors import IntegrationError
+
+    async def boom(user, toolkit):
+        raise IntegrationError("Composio 500 key=sk_secret")
+
+    provider.disconnect = boom
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    await flow.disconnect(1, Capability.GMAIL)
+    assert "sk_secret" not in rec.sent[-1].text and "Composio" not in rec.sent[-1].text
+    assert "—" not in rec.sent[-1].text and "–" not in rec.sent[-1].text
+
+
+async def test_connection_after_not_now_still_activates(db, provider, cache, fake_bus, rec, state):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    pid = await flow.start(1, Capability.GMAIL, "")
+    await flow.decline(1, pid)
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    activated = []
+
+    async def on_active(user_id, cap):
+        activated.append(cap)
+
+    flow.on_active = on_active
+    await flow.check(pid)
+    [ev] = fake_bus.events
+    await flow.on_connection_changed(ev)
+    assert [j.kind for j in fake_bus.jobs] == [JobKind.FIRST_SYNC]
+    assert activated == [Capability.GMAIL] and "Connected" in rec.sent[-1].text
+
+
+async def test_disconnect_clears_synced(db, provider, cache, fake_bus, rec, state):
+    await state.update(1, {"synced": {"gmail": "x", "slack": "y"}})
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    await flow.disconnect(1, Capability.GMAIL)
+    assert (await state.get(1))["synced"] == {"slack": "y"}
+
+
+async def test_one_connected_message_for_multiple_pendings(db, provider, cache, fake_bus, rec, state):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    await connections.create_pending(1, Capability.GMAIL, "", None, now=NOW)
+    await connections.create_pending(1, Capability.GMAIL, "", None, now=NOW)
+    ev = Event(id="m1", user_id=1, type=EventType.CONNECTION_CHANGED, occurred_at=NOW, source="integrations",
+               payload={"capability": "gmail", "state": "ACTIVE"})
+    await flow.on_connection_changed(ev)
+    await flow.on_connection_changed(ev.model_copy(update={"id": "m2"}))
+    assert len([m for m in rec.sent if "Connected" in m.text]) == 1
+
+
+async def test_failed_event_without_waiting_pending_is_silent(db, provider, cache, fake_bus, rec, state):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    ev = Event(id="s1", user_id=1, type=EventType.CONNECTION_CHANGED, occurred_at=NOW, source="integrations",
+               payload={"capability": "slack", "state": "FAILED"})
+    await flow.on_connection_changed(ev)
+    assert rec.sent == []
