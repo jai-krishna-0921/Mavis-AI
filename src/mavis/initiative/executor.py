@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+from typing import Any
+
 import structlog
 
 from mavis.bus.base import EventBus
@@ -20,6 +23,9 @@ from mavis.timers.service import WakeupService
 
 log = structlog.get_logger()
 
+MAX_UNTRUSTED_URGENCY = 4  # only a trusted origin may bypass quiet hours (urgency 5)
+DELAY_NOTE_AFTER = timedelta(minutes=30)
+
 
 class InitiativeExecutor:
     def __init__(self, bus: EventBus, loops: LoopService, wakeups: WakeupService, policy: PingPolicy,
@@ -28,7 +34,7 @@ class InitiativeExecutor:
         self._policy, self._composer, self._quiet = policy, composer, quiet
 
     async def apply(self, user, decision: InitiativeDecision, event: Event, context: str = "",
-                    quiet_streak: int = 0) -> None:
+                    quiet_streak: int = 0, origin: dict[str, Any] | None = None) -> None:
         untrusted = event.trust is Trust.UNTRUSTED  # spec 8.3: third-party content may not create work
         for upsert in decision.track:
             if untrusted and not await self._owns_existing_loop(user.id, upsert.id):
@@ -59,7 +65,8 @@ class InitiativeExecutor:
             if intent.dedupe_key is None:  # retry-safe default: one notification per source event
                 intent = intent.model_copy(update={"dedupe_key": f"notify:{event.id}"})
             await self.notify(user, intent, context=context, quiet_streak=quiet_streak,
-                              untrusted=untrusted)
+                              untrusted=untrusted, original_due=timeutil.ensure_utc(event.occurred_at),
+                              origin=origin)
         elif decision.ignore_reason:
             log.info("initiative.ignored", event_id=event.id, reason=decision.ignore_reason)
 
@@ -70,7 +77,10 @@ class InitiativeExecutor:
         return loop is not None and loop.user_id == user_id
 
     async def notify(self, user, intent: NotifyIntent, context: str = "", quiet_streak: int = 0,
-                     untrusted: bool = False) -> bool:
+                     untrusted: bool = False, original_due: datetime | None = None,
+                     origin: dict[str, Any] | None = None) -> bool:
+        if untrusted and intent.urgency > MAX_UNTRUSTED_URGENCY:
+            intent = intent.model_copy(update={"urgency": MAX_UNTRUSTED_URGENCY})
         verdict = await self._policy.check(user, intent.urgency, intent.dedupe_key, timeutil.now())
         if not verdict.allow:
             log.info("initiative.notify_blocked", user=user.id, reason=verdict.reason,
@@ -78,13 +88,16 @@ class InitiativeExecutor:
             if verdict.defer_until is not None:
                 await self._wakeups.wake_me(
                     user.id, verdict.defer_until, f"deferred: {intent.intent[:80]}", kind=WakeupKind.DEFERRED,
-                    payload={"notify": intent.model_dump(mode="json"), "untrusted": untrusted}, scale=False,
+                    payload={"notify": intent.model_dump(mode="json"), "untrusted": untrusted,
+                             "original_due": (original_due or timeutil.now()).isoformat(), "origin": origin},
+                    scale=False,
                     dedupe_key=f"deferred:{intent.dedupe_key}" if intent.dedupe_key else None,
                 )
             return False
         if intent.dedupe_key and await self._recover_partial(user, intent):
             return False
-        message = await self._composer.compose(user, intent.intent, intent.urgency, context,
+        message = await self._composer.compose(user, intent.intent, intent.urgency,
+                                                _with_delay_note(context, original_due, user),
                                                 untrusted=untrusted)
         if not message.send:
             log.info("initiative.composer_dropped", user=user.id, intent=intent.intent[:80])
@@ -121,4 +134,20 @@ class InitiativeExecutor:
         await messages.log(user.id, Role.ASSISTANT, "\n".join(bubbles), proactive=True,
                            event_id=scoped("proactive:", 0))
         await self._policy.record(user, dedupe_key, urgency, now)
-        await self._quiet.after_assistant_message(user.id, bubbles[-1], streak=quiet_streak)
+        if quiet_streak > 0:  # only a USER_QUIET nudge continues its chain; other proactive never arm one
+            await self._quiet.after_assistant_message(user.id, bubbles[-1], streak=quiet_streak)
+
+
+def _with_delay_note(context: str, original_due: datetime | None, user) -> str:
+    """Tell the composer when this message is late, so it does not talk as if it were still on time."""
+    if original_due is None:
+        return context
+    now = timeutil.now()
+    delay = now - timeutil.ensure_utc(original_due)
+    if delay < DELAY_NOTE_AFTER:
+        return context
+    due_local = timeutil.to_local(original_due, user.timezone)
+    note = (f"Delay: this was meant to go out at {due_local:%A %H:%M} local time but is going out "
+            f"about {int(delay.total_seconds() // 3600)}h {int(delay.total_seconds() // 60) % 60}m late. "
+            "Do not say it is happening right now; acknowledge the timing naturally if it matters.")
+    return f"{context}\n{note}" if context else note

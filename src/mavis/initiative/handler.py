@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import structlog
 from sqlalchemy.exc import NoResultFound
 
+from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision, NotifyIntent
 from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Trust
@@ -26,6 +27,7 @@ from mavis.timers.service import WakeupService
 from mavis.worker.runner import register_event_handler
 
 log = structlog.get_logger()
+MAX_WAKEUP_LATENESS = timedelta(hours=2)
 HANDLED_TYPES = tuple(t for t in EventType if t not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED))
 
 
@@ -45,9 +47,22 @@ class InitiativeHandler:
             return
         kind = event.payload.get("kind")
 
+        if event.source == "timer" and _too_late(event):
+            log.warning("initiative.wakeup_too_late", event_id=event.id, kind=kind,
+                        due_at=event.occurred_at.isoformat())
+            if kind == WakeupKind.ROUTINE.value:
+                await self._routines.reschedule(user, event.payload.get("loop_id"))
+            return
         if event.type is EventType.WAKEUP and kind == WakeupKind.DEFERRED.value:
-            await self._executor.notify(user, NotifyIntent.model_validate(event.payload["notify"]),
-                                        untrusted=bool(event.payload.get("untrusted", False)))
+            origin = event.payload.get("origin")
+            if origin and not await self._origin_still_valid(user.id, origin):
+                log.info("initiative.deferred_stale", event_id=event.id, origin=origin)
+                return
+            original_due = event.payload.get("original_due")
+            await self._executor.notify(
+                user, NotifyIntent.model_validate(event.payload["notify"]),
+                untrusted=bool(event.payload.get("untrusted", False)),
+                original_due=datetime.fromisoformat(original_due) if original_due else None, origin=origin)
             return
         if event.type is EventType.WAKEUP and kind == WakeupKind.ROUTINE.value:
             await self._routines.run(user, event.payload)
@@ -61,6 +76,11 @@ class InitiativeHandler:
             asked_at = datetime.fromisoformat(event.payload["asked_at"])
             if not await self._quiet.still_quiet(user.id, asked_at):
                 return
+
+        if event.type is EventType.EVENT_STARTING and not await self._origin_still_valid(
+                user.id, {"kind": "event_starting", "loop_id": event.payload.get("loop_id")}):
+            log.info("initiative.prep_dropped_started", event_id=event.id)
+            return
 
         open_loops = await self._loops.active(user.id)
         result = await self._filter.apply(event, open_loops)
@@ -83,10 +103,22 @@ class InitiativeHandler:
         if event.trust is Trust.UNTRUSTED:
             context = wrap_untrusted(result.summary, event.type.value)
         streak = int(event.payload.get("streak", 0)) + 1 if event.type is EventType.USER_QUIET else 0
-        await self._executor.apply(user, decision, event, context=context, quiet_streak=streak)
+        await self._executor.apply(user, decision, event, context=context, quiet_streak=streak,
+                                  origin=_origin_for(event))
 
         if event.type is EventType.EVENT_ENDED and event.payload.get("loop_id"):
             await self._loops.close(int(event.payload["loop_id"]), LoopStatus.DONE)
+
+    async def _origin_still_valid(self, user_id: int, origin: dict) -> bool:
+        """Send-time revalidation: has the reason for this message gone stale?"""
+        kind = origin.get("kind")
+        if kind == EventType.USER_QUIET.value and origin.get("asked_at"):
+            return await self._quiet.still_quiet(user_id, datetime.fromisoformat(origin["asked_at"]))
+        if kind == EventType.EVENT_STARTING.value and origin.get("loop_id"):
+            loop = await self._loops.get(int(origin["loop_id"]))
+            if loop is not None and loop.due_at is not None:
+                return timeutil.ensure_utc(loop.due_at) > timeutil.now()
+        return True
 
     async def _on_loop_updated(self, loop: Loop) -> None:
         if loop.status is not LoopStatus.OPEN:
@@ -97,6 +129,18 @@ class InitiativeHandler:
             derived = [WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED]
             await self._wakeups.cancel_where(loop.user_id, derived, loop_id=loop.id)
             await schedule_default_signals(self._wakeups, loop)
+
+
+def _too_late(event: Event) -> bool:
+    return timeutil.now() - timeutil.ensure_utc(event.occurred_at) > MAX_WAKEUP_LATENESS
+
+
+def _origin_for(event: Event) -> dict | None:
+    if event.type is EventType.USER_QUIET:
+        return {"kind": event.type.value, "asked_at": event.payload.get("asked_at")}
+    if event.type is EventType.EVENT_STARTING:
+        return {"kind": event.type.value, "loop_id": event.payload.get("loop_id")}
+    return None
 
 
 def _with_default_dedupe(decision: InitiativeDecision, event: Event) -> InitiativeDecision:

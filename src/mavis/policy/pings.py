@@ -47,9 +47,8 @@ class PingPolicy:
         local = timeutil.to_local(now, user.timezone)
         if dedupe_key and await self._seen(user.id, _day_key(dedupe_key, local)):
             return PolicyVerdict(allow=False, reason="duplicate")
-        if urgency >= URGENT:
-            return PolicyVerdict(allow=True, reason="urgent")
-        if in_quiet_hours(local.hour, s.quiet_start, s.quiet_end):
+        urgent = urgency >= URGENT  # urgent bypasses quiet hours only, never the daily budget (spec 8.4)
+        if not urgent and in_quiet_hours(local.hour, s.quiet_start, s.quiet_end):
             defer = next_quiet_end(local, s.quiet_end).astimezone(UTC)
             return PolicyVerdict(allow=False, defer_until=defer, reason="quiet hours")
         if await self.count_today(user, now) >= s.ping_daily_budget:

@@ -130,8 +130,8 @@ async def test_interview_prep_pep_talk_then_follow_up(user, world, clock, bus, f
     assert all(lp.id != loop_id for lp in await init.loops.active(user.id))
     closed = await init.loops.get(loop_id)
     assert closed is not None and closed.status is LoopStatus.DONE
-    # The follow-up ended with a question, so Mavis will notice if Jai goes quiet.
-    assert len(await init.wakeups.pending(user.id, WakeupKind.USER_QUIET)) == 1
+    # F3: proactive messages never arm a went-quiet nudge, even when they end with a question.
+    assert len(await init.wakeups.pending(user.id, WakeupKind.USER_QUIET)) == 0
     assert not any(DASHES.search(t) for t in channel.texts)
     assert await deliver_pending(channel) == 0  # nothing left to send
 

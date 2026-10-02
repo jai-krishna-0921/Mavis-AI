@@ -137,7 +137,7 @@ async def test_deferred_wakeup_passes_untrusted_flag(user, clock, recording_bus,
     init = build(recording_bus, fake_memory)
     seen = {}
 
-    async def spy(user_, intent, context="", quiet_streak=0, untrusted=False):
+    async def spy(user_, intent, context="", quiet_streak=0, untrusted=False, **kw):
         seen["untrusted"] = untrusted
         return True
 

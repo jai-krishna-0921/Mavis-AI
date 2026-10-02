@@ -200,5 +200,6 @@ async def test_same_event_twice_with_different_bubble_count_sends_once(
 
 async def test_deliver_question_schedules_user_quiet(user, clock, recording_bus, fake_memory):
     executor, _, wakeups = build(recording_bus, fake_memory)
-    await executor.deliver(user, ["Noted.", "Want me to follow up?"], dedupe_key="q:1")
+    # a went-quiet nudge (streak 1) that itself ends with a question continues the chain
+    await executor.deliver(user, ["Noted.", "Want me to follow up?"], dedupe_key="q:1", quiet_streak=1)
     assert len(await wakeups.pending(user.id, WakeupKind.USER_QUIET)) == 1
