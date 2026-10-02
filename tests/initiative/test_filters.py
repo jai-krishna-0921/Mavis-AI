@@ -167,3 +167,21 @@ async def test_embedding_failure_gives_zero_relevance():
     loop = Loop(id=9, user_id=1, kind=LoopKind.COMMITMENT, title="Acme")
     r = await EventFilter(embed=boom).apply(email(subject="Acme"), [loop])
     assert not r.drop and r.relevance == 0.0
+
+
+async def test_other_security_phrases_survive_promo_signals():
+    async def zero(texts):
+        return [[1.0, 0.0] for _ in texts]
+
+    r = await EventFilter(embed=zero).apply(
+        email(subject="Your bank", snippet="Your password was changed", headers={"List-Unsubscribe": "<x>"}),
+        [],
+    )
+    assert not r.drop and r.relevance >= 0.9
+
+
+def test_cancelled_calendar_event_is_marked_in_the_summary():
+    ev = Event(id="gcal:1:e:v", user_id=1, type=EventType.CALENDAR_CHANGED, occurred_at=T, source="x",
+               payload={"title": "Sync", "starts_at": "2026-10-05T10:00:00Z", "status": "cancelled"},
+               trust=Trust.UNTRUSTED)
+    assert "(cancelled)" in summarize_event(ev)
