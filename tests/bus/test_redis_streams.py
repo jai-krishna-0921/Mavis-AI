@@ -205,3 +205,62 @@ def test_claim_idle_ms_comes_from_settings(settings, monkeypatch) -> None:
         assert get_bus()._claim_idle_ms == 1234
     finally:
         set_bus(None)
+
+
+def test_make_redis_socket_timeout_exceeds_block() -> None:
+    from mavis.bus import BLOCK_MS, _make_redis
+
+    client = _make_redis("redis://localhost:6380/15")
+    kw = client.connection_pool.connection_kwargs
+    assert kw["socket_timeout"] > BLOCK_MS / 1000
+    assert kw["socket_connect_timeout"] == 5
+    assert kw["health_check_interval"] == 30
+    assert kw["decode_responses"] is True
+
+
+async def test_consume_survives_transient_timeout(monkeypatch) -> None:
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+    from structlog.testing import capture_logs
+
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(d):
+        sleeps.append(d)
+        await real_sleep(0)
+
+    client = FakeAsyncRedis(decode_responses=True)
+    real_xreadgroup = client.xreadgroup
+    calls = 0
+
+    async def xreadgroup(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RedisTimeoutError("Timeout reading from localhost:6380")
+        if calls == 2:
+            return []
+        result = await real_xreadgroup(*args, **kwargs)
+        await real_sleep(0.005)
+        return result
+
+    client.xreadgroup = xreadgroup
+    bus = RedisStreamsBus(client, claim_idle_ms=60_000, block_ms=10)
+    monkeypatch.setattr("mavis.bus.redis_streams.asyncio.sleep", fast_sleep)
+    seen: list[str] = []
+
+    async def handler(event: Event) -> None:
+        seen.append(event.id)
+
+    with capture_logs() as logs:
+        task = asyncio.create_task(bus.consume_events("g", "c", handler))
+        await real_sleep(0.05)
+        await bus.publish(ev("late-1"))
+        await wait_until(lambda: seen == ["late-1"])
+        await bus.close()
+        task.cancel()
+    assert any(
+        rec["event"] == "bus.consume_transient_error" and rec["log_level"] == "warning" for rec in logs
+    )
+    assert not any(rec["event"] == "bus.consume_loop_error" for rec in logs)
+    assert 0.5 in sleeps

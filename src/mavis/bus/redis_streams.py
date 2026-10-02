@@ -8,9 +8,11 @@ from typing import Any
 
 import structlog
 from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import ResponseError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from mavis.bus.base import EventHandler, JobHandler, Stream
+from mavis.bus.base import BLOCK_MS, EventHandler, JobHandler, Stream
 from mavis.domain.events import Event, Job
 
 log = structlog.get_logger(__name__)
@@ -23,7 +25,7 @@ class RedisStreamsBus:
         client: Redis,
         *,
         claim_idle_ms: int = 60_000,
-        block_ms: int = 5_000,
+        block_ms: int = BLOCK_MS,
         dedupe_ttl_s: int = 7 * 24 * 3600,
         max_attempts: int = 5,
     ) -> None:
@@ -80,6 +82,7 @@ class RedisStreamsBus:
         self, stream: Stream, group: str, consumer: str, handle: Callable[[str, int], Awaitable[None]]
     ) -> None:
         await self._ensure_group(stream.value, group)
+        backoff = 0.0
         while not self._closed:
             try:
                 entries = await self._claim_stale(stream.value, group, consumer)
@@ -89,8 +92,16 @@ class RedisStreamsBus:
                     entries = [entry for _name, items in (resp or []) for entry in items]
                 for msg_id, fields in entries:
                     await self._process(stream.value, group, msg_id, fields, handle)
+                backoff = 0.0
             except asyncio.CancelledError:
                 raise
+            except (RedisTimeoutError, RedisConnectionError) as exc:
+                if self._closed:
+                    return
+                backoff = 0.5 if backoff == 0.0 else min(backoff * 2, 5.0)
+                log.warning("bus.consume_transient_error", stream=stream.value, error=str(exc),
+                            retry_in_s=backoff)
+                await asyncio.sleep(backoff)
             except Exception as exc:
                 if self._closed:
                     return
