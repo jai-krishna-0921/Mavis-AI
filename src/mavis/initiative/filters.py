@@ -22,7 +22,8 @@ EXTERNAL_TYPES = frozenset(
 )
 PROMO_LABELS = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS", "SPAM"})
 URGENT = re.compile(
-    r"security alert|new sign-?in|password (reset|changed)|suspicious|unusual activity|"
+    r"security alert|new sign-?in|sign-?in attempt|password (reset|changed|was changed)|suspicious|"
+    r"unusual activity|2-step verification|new device|"
     r"payment (failed|declined)|overdue|interview|offer letter",
     re.IGNORECASE,
 )
@@ -48,7 +49,8 @@ def summarize_event(event: Event) -> str:
         case EventType.SLACK_MESSAGE:
             text = f"Slack message from {p.get('from', '?')} in {p.get('channel', '?')}: {p.get('text', '')}"
         case EventType.CALENDAR_CHANGED:
-            text = f"Calendar event '{p.get('title', '')}' at {p.get('starts_at', '?')}"
+            cancelled = " (cancelled)" if str(p.get("status", "")).lower() == "cancelled" else ""
+            text = f"Calendar event '{p.get('title', '')}'{cancelled} at {p.get('starts_at', '?')}"
         case EventType.NOTION_CHANGED:
             text = f"Notion page changed: {p.get('title', '')}"
         case EventType.CONNECTION_CHANGED:

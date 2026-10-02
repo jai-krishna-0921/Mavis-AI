@@ -84,7 +84,7 @@ async def test_gmail_first_sync(provider, fake_bus):
     assert "\u2014" not in mem.calls[0][1] and "\u2013" not in mem.calls[0][1]
 
 
-async def test_calendar_first_sync_creates_commitments(provider, fake_bus):
+async def test_calendar_first_sync_creates_no_loops(provider, fake_bus):
     provider.results["calendar.list"] = ToolResult(
         ok=True,
         data={

@@ -21,11 +21,12 @@ router = APIRouter()
 THROTTLE_S = 10
 
 _PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Connected</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Thanks</title>
 <style>body{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;
 background:#0f1115;color:#e8e8e8}main{text-align:center;padding:24px}h1{font-size:22px}</style></head>
-<body><main><h1>Connected ✓</h1>
-<p>All set, you can close this tab and head back to Telegram.</p></main></body></html>"""
+<body><main><h1>Thanks ✓</h1>
+<p>You can close this tab and head back to Telegram.
+I'll confirm there once it's connected.</p></main></body></html>"""
 
 
 @router.get("/connect/callback", response_class=HTMLResponse)
