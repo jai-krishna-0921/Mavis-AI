@@ -30,6 +30,16 @@ TEST_ENV = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _no_inline_retries(request, monkeypatch) -> None:
+    """Existing bus tests count handler calls; inline retries (2s/5s/10s) are tested explicitly."""
+    if request.node.get_closest_marker("inline_retries"):
+        return
+    from mavis.bus import base
+
+    monkeypatch.setattr(base, "INLINE_RETRY_DELAYS_S", ())
+
+
 @pytest.fixture
 def settings(tmp_path, monkeypatch) -> Iterator:
     """Isolated Settings: temp data dir, temp SQLite, no external services, no developer .env."""
