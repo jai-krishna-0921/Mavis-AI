@@ -13,7 +13,7 @@ import httpx
 from mavis.config import get_settings
 
 WEBHOOK_PATH = "/telegram/webhook"
-ALLOWED_UPDATES = ["message", "callback_query"]
+ALLOWED_UPDATES = ["message", "edited_message", "callback_query"]  # same as the poller
 
 
 async def _call(method: str, payload: dict[str, Any] | None = None) -> Any:

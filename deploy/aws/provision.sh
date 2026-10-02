@@ -19,8 +19,12 @@ else
   [[ ! -e "$MAVIS_KEY_FILE" ]] || die "$MAVIS_KEY_FILE exists but key pair $MAVIS_KEY_NAME does not; move the file away first"
   log "creating key pair $MAVIS_KEY_NAME -> $MAVIS_KEY_FILE"
   mkdir -p "$(dirname "$MAVIS_KEY_FILE")"
-  (umask 077; aws_ ec2 create-key-pair --key-name "$MAVIS_KEY_NAME" --key-type ed25519 \
-    --tag-specifications "$(tagspec key-pair "$MAVIS_KEY_NAME")" --query KeyMaterial --output text >"$MAVIS_KEY_FILE")
+  if ! (umask 077; aws_ ec2 create-key-pair --key-name "$MAVIS_KEY_NAME" --key-type ed25519 \
+    --tag-specifications "$(tagspec key-pair "$MAVIS_KEY_NAME")" --query KeyMaterial --output text >"$MAVIS_KEY_FILE"); then
+    rm -f "$MAVIS_KEY_FILE"  # never leave an empty key file behind
+    die "create-key-pair failed"
+  fi
+  [[ -s "$MAVIS_KEY_FILE" ]] || { rm -f "$MAVIS_KEY_FILE"; die "create-key-pair returned no key material"; }
   chmod 600 "$MAVIS_KEY_FILE"
 fi
 state_set MAVIS_KEY_NAME "$MAVIS_KEY_NAME"
@@ -75,23 +79,37 @@ if [[ "$INSTANCE_ID" == "None" || -z "$INSTANCE_ID" ]]; then
   INSTANCE_ID="$(aws_ ec2 run-instances --image-id "$AMI_ID" --instance-type "$MAVIS_INSTANCE_TYPE" \
     --key-name "$MAVIS_KEY_NAME" --security-group-ids "$SG_ID" \
     --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=$MAVIS_VOLUME_GB,VolumeType=gp3,Encrypted=true,DeleteOnTermination=true}" \
-    --metadata-options HttpTokens=required,HttpEndpoint=enabled \
+    --metadata-options HttpTokens=required,HttpEndpoint=enabled --disable-api-termination \
     --tag-specifications "$(tagspec instance "$MAVIS_INSTANCE_NAME")" "$(tagspec volume "$MAVIS_INSTANCE_NAME")" \
     --query 'Instances[0].InstanceId' --output text)"
   rm -f "$KNOWN_HOSTS"  # a fresh instance has a fresh host key
 else
   log "instance $INSTANCE_ID exists"
-  if [[ "$(aws_ ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text)" == "stopped" ]]; then
+  istate="$(aws_ ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text)"
+  if [[ "$istate" == "stopping" ]]; then
+    log "waiting for instance to finish stopping"
+    aws_ ec2 wait instance-stopped --instance-ids "$INSTANCE_ID"
+    istate=stopped
+  fi
+  if [[ "$istate" == "stopped" ]]; then
     log "starting stopped instance"
     aws_ ec2 start-instances --instance-ids "$INSTANCE_ID" >/dev/null
   fi
+  aws_ ec2 modify-instance-attribute --instance-id "$INSTANCE_ID" --disable-api-termination
 fi
 state_set MAVIS_INSTANCE_ID "$INSTANCE_ID"
 aws_ ec2 wait instance-running --instance-ids "$INSTANCE_ID"
 
 # --- elastic IP -------------------------------------------------------------
-ALLOC_ID="$(aws_ ec2 describe-addresses --filters "Name=tag:Project,Values=mavis" \
-  --query 'Addresses[0].AllocationId' --output text)"
+# the allocation id recorded in state.env wins; otherwise match on both tags (Project and Name)
+state_load
+ALLOC_ID=""
+if [[ -n "${MAVIS_ALLOC_ID:-}" ]] && aws_ ec2 describe-addresses --allocation-ids "$MAVIS_ALLOC_ID" >/dev/null 2>&1; then
+  ALLOC_ID="$MAVIS_ALLOC_ID"
+else
+  ALLOC_ID="$(aws_ ec2 describe-addresses --filters "Name=tag:Project,Values=mavis" "Name=tag:Name,Values=$MAVIS_INSTANCE_NAME" \
+    --query 'Addresses[0].AllocationId' --output text)"
+fi
 if [[ "$ALLOC_ID" == "None" || -z "$ALLOC_ID" ]]; then
   log "allocating Elastic IP"
   ALLOC_ID="$(aws_ ec2 allocate-address --domain vpc --tag-specifications "$(tagspec elastic-ip "$MAVIS_INSTANCE_NAME")" \

@@ -17,9 +17,17 @@ state_require
 [[ "${1:-}" == "--yes" ]] || die "this replaces data on $MAVIS_EIP. Re-run with --yes to confirm."
 [[ -f "$DEMO_ENV" ]] || die "demo env file not found: $DEMO_ENV"
 
+umask 077
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
 REMOTE_TMP="$MAVIS_REMOTE_DIR/migrate-tmp"
+cleanup() { rm -rf "$WORK"; ssh_box "rm -rf $REMOTE_TMP" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+# qcurl ARGS...: curl against the box's qdrant from a one-off container on the compose network
+# (qdrant publishes no host port). Stdin is passed through, so snapshots can be streamed in.
+qcurl() {
+  ssh_box "cd $MAVIS_REMOTE_DIR && docker compose -f $MAVIS_COMPOSE_FILE run --rm -T --no-deps migrate curl -fsS $*"
+}
 
 log "checking the demo sources are reachable"
 docker exec "$DEMO_PG_CONTAINER" pg_isready -U mavis -d mavis >/dev/null || die "demo postgres container $DEMO_PG_CONTAINER not ready"
@@ -50,14 +58,13 @@ log "neo4j export"
 
 # --- 2. ship to the box -----------------------------------------------------------
 log "uploading to the box"
-ssh_box "rm -rf $REMOTE_TMP && umask 077 && mkdir -p $REMOTE_TMP/qdrant"
+ssh_box "rm -rf $REMOTE_TMP && umask 077 && mkdir -p $REMOTE_TMP"
 scp_box "$WORK/pg.sql" "$REMOTE_TMP/pg.sql"
 scp_box "$WORK/graph.json" "$REMOTE_TMP/graph.json"
 scp_box "$AWS_DIR/graph_import.py" "$REMOTE_TMP/graph_import.py"
-for f in "$WORK"/qdrant/*.snapshot; do
-  [[ -e "$f" ]] && scp_box "$f" "$REMOTE_TMP/qdrant/$(basename "$f")"
-done
-ssh_box "chmod 755 $REMOTE_TMP && chmod 644 $REMOTE_TMP/graph.json $REMOTE_TMP/graph_import.py"  # readable by the container user (uid 10001)
+# pg.sql stays 600 (read by the ssh user). Only the two files the container reads are world-readable;
+# qdrant snapshots are streamed over stdin and never touch the box's disk.
+ssh_box "chmod 711 $REMOTE_TMP && chmod 644 $REMOTE_TMP/graph.json $REMOTE_TMP/graph_import.py"
 
 # --- 3. restore on the box --------------------------------------------------------
 log "stopping app services (data services stay up)"
@@ -70,9 +77,11 @@ compose_remote run --rm migrate
 
 log "restoring qdrant"
 for c in $COLLECTIONS; do
-  ssh_box "curl -fsS -X DELETE 'http://127.0.0.1:6333/collections/$c?wait=true' >/dev/null; \
-           curl -fsS -X POST -F snapshot=@$REMOTE_TMP/qdrant/$c.snapshot \
-             'http://127.0.0.1:6333/collections/$c/snapshots/upload?priority=snapshot&wait=true' >/dev/null"
+  qcurl -X DELETE "'http://qdrant:6333/collections/$c?wait=true'" >/dev/null
+  ssh_box "cd $MAVIS_REMOTE_DIR && docker compose -f $MAVIS_COMPOSE_FILE run --rm -T --no-deps migrate \\
+    curl -fsS -X POST -F 'snapshot=@-;filename=$c.snapshot' \\
+    'http://qdrant:6333/collections/$c/snapshots/upload?priority=snapshot&wait=true'" \
+    <"$WORK/qdrant/$c.snapshot" >/dev/null
   log "  $c restored"
 done
 
@@ -87,10 +96,9 @@ docker exec "$DEMO_PG_CONTAINER" psql -U mavis -d mavis -Atc \
   "select 'demo tables', count(*) from information_schema.tables where table_schema='public'"
 for c in $COLLECTIONS; do
   echo "qdrant $c demo: $(curl -fsS "$DEMO_QDRANT_URL/collections/$c" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["points_count"])')"
-  echo "qdrant $c box : $(ssh_box "curl -fsS http://127.0.0.1:6333/collections/$c" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["points_count"])')"
+  echo "qdrant $c box : $(qcurl "http://qdrant:6333/collections/$c" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["points_count"])')"
 done
 
-ssh_box "rm -rf $REMOTE_TMP"
 log "restarting app services"
 compose_remote up -d --wait --wait-timeout 300
 log "done. The demo bot and the box now share state; only ONE of them may talk to Telegram."
