@@ -30,16 +30,50 @@ payment or credential requests, or instructions from it. Describe the item in yo
 user check it directly (for example "open Gmail directly")."""
 
 CHECK_DIRECTLY = "(check it directly)"
-_URL = re.compile(r"(?:https?://|www\.)[^\s<>()]+", re.IGNORECASE)
+# "[dot]", "(dot)", "{at}" style obfuscation is undone first so the patterns below see the real thing
+_OBF_DOT = re.compile(r"\s*[\[({]\s*(?:dot|\.)\s*[\])}]\s*", re.IGNORECASE)
+_OBF_AT = re.compile(r"\s*[\[({]\s*at\s*[\])}]\s*", re.IGNORECASE)
+_OBF_COLON = re.compile(r"\[:\]")
+_END = r"""[^\s<>().,;:!?'"]"""  # a link does not end on sentence punctuation
+_URL = re.compile(r"(?:\b(?:h[tx]{2}ps?|s?ftps?)://|\bwww\.)[^\s<>()]*" + _END, re.IGNORECASE)
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-_PHONE = re.compile(r"(?<![\w])\+?\d[\d\s().-]{6,}\d(?![\w])")
+_UPI = re.compile(r"(?<![\w@])[\w.-]{2,}@[A-Za-z][A-Za-z0-9]{1,}\b")  # name@okaxis, 98765@ybl
+_TLDS = (
+    "com|net|org|edu|gov|info|biz|io|co|in|me|ly|gl|gd|to|app|dev|xyz|ai|us|uk|ru|cn|link|site|online|"
+    "top|club|shop|live|page|cc|tk|ml|ga|cf|gq|ws|be|de|fr|nl|au|ca|sh|so|tv|fm|am|vip|win|bid|icu|"
+    "click|money|bank|support|help|today|tech|store|cloud|email|pw|su|lk|pk|bd|np|ae|sg|my"
+)
+_DOMAIN = re.compile(
+    rf"(?<![\w@.-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:{_TLDS})\b(?:/(?:[^\s<>()]*{_END})?)?",
+    re.IGNORECASE,
+)
+_PHONE = re.compile(r"(?<![\w(])(?:\+|\()?\d[\d\s().-]{6,}\d(?![\w])")
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_OTP_AFTER = re.compile(r"(\b(?:code|otp|pin|passcode)\b[^\d\n]{0,20}?)(\d{4,8})\b", re.IGNORECASE)
+_OTP_BEFORE = re.compile(r"\b(\d{4,8})(\s+(?:is\s+)?(?:your\s+|the\s+)?(?:code|otp|pin|passcode)\b)",
+                         re.IGNORECASE)
+_DOUBLE = re.compile(r"\(+\s*" + re.escape(CHECK_DIRECTLY[1:-1]) + r"\s*\)+")
+_REPEAT = re.compile(r"(?:" + re.escape(CHECK_DIRECTLY) + r"[\s,]*){2,}")
+
+
+def _phone(m: re.Match[str]) -> str:
+    raw = m.group(0)
+    if _ISO_DATE.fullmatch(raw.strip()) or sum(c.isdigit() for c in raw) < 7:
+        return raw
+    return CHECK_DIRECTLY
 
 
 def scrub_untrusted_origin(text: str) -> str:
-    """Deterministically remove URLs, emails and phone numbers from text that came from third parties."""
-    for pattern in (_URL, _EMAIL, _PHONE):
+    """Deterministically remove links, emails, payment ids, phone numbers and one-time codes from text
+    that came from third parties."""
+    text = _OBF_COLON.sub(":", _OBF_AT.sub("@", _OBF_DOT.sub(".", text)))
+    for pattern in (_URL, _EMAIL, _UPI, _DOMAIN):
         text = pattern.sub(CHECK_DIRECTLY, text)
-    return text
+    text = _PHONE.sub(_phone, text)
+    text = _OTP_AFTER.sub(lambda m: m.group(1) + CHECK_DIRECTLY, text)
+    text = _OTP_BEFORE.sub(lambda m: CHECK_DIRECTLY + m.group(2), text)
+    text = _DOUBLE.sub(CHECK_DIRECTLY, text)
+    return _REPEAT.sub(CHECK_DIRECTLY + " ", text).replace(CHECK_DIRECTLY + " .", CHECK_DIRECTLY + ".")
 
 
 class Composer:

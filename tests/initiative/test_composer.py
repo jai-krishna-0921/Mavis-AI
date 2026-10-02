@@ -1,5 +1,7 @@
+import pytest
+
 from mavis.domain.decisions import ComposedMessage
-from mavis.initiative.composer import Composer
+from mavis.initiative.composer import CHECK_DIRECTLY, Composer, scrub_untrusted_origin
 
 
 async def test_composer_caps_bubbles_at_three(user, clock, fake_memory, fake_llm):
@@ -114,3 +116,36 @@ async def test_composer_without_history_or_name_never_asks_or_greets(
     await Composer(fake_memory).compose(SimpleNamespace(id=u.id, name=None, timezone="Asia/Kolkata"), "x", 3)
     assert "brief hello is fine" not in seen["system"] and "Ask once" not in seen["system"]
     assert "Do not ask again" in seen["system"]
+
+
+@pytest.mark.parametrize("raw, gone", [
+    ("visit evil.com now", "evil.com"),
+    ("go to bit.ly/abc123", "bit.ly"),
+    ("join t.me/scamgroup", "t.me"),
+    ("hxxp://bad.example/x", "bad.example"),
+    ("hxxps[:]//evil[.]com/login", "evil"),
+    ("ftp://files.example/x", "files.example"),
+    ("mail bob [at] evil [dot] com", "evil"),
+    ("pay to rahul@okaxis today", "okaxis"),
+    ("98765@ybl for the refund", "ybl"),
+    ("your code is 482913", "482913"),
+    ("482913 is your OTP", "482913"),
+    ("PIN: 1234", "1234"),
+])
+def test_scrub_covers_obfuscated_and_payment_details(raw, gone):
+    out = scrub_untrusted_origin(raw)
+    assert gone not in out and CHECK_DIRECTLY in out
+
+
+def test_scrub_phone_in_parentheses_has_no_artifact():
+    out = scrub_untrusted_origin("call (415) 555-0132 today")
+    assert out == f"call {CHECK_DIRECTLY} today"
+    assert "((" not in scrub_untrusted_origin("(415) 555-0132")
+
+
+@pytest.mark.parametrize("text", [
+    "meeting on 2026-10-03 at 10", "Interview at 10:30 with Jawahar", "e.g. this, i.e. that",
+    "room 1234", "Node.js and file.py", "the interview went well.",
+])
+def test_scrub_leaves_ordinary_text(text):
+    assert scrub_untrusted_origin(text) == text
