@@ -115,3 +115,25 @@ async def test_security_policy_keeps_higher_urgency():
 async def test_policy_leaves_ordinary_mail_alone():
     decision = InitiativeDecision(ignore_reason="not important")
     assert await EmailTriage(known).apply_policy(email(subject="lunch?"), decision) == decision
+
+
+async def test_spam_and_trash_security_lookalike_dropped_and_not_forced():
+    for label in ("SPAM", "TRASH"):
+        spoof = email(subject="Security alert", labelIds=[label])
+        assert await email_prefilter(spoof) == "spam/trash"
+        decision = InitiativeDecision(ignore_reason="spam")
+        assert await EmailTriage(known).apply_policy(spoof, decision) == decision
+
+
+async def test_known_sender_uses_address_not_display_name():
+    spoofed = email(sender="Jawahar <attacker@evil.example>", subject="hi")
+    assert "known_sender=no" in await EmailTriage(known).enrich(spoofed)
+    by_address = email(sender="Someone Else <jawahar@example.com>", subject="hi")
+    assert "known_sender=yes" in await EmailTriage(known).enrich(by_address)
+
+
+def test_classify_uses_word_boundaries():
+    assert classify({"subject": "Upgrade to premium", "snippet": "chemistry notes"}) == []
+    assert "bill" in classify({"subject": "Your emi is due", "snippet": ""})
+    assert "bill" in classify({"subject": "Invoices attached", "snippet": ""})
+    assert "travel" in classify({"subject": "Web check-in open", "snippet": ""})
