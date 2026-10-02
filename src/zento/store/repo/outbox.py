@@ -53,6 +53,17 @@ async def enqueue_now(msg: Outbound) -> int:
         return outbox_id
 
 
+async def texts_with_dedupe_prefix(prefix: str) -> list[str]:
+    """Texts of every outbox row whose dedupe_key starts with `prefix`, in enqueue order."""
+    async with Session() as s:
+        rows = await s.scalars(
+            select(OutboxMessage.text)
+            .where(OutboxMessage.dedupe_key.startswith(prefix, autoescape=True))
+            .order_by(OutboxMessage.id)
+        )
+        return list(rows)
+
+
 async def due(now: datetime, limit: int = 20) -> list[OutboxMessage]:
     async with Session() as s:
         rows = await s.scalars(
