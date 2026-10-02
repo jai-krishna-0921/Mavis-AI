@@ -121,3 +121,14 @@ async def test_too_long_bad_request_resplits() -> None:
     ids = await TelegramChannel("token", bot=bot).send_text(5, "word " * 60)
     assert len(ids) >= 3
     assert all(len(c[2]) <= 100 for c in bot.calls if c[0] == "message")
+
+
+async def test_react_calls_set_message_reaction() -> None:
+    bot = StubBot()
+
+    async def set_message_reaction(chat_id, message_id, reaction=None):
+        bot.calls.append(("reaction", chat_id, message_id, reaction))
+
+    bot.set_message_reaction = set_message_reaction
+    await TelegramChannel("token", bot=bot).react(5, 42, "\N{EYES}")
+    assert ("reaction", 5, 42, "\N{EYES}") in bot.calls
