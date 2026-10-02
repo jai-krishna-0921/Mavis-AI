@@ -7,6 +7,7 @@ from zento.agents.simple_turn import run_turn
 from zento.channels.outbox_sender import OutboxSender
 from zento.domain.errors import LLMError
 from zento.domain.events import Event, EventType, Trust
+from zento.domain.messages import Outbound, Role
 from zento.store.db import utcnow
 from zento.store.repo import messages, outbox, users
 
@@ -61,12 +62,27 @@ async def test_file_message_is_described(db, channel, fake_llm) -> None:
 async def test_run_turn_is_idempotent_on_retry(db, channel, fake_llm) -> None:
     user, _ = await users.get_or_create_by_chat(77, "Jai")
     fake_llm.push_text("First\n\nSecond")
-    fake_llm.push_text("Other\n\nWords")  # a retry gets a different completion
+    fake_llm.push_text("Other\n\nWords\n\nAnd more")  # a retry would get a different bubble count
     event = msg_event(user.id, "hi")
     await run_turn(event)
     await run_turn(event)
     assert [r.text for r in await outbox.due(utcnow())] == ["First", "Second"]
     assert [m.role for m in await messages.recent(user.id)] == ["user", "assistant"]
+    assert len(fake_llm.calls) == 1
+
+
+async def test_retry_after_enqueue_before_assistant_log_backfills_log(db, channel, fake_llm) -> None:
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    fake_llm.push_text("Never used")
+    event = msg_event(user.id, "hi")
+    await messages.log(user.id, Role.USER, "hi", event_id=event.id)
+    await outbox.enqueue_now(Outbound(user_id=user.id, text="First", dedupe_key=f"reply:{event.id}:0"))
+    await outbox.enqueue_now(Outbound(user_id=user.id, text="Second", dedupe_key=f"reply:{event.id}:1"))
+    await run_turn(event)  # crashed earlier before logging the assistant message
+    assert fake_llm.calls == []
+    assert [r.text for r in await outbox.due(utcnow())] == ["First", "Second"]
+    log = await messages.recent(user.id)
+    assert [(m.role, m.content) for m in log] == [("user", "hi"), ("assistant", "First\n\nSecond")]
 
 
 async def test_llm_error_propagates(db, channel, fake_llm) -> None:

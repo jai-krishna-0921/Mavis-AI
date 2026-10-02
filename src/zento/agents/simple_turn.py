@@ -43,6 +43,12 @@ async def run_turn(event: Event) -> None:
     text = user_text(event)
     await messages.log(user.id, Role.USER, text, event_id=event.id)
 
+    # Retry after the reply was enqueued: don't call the LLM again (it could split differently).
+    enqueued = await outbox.texts_with_dedupe_prefix(f"reply:{event.id}:")
+    if enqueued:
+        await messages.log(user.id, Role.ASSISTANT, "\n\n".join(enqueued), event_id=f"reply:{event.id}")
+        return
+
     if user.telegram_chat_id is not None:
         with contextlib.suppress(Exception):
             await get_channel().send_typing(user.telegram_chat_id)
