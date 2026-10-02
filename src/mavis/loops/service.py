@@ -50,7 +50,10 @@ class LoopService:
                 loop, changed = result
                 created = False
             elif (existing := await repo.find_open_duplicate(user_id, data)) is not None:
-                result = await repo.update(user_id, existing.id, data)
+                # merge: keep the established title so the loop stays recognisable
+                merged = data.model_copy(update={"title": existing.title,
+                                                 "importance": max(existing.importance, data.importance)})
+                result = await repo.update(user_id, existing.id, merged)
                 assert result is not None
                 loop, changed = result
                 created = False

@@ -201,3 +201,37 @@ async def test_upsert_cannot_touch_another_users_loop(user, recording_bus, clock
     loop = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.GOAL, title="g"))
     with pytest.raises(ValueError):
         await svc.upsert(user.id + 1, LoopUpsert(id=loop.id, kind=LoopKind.GOAL, title="hijack"))
+
+
+async def test_fuzzy_duplicate_from_one_utterance_is_merged(user, recording_bus, clock):
+    svc = LoopService(recording_bus)
+    a = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Dentist appointment",
+                                             due_at=DUE, importance=3))
+    b = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Dentist appointment at 4pm",
+                                             due_at=DUE + timedelta(minutes=30), importance=4))
+    c = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Appointment with the dentist "
+                                             "tomorrow", importance=2))
+    assert a.id == b.id == c.id
+    [loop] = await svc.active(user.id)
+    assert loop.title == "Dentist appointment" and loop.importance == 4
+    assert loop.due_at == DUE + timedelta(minutes=30)
+
+
+@pytest.mark.parametrize("title, due_shift, kind", [
+    ("Dentist appointment", timedelta(hours=3), LoopKind.COMMITMENT),  # far apart: a second visit
+    ("Call the dentist", timedelta(0), LoopKind.COMMITMENT),            # a different thing
+    ("Dentist appointment", timedelta(0), LoopKind.CONCERN),            # different kind
+])
+async def test_distinct_loops_are_not_merged(user, recording_bus, clock, title, due_shift, kind):
+    svc = LoopService(recording_bus)
+    await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Dentist appointment", due_at=DUE))
+    await svc.upsert(user.id, LoopUpsert(kind=kind, title=title, due_at=DUE + due_shift))
+    assert len(await svc.active(user.id)) == 2
+
+
+def test_similar_titles_ignores_times_dates_and_filler():
+    from mavis.store.repo.loops import similar_titles
+
+    assert similar_titles("Interview with Jawahar at Fractal", "Fractal interview, Jawahar, Monday 10am")
+    assert similar_titles("Send thank-you email to Jawahar", "send thank you email to jawahar")
+    assert not similar_titles("Interview with Jawahar", "Thank-you email to Jawahar")
