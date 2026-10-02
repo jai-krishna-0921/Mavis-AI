@@ -74,3 +74,16 @@ def channel():
     set_channel(ch)
     yield ch
     set_channel(None)
+
+
+@pytest.fixture
+async def bus(settings):
+    """An InProcessBus installed as the process bus."""
+    from zento.bus import set_bus
+    from zento.bus.inprocess import InProcessBus
+
+    b = InProcessBus()
+    set_bus(b)
+    yield b
+    await b.close()
+    set_bus(None)
