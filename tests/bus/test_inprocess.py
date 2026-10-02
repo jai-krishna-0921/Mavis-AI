@@ -94,10 +94,35 @@ async def test_inline_retries_recover_without_redelivery(monkeypatch) -> None:
         nonlocal calls
         calls += 1
         if calls < 3:
-            raise RuntimeError("flaky")
+            raise TimeoutError("flaky")
 
     await bus.publish(ev("e1"))
     task = asyncio.create_task(bus.consume_events("g", "c", handler))
     await bus.wait_idle()
     task.cancel()
     assert calls == 3 and slept == [2, 5] and bus.dead_events == []
+
+
+@pytest.mark.inline_retries
+async def test_non_transient_error_skips_inline_retries(monkeypatch) -> None:
+    from mavis.bus import base
+
+    slept: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        slept.append(s)
+
+    monkeypatch.setattr(base, "_sleep", fake_sleep)
+    bus = InProcessBus()
+    calls = 0
+
+    async def handler(e: Event) -> None:
+        nonlocal calls
+        calls += 1
+        raise ValueError("bug")
+
+    await bus.publish(ev("e1"))
+    task = asyncio.create_task(bus.consume_events("g", "c", handler))
+    await bus.wait_idle()
+    task.cancel()
+    assert slept == [] and calls == InProcessBus.MAX_ATTEMPTS  # normal bus retry path only

@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 
 import structlog
 
-from mavis.bus.base import EventBus
+from mavis.bus.base import SELF_RETRYING, EventBus, run_with_inline_retries
 from mavis.config import get_settings
 from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Job, JobKind, Trust
@@ -49,26 +49,34 @@ def clear_handlers() -> None:
     _job_handlers.clear()
 
 
+async def _run_handlers(event: Event, handlers: list[EventFn]) -> None:
+    for fn in handlers:
+        try:
+            await fn(event)
+        except LLMError:
+            if event.trust is Trust.USER:
+                # same dedupe_key on every attempt: the fallback is sent at most once per event
+                await outbox.enqueue_now(
+                    Outbound(user_id=event.user_id, text=FALLBACK_TEXT, dedupe_key=f"fallback:{event.id}")
+                )
+            raise
+
+
 async def handle_event(event: Event) -> None:
     handlers = list(_event_handlers.get(event.type, []))
     if not handlers:
         log.debug("worker.no_handler", event_type=event.type)
         return
     with structlog.contextvars.bound_contextvars(event_id=event.id, user_id=event.user_id):
+        # The user lock is held across the inline retries (and their sleeps) so this user's next
+        # event cannot overtake a retrying one. Other users run on the other consumer loops.
         async with user_lock(event.user_id):
-            for fn in handlers:
-                try:
-                    await fn(event)
-                except LLMError:
-                    if event.trust is Trust.USER:
-                        await outbox.enqueue_now(
-                            Outbound(
-                                user_id=event.user_id,
-                                text=FALLBACK_TEXT,
-                                dedupe_key=f"fallback:{event.id}",
-                            )
-                        )
-                    raise
+            await run_with_inline_retries(
+                lambda: _run_handlers(event, handlers), what="event", ref=event.id
+            )
+
+
+setattr(handle_event, SELF_RETRYING, True)
 
 
 async def handle_job(job: Job) -> None:
