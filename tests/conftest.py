@@ -107,6 +107,16 @@ def _reset_worker_registry():
     clear_handlers()
 
 
+@pytest.fixture(autouse=True)
+def _reset_initiative_wiring():
+    """The process Initiative binds a bus and memory; it must not leak between tests."""
+    from mavis.initiative import wiring
+
+    wiring.set_current(None)
+    yield
+    wiring.set_current(None)
+
+
 @pytest.fixture
 async def user(db):
     from mavis.store.repo import users

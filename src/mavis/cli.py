@@ -144,10 +144,10 @@ async def _chat() -> None:
 
     configure_logging(level="WARNING")
     await init_db()
+    bus = InProcessBus()
+    set_bus(bus)  # before the handlers: the initiative engine binds get_bus() when it is wired
     register_default_handlers()
     _start_memory_warmup()
-    bus = InProcessBus()
-    set_bus(bus)
     console = ConsoleChannel()
     set_channel(console)
     user, _ = await users.get_or_create_by_chat(LOCAL_CHAT_ID, None)
