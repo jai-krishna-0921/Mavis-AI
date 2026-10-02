@@ -12,7 +12,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import ResponseError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from mavis.bus.base import BLOCK_MS, EventHandler, JobHandler, Stream
+from mavis.bus.base import BLOCK_MS, EventHandler, JobHandler, Stream, run_with_inline_retries
 from mavis.domain.events import Event, Job
 
 log = structlog.get_logger(__name__)
@@ -132,7 +132,9 @@ class RedisStreamsBus:
             await self._dead_letter(stream, group, msg_id, data)
             return
         try:
-            await handle(data, delivered - 1)
+            await run_with_inline_retries(
+                lambda: handle(data, delivered - 1), what=stream, ref=str(msg_id)
+            )
         except Exception:
             log.exception("bus.handler_failed", stream=stream, msg_id=str(msg_id), attempt=delivered)
             if delivered >= self._max:
