@@ -1,6 +1,8 @@
 .env
 .venv/
 data/
+deploy/aws/state.env
+*.pem
 __pycache__/
 *.pyc
 .pytest_cache/
