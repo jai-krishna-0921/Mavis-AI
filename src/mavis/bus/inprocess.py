@@ -66,7 +66,8 @@ class InProcessBus:
         while True:
             await self._events.join()
             await self._jobs.join()
-            if self._events.empty() and self._jobs.empty():
+            # empty() is true while the last item is still being handled, so count unfinished work.
+            if self._events._unfinished_tasks == 0 and self._jobs._unfinished_tasks == 0:  # noqa: SLF001
                 return
 
     async def close(self) -> None:
