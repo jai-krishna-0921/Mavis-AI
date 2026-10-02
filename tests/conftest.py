@@ -275,3 +275,54 @@ def fake_memory() -> Iterator[FakeMemory]:
     set_memory(fm)  # type: ignore[arg-type]
     yield fm
     set_memory(None)
+
+
+# --- integrations fixtures (shared by tests/tools, tests/agents, tests/initiative) ---------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_integrations():
+    """Process-level integration singletons must not leak between tests."""
+    yield
+    try:
+        from mavis.tools import integrations
+    except ImportError:  # pragma: no cover
+        return
+    integrations.get_provider.cache_clear()
+    integrations.get_connection_cache.cache_clear()
+    # Task 16 extends this with the wiring getters, hooks lists and brief sources.
+
+
+@pytest.fixture
+def provider():
+    from tests.tools.integrations.fakes import FakeProvider
+
+    return FakeProvider()
+
+
+@pytest.fixture
+def cache(provider):
+    from mavis.tools.integrations.connections import ConnectionCache
+
+    return ConnectionCache(provider, ttl_s=60)
+
+
+@pytest.fixture
+def fake_bus():
+    from tests.tools.integrations.fakes import FakeBus
+
+    return FakeBus()
+
+
+@pytest.fixture
+def state():
+    from tests.tools.integrations.fakes import FakeState
+
+    return FakeState()
+
+
+@pytest.fixture
+def rec():
+    from tests.tools.integrations.fakes import Recorder
+
+    return Recorder()
