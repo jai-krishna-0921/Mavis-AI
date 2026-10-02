@@ -19,6 +19,7 @@ from mavis.tools.integrations.normalize import (
     email_event,
     extract_calendar_items,
     extract_messages,
+    normalize_email,
 )
 
 log = structlog.get_logger()
@@ -49,8 +50,14 @@ class Poller:
         st = await self.state.get(user_id)
         if capability not in POLLABLE or not st.get("polling", {}).get(capability.value):
             return 0
-        if not await self.cache.is_active(user_id, capability):
-            return 0  # stop the chain; activation restarts it on reconnect
+        try:
+            if not await self.cache.is_active(user_id, capability):
+                return 0  # definite answer: stop the chain; activation restarts it on reconnect
+        except Exception as exc:
+            # Unknown, not "disconnected": keep the chain alive and try again next interval.
+            log.warning("poller.status_failed", user_id=user_id, error=type(exc).__name__)
+            await self.schedule(user_id, self.clock() + POLL_INTERVAL, capability.value, POLL_KIND)
+            return 0
         try:
             if capability is Capability.GMAIL:
                 return await self._poll_gmail(user_id, st)
@@ -71,12 +78,14 @@ class Poller:
         if not res.ok:
             log.warning("poller.gmail_failed", user_id=user_id, error=res.error)
             return 0
+        ceiling = int(self.clock().timestamp())
         newest, published = after, 0
         for raw in extract_messages(res.data):
             event = email_event(user_id, raw, source="poller")
             if event is None:
                 continue
-            newest = max(newest, int(event.occurred_at.timestamp()))
+            if normalize_email(raw)["received_at"]:  # no timestamp: leave the cursor alone
+                newest = max(newest, min(int(event.occurred_at.timestamp()), ceiling))
             if await self.bus.publish(event):
                 published += 1
         await self._set_cursor(user_id, st, "gmail_after", newest)

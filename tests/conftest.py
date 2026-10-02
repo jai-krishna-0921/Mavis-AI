@@ -290,6 +290,9 @@ def _reset_integrations():
         return
     integrations.get_provider.cache_clear()
     integrations.get_connection_cache.cache_clear()
+    from mavis.worker import locks
+
+    locks._claims.clear()
     # Task 16 extends this with the wiring getters, hooks lists and brief sources.
 
 

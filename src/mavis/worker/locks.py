@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import AsyncIterator
 from weakref import WeakKeyDictionary
 
@@ -12,6 +13,22 @@ from redis.exceptions import LockError
 from mavis.bus import get_redis
 
 _local: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = WeakKeyDictionary()
+
+_claims: dict[str, float] = {}
+
+
+async def claim(key: str, ttl_s: float) -> bool:
+    """Atomic set-if-absent with expiry (Redis SET NX EX, in-process dict in dev). True if this caller won."""
+    client = get_redis()
+    if client is not None:
+        return bool(await client.set(f"mavis:claim:{key}", "1", nx=True, ex=max(1, int(ttl_s))))
+    now = time.monotonic()
+    for k in [k for k, exp in _claims.items() if exp <= now]:
+        del _claims[k]
+    if key in _claims:
+        return False
+    _claims[key] = now + ttl_s
+    return True
 
 
 @contextlib.asynccontextmanager

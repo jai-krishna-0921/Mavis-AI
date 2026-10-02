@@ -124,3 +124,27 @@ async def test_webhook_non_object_body_and_non_utf8_never_500():
         r1 = await c.post("/webhooks/integrations", content=body, headers=sign(body))
         r2 = await c.post("/webhooks/integrations", content=b"\xff\xfe", headers=sign(b"x"))
     assert r1.status_code == 400 and r2.status_code == 401
+
+
+async def test_callback_throttles_rapid_requests(db):
+    bus = FakeBus()
+    pid = await connections.create_pending(1, Capability.GMAIL, "", None)
+    async with client(app_with(bus)) as c:
+        bodies = [(await c.get(f"/connect/callback?p={pid}")).text for _ in range(10)]
+    assert len(bus.jobs) == 1 and len(set(bodies)) == 1
+
+
+async def test_callback_ignores_resolved_unknown_and_expired(db):
+    from datetime import timedelta
+
+    from mavis.domain import timeutil
+    from mavis.domain.integrations import PendingStatus
+
+    bus = FakeBus()
+    done = await connections.create_pending(1, Capability.GMAIL, "", None)
+    await connections.resolve(done, PendingStatus.ACTIVE)
+    stale = timeutil.now() - timedelta(hours=25)
+    old = await connections.create_pending(1, Capability.GMAIL, "", None, now=stale)
+    async with client(app_with(bus)) as c:
+        pages = [(await c.get(f"/connect/callback?p={p}")).text for p in (done, old, 424242)]
+    assert bus.jobs == [] and len(set(pages)) == 1
