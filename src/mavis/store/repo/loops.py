@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import re
 from datetime import datetime, timedelta
 
@@ -103,12 +104,54 @@ async def list_open(user_id: int) -> list[Loop]:
         return [to_domain(r) for r in rows]
 
 
+DUPLICATE_DUE_WINDOW = timedelta(hours=2)
+DUPLICATE_SIMILARITY = 0.8
+_TIME_TOKEN = re.compile(r"^\d+(?:[:.]\d+)?(?:am|pm|h|hrs?|st|nd|rd|th)?$")
+_DUP_STOPWORDS = frozenset(
+    "a an the at on by in to for of with and or my me i is it this that next coming about from "
+    "am pm today tomorrow tonight tmrw tmr morning afternoon evening night noon midnight "
+    "monday tuesday wednesday thursday friday saturday sunday mon tue tues wed thu thur thurs fri sat sun "
+    "january february march april may june july august september october november december "
+    "jan feb mar apr jun jul aug sep sept oct nov dec".split()
+)
+
+
+def _dup_tokens(title: str) -> list[str]:
+    """Title words that identify the thing: no times, dates, weekdays or filler."""
+    return [t for t in normalise_title(title).split() if t not in _DUP_STOPWORDS and not _TIME_TOKEN.match(t)]
+
+
+def similar_titles(a: str, b: str) -> bool:
+    ta, tb = _dup_tokens(a), _dup_tokens(b)
+    if not ta or not tb:
+        return normalise_title(a) == normalise_title(b)
+    sa, sb = set(ta), set(tb)
+    if len(sa & sb) / len(sa | sb) >= DUPLICATE_SIMILARITY:
+        return True
+    ratio = difflib.SequenceMatcher(None, " ".join(sorted(sa)), " ".join(sorted(sb))).ratio()
+    return ratio >= DUPLICATE_SIMILARITY
+
+
+def _due_close(a: datetime | None, b: datetime | None) -> bool:
+    if a is None or b is None:
+        return True
+    return abs(timeutil.ensure_utc(a) - timeutil.ensure_utc(b)) <= DUPLICATE_DUE_WINDOW
+
+
 async def find_open_duplicate(user_id: int, data: LoopUpsert) -> Loop | None:
+    """An open loop of the same kind that is the same thing said differently (one utterance often
+    yields "Dentist appointment" and "Dentist appointment at 4pm"): similar title and due within 2h,
+    or either due missing. An exact match wins over a fuzzy one."""
     due = timeutil.ensure_utc(data.due_at)
+    fuzzy: Loop | None = None
     for loop in await list_open(user_id):
-        if loop.kind is data.kind and loop.title.casefold() == data.title.casefold() and loop.due_at == due:
+        if loop.kind is not data.kind:
+            continue
+        if loop.title.casefold() == data.title.casefold() and loop.due_at == due:
             return loop
-    return None
+        if fuzzy is None and _due_close(loop.due_at, due) and similar_titles(loop.title, data.title):
+            fuzzy = loop
+    return fuzzy
 
 
 def normalise_title(title: str) -> str:
