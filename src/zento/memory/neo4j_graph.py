@@ -8,9 +8,11 @@ Edges: [:<REL> {statement, confidence, source_ref, valid_from, valid_to}]
 # ruff: noqa: E501
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from zento.domain.memory import SINGLE_VALUED_RELS, Entity, Relation
+from zento.memory.graph import edge_score
 from zento.memory.names import USER_KEY, is_user, node_key, normalize_name, sanitize_label, sanitize_rel
 
 _DEDUPE = "reduce(acc = [], a IN coalesce(n.{f}, []) + ${p} | CASE WHEN a IN acc THEN acc ELSE acc + a END)"
@@ -50,6 +52,12 @@ Q_ADD_ALIASES = (
     "MATCH (n:Entity {user_id:$u, key:$key}) SET n.aliases = " + _DEDUPE.format(f="aliases", p="aliases")
     + ", n.norm_aliases = " + _DEDUPE.format(f="norm_aliases", p="norm_aliases")
 )
+Q_KEY_EXISTS = "MATCH (n:Entity {user_id:$u, key:$key}) RETURN n.key AS key LIMIT 1"
+Q_CURRENT_EDGES = (
+    "MATCH (a:Entity {user_id:$u})-[r]->(b:Entity {user_id:$u}) WHERE r.valid_to IS NULL "
+    "RETURN elementId(r) AS id, a.key AS src, type(r) AS rel, b.key AS dst ORDER BY r.valid_from DESC"
+)
+Q_DELETE_EDGES = "MATCH (:Entity {user_id:$u})-[r]->() WHERE elementId(r) IN $ids DELETE r"
 Q_DELETE_NODE = "MATCH (n:Entity {user_id:$u, key:$key}) DETACH DELETE n"
 
 
@@ -80,7 +88,8 @@ def q_update_current_edge(rel: str) -> str:
         "WHERE r.valid_to IS NULL "
         "SET r.statement=$statement, "
         "r.confidence = CASE WHEN r.confidence > $confidence THEN r.confidence ELSE $confidence END, "
-        "r.source_ref = $source_ref RETURN count(r) AS c"
+        "r.source_ref = CASE WHEN $source_ref = '' THEN coalesce(r.source_ref, '') ELSE $source_ref END "
+        "RETURN count(r) AS c"
     )
 
 
@@ -99,8 +108,41 @@ def q_neighborhood(hops: int) -> str:
         "MATCH (s:Entity {user_id:$u}) WHERE s.key IN $keys "
         f"MATCH p=(s)-[*1..{h}]-(:Entity) WHERE all(r IN relationships(p) WHERE r.valid_to IS NULL) "
         "UNWIND relationships(p) AS r WITH DISTINCT r "
-        "RETURN r.statement AS st ORDER BY r.valid_from DESC LIMIT $limit"
+        "RETURN r.statement AS st, r.confidence AS conf, r.valid_from AS vf "
+        "ORDER BY r.valid_from DESC LIMIT $limit"
     )
+
+
+def _to_dt(v: Any) -> datetime:
+    if v is None:
+        return datetime.now(UTC)
+    if hasattr(v, "to_native"):
+        v = v.to_native()
+    return v if v.tzinfo else v.replace(tzinfo=UTC)
+
+
+def rank_candidates(rows: list[dict], limit: int, now: datetime | None = None) -> list[str]:
+    """Same ranking as SqliteGraphStore: score = confidence x recency decay."""
+    now = now or datetime.now(UTC)
+    scored = sorted(
+        (r for r in rows if r.get("st")),
+        key=lambda r: edge_score(float(r.get("conf") or 0.0), _to_dt(r.get("vf")), now),
+        reverse=True,
+    )
+    return [r["st"] for r in scored[:limit]]
+
+
+def plan_dedupe(edges: list[dict]) -> list[str]:
+    """Ids of current edges to delete: self-loops and duplicates (input is newest-first)."""
+    seen: set[tuple[str, str, str]] = set()
+    doomed: list[str] = []
+    for e in edges:
+        sig = (e["src"], e["rel"], e["dst"])
+        if e["src"] == e["dst"] or sig in seen:
+            doomed.append(e["id"])
+        else:
+            seen.add(sig)
+    return doomed
 
 
 def _recreate_edge(rel_type: str) -> str:
@@ -155,22 +197,26 @@ class Neo4jGraphStore:
         dst = await self._key_for(user_id, rel.object)
         params = dict(u=user_id, src=src, dst=dst, statement=rel.statement, confidence=rel.confidence,
                       source_ref=source_ref)
-        if r in SINGLE_VALUED_RELS:
-            await self._run(q_close_single_valued(r), u=user_id, src=src, dst=dst)
         rows = await self._run(q_update_current_edge(r), **params)
         if not rows or rows[0]["c"] == 0:
+            if r in SINGLE_VALUED_RELS:
+                await self._run(q_close_single_valued(r), u=user_id, src=src, dst=dst)
             await self._run(q_create_edge(r), **params)
 
     async def neighborhood(self, user_id: int, names: list[str], hops: int = 2, limit: int = 25) -> list[str]:
         keys: list[str] = []
         for n in names:
+            if is_user(n):
+                await self._run(Q_ENSURE_USER, u=user_id, key=USER_KEY)
+                keys.append(USER_KEY)
+                continue
             rows = await self._run(Q_FIND_KEY, u=user_id, norm=normalize_name(n))
             if rows:
                 keys.append(rows[0]["key"])
         if not keys:
             return []
-        rows = await self._run(q_neighborhood(hops), u=user_id, keys=keys, limit=limit)
-        return [r["st"] for r in rows if r["st"]]
+        rows = await self._run(q_neighborhood(hops), u=user_id, keys=keys, limit=limit * 4)
+        return rank_candidates(rows, limit)
 
     async def entities(self, user_id: int) -> list[Entity]:
         return [Entity(name=r["name"], label=r["label"], aliases=r["aliases"])
@@ -191,6 +237,10 @@ class Neo4jGraphStore:
         keep_key, drop_key = node_key(lab, keep), node_key(lab, drop)
         if keep_key == drop_key:
             return
+        if not await self._run(Q_KEY_EXISTS, u=user_id, key=keep_key):
+            return
+        if not await self._run(Q_KEY_EXISTS, u=user_id, key=drop_key):
+            return
         for e in await self._run(Q_DROP_EDGES, u=user_id, drop=drop_key):
             other = keep_key if e["other"] == drop_key else e["other"]
             src, dst = (keep_key, other) if e["outgoing"] else (other, keep_key)
@@ -199,3 +249,6 @@ class Neo4jGraphStore:
         await self._run(Q_ADD_ALIASES, u=user_id, key=keep_key, aliases=[drop],
                         norm_aliases=[normalize_name(drop)])
         await self._run(Q_DELETE_NODE, u=user_id, key=drop_key)
+        doomed = plan_dedupe(await self._run(Q_CURRENT_EDGES, u=user_id))
+        if doomed:
+            await self._run(Q_DELETE_EDGES, u=user_id, ids=doomed)

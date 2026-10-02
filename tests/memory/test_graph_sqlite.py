@@ -88,3 +88,27 @@ async def test_merge_entities_repoints_edges(graph):
     names = {e.name: e for e in await graph.entities(1)}
     assert "Jawahar R" not in names and "Jawahar R" in names["Jawahar"].aliases
     assert any(d["subject"] == "Jawahar" and d["relation"] == "SKILLED_AT" for d in await graph.dump(1))
+
+
+async def test_ranking_prefers_confident_older_edge(graph):
+    from datetime import timedelta
+
+    from zento.memory.graph import edge_score
+    from zento.store.db import utcnow
+
+    now = utcnow()
+    assert edge_score(0.9, now - timedelta(days=5), now) > edge_score(0.2, now, now)
+    await graph.upsert_relation(1, rel("User", "PREFERS", "Tea", "User prefers tea.", 0.95))
+    await graph.upsert_relation(1, rel("User", "DISLIKES", "Rain", "User dislikes rain.", 0.1))
+    async with dbm.Session() as s:
+        for e in await s.scalars(select(GraphEdge).where(GraphEdge.rel == "PREFERS")):
+            e.valid_from = now - timedelta(days=5)
+        await s.commit()
+    assert (await graph.neighborhood(1, ["User"], limit=1)) == ["User prefers tea."]
+
+
+async def test_forget_escapes_like_wildcards(graph):
+    await graph.upsert_relation(1, rel("User", "PREFERS", "Tea", "User prefers tea."))
+    await graph.upsert_relation(1, rel("User", "DISLIKES", "Rain", "User dislikes 100% rain."))
+    assert await graph.forget(1, "%") == 1
+    assert [d["relation"] for d in await graph.dump(1)] == ["PREFERS"]
