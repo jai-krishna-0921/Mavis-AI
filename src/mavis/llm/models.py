@@ -147,13 +147,17 @@ class _Limiter:
         self._dispatch()
 
     def _dispatch(self) -> None:
+        """Hand free slots to live waiters. Never raises; dead (cancelled/timed-out) waiters are dropped."""
         now = asyncio.get_running_loop().time()
+        self._waiters = [w for w in self._waiters if not w.fut.done()]
         while self._free > 0 and self._waiters:
             pick = next(
                 (w for w in self._waiters if w.interactive or now - w.since >= BACKGROUND_AGING_S),
                 self._waiters[0],
             )
             self._waiters.remove(pick)
+            if pick.fut.done():  # defensive: cancelled between the filter and here
+                continue
             self._free -= 1
             pick.fut.set_result(None)
 
