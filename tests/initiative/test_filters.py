@@ -144,3 +144,26 @@ async def test_default_embedder_resolves_at_call_time():
         assert abs(r.relevance - 1.0) < 1e-6
     finally:
         embeddings.set_embedder(None)
+
+
+async def test_bad_loop_id_is_treated_as_no_match():
+    ev = Event(
+        id="wakeup:2",
+        user_id=1,
+        type=EventType.EVENT_ENDED,
+        occurred_at=T,
+        source="timer",
+        payload={"loop_id": "abc"},
+    )
+    loop = Loop(id=3, user_id=1, kind=LoopKind.COMMITMENT, title="x")
+    r = await EventFilter(embed=no_embed).apply(ev, [loop])
+    assert not r.drop and r.matched_loops == []
+
+
+async def test_embedding_failure_gives_zero_relevance():
+    async def boom(texts):
+        raise RuntimeError("model unavailable")
+
+    loop = Loop(id=9, user_id=1, kind=LoopKind.COMMITMENT, title="Acme")
+    r = await EventFilter(embed=boom).apply(email(subject="Acme"), [loop])
+    assert not r.drop and r.relevance == 0.0

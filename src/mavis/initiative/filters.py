@@ -6,10 +6,14 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+import structlog
+
 from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType
 from mavis.domain.loops import Loop
 from mavis.memory import embeddings
+
+log = structlog.get_logger()
 
 Embed = Callable[[list[str]], Awaitable[list[list[float]]]]
 
@@ -88,8 +92,13 @@ class EventFilter:
     async def apply(self, event: Event, open_loops: list[Loop]) -> FilterResult:
         summary = summarize_event(event)
         if event.type not in EXTERNAL_TYPES:
-            loop_id = event.payload.get("loop_id") or event.payload.get("id")
-            matched = [lp for lp in open_loops if loop_id is not None and lp.id == int(loop_id)]
+            raw = event.payload.get("loop_id") or event.payload.get("id")
+            try:
+                loop_id = int(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                log.warning("filter.bad_loop_id", event_id=event.id, loop_id=repr(raw))
+                loop_id = None
+            matched = [lp for lp in open_loops if loop_id is not None and lp.id == loop_id]
             return FilterResult(drop=False, matched_loops=matched, relevance=1.0, summary=summary)
 
         p = event.payload
@@ -110,5 +119,9 @@ class EventFilter:
     async def _similarity(self, summary: str, loops: list[Loop]) -> float:
         if not loops:
             return 0.0
-        vectors = await self._embed([summary] + [lp.title for lp in loops])
+        try:
+            vectors = await self._embed([summary] + [lp.title for lp in loops])
+        except Exception as exc:
+            log.warning("filter.embed_failed", error=str(exc))
+            return 0.0
         return max(embeddings.cosine(vectors[0], v) for v in vectors[1:])
