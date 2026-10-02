@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from mavis.agents.persona import should_ask_name, split_bubbles, system_prompt
+from mavis.agents.persona import recent_messages, should_ask_name, split_bubbles, system_prompt
 from mavis.store.repo import users
 
 NOW = datetime(2026, 10, 2, 4, 30, tzinfo=UTC)  # 10:00 in Asia/Kolkata, a Friday
@@ -78,6 +78,7 @@ def test_should_ask_name_logic() -> None:
 async def test_no_reintroduction_when_mid_conversation(db) -> None:
     user, _ = await users.get_or_create_by_chat(6, "Jai")
     assert "brief hello is fine" in system_prompt(user, NOW, prior_turns=0)
+    assert "hello" not in system_prompt(user, NOW).split("Right now")[1]  # None: no claim either way
     mid = system_prompt(user, NOW, prior_turns=4)
     assert "Do not introduce yourself" in mid and "brief hello is fine" not in mid
 
@@ -87,8 +88,14 @@ async def test_connection_state_is_injected(db) -> None:
     prompt = system_prompt(user, NOW, connections={"gmail": "connected", "googlecalendar": "not connected"})
     assert "Gmail: connected" in prompt
     assert "Google Calendar: not connected" in prompt and "/connect calendar" in prompt
-    unknown = system_prompt(user, NOW)
-    assert "Gmail: status unknown" in unknown and "Google Calendar: status unknown" in unknown
+    assert "Gmail: connected" in prompt and "/connect gmail" in prompt
+    unknown = system_prompt(user, NOW, connections={})  # looked, could not tell
+    assert "Gmail: unknown" in unknown and "Google Calendar: unknown" in unknown
+    both = {"gmail": "pending", "googlecalendar": "needs reconnecting"}
+    states = system_prompt(user, NOW, connections=both)
+    assert "Gmail: pending" in states and "Google Calendar: needs reconnecting" in states
+    # not injecting at all (proactive callers) leaves the block out entirely
+    assert "Their links right now" not in system_prompt(user, NOW)
 
 
 def test_split_bubbles() -> None:
@@ -96,3 +103,11 @@ def test_split_bubbles() -> None:
     assert split_bubbles("one\n\n\n\ntwo\n\nthree\n\nfour") == ["one", "two", "three\n\nfour"]
     assert split_bubbles("  single  ") == ["single"]
     assert split_bubbles("   ") == []
+
+
+def test_recent_messages_and_name_ask_ignore_old_history() -> None:
+    old = _msg("assistant", "what should I call you?", NOW - timedelta(hours=13))
+    fresh = _msg("user", "hi", NOW - timedelta(hours=1))
+    assert recent_messages([old, fresh], NOW) == [fresh]
+    # asked 13h ago but still "today" locally: outside the 12h window, so asking is allowed again
+    assert should_ask_name(None, [old], NOW, "Asia/Kolkata")

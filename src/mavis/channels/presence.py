@@ -46,9 +46,10 @@ async def typing(chat_id: int | None, interval_s: float = TYPING_REFRESH_S) -> A
     if chat_id is None:
         yield
         return
-    await _send_typing(chat_id)
 
     async def _refresh() -> None:
+        # first cue goes out immediately, but inside the task so a slow Telegram never delays the turn
+        await _send_typing(chat_id)
         while True:
             await asyncio.sleep(interval_s)
             await _send_typing(chat_id)

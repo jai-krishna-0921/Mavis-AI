@@ -135,3 +135,86 @@ async def test_midconversation_turn_prompt_does_not_reintroduce(db, fake_llm, ch
     fake_llm.push_text("Yep, here!")
     await run_turn(msg_event(user.id, "Hlo?"))
     assert "Do not introduce yourself" in fake_llm.calls[-1][0].content
+
+
+async def test_connection_failure_is_negatively_cached(db, monkeypatch) -> None:
+    from mavis.agents import simple_turn
+    from mavis.tools import integrations
+
+    simple_turn._failed_until.clear()
+    calls = []
+
+    class Cache:
+        async def status(self, user_id):
+            calls.append(user_id)
+            raise RuntimeError("composio down")
+
+    def fake(value):
+        def getter():
+            return value
+
+        getter.cache_clear = lambda: None
+        return getter
+
+    monkeypatch.setattr(integrations, "get_provider", fake(type("P", (), {"configured": True})()))
+    monkeypatch.setattr(integrations, "get_connection_cache", fake(Cache()))
+    assert await simple_turn.connection_states(9) == {}
+    assert await simple_turn.connection_states(9) == {}
+    assert calls == [9]  # second call inside the window never touched the provider
+    simple_turn._failed_until[9] = 0.0  # window elapsed
+    await simple_turn.connection_states(9)
+    assert calls == [9, 9]
+    simple_turn._failed_until.clear()
+
+
+async def test_connection_state_names(db, monkeypatch) -> None:
+    from mavis.agents import simple_turn
+    from mavis.domain.integrations import ConnectionState
+    from mavis.tools import integrations
+
+    simple_turn._failed_until.clear()
+
+    class Cache:
+        async def status(self, user_id):
+            return {"gmail": ConnectionState.INITIATED, "googlecalendar": ConnectionState.FAILED}
+
+    def fake(value):
+        def getter():
+            return value
+
+        getter.cache_clear = lambda: None
+        return getter
+
+    monkeypatch.setattr(integrations, "get_provider", fake(type("P", (), {"configured": True})()))
+    monkeypatch.setattr(integrations, "get_connection_cache", fake(Cache()))
+    expected = {"gmail": "pending", "googlecalendar": "needs reconnecting"}
+    assert await simple_turn.connection_states(1) == expected
+
+
+async def test_old_history_is_not_midconversation(db, fake_llm, channel, memory, bus, clock) -> None:
+    user, _ = await users.get_or_create_by_chat(111, "Jai")
+    await messages.log(user.id, Role.USER, "hello")
+    await messages.log(user.id, Role.ASSISTANT, "Hey Jai!")
+    clock.advance(hours=13)
+    fake_llm.push_text("Welcome back!")
+    await run_turn(msg_event(user.id, "hi again"))
+    system = fake_llm.calls[-1][0].content
+    assert "mid-conversation" not in system and "brief hello is fine" in system
+
+
+async def test_start_mid_conversation_gets_restart_hint(db, fake_llm, channel, memory, bus) -> None:
+    user, _ = await users.get_or_create_by_chat(111, "Jai")
+    await messages.log(user.id, Role.USER, "hello")
+    await messages.log(user.id, Role.ASSISTANT, "Hey Jai!")
+    fake_llm.push_text("Welcome back!")
+    await run_turn(msg_event(user.id, "/start", command="start"))
+    system = fake_llm.calls[-1][0].content
+    assert "Do not introduce yourself again" in system and "introduce yourself in one line" not in system
+
+
+async def test_start_on_fresh_chat_introduces(db, fake_llm, channel, memory, bus) -> None:
+    user, _ = await users.get_or_create_by_chat(111, "Jai")
+    fake_llm.push_text("Hi!")
+    await run_turn(msg_event(user.id, "/start", command="start"))
+    assert "introduce yourself in one line" in fake_llm.calls[-1][0].content
+

@@ -272,3 +272,40 @@ def test_fallback_copy_promises_no_follow_up_and_has_no_dashes():
     assert "get back to you" not in lowered and "i'll" not in lowered
     assert "try me again" in lowered
     assert "—" not in FALLBACK_TEXT and "–" not in FALLBACK_TEXT
+
+
+async def test_slow_reaction_does_not_reorder_a_users_messages(user, channel, monkeypatch):
+    import asyncio
+
+    from mavis.domain import timeutil
+    from mavis.domain.events import Event, EventType, Trust
+    from mavis.worker import runner
+
+    delays = {77: 0.3, 78: 0.0}
+    original = channel.react
+
+    async def slow_react(chat_id, message_id, emoji):
+        await asyncio.sleep(delays[message_id])
+        await original(chat_id, message_id, emoji)
+
+    monkeypatch.setattr(channel, "react", slow_react)
+    order: list[str] = []
+
+    async def handler(event):
+        order.append(event.payload["text"])
+
+    monkeypatch.setitem(runner._event_handlers, EventType.USER_MESSAGE, [handler])
+
+    def ev(n, mid):
+        return Event(id=f"tg:update:{n}", user_id=user.id, type=EventType.USER_MESSAGE,
+                     occurred_at=timeutil.now(), source="telegram",
+                     payload={"text": f"m{n}", "message_id": mid}, trust=Trust.USER)
+
+    first = asyncio.create_task(runner.handle_event(ev(1, 77)))
+    await asyncio.sleep(0)  # message 1 is queued on the lock before message 2 arrives
+    second = asyncio.create_task(runner.handle_event(ev(2, 78)))
+    await asyncio.gather(first, second)
+    assert order == ["m1", "m2"]
+    await asyncio.gather(*runner._ack_tasks)  # acks are fire-and-forget; let the slow one land
+    assert {r[1] for r in channel.reactions} == {77, 78}
+    assert not runner._ack_tasks

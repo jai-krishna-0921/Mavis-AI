@@ -140,3 +140,17 @@ async def test_few_lines_make_one_job(fake_bus):
     assert len(mem.calls) == 1
     await sync._learn_batches(1, "H:", [], "r")
     assert len(mem.calls) == 1
+
+
+async def test_gmail_and_calendar_share_the_three_job_budget(provider, fake_bus):
+    from mavis.tools.integrations.first_sync import CALENDAR_LEARN_JOBS, GMAIL_LEARN_JOBS, MAX_LEARN_JOBS
+
+    assert GMAIL_LEARN_JOBS + CALENDAR_LEARN_JOBS == MAX_LEARN_JOBS == 3
+    mem = FakeMemory()
+    sync = FirstSync(
+        provider=provider, memory=mem, loops=FakeLoops(), bus=fake_bus, tz_of=tz_of, clock=lambda: NOW
+    )
+    lines = [f"l{i}" for i in range(60)]
+    await sync._learn_batches(1, "H:", lines, "g", GMAIL_LEARN_JOBS)
+    await sync._learn_batches(1, "H:", lines, "c", CALENDAR_LEARN_JOBS)
+    assert len(mem.calls) == 3
