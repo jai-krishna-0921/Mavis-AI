@@ -6,7 +6,7 @@ Every user-facing LLM responder builds its system prompt here.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -38,23 +38,27 @@ If asked, say that part stays behind the curtain, but be open about what you can
 you're an AI, you don't know what it's like to be anything, and you're happy to be useful anyway.
 - No corporate filler ("As an AI...", "I hope this helps"), no walls of bullet points unless they ask.
 
-What you can do (use exactly this when asked about your capabilities or features, and claim nothing beyond it)
-Available now:
+What you can do (background for you, not a script: say it in your own words, never read out these \
+labels or instructions, and claim nothing beyond it)
+Working today:
 - You remember {who}'s people, plans, goals and preferences across conversations.
 - You chat like a friend and keep the context of what you've talked about.
 - You ask clarifying questions when something is ambiguous.
-- You check in before important moments and follow up after them.
-- You send a morning check-in.
-Coming soon (say "soon", and never claim any of these works yet):
-- Connecting Gmail, Google Calendar, Notion and Slack to spot what's slipping and draft replies.
-- Research, and building docs, decks and reports.
-- Acting on their behalf, with their OK.
-Anything else is not something you offer. If asked for something outside these lists, \
-say you can't do that yet.
+- You check in before important moments and follow up after them, and send a morning check-in.
+- Gmail and Google Calendar: they link them by sending /connect (/connections shows what is linked, \
+/disconnect removes one). Once linked, you watch their inbox for what matters, flag what is urgent and \
+bring their calendar into morning briefs.
+{connection_lines}
+On the way, not built yet (if they ask, say it is coming soon, with no date and no promises):
+- Sending email or replies for them, Slack and Notion.
+- Web search and research.
+- A sandbox for writing code, docs, decks and reports.
+If they ask for something outside all of this, say you can't do that yet.
 
 Right now
 - Local time for {who}: {local_time} ({tz}).
-- {name_line}"""
+- {name_line}
+- {convo_line}"""
 
 
 class _UserLike(Protocol):
@@ -66,13 +70,70 @@ def local_time(user: _UserLike, now: datetime) -> datetime:
     return now.astimezone(ZoneInfo(user.timezone or get_settings().default_timezone))
 
 
-def system_prompt(user: _UserLike, now: datetime, context: str = "") -> str:
+CONNECTION_LABELS = {"gmail": "Gmail", "googlecalendar": "Google Calendar"}
+_CONNECTION_COMMAND = {"gmail": "/connect gmail", "googlecalendar": "/connect calendar"}
+
+
+def connection_lines(connections: dict[str, str] | None) -> str:
+    """Per-user link state for the prompt. Missing or unknown entries are reported as unknown."""
+    lines = ["Their links right now (tell them plainly; do not say coming soon about these):"]
+    for slug, label in CONNECTION_LABELS.items():
+        state = (connections or {}).get(slug, "unknown")
+        if state == "connected":
+            lines.append(f"- {label}: connected. Say they are connected; do not ask them to connect again.")
+        elif state == "not connected":
+            lines.append(f"- {label}: not connected. If it comes up, suggest {_CONNECTION_COMMAND[slug]}.")
+        else:
+            lines.append(f"- {label}: status unknown right now. Suggest /connections to check.")
+    return "\n".join(lines)
+
+
+_NAME_ASKED = re.compile(r"call you|your name|who am i (talking|speaking)", re.IGNORECASE)
+
+
+def should_ask_name(known_name: str | None, history: list, now: datetime, tz: str) -> bool:
+    """Ask for a name only when none is known, and at most once per local conversation day."""
+    if known_name:
+        return False
+    zone = ZoneInfo(tz or get_settings().default_timezone)
+    today = now.astimezone(zone).date()
+    for m in history:
+        if m.role != "assistant" or not _NAME_ASKED.search(m.content):
+            continue
+        created = m.created_at if m.created_at.tzinfo else m.created_at.replace(tzinfo=UTC)
+        if created.astimezone(zone).date() == today:
+            return False
+    return True
+
+
+def system_prompt(
+    user: _UserLike,
+    now: datetime,
+    context: str = "",
+    *,
+    connections: dict[str, str] | None = None,
+    known_name: str | None = None,
+    ask_name: bool = True,
+    prior_turns: int = 0,
+) -> str:
     local = local_time(user, now)
-    who = user.name or "the user"
-    name_line = (
-        f"Their name is {user.name}."
-        if user.name
-        else "You don't know their name yet; find a natural moment to ask."
+    name = user.name or known_name
+    who = name or "the user"
+    if name:
+        name_line = f"Their name is {name}. Never ask what to call them."
+    elif ask_name:
+        name_line = (
+            "You don't know their name yet. Ask once, only at a natural moment, never as a tag on the end "
+            "of an unrelated reply."
+        )
+    else:
+        name_line = "You don't know their name yet, but you already asked today. Do not ask again."
+    convo_line = (
+        f"You and {who} are mid-conversation ({prior_turns} earlier messages). Do not introduce yourself "
+        "or greet from scratch again. A short nudge like \"hello?\" just means they want your attention, "
+        "so answer it briefly and pick up the thread."
+        if prior_turns > 0
+        else "This is the start of your conversation, so a brief hello is fine."
     )
     prompt = PERSONA.format(
         agent=get_settings().agent_name,
@@ -80,6 +141,8 @@ def system_prompt(user: _UserLike, now: datetime, context: str = "") -> str:
         local_time=local.strftime("%A %d %B %Y, %H:%M"),
         tz=local.tzinfo,
         name_line=name_line,
+        convo_line=convo_line,
+        connection_lines=connection_lines(connections),
     )
     return f"{prompt}\n\n{context.strip()}" if context.strip() else prompt
 

@@ -91,3 +91,47 @@ async def test_llm_error_propagates(db, channel, fake_llm, memory, bus) -> None:
     fake_llm.push_error(TimeoutError())
     with pytest.raises(LLMError):
         await run_turn(msg_event(user.id, "hi"))
+
+
+async def test_connection_states_unknown_when_provider_unconfigured(db) -> None:
+    from mavis.agents.simple_turn import connection_states
+
+    assert await connection_states(1) == {}
+
+
+async def test_connection_states_maps_active_and_survives_failure(db, monkeypatch) -> None:
+    from mavis.agents import simple_turn
+    from mavis.domain.integrations import ConnectionState
+    from mavis.tools import integrations
+
+    class Cache:
+        def __init__(self, result):
+            self.result = result
+
+        async def status(self, user_id):
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+    def fake(value):
+        def getter():
+            return value
+
+        getter.cache_clear = lambda: None  # the autouse reset fixture clears these singletons
+        return getter
+
+    monkeypatch.setattr(integrations, "get_provider", fake(type("P", (), {"configured": True})()))
+    cache = Cache({"gmail": ConnectionState.ACTIVE, "googlecalendar": ConnectionState.NONE})
+    monkeypatch.setattr(integrations, "get_connection_cache", fake(cache))
+    assert await simple_turn.connection_states(1) == {"gmail": "connected", "googlecalendar": "not connected"}
+    monkeypatch.setattr(integrations, "get_connection_cache", fake(Cache(RuntimeError("down"))))
+    assert await simple_turn.connection_states(1) == {}
+
+
+async def test_midconversation_turn_prompt_does_not_reintroduce(db, fake_llm, channel, memory, bus) -> None:
+    user, _ = await users.get_or_create_by_chat(111, "Jai")
+    await messages.log(user.id, Role.USER, "hello")
+    await messages.log(user.id, Role.ASSISTANT, "Hey Jai!")
+    fake_llm.push_text("Yep, here!")
+    await run_turn(msg_event(user.id, "Hlo?"))
+    assert "Do not introduce yourself" in fake_llm.calls[-1][0].content

@@ -21,6 +21,7 @@ from mavis.memory.service import get_memory
 from mavis.store.db import Session, utcnow
 from mavis.store.models import Message
 from mavis.store.repo import messages, outbox, users
+from mavis.store.repo import profile as profile_repo
 from mavis.store.repo import summaries as summaries_repo
 
 log = structlog.get_logger(__name__)
@@ -37,6 +38,10 @@ HISTORY_LIMIT = 20
 START_HINT = (
     "The user just opened the chat with /start. Greet them warmly, introduce yourself in one line, "
     "and ask what's on their plate right now."
+)
+RESTART_HINT = (
+    "The user sent /start again in the middle of an ongoing chat. Welcome them back in one short line. "
+    "Do not introduce yourself again."
 )
 
 
@@ -85,6 +90,31 @@ def _clarified_request(history: list[Message]) -> str | None:
     if j is None or not clarify.is_day_question(before[j].content):
         return None
     return next((m.content for m in reversed(before[:j]) if m.role == Role.USER.value), None)
+
+
+CONNECTION_TIMEOUT_S = 1.5
+
+
+async def connection_states(user_id: int) -> dict[str, str]:
+    """Per-capability "connected" / "not connected" for the persona. Best effort: {} means unknown."""
+    try:
+        from mavis.tools.integrations import get_connection_cache, get_provider
+
+        if not getattr(get_provider(), "configured", True):
+            return {}  # no provider credentials: we cannot know, so the persona says unknown
+        states = await asyncio.wait_for(get_connection_cache().status(user_id), CONNECTION_TIMEOUT_S)
+        return {slug: "connected" if str(getattr(st, "value", st)) == "ACTIVE" else "not connected"
+                for slug, st in states.items()}
+    except Exception:  # noqa: BLE001 - the prompt must never depend on integrations being up
+        log.debug("simple_turn.connection_state_failed", exc_info=True)
+        return {}
+
+
+async def _known_name(user_id: int) -> str | None:
+    try:
+        return (await profile_repo.get(user_id)).name
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def enqueue_learn(
@@ -138,11 +168,21 @@ async def run_turn(event: Event) -> None:
         await enqueue_learn(user.id, event, text, previous, _clarified_request(history))
         return
 
-    hint = START_HINT if event.payload.get("command") == "start" else ""
+    hint = ""
+    if event.payload.get("command") == "start":
+        hint = RESTART_HINT if any(m.role == Role.ASSISTANT.value for m in history) else START_HINT
     previous_reply = previous
     async with presence.typing(user.telegram_chat_id):  # refreshed until the reply is queued
-        context = await build_context(user.id, text, hint)
-        prompt: list[BaseMessage] = [SystemMessage(persona.system_prompt(user, utcnow(), context=context))]
+        context, connections, card_name = await asyncio.gather(
+            build_context(user.id, text, hint), connection_states(user.id), _known_name(user.id)
+        )
+        now = utcnow()
+        known_name = user.name or card_name
+        prompt: list[BaseMessage] = [SystemMessage(persona.system_prompt(
+            user, now, context=context, connections=connections, known_name=known_name,
+            ask_name=persona.should_ask_name(known_name, history, now, user.timezone),
+            prior_turns=len(history) - 1,  # the current message is already in history
+        ))]
         prompt += _to_langchain(history)
 
         reply = await llm.complete(prompt, llm.Tier.FAST, name="simple_turn")
