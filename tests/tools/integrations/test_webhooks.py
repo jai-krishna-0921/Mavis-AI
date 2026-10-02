@@ -62,7 +62,7 @@ def test_calendar_slack_notion_payloads():
         "end": {"dateTime": "2026-10-05T11:00:00+05:30"},
         "attendees": [{"email": "jawahar@example.com"}],
     }
-    h, b = signed(v3("GOOGLECALENDAR_EVENT_CHANGE_TRIGGER", cal))
+    h, b = signed(v3("GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CHANGE_TRIGGER", cal))
     [ev] = parse_composio_webhook(h, b, SECRET)
     assert ev.type is EventType.CALENDAR_CHANGED and ev.id == "gcal:ev1:2026-10-04T10:00:00Z"
     h, b = signed(v3("SLACK_RECEIVE_MESSAGE", {"channel": "C1", "ts": "171.2", "user": "U1", "text": "hey"}))

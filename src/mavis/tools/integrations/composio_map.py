@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -23,8 +23,14 @@ class SlugMapping:
     translate: Callable[[Any], dict[str, Any]]
 
 
-def _tz_name(dt: datetime) -> str:
-    return dt.tzinfo.key if isinstance(dt.tzinfo, ZoneInfo) else "UTC"
+def _wall_and_tz(dt: datetime) -> tuple[str, str]:
+    """Composio's start_datetime must be naive (no offset or Z), paired with an IANA timezone.
+
+    A ZoneInfo datetime keeps its wall clock; anything else (fixed offset, UTC) is converted to naive UTC.
+    """
+    if isinstance(dt.tzinfo, ZoneInfo):
+        return dt.replace(tzinfo=None).isoformat(timespec="seconds"), dt.tzinfo.key
+    return dt.astimezone(UTC).replace(tzinfo=None).isoformat(timespec="seconds"), "UTC"
 
 
 def _compose(a: Any) -> dict[str, Any]:
@@ -37,7 +43,7 @@ def _compose(a: Any) -> dict[str, Any]:
 def _events_list(a: Any) -> dict[str, Any]:
     out: dict[str, Any] = {
         "timeMin": a.time_min.isoformat(), "timeMax": a.time_max.isoformat(),
-        "max_results": a.max_results, "singleEvents": True, "orderBy": "startTime",
+        "maxResults": a.max_results, "singleEvents": True, "orderBy": "startTime",
     }
     if a.updated_min is not None:
         out["updatedMin"] = a.updated_min.isoformat()
@@ -45,11 +51,12 @@ def _events_list(a: Any) -> dict[str, Any]:
 
 
 def _create_event(a: Any) -> dict[str, Any]:
+    wall, tz = _wall_and_tz(a.start)
     return {
-        "summary": a.summary, "start_datetime": a.start.isoformat(),
+        "summary": a.summary, "start_datetime": wall,
         "event_duration_hour": a.duration_minutes // 60,
         "event_duration_minutes": a.duration_minutes % 60,
-        "attendees": list(a.attendees), "description": a.description, "timezone": _tz_name(a.start),
+        "attendees": list(a.attendees), "description": a.description, "timezone": tz,
     }
 
 
@@ -58,8 +65,7 @@ def _update_event(a: Any) -> dict[str, Any]:
     if a.summary is not None:
         out["summary"] = a.summary
     if a.start is not None:
-        out["start_datetime"] = a.start.isoformat()
-        out["timezone"] = _tz_name(a.start)
+        out["start_datetime"], out["timezone"] = _wall_and_tz(a.start)
     if a.duration_minutes is not None:
         out["event_duration_hour"] = a.duration_minutes // 60
         out["event_duration_minutes"] = a.duration_minutes % 60
@@ -86,7 +92,7 @@ COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
     "calendar.find": SlugMapping("GOOGLECALENDAR_FIND_EVENT", lambda a: {"query": a.query}),
     "calendar.free_slots": SlugMapping(
         "GOOGLECALENDAR_FIND_FREE_SLOTS",
-        lambda a: {"timeMin": a.time_min.isoformat(), "timeMax": a.time_max.isoformat()},
+        lambda a: {"time_min": a.time_min.isoformat(), "time_max": a.time_max.isoformat()},
     ),
     "calendar.create_event": SlugMapping("GOOGLECALENDAR_CREATE_EVENT", _create_event),
     "calendar.update_event": SlugMapping("GOOGLECALENDAR_UPDATE_EVENT", _update_event),
@@ -96,10 +102,12 @@ COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
     ),
     "slack.send": SlugMapping("SLACK_SEND_MESSAGE", lambda a: {"channel": a.channel, "text": a.text}),
     "notion.search": SlugMapping("NOTION_SEARCH_NOTION_PAGE", lambda a: {"query": a.query}),
-    "notion.read": SlugMapping("NOTION_FETCH_DATA", lambda a: {"page_id": a.page_id}),
+    "notion.read": SlugMapping("NOTION_FETCH_BLOCK_CONTENTS", lambda a: {"block_id": a.page_id}),
     "notion.create_page": SlugMapping(
         "NOTION_CREATE_NOTION_PAGE",
-        lambda a: {"parent_id": a.parent_id, "title": a.title, "markdown": a.content},
+        # The live action creates an EMPTY page and has no body argument; content needs a follow-up
+        # NOTION_ADD_PAGE_CONTENT call (not built; Notion is outside the Gmail slice).
+        lambda a: {"parent_id": a.parent_id, "title": a.title},
     ),
 }
 
@@ -113,7 +121,7 @@ MAVIS_TRIGGERS: dict[Capability, tuple[str, ...]] = {
 
 COMPOSIO_TRIGGERS: dict[str, str] = {
     "mail.new_message": "GMAIL_NEW_GMAIL_MESSAGE",
-    "calendar.event_changed": "GOOGLECALENDAR_EVENT_CHANGE_TRIGGER",
+    "calendar.event_changed": "GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CHANGE_TRIGGER",
     "slack.message": "SLACK_RECEIVE_MESSAGE",
     "notion.page_changed": "NOTION_PAGE_UPDATED_TRIGGER",
 }
