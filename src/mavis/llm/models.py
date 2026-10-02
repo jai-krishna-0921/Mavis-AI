@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import weakref
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
@@ -95,37 +96,66 @@ RETRY_AFTER_CAP_S = 5.0  # a server Retry-After of 18s would make a reply crawl;
 RATE_LIMIT_BACKOFF_S = (0.5, 1.0, 2.0)  # same-model retries on 429 before moving to the next model
 
 
+BACKGROUND_AGING_S = 30.0  # a background waiter this old is treated as interactive (no starvation)
+BACKGROUND_ACQUIRE_TIMEOUT_S = 600.0  # below BUS_CLAIM_IDLE_MS (15 min): never outlive a bus claim
+INTERACTIVE_DEADLINE_S = 25.0  # chain-wide budget (queue + attempts + 429 backoffs) for a FAST reply
+BACKGROUND_DEADLINE_S = 120.0  # same, for background calls and SMART-tier calls
+
+
+class _Waiter:
+    __slots__ = ("fut", "interactive", "since")
+
+    def __init__(self, fut: asyncio.Future[None], interactive: bool, since: float) -> None:
+        self.fut, self.interactive, self.since = fut, interactive, since
+
+
 class _Limiter:
     """Process-wide cap on in-flight LLM calls (Ollama Cloud 429s on concurrent requests).
 
-    Two levels: a background call only acquires a slot when no interactive call is waiting, so a user
-    reply never queues behind LEARN-job traffic (an already running call is never preempted).
+    Two levels: a freed slot goes to the oldest *eligible* waiter, where eligible means interactive
+    or a background waiter that has waited >= BACKGROUND_AGING_S. If none is eligible the oldest
+    background waiter gets it. So replies never queue behind LEARN traffic, yet background work
+    cannot starve. A running call is never preempted. Everything here is synchronous (no await
+    between state changes), so release() cannot be interrupted by a second cancellation.
     """
 
     def __init__(self, size: int) -> None:
         self._free = max(1, size)
-        self._cond = asyncio.Condition()
-        self._interactive_waiting = 0
+        self._waiters: list[_Waiter] = []
 
-    async def acquire(self, priority: Priority) -> None:
-        interactive = priority == "interactive"
-        async with self._cond:
-            if interactive:
-                self._interactive_waiting += 1
-            try:
-                await self._cond.wait_for(
-                    lambda: self._free > 0 and (interactive or self._interactive_waiting == 0)
-                )
-            finally:
-                if interactive:
-                    self._interactive_waiting -= 1
-                    self._cond.notify_all()  # background waiters may now proceed (also on cancel)
+    async def acquire(self, priority: Priority, wait_s: float) -> None:
+        loop = asyncio.get_running_loop()
+        if self._free > 0 and not self._waiters:
             self._free -= 1
+            return
+        waiter = _Waiter(loop.create_future(), priority == "interactive", loop.time())
+        self._waiters.append(waiter)
+        self._dispatch()
+        try:
+            await asyncio.wait_for(waiter.fut, max(wait_s, 0.0))
+        except BaseException as exc:
+            if waiter in self._waiters:
+                self._waiters.remove(waiter)
+            elif waiter.fut.done() and not waiter.fut.cancelled():
+                self.release()  # slot was handed over just as we gave up: pass it on
+            if isinstance(exc, TimeoutError):
+                raise LLMError("timed out waiting for an LLM slot") from exc
+            raise
 
-    async def release(self) -> None:
-        async with self._cond:
-            self._free += 1
-            self._cond.notify_all()
+    def release(self) -> None:
+        self._free += 1
+        self._dispatch()
+
+    def _dispatch(self) -> None:
+        now = asyncio.get_running_loop().time()
+        while self._free > 0 and self._waiters:
+            pick = next(
+                (w for w in self._waiters if w.interactive or now - w.since >= BACKGROUND_AGING_S),
+                self._waiters[0],
+            )
+            self._waiters.remove(pick)
+            self._free -= 1
+            pick.fut.set_result(None)
 
 
 # one limiter per event loop: asyncio primitives must not be shared across loops (pytest runs many)
@@ -162,21 +192,50 @@ async def _sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
-async def _call[R](op: Callable[[], Awaitable[R]], priority: Priority) -> R:
-    """Run one model attempt under the concurrency limiter; back off and retry the SAME model on 429."""
+class _Deadline:
+    def __init__(self, seconds: float) -> None:
+        self._end = time.monotonic() + seconds
+
+    def remaining(self) -> float:
+        return self._end - time.monotonic()
+
+    def check(self) -> float:
+        left = self.remaining()
+        if left <= 0:
+            raise LLMError("LLM deadline exceeded")
+        return left
+
+
+def _deadline_for(tier: Tier, priority: Priority) -> _Deadline:
+    fast_reply = tier is Tier.FAST and priority == "interactive"
+    return _Deadline(INTERACTIVE_DEADLINE_S if fast_reply else BACKGROUND_DEADLINE_S)
+
+
+async def _call[R](op: Callable[[], Awaitable[R]], priority: Priority, deadline: _Deadline) -> R:
+    """One model attempt under the limiter and the chain deadline; 429 backs off on the SAME model."""
     for delay in (*RATE_LIMIT_BACKOFF_S, None):
+        left = deadline.check()
         lim = _limiter()
-        await lim.acquire(priority)
+        await lim.acquire(priority, left if priority == "interactive"
+                          else min(left, BACKGROUND_ACQUIRE_TIMEOUT_S))
+        wait: float | None = None
         try:
-            return await op()
+            try:
+                async with asyncio.timeout(deadline.check()):
+                    return await op()
+            except TimeoutError as exc:
+                if deadline.remaining() <= 0:
+                    raise LLMError("LLM deadline exceeded") from exc
+                raise
         except Exception as exc:  # noqa: BLE001
             if delay is None or not _is_rate_limited(exc):
                 raise
             wait = _retry_after_s(exc)
             log.warning("llm.rate_limited", retry_in_s=delay if wait is None else wait)
         finally:
-            await lim.release()
-        await _sleep(delay if wait is None else wait)  # outside the slot so others can use it
+            lim.release()
+        # outside the slot so others can use it; never sleep past the deadline
+        await _sleep(min(delay if wait is None else wait, max(deadline.remaining(), 0.0)))
     raise AssertionError("unreachable")  # pragma: no cover
 
 
@@ -206,11 +265,12 @@ async def complete(
 ) -> str:
     """Plain-text completion with model fallback. Raises LLMError on failure or empty output."""
     chain = _chain(tier)
+    deadline = _deadline_for(tier, priority)
     out = None
     for i, model in enumerate(chain):
         try:
             llm = _model_for(tier, temperature, model)
-            out = await _call(lambda m=llm: m.ainvoke(messages, config=run_config(name)), priority)
+            out = await _call(lambda m=llm: m.ainvoke(messages, config=run_config(name)), priority, deadline)
             break
         except Exception as exc:  # noqa: BLE001
             if _is_retriable(exc) and i + 1 < len(chain):
@@ -243,16 +303,23 @@ async def structured[T: BaseModel](
     """
     messages = _messages(system, user)
     chain = _chain(tier)
+    deadline = _deadline_for(tier, priority)
     for i, model in enumerate(chain):
         try:
-            return await _structured_with(model, schema, messages, tier, priority)
-        except _Unavailable as unavailable:
-            exc = unavailable.__cause__ or unavailable
+            return await _structured_with(model, schema, messages, tier, priority, deadline)
+        except (_Unavailable, _Invalid) as failure:
+            exc = failure.__cause__ or failure
             if i + 1 < len(chain):
                 _log_fallback(tier, model, chain[i + 1], exc)
                 continue
+            if isinstance(failure, _Invalid):
+                raise LLMError(str(failure)) from failure
             raise LLMError(f"could not get a valid {schema.__name__}: {type(exc).__name__}") from exc
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+class _Invalid(LLMError):
+    """Tool mode and JSON mode both failed to give a valid object on this model; try the next one."""
 
 
 class _Unavailable(Exception):
@@ -260,16 +327,19 @@ class _Unavailable(Exception):
 
 
 async def _structured_with[T: BaseModel](
-    model: str | None, schema: type[T], messages: list[BaseMessage], tier: Tier, priority: Priority
+    model: str | None, schema: type[T], messages: list[BaseMessage], tier: Tier, priority: Priority,
+    deadline: _Deadline,
 ) -> T:
     cfg = run_config(f"structured:{schema.__name__}")
     try:
         runnable = _model_for(tier, 0.1, model).with_structured_output(schema, method="function_calling")
-        result = await _call(lambda: runnable.ainvoke(messages, config=cfg), priority)
+        result = await _call(lambda: runnable.ainvoke(messages, config=cfg), priority, deadline)
         if isinstance(result, schema):
             return result
         if isinstance(result, dict):
             return schema.model_validate(result)
+    except LLMError:
+        raise  # deadline / queue timeout: no point trying anything else
     except Exception as exc:  # noqa: BLE001 - fall through to JSON mode
         if _is_retriable(exc):
             raise _Unavailable() from exc
@@ -283,7 +353,9 @@ async def _structured_with[T: BaseModel](
     for _ in range(2):
         try:
             llm = _model_for(tier, 0.1, model)
-            raw = await _call(lambda m=llm: m.ainvoke(messages + [hint], config=cfg), priority)
+            raw = await _call(lambda m=llm: m.ainvoke(messages + [hint], config=cfg), priority, deadline)
+        except LLMError:
+            raise
         except Exception as exc:  # noqa: BLE001
             if _is_retriable(exc):
                 raise _Unavailable() from exc
@@ -295,4 +367,4 @@ async def _structured_with[T: BaseModel](
             return schema.model_validate_json(match.group(0) if match else content)
         except ValidationError as exc:
             last = exc
-    raise LLMError(f"could not get a valid {schema.__name__}: {type(last).__name__ if last else 'unknown'}")
+    raise _Invalid(f"could not get a valid {schema.__name__}: {type(last).__name__ if last else 'unknown'}")

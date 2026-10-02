@@ -12,7 +12,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import ResponseError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from mavis.bus.base import BLOCK_MS, EventHandler, JobHandler, Stream, run_with_inline_retries
+from mavis.bus.base import BLOCK_MS, SELF_RETRYING, EventHandler, JobHandler, Stream, run_with_inline_retries
 from mavis.domain.events import Event, Job
 
 log = structlog.get_logger(__name__)
@@ -54,10 +54,12 @@ class RedisStreamsBus:
                            approximate=True)
 
     async def consume_events(self, group: str, consumer: str, handler: EventHandler) -> None:
+        self_retrying = getattr(handler, SELF_RETRYING, False)
+
         async def handle(data: str, attempts: int) -> None:
             await handler(Event.model_validate_json(data))
 
-        await self._consume(Stream.EVENTS, group, consumer, handle)
+        await self._consume(Stream.EVENTS, group, consumer, handle, inline_retries=not self_retrying)
 
     async def consume_jobs(self, group: str, consumer: str, handler: JobHandler) -> None:
         async def handle(data: str, attempts: int) -> None:
@@ -79,7 +81,8 @@ class RedisStreamsBus:
                 raise
 
     async def _consume(
-        self, stream: Stream, group: str, consumer: str, handle: Callable[[str, int], Awaitable[None]]
+        self, stream: Stream, group: str, consumer: str, handle: Callable[[str, int], Awaitable[None]],
+        inline_retries: bool = True,
     ) -> None:
         await self._ensure_group(stream.value, group)
         backoff = 0.0
@@ -91,7 +94,7 @@ class RedisStreamsBus:
                                                     block=self._block_ms)
                     entries = [entry for _name, items in (resp or []) for entry in items]
                 for msg_id, fields in entries:
-                    await self._process(stream.value, group, msg_id, fields, handle)
+                    await self._process(stream.value, group, msg_id, fields, handle, inline_retries)
                 backoff = 0.0
             except asyncio.CancelledError:
                 raise
@@ -120,7 +123,7 @@ class RedisStreamsBus:
 
     async def _process(
         self, stream: str, group: str, msg_id: str, fields: dict[str, Any],
-        handle: Callable[[str, int], Awaitable[None]],
+        handle: Callable[[str, int], Awaitable[None]], inline_retries: bool = True,
     ) -> None:
         data = fields.get("data") or fields.get(b"data")
         if isinstance(data, bytes):
@@ -132,9 +135,12 @@ class RedisStreamsBus:
             await self._dead_letter(stream, group, msg_id, data)
             return
         try:
-            await run_with_inline_retries(
-                lambda: handle(data, delivered - 1), what=stream, ref=str(msg_id)
-            )
+            if inline_retries:
+                await run_with_inline_retries(
+                    lambda: handle(data, delivered - 1), what=stream, ref=str(msg_id)
+                )
+            else:
+                await handle(data, delivered - 1)
         except Exception:
             log.exception("bus.handler_failed", stream=stream, msg_id=str(msg_id), attempt=delivered)
             if delivered >= self._max:

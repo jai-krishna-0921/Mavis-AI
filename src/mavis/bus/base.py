@@ -5,8 +5,12 @@ from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from typing import Protocol
 
+import httpx
 import structlog
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
+from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, Job
 
 BLOCK_MS = 5_000  # XREADGROUP BLOCK; redis socket read timeout must exceed it
@@ -18,21 +22,41 @@ log = structlog.get_logger(__name__)
 INLINE_RETRY_DELAYS_S: tuple[float, ...] = (2, 5, 10)
 
 
+def is_transient(exc: BaseException) -> bool:
+    """Failures worth an in-process retry; anything else (bugs, bad data) goes straight to pending/DLQ."""
+    return isinstance(
+        exc, (LLMError, RedisTimeoutError, RedisConnectionError, TimeoutError, httpx.TransportError)
+    )
+
+
+# Marker for handlers that run `run_with_inline_retries` themselves (e.g. under the per-user lock);
+# the bus then does not wrap them a second time.
+SELF_RETRYING = "mavis_self_retrying"
+
+
 async def _sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
-async def run_with_inline_retries(call: Callable[[], Awaitable[None]], *, what: str, ref: str) -> None:
-    """Run `call`; on Exception retry after each INLINE_RETRY_DELAYS_S delay, re-raising the last error.
+async def run_handler(handler: Callable[..., Awaitable[None]], item: object, *, what: str, ref: str) -> None:
+    if getattr(handler, SELF_RETRYING, False):
+        await handler(item)
+    else:
+        await run_with_inline_retries(lambda: handler(item), what=what, ref=ref)
 
-    The caller's per-user lock must be taken inside `call`, so it is never held across a sleep.
+
+async def run_with_inline_retries(call: Callable[[], Awaitable[None]], *, what: str, ref: str) -> None:
+    """Run `call`, retrying transient errors after each INLINE_RETRY_DELAYS_S delay; re-raise the last.
+
+    For events the per-user lock wraps this whole loop (see worker.runner.handle_event) so a user's
+    next event cannot overtake a retrying one; jobs are unlocked.
     """
     for attempt, delay in enumerate((*INLINE_RETRY_DELAYS_S, None)):
         try:
             await call()
             return
-        except Exception:
-            if delay is None:
+        except Exception as exc:
+            if delay is None or not is_transient(exc):
                 raise
             log.warning("bus.inline_retry", what=what, ref=ref, attempt=attempt + 1, retry_in_s=delay)
             await _sleep(delay)
