@@ -7,7 +7,9 @@ from zento.worker.handlers import register_default_handlers
 from zento.worker.runner import handle_event
 
 
-async def test_default_handlers_route_user_messages_to_simple_turn(db, channel, fake_llm) -> None:
+async def test_default_handlers_route_user_messages_to_simple_turn(
+    db, channel, fake_llm, memory, bus
+) -> None:
     register_default_handlers()
     register_default_handlers()  # idempotent
     user, _ = await users.get_or_create_by_chat(5, "Jai")
