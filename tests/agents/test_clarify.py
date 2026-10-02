@@ -71,7 +71,7 @@ async def test_extractor_prompt_flags_midnight_ambiguity(db, clock, memory, monk
     user, _ = await users.get_or_create_by_chat(1001, "Jai")
     seen: dict[str, str] = {}
 
-    async def capture(schema, system, user_msg, tier=llm.Tier.FAST):
+    async def capture(schema, system, user_msg, tier=llm.Tier.FAST, priority="interactive"):
         if schema is Extraction:
             seen["system"] = system
             return Extraction()
