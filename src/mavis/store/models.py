@@ -131,7 +131,6 @@ class LoopRow(Base):
     created_at: Mapped[datetime] = mapped_column()
     updated_at: Mapped[datetime] = mapped_column()
     version: Mapped[int] = mapped_column(Integer, default=1)
-    version: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class WakeupRow(Base):
