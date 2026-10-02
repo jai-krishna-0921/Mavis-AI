@@ -22,7 +22,13 @@ DECISION_POLICIES: list[DecisionPolicy] = []
 
 async def run_prefilters(event: Event) -> str | None:
     for fn in PREFILTERS:
-        reason = await fn(event)
+        try:
+            reason = await fn(event)
+        except Exception as exc:  # noqa: BLE001 - a broken prefilter must not fail the event
+            log.warning(
+                "initiative.prefilter_failed", prefilter=getattr(fn, "__qualname__", str(fn)), error=str(exc)
+            )
+            continue
         if reason:
             return reason
     return None
@@ -47,5 +53,10 @@ async def gather_enrichments(event: Event) -> str:
 
 async def apply_decision_policies(event: Event, decision: InitiativeDecision) -> InitiativeDecision:
     for fn in DECISION_POLICIES:
-        decision = await fn(event, decision)
+        try:
+            decision = await fn(event, decision)
+        except Exception as exc:  # noqa: BLE001 - a broken policy must not fail the event
+            log.warning(
+                "initiative.policy_failed", policy=getattr(fn, "__qualname__", str(fn)), error=str(exc)
+            )
     return decision
