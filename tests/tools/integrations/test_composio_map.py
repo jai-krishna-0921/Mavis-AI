@@ -45,7 +45,7 @@ def test_calendar_create_duration_and_timezone():
     out = COMPOSIO_ACTIONS["calendar.create_event"].translate(
         CalendarCreateArgs(summary="Prep", start=start, duration_minutes=90, attendees=["j@x.com"])
     )
-    assert out["start_datetime"] == "2026-10-05T10:00:00+05:30"
+    assert out["start_datetime"] == "2026-10-05T10:00:00"
     assert out["event_duration_hour"] == 1 and out["event_duration_minutes"] == 30
     assert out["timezone"] == "Asia/Kolkata"
     assert out["attendees"] == ["j@x.com"]
@@ -56,6 +56,15 @@ def test_calendar_create_utc_timezone_fallback():
         CalendarCreateArgs(summary="x", start=datetime(2026, 10, 5, 4, 30, tzinfo=UTC))
     )
     assert out["timezone"] == "UTC"
+    assert out["start_datetime"] == "2026-10-05T04:30:00"
+
+
+def test_calendar_create_fixed_offset_converts_to_naive_utc():
+    from datetime import timedelta, timezone
+
+    start = datetime(2026, 10, 5, 10, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    out = COMPOSIO_ACTIONS["calendar.create_event"].translate(CalendarCreateArgs(summary="x", start=start))
+    assert out["start_datetime"] == "2026-10-05T04:30:00" and out["timezone"] == "UTC"
 
 
 def test_triggers_cover_all_capabilities_and_map_to_slugs():
