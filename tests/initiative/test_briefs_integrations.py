@@ -116,3 +116,42 @@ async def test_inbox_items_trust_flags():
     assert await InboxBrief(p, ConnectionCache(p)).items(1, NOW, NOW) == [
         BriefItem("Inbox: nothing unread that needs you.", True)
     ]
+
+
+async def test_failed_connection_prompts_reconnect_and_brief_skips_source():
+    p = FakeProvider()
+    p.set_state(1, Capability.GMAIL, ConnectionState.FAILED)
+    prompts = []
+
+    async def on_failed(user_id, capability):
+        prompts.append((user_id, capability))
+
+    assert await InboxBrief(p, ConnectionCache(p), on_failed=on_failed).gather(1, NOW) is None
+    assert prompts == [(1, Capability.GMAIL)]
+
+
+async def test_brief_survives_a_failing_reconnect_prompt():
+    p = FakeProvider()
+    p.set_state(1, Capability.CALENDAR, ConnectionState.FAILED)
+
+    async def on_failed(user_id, capability):
+        raise RuntimeError("outbox down")
+
+    assert await CalendarBrief(p, ConnectionCache(p), tz_of, on_failed=on_failed).gather(1, NOW) is None
+
+
+async def test_brief_auth_error_confirmed_failed_prompts():
+    p = FakeProvider()
+    p.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    p.results["mail.search"] = ToolResult(ok=False, error="Composio answered 401 for POST /tools/execute/x")
+    prompts = []
+
+    async def on_failed(user_id, capability):
+        prompts.append(capability)
+
+    cache = ConnectionCache(p)
+    brief = InboxBrief(p, cache, on_failed=on_failed)
+    assert await brief.gather(1, NOW) is None and prompts == []  # provider still says ACTIVE
+    p.set_state(1, Capability.GMAIL, ConnectionState.FAILED)
+    assert await brief.gather(1, NOW) is None  # cache is warm with ACTIVE: auth error then confirms
+    assert prompts == [Capability.GMAIL]

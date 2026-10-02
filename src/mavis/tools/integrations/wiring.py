@@ -33,7 +33,7 @@ from mavis.tools.integrations.activation import Activator
 from mavis.tools.integrations.connect_flow import CHECK_KIND, ConnectFlow, RepoUserState
 from mavis.tools.integrations.first_sync import FirstSync
 from mavis.tools.integrations.poller import POLL_KIND, Poller
-from mavis.worker.runner import register_event_handler, register_job_handler
+from mavis.worker.runner import register_event_handler, register_job_handler, register_startup_hook
 
 log = structlog.get_logger(__name__)
 
@@ -83,7 +83,44 @@ async def wakeup_schedule(user_id: int, at: datetime, reason: str, kind: str) ->
             # firing right now (due, still PENDING until commit), or the chain would die.
             if w.due_at > now or at <= now:
                 return w.id
-    return await service.wake_me(user_id, at, reason, kind=kind)
+    # plumbing, not agent intent: never compressed by DEMO_TIME_SCALE
+    return await service.wake_me(user_id, at, reason, kind=kind, scale=False)
+
+
+async def connection_checks_pending(user_id: int, pending_id: int) -> bool:
+    from mavis.timers.service import WakeupService
+
+    pending = await WakeupService().pending(user_id, WakeupKind.SYSTEM_CONNECTION_CHECK)
+    return any(w.reason == str(pending_id) for w in pending)
+
+
+async def cancel_connection_checks(user_id: int, pending_id: int) -> None:
+    from mavis.timers.service import WakeupService
+
+    service = WakeupService()
+    for w in await service.pending(user_id, WakeupKind.SYSTEM_CONNECTION_CHECK):
+        if w.reason == str(pending_id):
+            await service.cancel(w.id)
+
+
+async def reconnect_prompt(user_id: int, capability: Capability) -> object:
+    """Expired or revoked access seen by the poller, a brief or an action: one prompt per day."""
+    return await get_connect_flow().prompt_reconnect(user_id, capability)
+
+
+async def all_user_ids() -> list[int]:
+    from mavis.store.repo import users
+
+    return await users.all_ids()
+
+
+async def heal_poll_chains(user_id: int) -> None:
+    await get_poller().ensure_chains(user_id)
+
+
+async def heal_all_poll_chains() -> None:
+    armed = await get_poller().ensure_all_chains()
+    log.info("poller.chains_ensured", armed=armed)
 
 
 async def user_timezone(user_id: int) -> str:
@@ -115,14 +152,16 @@ def get_connect_flow() -> ConnectFlow:
     return ConnectFlow(
         provider=get_provider(), cache=get_connection_cache(), bus=_LazyBus(), notify=outbox_notify,
         schedule=wakeup_schedule, state=RepoUserState(), base_url=get_settings().public_base_url,
-        on_active=get_activator().on_active,
+        on_active=get_activator().on_active, has_checks=connection_checks_pending,
+        cancel_checks=cancel_connection_checks,
     )
 
 
 @lru_cache
 def get_poller() -> Poller:
     return Poller(provider=get_provider(), cache=get_connection_cache(), bus=_LazyBus(),
-                  state=RepoUserState(), schedule=wakeup_schedule)
+                  state=RepoUserState(), schedule=wakeup_schedule, on_failed=reconnect_prompt,
+                  user_ids=all_user_ids)
 
 
 @lru_cache
@@ -198,6 +237,9 @@ def register_integrations(registry: object | None = None) -> None:
     register_job_handler(JobKind.POLL_PROVIDER, _poll_job)
     register_system_wakeup(CHECK_KIND, flow.on_check_wakeup)
     register_system_wakeup(POLL_KIND, get_poller().on_wakeup)
+    # Self-healing: the poll chain lives in the wakeups table, so re-arm it on start and each morning.
+    register_startup_hook(heal_all_poll_chains)
+    routines.register_morning_hook(heal_poll_chains)
 
     triage = get_email_triage()
     if email_prefilter not in hooks.PREFILTERS:
@@ -210,6 +252,10 @@ def register_integrations(registry: object | None = None) -> None:
 
     present = {s.name for s in routines.brief_sources()}
     if "calendar" not in present:
-        routines.register_brief_source(CalendarBrief(get_provider(), get_connection_cache(), user_timezone))
+        routines.register_brief_source(
+            CalendarBrief(get_provider(), get_connection_cache(), user_timezone, on_failed=reconnect_prompt)
+        )
     if "inbox" not in present:
-        routines.register_brief_source(InboxBrief(get_provider(), get_connection_cache()))
+        routines.register_brief_source(
+            InboxBrief(get_provider(), get_connection_cache(), on_failed=reconnect_prompt)
+        )

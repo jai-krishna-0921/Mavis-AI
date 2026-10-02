@@ -4,6 +4,7 @@ from mavis.agents import buttons
 from mavis.channels.outbox_sender import OutboxSender
 from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, JobKind, Trust
+from mavis.domain.policy import Capability
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative import hooks, routines
 from mavis.initiative import wiring as initiative_wiring
@@ -34,6 +35,8 @@ def test_register_integrations_wires_everything():
     assert hooks.ENRICHERS == [triage.enrich]
     assert hooks.DECISION_POLICIES == [triage.apply_policy]
     assert sorted(s.name for s in routines.brief_sources()) == ["calendar", "inbox"]
+    assert runner._startup_hooks == [wiring.heal_all_poll_chains]
+    assert routines._morning_hooks == [wiring.heal_poll_chains]
 
 
 def test_register_survives_registry_reset():
@@ -195,3 +198,78 @@ def test_reset_fixture_unbinds_stale_system_wakeups():
 def test_system_wakeups_cleared_after_previous_test():
     assert "system_poll" not in system.SYSTEM_WAKEUP_HANDLERS
     assert "system_connection_check" not in system.SYSTEM_WAKEUP_HANDLERS
+
+
+async def test_two_users_first_sync_learn_markers_do_not_collide(db, monkeypatch):
+    from mavis.memory import jobs
+    from mavis.tools.integrations.first_sync import FirstSync
+
+    learned = []
+
+    class FakeMemoryService:
+        async def learn(self, user_id, text, source_ref="", trust=Trust.USER):
+            learned.append((user_id, source_ref))
+
+    monkeypatch.setattr(jobs, "get_memory", lambda: FakeMemoryService())
+    bus = FakeBus()
+    monkeypatch.setattr(wiring, "get_bus", lambda: bus)
+
+    class P:
+        async def execute(self, user, action, args):
+            from mavis.domain.integrations import ToolResult
+            return ToolResult(ok=True, data={"messages": [
+                {"messageId": "1", "sender": "A <a@x.com>", "subject": "hi", "labelIds": ["INBOX"]}]})
+
+    async def tz(_):
+        return "UTC"
+
+    sync = FirstSync(provider=P(), memory=wiring.JobLearner(), loops=None, bus=bus, tz_of=tz)
+    await sync.run(101, Capability.GMAIL)
+    await sync.run(102, Capability.GMAIL)
+    for job in [j for j in bus.jobs if j.kind is JobKind.LEARN]:
+        await jobs.handle_learn(job)
+    assert {u for u, _ in learned} == {101, 102}
+
+
+async def test_system_wakeups_ignore_demo_time_scale(db, user, clock, settings, monkeypatch):
+    clock.set(NOW)
+    monkeypatch.setattr(settings, "demo_time_scale", 0.01)
+    at = timeutil.now() + timedelta(minutes=10)
+    check = await wiring.wakeup_schedule(user.id, at, "5", "system_connection_check")
+    poll = await wiring.wakeup_schedule(user.id, at, "gmail", POLL_KIND)
+    due = {w.id: w.due_at for w in await WakeupService().pending(user.id)}
+    assert due[check] == at and due[poll] == at
+
+
+async def test_heal_rearms_missing_poll_chains_for_every_user(db, user, clock):
+    clock.set(NOW)
+    other, _ = await users.get_or_create_by_chat(222, "Sam")
+    await users.update_state(user.id, {"polling": {"gmail": True, "googlecalendar": False}})
+    await users.update_state(other.id, {"polling": {"googlecalendar": True}})
+    await wiring.heal_all_poll_chains()
+    await wiring.heal_all_poll_chains()  # idempotent: the pending chain absorbs the second ask
+    svc = WakeupService()
+    assert [w.reason for w in await svc.pending(user.id, WakeupKind.SYSTEM_POLL)] == ["gmail"]
+    assert [w.reason for w in await svc.pending(other.id, WakeupKind.SYSTEM_POLL)] == ["googlecalendar"]
+    # a chain that is still alive is left alone by the morning hook
+    await wiring.heal_poll_chains(user.id)
+    assert len(await svc.pending(user.id, WakeupKind.SYSTEM_POLL)) == 1
+
+
+async def test_connection_checks_pending_sees_scheduled_checks(db, user, clock):
+    clock.set(NOW)
+    assert await wiring.connection_checks_pending(user.id, 5) is False
+    at = timeutil.now() + timedelta(minutes=1)
+    await wiring.wakeup_schedule(user.id, at, "5", "system_connection_check")
+    assert await wiring.connection_checks_pending(user.id, 5) is True
+    assert await wiring.connection_checks_pending(user.id, 6) is False
+
+
+async def test_cancel_connection_checks_only_touches_that_pending(db, user, clock):
+    clock.set(NOW)
+    at = timeutil.now() + timedelta(minutes=1)
+    await wiring.wakeup_schedule(user.id, at, "5", "system_connection_check")
+    await wiring.wakeup_schedule(user.id, at, "6", "system_connection_check")
+    await wiring.cancel_connection_checks(user.id, 5)
+    assert await wiring.connection_checks_pending(user.id, 5) is False
+    assert await wiring.connection_checks_pending(user.id, 6) is True

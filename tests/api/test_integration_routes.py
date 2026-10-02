@@ -38,7 +38,7 @@ async def test_callback_enqueues_check_and_renders_page(db):
     pid = await connections.create_pending(1, Capability.GMAIL, "", None)
     async with client(app_with(bus)) as c:
         r = await c.get(f"/connect/callback?p={pid}")
-    assert r.status_code == 200 and "you can close this tab" in r.text
+    assert r.status_code == 200 and "close this tab" in r.text and "Connected" not in r.text
     [job] = bus.jobs
     assert job.kind is JobKind.CONNECTION_CHECK and job.payload == {"pending_id": pid} and job.user_id == 1
 
@@ -85,7 +85,7 @@ async def test_webhook_publishes_events_once():
         r2 = await c.post("/webhooks/integrations", content=body, headers=headers)
     assert r1.json() == {"accepted": 1, "received": 1}
     assert r2.json() == {"accepted": 0, "received": 1}
-    assert [e.id for e in bus.events] == ["gmail:msg:x1"]
+    assert [e.id for e in bus.events] == ["gmail:1:msg:x1"]
 
 
 async def test_webhook_rejects_bad_signature_and_publishes_nothing():
