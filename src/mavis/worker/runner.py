@@ -19,7 +19,7 @@ from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Job, JobKind, Trust
 from mavis.domain.messages import Outbound
 from mavis.store.repo import outbox
-from mavis.worker.locks import user_lock
+from mavis.worker.locks import lock, user_lock
 
 log = structlog.get_logger(__name__)
 
@@ -28,6 +28,8 @@ JobFn = Callable[[Job], Awaitable[None]]
 
 WORKER_GROUP = "workers"
 FALLBACK_TEXT = "Give me a sec, something's slow on my end. I'll get back to you on this."
+
+CHAT_EVENT_TYPES = frozenset({EventType.USER_MESSAGE, EventType.BUTTON_PRESSED})
 
 _event_handlers: dict[EventType, list[EventFn]] = defaultdict(list)
 _job_handlers: dict[JobKind, JobFn] = {}
@@ -62,6 +64,14 @@ async def _run_handlers(event: Event, handlers: list[EventFn]) -> None:
             raise
 
 
+def _event_lock(event: Event):
+    """Chat turns serialise on the user lock; initiative events on their own per-user key, so slow
+    proactive LLM work never makes the user's next reply wait."""
+    if event.type in CHAT_EVENT_TYPES:
+        return user_lock(event.user_id)
+    return lock(f"initiative:{event.user_id}", timeout_s=600)
+
+
 async def handle_event(event: Event) -> None:
     handlers = list(_event_handlers.get(event.type, []))
     if not handlers:
@@ -70,7 +80,7 @@ async def handle_event(event: Event) -> None:
     with structlog.contextvars.bound_contextvars(event_id=event.id, user_id=event.user_id):
         # The user lock is held across the inline retries (and their sleeps) so this user's next
         # event cannot overtake a retrying one. Other users run on the other consumer loops.
-        async with user_lock(event.user_id):
+        async with _event_lock(event):
             await run_with_inline_retries(
                 lambda: _run_handlers(event, handlers), what="event", ref=event.id
             )

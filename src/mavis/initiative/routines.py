@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import statistics
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Protocol
 
@@ -16,6 +17,7 @@ from mavis.domain.loops import LoopKind, LoopUpsert
 from mavis.domain.messages import Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.executor import InitiativeExecutor
+from mavis.initiative.untrusted import wrap_untrusted
 from mavis.loops.service import LoopService
 from mavis.store.db import Session
 from mavis.store.models import Message
@@ -31,10 +33,18 @@ MIN_SAMPLES = 2
 MAX_IGNORED = 3  # after three check-ins with no user reply, stop sending until they write again
 
 
+@dataclass(frozen=True)
+class BriefItem:
+    """One line of the morning brief. `trusted=False` for anything derived from third-party content."""
+
+    text: str
+    trusted: bool
+
+
 class BriefSource(Protocol):
     name: str
 
-    async def items(self, user_id: int, start: datetime, end: datetime) -> list[str]: ...
+    async def items(self, user_id: int, start: datetime, end: datetime) -> list[BriefItem]: ...
 
 
 _sources: list[BriefSource] = []
@@ -81,33 +91,56 @@ class Routines:
             log.warning("routines.unknown", payload=payload)
 
     async def morning_checkin(self, user, loop_id: int | None) -> None:
+        failed = False
         try:
-            if await self._ignored_streak(user.id) >= MAX_IGNORED:
-                log.info("routines.morning_skipped_ignored", user=user.id)
-                return
-            local_now = timeutil.to_local(timeutil.now(), user.timezone)
-            start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-            end = start + timedelta(days=1)
-            items = [
-                f"{lp.title} at {timeutil.to_local(lp.due_at, user.timezone):%H:%M}"
-                for lp in await self._loops.active(user.id)
-                if lp.kind is not LoopKind.ROUTINE and lp.due_at is not None
-                and start.astimezone(UTC) <= lp.due_at < end.astimezone(UTC)
-            ]
-            for src in list(_sources):
-                try:
-                    items += await src.items(user.id, start.astimezone(UTC), end.astimezone(UTC))
-                except Exception:  # noqa: BLE001 - one broken source must not kill the brief
-                    log.exception("routines.brief_source_failed", source=getattr(src, "name", "?"))
-            if items:
-                intent = "Warm good-morning check-in. Today's items:\n" + "\n".join(f"- {i}" for i in items)
-            else:
-                intent = ("Warm good-morning check-in. Nothing scheduled today: ask what's on their plate "
-                          "or nudge gently on one of their goals.")
-            key = f"morning:{local_now.date().isoformat()}"
-            await self._executor.notify(user, NotifyIntent(urgency=3, intent=intent, dedupe_key=key))
+            await self._send_morning(user)
+        except BaseException:
+            failed = True
+            log.exception("routines.morning_failed", user=user.id)
+            raise
         finally:
-            await self._schedule_morning(user, loop_id, next_day=True)
+            try:  # always reschedule, but never let a reschedule failure mask the original error
+                await self._schedule_morning(user, loop_id, next_day=True)
+            except Exception:
+                if not failed:
+                    raise
+                log.exception("routines.reschedule_failed", user=user.id)
+
+    async def reschedule(self, user, loop_id: int | None) -> None:
+        """A check-in that fired far too late is skipped; the next one is booked for tomorrow."""
+        await self._schedule_morning(user, loop_id, next_day=True)
+
+    async def _send_morning(self, user) -> None:
+        if await self._ignored_streak(user.id) >= MAX_IGNORED:
+            log.info("routines.morning_skipped_ignored", user=user.id)
+            return
+        local_now = timeutil.to_local(timeutil.now(), user.timezone)
+        start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        items = [
+            BriefItem(f"{lp.title} at {timeutil.to_local(lp.due_at, user.timezone):%H:%M}", True)
+            for lp in await self._loops.active(user.id)
+            if lp.kind is not LoopKind.ROUTINE and lp.due_at is not None
+            and start.astimezone(UTC) <= lp.due_at < end.astimezone(UTC)
+        ]
+        for src in list(_sources):
+            try:
+                for item in await src.items(user.id, start.astimezone(UTC), end.astimezone(UTC)):
+                    if isinstance(item, str):  # legacy source without a trust marker: assume untrusted
+                        item = BriefItem(item, False)
+                    items.append(item)
+            except Exception:  # noqa: BLE001 - one broken source must not kill the brief
+                log.exception("routines.brief_source_failed", source=getattr(src, "name", "?"))
+        untrusted = any(not i.trusted for i in items)
+        if items:
+            lines = [i.text if i.trusted else wrap_untrusted(i.text, "brief") for i in items]
+            intent = "Warm good-morning check-in. Today's items:\n" + "\n".join(f"- {line}" for line in lines)
+        else:
+            intent = ("Warm good-morning check-in. Nothing scheduled today: ask what's on their plate "
+                      "or nudge gently on one of their goals.")
+        key = f"morning:{local_now.date().isoformat()}"
+        await self._executor.notify(user, NotifyIntent(urgency=3, intent=intent, dedupe_key=key),
+                                    untrusted=untrusted)
 
     async def _ignored_streak(self, user_id: int) -> int:
         async with Session() as s:

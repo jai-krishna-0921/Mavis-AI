@@ -10,7 +10,7 @@ from mavis.initiative import routines as routines_mod
 from mavis.initiative.composer import Composer
 from mavis.initiative.executor import InitiativeExecutor
 from mavis.initiative.quiet import QuietTracker
-from mavis.initiative.routines import MORNING_ROUTINE, MORNING_TITLE, Routines
+from mavis.initiative.routines import MORNING_ROUTINE, MORNING_TITLE, BriefItem, Routines
 from mavis.loops.service import LoopService
 from mavis.policy.pings import PingPolicy
 from mavis.store.db import Session
@@ -66,7 +66,7 @@ async def test_morning_checkin_composes_with_items_and_reschedules(user, clock, 
         name = "inbox"
 
         async def items(self, user_id, start, end):
-            return ["2 unread from Acme recruiting"]
+            return [BriefItem("2 unread from Acme recruiting", True)]
 
     routines_mod.register_brief_source(Inbox())
     seen = {}

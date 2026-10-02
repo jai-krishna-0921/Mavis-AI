@@ -105,7 +105,8 @@ async def test_daily_budget(user, settings, monkeypatch):
     verdict = await policy.check(user, 3, None, AFTERNOON)
     assert not verdict.allow and verdict.reason == "daily budget reached"
     assert verdict.defer_until == SEVEN_IST_MON
-    assert (await policy.check(user, 5, None, AFTERNOON)).allow
+    # F4: urgency 5 bypasses quiet hours only, never the daily budget
+    assert not (await policy.check(user, 5, None, AFTERNOON)).allow
 
 
 async def test_budget_under_limit_allows(user, settings, monkeypatch):
