@@ -22,6 +22,7 @@ from mavis.initiative.reasoner import Reasoner
 from mavis.initiative.routines import Routines
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.loops.service import LoopService
+from mavis.policy.pings import normalize_dedupe_key
 from mavis.store.repo import users
 from mavis.timers import system
 from mavis.timers.service import WakeupService
@@ -96,7 +97,7 @@ class InitiativeHandler:
             return
         result.extra = await hooks.gather_enrichments(event)
         try:
-            decision = _cap_llm_urgency(await self._reasoner.decide(user, event, result))
+            decision = _normalize_llm_key(_cap_llm_urgency(await self._reasoner.decide(user, event, result)))
         except LLMError as exc:
             log.warning("initiative.reasoner_failed", event_id=event.id, error=str(exc))
             decision = fallback_decision(event, result)
@@ -168,12 +169,30 @@ def _too_late(event: Event) -> bool:
     return timeutil.now() - timeutil.ensure_utc(event.occurred_at) > MAX_WAKEUP_LATENESS
 
 
+def _event_loop_id(event: Event) -> int | None:
+    """The loop this event is about, if any."""
+    raw = event.payload.get("loop_id")
+    if raw is None and event.type in (EventType.LOOP_CREATED, EventType.LOOP_UPDATED):
+        raw = event.payload.get("id")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _origin_for(event: Event) -> dict | None:
     if event.type is EventType.USER_QUIET:
         return {"kind": event.type.value, "asked_at": event.payload.get("asked_at")}
-    if event.type is EventType.EVENT_STARTING:
-        return {"kind": event.type.value, "loop_id": event.payload.get("loop_id")}
+    if (loop_id := _event_loop_id(event)) is not None:
+        return {"kind": event.type.value, "loop_id": loop_id}
     return None
+
+
+def _normalize_llm_key(decision: InitiativeDecision) -> InitiativeDecision:
+    if decision.notify is None or not decision.notify.dedupe_key:
+        return decision
+    key = normalize_dedupe_key(decision.notify.dedupe_key)
+    return decision.model_copy(update={"notify": decision.notify.model_copy(update={"dedupe_key": key})})
 
 
 def _with_default_dedupe(decision: InitiativeDecision, event: Event) -> InitiativeDecision:

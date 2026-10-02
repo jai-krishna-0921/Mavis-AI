@@ -17,7 +17,7 @@ from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.composer import Composer
 from mavis.initiative.quiet import QuietTracker
 from mavis.loops.service import LoopService
-from mavis.policy.pings import PingPolicy, in_quiet_hours
+from mavis.policy.pings import PingPolicy, in_quiet_hours, loop_ping_key
 from mavis.store.db import Session
 from mavis.store.repo import messages, outbox
 from mavis.timers.service import WakeupService
@@ -103,7 +103,9 @@ class InitiativeExecutor:
                      origin: dict[str, Any] | None = None) -> bool:
         if untrusted and intent.urgency > MAX_UNTRUSTED_URGENCY:
             intent = intent.model_copy(update={"urgency": MAX_UNTRUSTED_URGENCY})
-        verdict = await self._policy.check(user, intent.urgency, intent.dedupe_key, timeutil.now())
+        extra = [k for k in (loop_ping_key((origin or {}).get("loop_id"), (origin or {}).get("kind")),) if k]
+        verdict = await self._policy.check(user, intent.urgency, intent.dedupe_key, timeutil.now(),
+                                           extra_keys=extra)
         if not verdict.allow:
             log.info("initiative.notify_blocked", user=user.id, reason=verdict.reason,
                      defer_until=verdict.defer_until)
@@ -124,7 +126,8 @@ class InitiativeExecutor:
         if not message.send:
             log.info("initiative.composer_dropped", user=user.id, intent=intent.intent[:80])
             return False
-        await self.deliver(user, message.messages, intent.dedupe_key, intent.urgency, quiet_streak)
+        await self.deliver(user, message.messages, intent.dedupe_key, intent.urgency, quiet_streak,
+                           extra_keys=extra)
         return True
 
     async def _recover_partial(self, user, intent: NotifyIntent) -> bool:
@@ -141,7 +144,7 @@ class InitiativeExecutor:
         return True
 
     async def deliver(self, user, bubbles: list[str], dedupe_key: str | None = None, urgency: int = 3,
-                      quiet_streak: int = 0) -> None:
+                      quiet_streak: int = 0, extra_keys: list[str] | None = None) -> None:
         now = timeutil.now()
         local_date = timeutil.to_local(now, user.timezone).date().isoformat()
 
@@ -155,7 +158,7 @@ class InitiativeExecutor:
             await session.commit()
         await messages.log(user.id, Role.ASSISTANT, "\n".join(bubbles), proactive=True,
                            event_id=scoped("proactive:", 0))
-        await self._policy.record(user, dedupe_key, urgency, now)
+        await self._policy.record(user, dedupe_key, urgency, now, extra_keys=extra_keys or ())
         if quiet_streak > 0:  # only a USER_QUIET nudge continues its chain; other proactive never arm one
             await self._quiet.after_assistant_message(user.id, bubbles[-1], streak=quiet_streak)
 
