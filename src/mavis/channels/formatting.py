@@ -24,15 +24,33 @@ _KEEP = re.compile("\x01(\\d+)\x01")
 _TAG = re.compile(r"<(/?)(b|i|code|pre|a)(?:\s[^>]*)?>")
 
 
+_DASH = "[\u2014\u2013\u2015\u2012]"  # em, en, horizontal bar, figure dash
+
+
 def sanitize_typography(text: str) -> str:
-    """Remove em and en dashes: they read as machine-written in chat."""
-    text = re.sub(r"(?<=\d)[ \t]*–[ \t]*(?=\d)", "-", text)
-    text = re.sub(r"(?m)^([ \t]*)[—–][ \t]*", r"\1", text)
-    text = re.sub(r"[ \t]*[—–][ \t]*$", "", text, flags=re.M)
-    text = re.sub(r"[ \t]*[—–][ \t]*", ", ", text)
+    """Remove em and en dashes (and their lookalikes): they read as machine-written in chat."""
+    text = text.replace("\u2212", "-")  # minus sign: a plain hyphen-minus reads the same
+    text = re.sub(r"(?<=\S)[ \t]+--[ \t]+(?=\S)", " \u2014 ", text)  # " -- " used as a separator
+    text = re.sub(r"(?<=\d)[ \t]*[\u2013\u2012][ \t]*(?=\d)", "-", text)
+    text = re.sub(rf"(?m)^([ \t]*){_DASH}[ \t]*", r"\1", text)
+    text = re.sub(rf"[ \t]*{_DASH}[ \t]*$", "", text, flags=re.M)
+    text = re.sub(rf"[ \t]*{_DASH}[ \t]*", ", ", text)
     text = re.sub(r",(?:[ \t]*,)+", ",", text)
     text = re.sub(r"([.!?:;]),", r"\1", text)
     return re.sub(r",[ \t]{2,}", ", ", text)
+
+
+def sanitize_stored(text: str) -> str:
+    """Typography fixes for text kept in history (fenced blocks and inline code are left alone)."""
+    out: list[str] = []
+    fenced = False
+    for line in text.split("\n"):
+        if _FENCE.match(line):
+            fenced = not fenced
+            out.append(line)
+            continue
+        out.append(line if fenced else _sanitize_line(line))
+    return "\n".join(out)
 
 
 def _sanitize_line(line: str) -> str:
