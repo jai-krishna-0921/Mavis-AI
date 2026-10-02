@@ -1,7 +1,7 @@
 [project]
 name = "zento"
 version = "0.1.0"
-description = "Zento: a 24x7 proactive personal assistant agent"
+description = "Mavis AI: a 24/7 proactive personal assistant agent"
 readme = "README.md"
 authors = [
     { name = "jai krishna", email = "jaikrishna0921@gmail.com" }
