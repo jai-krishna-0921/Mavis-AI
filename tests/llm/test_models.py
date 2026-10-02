@@ -394,3 +394,49 @@ async def test_slot_granted_then_cancel_is_passed_on() -> None:
     with pytest.raises(asyncio.CancelledError):
         await waiter
     await asyncio.wait_for(lim.acquire("interactive", 1), 1)
+
+
+async def test_background_complete_makes_a_single_model_attempt(chain) -> None:
+    log, scripts, s = chain
+    scripts[s.model_fast] = [_timeout()]
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("learn")], priority="background")
+    assert log == [s.model_fast]  # no walk down the fallback chain
+
+
+async def test_background_structured_makes_a_single_model_attempt(chain, monkeypatch) -> None:
+    log, scripts, s = chain
+
+    class _Struct(_Chat):
+        def with_structured_output(self, schema, method=None):
+            outer = self
+
+            class R:
+                async def ainvoke(self, messages, config=None):
+                    outer.log.append(outer.name)
+                    raise _timeout()
+
+            return R()
+
+    def fake(tier=Tier.FAST, temperature=0.6, model=None):
+        return _Struct(model or s.model_fast, log, [])
+
+    monkeypatch.setattr(models, "chat_model", fake)
+    with pytest.raises(LLMError):
+        await models.structured(Sample, "sys", "u", priority="background")
+    assert log == [s.model_fast]
+
+
+async def test_background_can_opt_back_into_fallback(chain) -> None:
+    log, scripts, s = chain
+    scripts[s.model_fast] = [_timeout()]
+    out = await models.complete([HumanMessage("x")], priority="background", fallback=True)
+    assert out == "from gemma4:31b" and log == [s.model_fast, "gemma4:31b"]
+
+
+async def test_interactive_can_disable_fallback(chain) -> None:
+    log, scripts, s = chain
+    scripts[s.model_fast] = [_timeout()]
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("x")], fallback=False)
+    assert log == [s.model_fast]

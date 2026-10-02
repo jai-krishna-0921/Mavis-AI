@@ -29,7 +29,8 @@ from mavis.tools.integrations.normalize import (
     to_datetime,
 )
 
-BATCH = 15
+BATCH = 15  # lines per LEARN job, until MAX_LEARN_JOBS binds
+MAX_LEARN_JOBS = 3  # first sync must not flood the single LLM slot: lines are combined into <= 3 jobs
 MAX_REPLY_LOOPS = 5
 AUTOMATED = ("no-reply", "noreply", "notifications", "mailer-daemon", "donotreply", "do-not-reply")
 SECURITY_WORDS = ("security alert", "new sign-in", "suspicious", "unusual activity")
@@ -83,9 +84,10 @@ class FirstSync:
         return res.data if res.ok else None
 
     async def _learn_batches(self, user_id: int, header: str, lines: list[str], ref: str) -> None:
-        for i in range(0, len(lines), BATCH):
-            chunk = "\n".join(lines[i : i + BATCH])
-            await self.memory.learn(user_id, f"{header}\n{chunk}", f"{ref}:{i // BATCH}")
+        size = max(BATCH, -(-len(lines) // MAX_LEARN_JOBS))  # ceil: never more than MAX_LEARN_JOBS chunks
+        for n, i in enumerate(range(0, len(lines), size)):
+            chunk = "\n".join(lines[i : i + size])
+            await self.memory.learn(user_id, f"{header}\n{chunk}", f"{ref}:{n}")
 
     async def _gmail(self, user_id: int) -> list[str]:
         data = await self._execute(

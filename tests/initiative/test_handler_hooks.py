@@ -105,7 +105,7 @@ async def test_enricher_extra_reaches_reasoner_prompt(user, clock, recording_bus
     init = build_initiative(recording_bus, fake_memory, embed=no_embed)
     prompts: dict = {}
 
-    async def fake_structured(schema, system, user_msg, tier=llm.Tier.FAST, priority="interactive"):
+    async def fake_structured(schema, system, user_msg, tier=llm.Tier.FAST, priority="interactive", **_):
         prompts["user"] = user_msg
         return InitiativeDecision(ignore_reason="test")
 

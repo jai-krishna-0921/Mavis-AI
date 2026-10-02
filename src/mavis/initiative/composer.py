@@ -65,7 +65,8 @@ class Composer:
             f"Extra context:\n{context or '-'}\n\nRecent conversation:\n{history}"
         )
         draft = await llm.structured(
-            ComposedMessage, system, prompt, tier=llm.Tier.FAST, priority="background"
+            ComposedMessage, system, prompt, tier=llm.Tier.FAST, priority="background",
+            fallback=True,  # user-visible message: keep the model chain
         )
         bubbles = []
         for b in draft.messages:
