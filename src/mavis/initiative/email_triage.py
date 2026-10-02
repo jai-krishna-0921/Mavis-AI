@@ -125,6 +125,6 @@ class EmailTriage:
         notify = NotifyIntent(
             urgency=4,
             intent=SECURITY_INTENT,
-            dedupe_key=f"email:{event.payload.get('message_id', event.id)}",
+            dedupe_key=f"email:{event.user_id}:{event.payload.get('message_id', event.id)}",
         )
         return decision.model_copy(update={"notify": notify, "ignore_reason": None})
