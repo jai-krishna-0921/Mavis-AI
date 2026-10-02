@@ -19,8 +19,8 @@ These are additive and backwards-compatible. Later phases may rely on them.
 3. `VectorStore.count(user_id: int) -> int` — convenience for tests/admin.
 4. `zento.memory.embeddings.Embedder` protocol (`dim: int`, `async embed(texts) -> list[list[float]]`), `get_embedder()`, `set_embedder()`.
 5. `zento.memory.recall.LoopsReader` protocol: `async active(user_id: int, entities: list[str] | None = None, due_within: timedelta | None = None) -> list[Loop]` — Phase 3's `LoopService` satisfies it and is plugged in with `MemoryService.set_loops_reader(...)`.
-6. `zento.memory.service`: `get_memory() -> MemoryService` (async, lazy singleton), `set_memory(svc | None)` (tests), `MemoryService.on_extraction: list[ExtractionHook]` where `ExtractionHook = Callable[[int, Extraction, str], Awaitable[None]]` (args: user_id, extraction, source_ref), `MemoryService.invalidate(user_id)`, `MemoryService.describe_user(user_id) -> str`, `MemoryService.forget(user_id, needle) -> int`.
-7. `LEARN` job payload: `{"text": str, "source_ref": str, "trust": "user"|"system"|"untrusted", "conversation": bool}` (`conversation` defaults to `true`; when true the rolling summary is refreshed).
+6. `zento.memory.service`: `get_memory() -> MemoryService` (synchronous lazy singleton; stores initialise lazily on first awaited call), `set_memory(svc | None)` (tests), `MemoryService.on_extraction: list[ExtractionHook]` where `ExtractionHook = Callable[[int, Extraction, str], Awaitable[None]]` (args: user_id, extraction, source_ref), `MemoryService.invalidate(user_id)`, `MemoryService.describe_user(user_id) -> str`, `MemoryService.forget(user_id, needle) -> int`.
+7. `LEARN` job payload: `{"text": str, "source_ref": str, "trust": "user"|"system"|"untrusted", "conversation": bool}` (for conversation turns `text` is `"Mavis: <previous reply>\nUser: <message>"` when there is a previous reply) (`conversation` defaults to `true`; when true the rolling summary is refreshed).
 8. New ORM tables in `store/models.py`: `graph_nodes`, `graph_edges`, `profile_cards`, `conversation_summaries`.
 
 ## Phase 1 assumptions this plan relies on
@@ -28,7 +28,7 @@ These are additive and backwards-compatible. Later phases may rely on them.
 - `zento.store.db` exposes `Session` (async sessionmaker) and `Base`; `zento.store.models` holds ORM classes including `Message(id, user_id, role, content, proactive, created_at)` and `User(id, name, timezone, …)`, plus `utcnow()` in `zento.store.db`.
 - Code reaches the session factory as `dbm.Session()` (`from zento.store import db as dbm`) so test fixtures can swap it.
 - `zento.store.repo.users.get(user_id) -> User`, `users.get_or_create_by_chat(chat_id, name) -> (User, bool)`; `zento.store.repo.messages.log(...)`, `.recent(user_id, limit=20)`; `zento.store.repo.outbox.enqueue(session, Outbound) -> int`.
-- `zento.bus.get_bus() -> EventBus`; `zento.worker.runner.register_job_handler(kind, fn)`; `zento/worker/handlers.py` has `register_all()` called at worker start.
+- `zento.bus.get_bus() -> EventBus`; `zento.worker.runner.register_job_handler(kind, fn)`; `zento/worker/handlers.py` has `register_default_handlers()` called at worker start.
 - Test fixtures from `tests/conftest.py`: `settings`, `db` (fresh schema via `Base.metadata.create_all`), `bus`, `channel`, `fake_llm` (`push_structured(obj)`, `push_text(str)`, `push_ai(AIMessage)`; patches `zento.llm.models.structured` and `chat_model`).
 - `pyproject.toml` has `[tool.pytest.ini_options]` with `asyncio_mode = "auto"`.
 
@@ -61,10 +61,10 @@ Inherits every line of the index's **Global Constraints**. Phase-specific:
 src/zento/memory/
   __init__.py            (exists, empty)
   tokens.py              estimate_tokens()                                  Task 1
-  embeddings.py          Embedder port, FastEmbedder, get/set_embedder, cosine   Task 1 (replaces scaffold)
-  vector.py              VectorStore port, QdrantVectorStore               Task 2 (replaces scaffold)
+  embeddings.py          Embedder port, FastEmbedder, get/set_embedder, cosine   Task 1
+  vector.py              VectorStore port, QdrantVectorStore               Task 2
   names.py               normalize_name, node_key, sanitize_label/rel, is_user   Task 3
-  graph.py               GraphStore port, SqliteGraphStore, make_graph()   Task 3 (replaces scaffold)
+  graph.py               GraphStore port, SqliteGraphStore, make_graph()   Task 3
   neo4j_graph.py         Cypher builders + Neo4jGraphStore                 Task 4
   extractor.py           extract(), wrap_untrusted(), sanitize()           Task 5
   resolver.py            resolve() -> Resolution                           Task 6
@@ -80,7 +80,7 @@ src/zento/store/repo/profile.py    get/save/history                             
 src/zento/store/repo/summaries.py  latest/add/messages_outside_window                            Task 8
 src/zento/agents/simple_turn.py    recall in prompt + enqueue LEARN                               Task 12
 src/zento/worker/handlers.py       register memory jobs                                           Task 12
-src/zento/migrations/versions/*_phase2_memory_tables.py (autogenerated)                           Task 3
+src/zento/migrations/versions/0002_memory_*.py (autogenerated, rev id 0002_memory)                           Task 3
 tests/memory/ fakes.py conftest.py test_*.py
 tests/agents/test_simple_turn_memory.py
 ```
@@ -221,7 +221,7 @@ def estimate_tokens(text: str) -> int:
     return (len(text) + 3) // 4
 ```
 
-`src/zento/memory/embeddings.py` (replace the scaffold entirely):
+`src/zento/memory/embeddings.py` (new file; Phase 1 Task 1 deleted the old scaffold):
 
 ```python
 """Text embeddings behind a small port so tests never download a model.
@@ -404,11 +404,11 @@ def test_point_id_is_deterministic_and_normalised():
 - [ ] **Step 3: Run test to verify it fails**
 
 Run: `uv run pytest tests/memory/test_vector.py -v`
-Expected: FAIL with `TypeError` / `AttributeError` (scaffold `VectorMemory` has a different API) or `ImportError: cannot import name 'QdrantVectorStore'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'zento.memory.vector'`
 
 - [ ] **Step 4: Implement**
 
-`src/zento/memory/vector.py` (replace the scaffold entirely):
+`src/zento/memory/vector.py` (new file; Phase 1 Task 1 deleted the old scaffold):
 
 ```python
 """Episodic / semantic memory in Qdrant.
@@ -555,7 +555,7 @@ git commit -m "feat(memory): qdrant vector store with deterministic ids and user
 
 **Files:**
 - Create: `src/zento/memory/names.py`
-- Modify: `src/zento/store/models.py` (append four ORM classes; delete any leftover scaffold `Triple` class)
+- Modify: `src/zento/store/models.py` (append four ORM classes)
 - Replace: `src/zento/memory/graph.py`
 - Create: Alembic revision (autogenerated)
 - Create: `tests/memory/test_names.py`, `tests/memory/test_graph_sqlite.py`; Modify: `tests/memory/conftest.py` (add `graph` fixture)
@@ -654,7 +654,7 @@ Expected: 5 passed
 
 - [ ] **Step 5: Add ORM tables**
 
-Append to `src/zento/store/models.py` (add any of these imports that are not already at the top of the file: `from datetime import datetime`, `from sqlalchemy import JSON, Float, ForeignKey, Integer, String, Text, UniqueConstraint`, `from sqlalchemy.orm import Mapped, mapped_column`, `from zento.store.db import Base, utcnow`). If a scaffold `Triple` class exists in the store package, delete it.
+Append to `src/zento/store/models.py` (add any of these imports that are not already at the top of the file: `from datetime import datetime`, `from sqlalchemy import JSON, Float, ForeignKey, Integer, String, Text, UniqueConstraint`, `from sqlalchemy.orm import Mapped, mapped_column`, `from zento.store.db import Base, utcnow`).
 
 ```python
 class GraphNode(Base):
@@ -709,8 +709,8 @@ class ConversationSummary(Base):
 
 - [ ] **Step 6: Generate and apply the migration**
 
-Run: `uv run alembic revision --autogenerate -m "phase2 memory tables"`
-Expected: `Generating .../migrations/versions/<rev>_phase2_memory_tables.py ... done`, and the file contains `op.create_table('graph_nodes'`, `'graph_edges'`, `'profile_cards'`, `'conversation_summaries'` (plus `op.drop_table('triples')` only if the scaffold table had been migrated in Phase 1).
+Run: `uv run alembic revision --autogenerate -m "memory tables" --rev-id 0002_memory`
+Expected: `Generating .../migrations/versions/0002_memory_memory_tables.py ... done`, with `down_revision = '0001'`, and the file contains exactly `op.create_table('graph_nodes'`, `'graph_edges'`, `'profile_cards'`, `'conversation_summaries'` (delete any unrelated operations autogenerate added).
 
 Run: `uv run alembic upgrade head`
 Expected: `INFO  [alembic.runtime.migration] Running upgrade <prev> -> <rev>, phase2 memory tables`
@@ -832,7 +832,7 @@ Expected: FAIL with `ImportError: cannot import name 'SqliteGraphStore'`
 
 - [ ] **Step 9: Implement `graph.py`**
 
-`src/zento/memory/graph.py` (replace the scaffold entirely):
+`src/zento/memory/graph.py` (new file; Phase 1 Task 1 deleted the old scaffold):
 
 ```python
 """Knowledge graph of the user's world behind a port.
@@ -2082,10 +2082,10 @@ async def test_no_summary_until_enough_messages_fall_out_of_window(db, fake_llm)
 
 async def test_summarises_messages_outside_window_once(db, fake_llm):
     uid, ids = await make_user_with_messages(45)  # 25 outside window
-    fake_llm.push_text("Jai and Zento talked about interview prep.")
+    fake_llm.push_text("Jai and Mavis talked about interview prep.")
     assert await maybe_summarize(uid) is True
     latest = await summaries.latest(uid)
-    assert latest.summary == "Jai and Zento talked about interview prep."
+    assert latest.summary == "Jai and Mavis talked about interview prep."
     assert latest.upto_message_id == ids[24]
     assert await maybe_summarize(uid) is False  # nothing new outside the window
 
@@ -2493,7 +2493,7 @@ git commit -m "feat(memory): aho-corasick entity spotting and budgeted recall as
 
 **Interfaces:**
 - Consumes: everything from Tasks 1–9; `zento.store.repo.users.get`; `Trust`.
-- Produces: `ExtractionHook`; `MemoryService(graph, vector, embedder, loops=None)` with attributes `graph`, `vector`, `embedder`, `on_extraction`, methods `init()`, `set_loops_reader(r)`, `invalidate(user_id)`, `recall(user_id, text) -> RecallContext`, `learn(user_id, text, source_ref="", trust=Trust.USER) -> Extraction`, `describe_user(user_id) -> str`, `forget(user_id, needle) -> int`; module functions `async get_memory() -> MemoryService`, `set_memory(svc | None)`.
+- Produces: `ExtractionHook`; `MemoryService(graph, vector, embedder, loops=None)` with attributes `graph`, `vector`, `embedder`, `on_extraction`, methods `init()`, `set_loops_reader(r)`, `invalidate(user_id)`, `recall(user_id, text) -> RecallContext`, `learn(user_id, text, source_ref="", trust=Trust.USER) -> Extraction`, `describe_user(user_id) -> str`, `forget(user_id, needle) -> int`; module functions `get_memory() -> MemoryService` (sync), `set_memory(svc | None)`.
 
 - [ ] **Step 1: Add fixtures**
 
@@ -2713,10 +2713,18 @@ class MemoryService:
         self.loops = loops
         self.on_extraction: list[ExtractionHook] = []
         self._spotters = SpotterCache(graph)
+        self._ready = False
+        self._init_lock = asyncio.Lock()
 
     async def init(self) -> None:
-        await self.graph.init()
-        await self.vector.init()
+        """Idempotent store initialisation; every public coroutine calls it lazily."""
+        if self._ready:
+            return
+        async with self._init_lock:
+            if not self._ready:
+                await self.graph.init()
+                await self.vector.init()
+                self._ready = True
 
     def set_loops_reader(self, reader: LoopsReader | None) -> None:
         self.loops = reader
@@ -2727,6 +2735,7 @@ class MemoryService:
     # --- hot path ------------------------------------------------------------------
 
     async def recall(self, user_id: int, text: str) -> RecallContext:
+        await self.init()
         user = await users.get(user_id)
         spotter = await _safe(self._spotters.get(user_id), None, "spotter")
         names = spotter.spot(text) if spotter else []
@@ -2751,6 +2760,7 @@ class MemoryService:
     # --- background ----------------------------------------------------------------
 
     async def learn(self, user_id: int, text: str, source_ref: str = "", trust: Trust = Trust.USER) -> Extraction:
+        await self.init()
         user = await users.get(user_id)
         card = await profile_repo.get(user_id)
         extraction = await extract(text, user_name=user.name or card.name, tz=user.timezone, trust=trust,
@@ -2785,6 +2795,7 @@ class MemoryService:
     # --- user control ------------------------------------------------------------
 
     async def describe_user(self, user_id: int) -> str:
+        await self.init()
         card = await profile_repo.get(user_id)
         facts = [d["statement"] for d in await self.graph.dump(user_id)][-15:]
         parts = []
@@ -2795,6 +2806,7 @@ class MemoryService:
         return "\n\n".join(parts) or "I don't know much about you yet."
 
     async def forget(self, user_id: int, needle: str) -> int:
+        await self.init()
         removed = await self.graph.forget(user_id, needle) + await self.vector.forget(user_id, needle)
         card, changed = (await profile_repo.get(user_id)).remove_matching(needle)
         if changed:
@@ -2805,7 +2817,6 @@ class MemoryService:
 
 
 _service: MemoryService | None = None
-_lock: asyncio.Lock | None = None
 
 
 def set_memory(svc: MemoryService | None) -> None:
@@ -2813,20 +2824,14 @@ def set_memory(svc: MemoryService | None) -> None:
     _service = svc
 
 
-async def get_memory() -> MemoryService:
-    global _service, _lock
-    if _service is not None:
-        return _service
-    if _lock is None:
-        _lock = asyncio.Lock()
-    async with _lock:
-        if _service is None:
-            s = get_settings()
-            embedder = get_embedder()
-            vector = QdrantVectorStore(embedder, url=s.qdrant_url or None, path=str(s.data_dir / "qdrant"))
-            svc = MemoryService(make_graph(), vector, embedder)
-            await svc.init()
-            _service = svc
+def get_memory() -> MemoryService:
+    """Synchronous lazy singleton. Stores initialise on first use (see MemoryService.init)."""
+    global _service
+    if _service is None:
+        s = get_settings()
+        embedder = get_embedder()
+        vector = QdrantVectorStore(embedder, url=s.qdrant_url or None, path=str(s.data_dir / "qdrant"))
+        _service = MemoryService(make_graph(), vector, embedder)
     return _service
 ```
 
@@ -3028,13 +3033,18 @@ git commit -m "feat(memory): consolidation job rewrites profile card and merges 
 
 **Files:**
 - Create: `src/zento/memory/jobs.py`
-- Modify: `src/zento/worker/handlers.py` (register memory jobs inside `register_all()`)
-- Replace: `src/zento/agents/simple_turn.py` (keeps Phase 1 behaviour; lines marked `# P2` are new)
+- Modify: `tests/conftest.py` (receives `embedder`, `vector`, `graph`, `memory`, `user` fixtures), `tests/memory/conftest.py`
+- Modify: `src/zento/worker/handlers.py` (register memory jobs inside `register_default_handlers()`)
+- Modify: `src/zento/agents/simple_turn.py` (full file given; Phase 1 behaviour kept, lines marked `# P2` are new; adds `build_context(user_id, text, hint='') -> str` and `enqueue_learn(user_id, event, text, previous_reply)`)
 - Create: `tests/memory/test_jobs.py`, `tests/agents/test_simple_turn_memory.py`
 
 **Interfaces:**
-- Consumes: `get_memory()`, `maybe_summarize()`, `consolidate()`, `register_job_handler`, `Job`, `JobKind`, `Trust`, `get_bus()`, `persona.system_prompt(user, now, context)`, `messages.log/recent`, `outbox.enqueue`, `summaries_repo.latest`, `llm.structured`, `ComposedMessage`, `Outbound`.
-- Produces: `handle_learn(job) -> None`, `handle_consolidate(job) -> None`, `register() -> None`; `run_turn(event)` now injects `RecallContext.render()` (+ rolling summary) into the system prompt and enqueues `Job(id=f"learn:{event.id}", kind=JobKind.LEARN, payload={"text", "source_ref", "trust", "conversation": True})` after the reply is queued.
+- Consumes: `get_memory()`, `maybe_summarize()`, `consolidate()`, `register_job_handler`, `Job`, `JobKind`, `Trust`, `get_bus()`, `persona.system_prompt(user, now, context)`, `messages.log/recent`, `outbox.enqueue`, `summaries_repo.latest`, `llm.complete`, `Outbound`, `get_channel`.
+- Produces: `handle_learn(job) -> None`, `handle_consolidate(job) -> None`, `register() -> None`; `run_turn(event)` now injects `RecallContext.render()` (+ rolling summary) into the system prompt and enqueues `Job(id=f"learn:{event.id}", kind=JobKind.LEARN, payload={"text", "source_ref", "trust", "conversation": True})` after the reply is queued; `text` is `"Mavis: <previous assistant message>\nUser: <text>"` when a previous assistant message exists, else the user text.
+
+- [ ] **Step 0: Promote memory fixtures to the root conftest**
+
+`tests/agents/` tests below (and all later phases) need the memory fixtures. Move the `embedder`, `vector`, `graph`, `memory` and `user` fixtures (with their imports) from `tests/memory/conftest.py` to `tests/conftest.py`, deleting them from the former. Run `uv run pytest tests/memory -q` — expected: same pass count as before the move.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3091,7 +3101,6 @@ async def test_register_wires_both_kinds(monkeypatch):
 from datetime import UTC, datetime
 
 from zento.agents import simple_turn
-from zento.domain.decisions import ComposedMessage
 from zento.domain.events import Event, EventType, JobKind, Trust
 from zento.domain.memory import Relation
 from zento.llm import models
@@ -3104,11 +3113,11 @@ async def test_turn_injects_recall_and_enqueues_learn(memory, user, bus, monkeyp
 
     seen = {}
 
-    async def spy(schema, system, convo, tier=models.Tier.FAST):
-        seen["system"] = system
-        return ComposedMessage(send=True, messages=["Your friend Jawahar, right?"])
+    async def spy(messages, tier=models.Tier.FAST, temperature=0.6, name="complete"):
+        seen["system"] = messages[0].content
+        return "Your friend Jawahar, right?"
 
-    monkeypatch.setattr(models, "structured", spy)
+    monkeypatch.setattr(models, "complete", spy)
     sent, jobs_seen = [], []
 
     async def fake_enqueue_outbox(session, msg):
@@ -3132,7 +3141,6 @@ async def test_turn_injects_recall_and_enqueues_learn(memory, user, bus, monkeyp
     assert job.kind is JobKind.LEARN and job.id == "learn:tg:update:42"
     assert job.payload == {"text": "is Jawahar free?", "source_ref": "tg:update:42", "trust": "user",
                            "conversation": True}
-```
 
 Note: this test assumes the Phase 1 `bus` fixture is the instance returned by `zento.bus.get_bus()` during tests (the index's fixture contract). If Phase 1's fixture differs, monkeypatch `zento.agents.simple_turn.get_bus` to return `bus` at the top of the test.
 
@@ -3159,7 +3167,7 @@ from zento.worker.runner import register_job_handler
 
 async def handle_learn(job: Job) -> None:
     p = job.payload
-    memory = await get_memory()
+    memory = get_memory()
     await memory.learn(job.user_id, str(p.get("text", "")), str(p.get("source_ref", "")),
                        Trust(p.get("trust", Trust.USER.value)))
     if p.get("conversation", True):
@@ -3167,7 +3175,7 @@ async def handle_learn(job: Job) -> None:
 
 
 async def handle_consolidate(job: Job) -> None:
-    await consolidate(job.user_id, await get_memory())
+    await consolidate(job.user_id, get_memory())
 
 
 def register() -> None:
@@ -3177,7 +3185,7 @@ def register() -> None:
 
 - [ ] **Step 4: Register in the worker**
 
-In `src/zento/worker/handlers.py`, inside `register_all()`, add at the end of the function body:
+In `src/zento/worker/handlers.py`, inside `register_default_handlers()`, add at the end of the function body:
 
 ```python
     from zento.memory import jobs as memory_jobs
@@ -3185,9 +3193,9 @@ In `src/zento/worker/handlers.py`, inside `register_all()`, add at the end of th
     memory_jobs.register()
 ```
 
-- [ ] **Step 5: Replace `simple_turn.py`**
+- [ ] **Step 5: Extend `simple_turn.py`**
 
-`src/zento/agents/simple_turn.py` (full file; if Phase 1's version has extra behaviour such as a typing indicator, keep it — the `# P2` lines are what this task adds):
+Replace `src/zento/agents/simple_turn.py` with this full file. It is Phase 1's file plus the lines marked `# P2` (recall + rolling summary in the system prompt, and a LEARN job after the reply). Phase 1 behaviour is unchanged: idempotent logging via `event_id`, `/start` hint, file note, typing indicator, `llm.complete` (so `LLMError` still propagates to the worker's fallback message).
 
 ```python
 """One conversational turn: recall → reply in persona voice → learn in the background.
@@ -3197,65 +3205,89 @@ Replaced by the LangGraph conversation graph in Phase 4.
 
 from __future__ import annotations
 
-import asyncio
-from datetime import UTC, datetime
+import asyncio  # P2
+import contextlib
 
-import structlog
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from zento.agents import persona
-from zento.bus import get_bus
-from zento.domain.decisions import ComposedMessage
-from zento.domain.errors import LLMError
-from zento.domain.events import Event, Job, JobKind
+from zento.bus import get_bus  # P2
+from zento.channels import get_channel
+from zento.domain.events import Event, Job, JobKind  # P2: Job, JobKind
 from zento.domain.messages import Outbound, Role
 from zento.llm import models as llm
 from zento.memory.service import get_memory  # P2
-from zento.store import db as dbm
+from zento.store.db import Session, utcnow
+from zento.store.models import Message
 from zento.store.repo import messages, outbox, users
 from zento.store.repo import summaries as summaries_repo  # P2
 
-log = structlog.get_logger()
-FALLBACK = "Give me a sec, something's slow on my end. I'll get back to you."
+HISTORY_LIMIT = 20
+START_HINT = (
+    "The user just opened the chat with /start. Greet them warmly, introduce yourself in one line, "
+    "and ask what's on their plate right now."
+)
+
+
+def user_text(event: Event) -> str:
+    text = (event.payload.get("text") or "").strip()
+    file = event.payload.get("file")
+    if file:
+        note = f"[sent a file: {file.get('file_name', 'file')}]"
+        text = f"{text}\n{note}".strip() if text else note
+    return text
+
+
+def _to_langchain(history: list[Message]) -> list[BaseMessage]:
+    return [HumanMessage(m.content) if m.role == Role.USER.value else AIMessage(m.content) for m in history]
+
+
+async def build_context(user_id: int, text: str, hint: str = "") -> str:  # P2
+    """Recall block + rolling summary + optional hint, for the system prompt."""
+    memory = get_memory()
+    recall, summary = await asyncio.gather(memory.recall(user_id, text), summaries_repo.latest(user_id))
+    parts = [hint] if hint else []
+    if summary:
+        parts.append(f"## Earlier in our conversation\n{summary.summary}")
+    parts.append(recall.render())
+    return "\n\n".join(p for p in parts if p.strip())
+
+
+async def enqueue_learn(user_id: int, event: Event, text: str, previous_reply: str | None) -> None:  # P2
+    convo = f"Mavis: {previous_reply}\nUser: {text}" if previous_reply else text
+    await get_bus().enqueue(Job(
+        id=f"learn:{event.id}", user_id=user_id, kind=JobKind.LEARN,
+        payload={"text": convo, "source_ref": event.id, "trust": event.trust.value, "conversation": True},
+    ))
 
 
 async def run_turn(event: Event) -> None:
-    text = str(event.payload.get("text", "")).strip()
-    if not text:
-        return
     user = await users.get(event.user_id)
-    await messages.log(user.id, Role.USER, text)
+    text = user_text(event)
+    await messages.log(user.id, Role.USER, text, event_id=event.id)
 
-    memory = await get_memory()  # P2
-    recall, history, summary = await asyncio.gather(  # P2
-        memory.recall(user.id, text), messages.recent(user.id, limit=20), summaries_repo.latest(user.id)
+    if user.telegram_chat_id is not None:
+        with contextlib.suppress(Exception):
+            await get_channel().send_typing(user.telegram_chat_id)
+
+    history = await messages.recent(user.id, HISTORY_LIMIT)
+    previous_reply = next(  # P2
+        (m.content for m in reversed(history[:-1]) if m.role == Role.ASSISTANT.value), None
     )
-    context = recall.render()  # P2
-    if summary:  # P2
-        context = f"## Earlier in our conversation\n{summary.summary}\n\n{context}".strip()
+    hint = START_HINT if event.payload.get("command") == "start" else ""
+    context = await build_context(user.id, text, hint)  # P2
+    prompt: list[BaseMessage] = [SystemMessage(persona.system_prompt(user, utcnow(), context=context))]
+    prompt += _to_langchain(history)
 
-    system = persona.system_prompt(user, datetime.now(UTC), context)
-    convo: list[BaseMessage] = [
-        HumanMessage(m.content) if m.role == Role.USER else AIMessage(m.content) for m in history
-    ]
-    try:
-        reply = await llm.structured(ComposedMessage, system, convo, llm.Tier.FAST)
-        bubbles = [b.strip() for b in reply.messages if b.strip()] or [FALLBACK]
-    except LLMError as exc:
-        log.warning("turn.llm_failed", error=str(exc), event_id=event.id)
-        bubbles = [FALLBACK]
+    reply = await llm.complete(prompt, llm.Tier.FAST, name="simple_turn")
+    bubbles = persona.split_bubbles(reply) or [reply]
 
-    async with dbm.Session() as s:
-        for b in bubbles:
-            await outbox.enqueue(s, Outbound(user_id=user.id, text=b))
+    async with Session() as s:
+        for i, bubble in enumerate(bubbles):
+            await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=f"reply:{event.id}:{i}"))
         await s.commit()
-    for b in bubbles:
-        await messages.log(user.id, Role.ASSISTANT, b)
-
-    await get_bus().enqueue(Job(  # P2
-        id=f"learn:{event.id}", user_id=user.id, kind=JobKind.LEARN,
-        payload={"text": text, "source_ref": event.id, "trust": event.trust.value, "conversation": True},
-    ))
+    await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles), event_id=f"reply:{event.id}")
+    await enqueue_learn(user.id, event, text, previous_reply)  # P2
 ```
 
 - [ ] **Step 6: Run the new tests**
@@ -3263,10 +3295,12 @@ async def run_turn(event: Event) -> None:
 Run: `uv run pytest tests/memory/test_jobs.py tests/agents/test_simple_turn_memory.py -v`
 Expected: 4 passed
 
-- [ ] **Step 7: Run the full suite (Phase 1 tests must stay green)**
+- [ ] **Step 7: Make Phase 1 turn tests memory-aware, then run the full suite**
+
+`run_turn` now calls `get_memory()`, which must never open the on-disk Qdrant or download a model in tests. The fixtures already live in `tests/conftest.py` (Step 0). Add the `memory` fixture to the parameter list of every test in `tests/agents/test_simple_turn.py` (e.g. `async def test_run_turn_replies_in_bubbles_and_logs(db, channel, fake_llm, memory) -> None:`).
 
 Run: `uv run pytest -q`
-Expected: all tests pass (`N passed`, no failures). If a Phase 1 `simple_turn` test now fails only because `get_memory()` tries to open the on-disk Qdrant, add the `memory` fixture from `tests/memory/conftest.py` to that test (move the `embedder`, `vector`, `graph`, `memory` fixtures to `tests/conftest.py` so every package can use them) and re-run.
+Expected: all tests pass (`N passed`, no failures).
 
 - [ ] **Step 8: Manual smoke (real model, optional)**
 
@@ -3276,7 +3310,7 @@ Expected: the second reply mentions Jawahar is your friend helping with intervie
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/zento/memory/jobs.py src/zento/worker/handlers.py src/zento/agents/simple_turn.py tests/memory/test_jobs.py tests/agents/test_simple_turn_memory.py
+git add src/zento/memory/jobs.py src/zento/worker/handlers.py src/zento/agents/simple_turn.py tests/conftest.py tests/memory/conftest.py tests/memory/test_jobs.py tests/agents/test_simple_turn_memory.py tests/agents/test_simple_turn.py
 git commit -m "feat(memory): learn/consolidate jobs and recall-aware conversation turns"
 ```
 

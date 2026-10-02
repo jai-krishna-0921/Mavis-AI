@@ -27,11 +27,12 @@ If any of these differ in the repo, adapt the call site, not the design:
 - `zento.store.db.Session` (async sessionmaker); `zento.store.models.Base`, `zento.store.models.Message` with columns `id, user_id, role (str), content, proactive (bool), created_at (DateTime tz)`; table `users` with integer `id`.
 - `zento.store.repo.users.get(user_id) -> User` (ORM, has `.id .name .timezone .telegram_chat_id`), `users.get_or_create_by_chat(chat_id, name) -> tuple[User, bool]`.
 - `zento.store.repo.messages.log(user_id, role, content, proactive=False)`, `messages.recent(user_id, limit=20) -> list[Message]` oldest→newest.
-- `zento.store.repo.outbox.enqueue(session, msg: Outbound) -> int` (does not commit); `zento.channels.outbox_sender.deliver_pending(channel, limit=50) -> int`.
-- `zento.bus.get_bus() -> EventBus`; `zento.worker.runner.register_event_handler(event_type, handler)`; `zento.worker.handlers.register_all()` runs at worker/dev startup.
-- `zento.agents.simple_turn.run_turn(event)`: reads `event.payload["text"]`, logs the user message, produces reply bubbles, enqueues them to the outbox.
+- `zento.store.repo.outbox.enqueue(session, msg: Outbound) -> int` (does not commit; dedupes on `dedupe_key`); `zento.channels.outbox_sender.deliver_pending(channel=None, limit=50) -> int`.
+- `zento.worker.runner.handle_event` runs every registered event handler under `zento.worker.locks.user_lock(event.user_id)`, so initiative handlers registered via `register_event_handler` are already serialised per user with conversation turns. Never take `user_lock` inside an event handler (asyncio locks are not re-entrant).
+- `zento.bus.get_bus() -> EventBus`; `zento.worker.runner.register_event_handler(event_type, handler)`; `zento.worker.handlers.register_default_handlers()` runs at worker/dev startup.
+- `zento.agents.simple_turn.run_turn(event)` (Phase 2 version): local variables `user` (ORM), `text` (via `user_text(event)`), `history`, `bubbles`; logs the user message with `event_id=event.id`; enqueues bubbles with `dedupe_key=f"reply:{event.id}:{i}"`; then calls `enqueue_learn(...)`.
 - `zento.agents.persona.system_prompt(user, now, context) -> str`.
-- `zento.memory.service.get_memory() -> MemoryService` with `on_extraction: list[Callable[[int, Extraction, str], Awaitable[None]]]`, assignable attribute `loops_reader` (protocol `active(user_id, entities, due_within)`), `recall(user_id, text) -> RecallContext`, `learn(user_id, text, source_ref) -> Extraction`.
+- `zento.memory.service.get_memory() -> MemoryService` with `on_extraction: list[Callable[[int, Extraction, str], Awaitable[None]]]`, `set_loops_reader(reader)` (protocol `active(user_id, entities, due_within)`); `get_memory()` is synchronous, `recall(user_id, text) -> RecallContext`, `learn(user_id, text, source_ref) -> Extraction`.
 - `zento.memory.embeddings.embed(texts: list[str]) -> list[list[float]]`.
 - Test fixtures in `tests/conftest.py`: `settings` (the `get_settings()` instance), `db` (fresh schema), `channel` (FakeChannel with `.sent` list), `fake_llm` (`push_structured(obj)`, `push_text(str)`; popping an empty queue raises).
 
@@ -43,7 +44,7 @@ If any of these differ in the repo, adapt the call site, not the design:
 4. New tables `loops`, `wakeups`, `ping_log` (Alembic revision `0003_initiative`).
 5. **Email event payload shape** consumed by `initiative/filters.py`; Phase 5 must emit `EMAIL_RECEIVED` with `payload = {"message_id", "thread_id", "from", "to", "subject", "snippet", "labels": [str], "headers": {name: value}, "from_me": bool}` and `trust=Trust.UNTRUSTED`. Slack: `{"from", "channel", "text", "ts"}`. Calendar: `{"title", "starts_at", "event_id"}`.
 6. `zento.initiative.routines.BriefSource` protocol + `register_brief_source(src)`; Phase 5 registers calendar/inbox sources.
-7. Phase 2 note: the learn job for a conversation turn should receive the previous assistant message plus the user message (`"Zento: …\nUser: …"`), so an answer to a clarifying question ("It's on Monday") is extracted with its context.
+7. Phase 2 note: the learn job for a conversation turn should receive the previous assistant message plus the user message (`"Mavis: …\nUser: …"`), so an answer to a clarifying question ("It's on Monday") is extracted with its context.
 
 ## Review Focus
 
@@ -381,9 +382,9 @@ In `src/zento/agents/simple_turn.py`, immediately after the inbound user message
     question = clarify.day_clarification(text, user.timezone)
     if question is not None:
         async with Session() as session:
-            await outbox.enqueue(session, Outbound(user_id=user.id, text=question))
+            await outbox.enqueue(session, Outbound(user_id=user.id, text=question, dedupe_key=f"reply:{event.id}:0"))
             await session.commit()
-        await messages.log(user.id, Role.ASSISTANT, question)
+        await messages.log(user.id, Role.ASSISTANT, question, event_id=f"reply:{event.id}")
         return
 ```
 
@@ -432,7 +433,7 @@ git commit -m "feat(turn): ask today-or-tomorrow after midnight; anchor extracti
 - Create: `src/zento/migrations/versions/0003_initiative.py`
 - Create: `src/zento/store/repo/loops.py`
 - Create: `src/zento/loops/__init__.py`, `src/zento/loops/service.py`
-- Modify: `tests/conftest.py` (append `recording_bus`, `drain`, `fake_memory`, `user` fixtures)
+- Modify: `tests/conftest.py` (append `RecordingBus`, `FakeMemory`, `recording_bus`, `drain`, `fake_memory` fixtures; `user` comes from Phase 2)
 - Test: `tests/loops/test_service.py`
 
 **Interfaces:**
@@ -504,29 +505,44 @@ def drain():
 
 
 class FakeMemory:
+    """MemoryService double shared by Phases 3+ (Phase 4 relies on learned/forgotten/forget)."""
+
     def __init__(self) -> None:
         self.on_extraction: list = []
         self.loops_reader = None
+        self.profile = ""
+        self.learned: list[tuple[int, str, str]] = []
+        self.forgotten: list[str] = []
+
+    def set_loops_reader(self, reader) -> None:
+        self.loops_reader = reader
 
     async def recall(self, user_id: int, text: str) -> RecallContext:
-        return RecallContext()
+        return RecallContext(profile=self.profile)
 
-    async def learn(self, user_id: int, text: str, source_ref: str) -> Extraction:
+    async def learn(self, user_id: int, text: str, source_ref: str = "", trust=None) -> Extraction:
+        self.learned.append((user_id, text, source_ref))
         return Extraction()
 
+    async def forget(self, user_id: int, needle: str) -> int:
+        self.forgotten.append(needle)
+        return 2
+
+    async def describe_user(self, user_id: int) -> str:
+        return self.profile or "I don't know much about you yet."
+
 
 @pytest.fixture
-def fake_memory() -> FakeMemory:
-    return FakeMemory()
+def fake_memory(monkeypatch) -> FakeMemory:
+    """A FakeMemory that is also what `zento.memory.service.get_memory()` returns."""
+    from zento.memory import service as memory_service
 
-
-@pytest.fixture
-async def user(db):
-    from zento.store.repo import users
-
-    u, _ = await users.get_or_create_by_chat(1001, "Jai")
-    return u
+    fm = FakeMemory()
+    monkeypatch.setattr(memory_service, "get_memory", lambda: fm)
+    return fm
 ```
+
+The `user` fixture (chat id 111, name "Jai") already exists in `tests/conftest.py` from Phase 2 Task 12; do not redefine it.
 
 - [ ] **Step 2: Write the failing tests** — `tests/loops/test_service.py`
 
@@ -952,7 +968,7 @@ git commit -m "feat(loops): open-loop store and service with LOOP_* events and e
 - Modify: `src/zento/store/models.py` (add `WakeupRow`)
 - Modify: `src/zento/migrations/versions/0003_initiative.py` (add `wakeups`)
 - Create: `src/zento/store/repo/wakeups.py`
-- Create: `src/zento/timers/__init__.py`, `src/zento/timers/service.py`
+- Create: `src/zento/timers/__init__.py`, `src/zento/timers/service.py`, `src/zento/timers/system.py` (system wakeup registry: `register_system_wakeup(kind, fn)`, `dispatch_system_wakeup(event) -> bool`, `SYSTEM_WAKEUP_HANDLERS`)
 - Test: `tests/timers/test_service.py`
 
 **Interfaces:**
@@ -1058,10 +1074,16 @@ from zento.domain.events import EventType
 class WakeupKind(StrEnum):
     AGENT = "agent"                    # the initiative agent asked to look again
     ROUTINE = "routine"                # morning check-in and other learned routines
-    USER_QUIET = "user_quiet"          # Zento asked something and hasn't heard back
+    USER_QUIET = "user_quiet"          # Mavis asked something and hasn't heard back
     EVENT_STARTING = "event_starting"  # prep / pep talk before a commitment
     EVENT_ENDED = "event_ended"        # "how did it go?" after a commitment
     DEFERRED = "deferred"              # a notification postponed by quiet hours / budget
+    # System wakeups: plumbing owned by later phases, routed by zento.timers.system, never reasoned about.
+    SYSTEM_APPROVAL_REMIND = "system_approval_remind"    # Phase 4
+    SYSTEM_APPROVAL_EXPIRE = "system_approval_expire"    # Phase 4
+    SYSTEM_TASK_DELIVERY = "system_task_delivery"        # Phase 4
+    SYSTEM_POLL = "system_poll"                          # Phase 5
+    SYSTEM_CONNECTION_CHECK = "system_connection_check"  # Phase 5
 
 
 class WakeupStatus(StrEnum):
@@ -1088,7 +1110,67 @@ EVENT_TYPE_FOR_KIND: dict[WakeupKind, EventType] = {
     WakeupKind.USER_QUIET: EventType.USER_QUIET,
     WakeupKind.EVENT_STARTING: EventType.EVENT_STARTING,
     WakeupKind.EVENT_ENDED: EventType.EVENT_ENDED,
+    WakeupKind.SYSTEM_APPROVAL_REMIND: EventType.WAKEUP,
+    WakeupKind.SYSTEM_APPROVAL_EXPIRE: EventType.WAKEUP,
+    WakeupKind.SYSTEM_TASK_DELIVERY: EventType.WAKEUP,
+    WakeupKind.SYSTEM_POLL: EventType.WAKEUP,
+    WakeupKind.SYSTEM_CONNECTION_CHECK: EventType.WAKEUP,
 }
+```
+
+`src/zento/timers/system.py` (system wakeup registry; Phases 4–5 register handlers here):
+
+```python
+"""System wakeups (kind 'system_*') are plumbing, not initiative: they never reach the reasoner."""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+
+from zento.domain.events import Event
+
+SYSTEM_PREFIX = "system_"
+SystemWakeupHandler = Callable[[int, str], Awaitable[None]]  # (user_id, reason)
+SYSTEM_WAKEUP_HANDLERS: dict[str, SystemWakeupHandler] = {}
+
+
+def register_system_wakeup(kind: str, fn: SystemWakeupHandler) -> None:
+    if not kind.startswith(SYSTEM_PREFIX):
+        raise ValueError(f"system wakeup kinds must start with {SYSTEM_PREFIX!r}: {kind}")
+    SYSTEM_WAKEUP_HANDLERS[kind] = fn
+
+
+async def dispatch_system_wakeup(event: Event) -> bool:
+    """True if this WAKEUP was a system one (handled or not) and must not go to the initiative agent."""
+    kind = str(event.payload.get("kind", ""))
+    if not kind.startswith(SYSTEM_PREFIX):
+        return False
+    fn = SYSTEM_WAKEUP_HANDLERS.get(kind)
+    if fn is not None:
+        await fn(event.user_id, str(event.payload.get("reason", "")))
+    return True
+```
+
+Append to `tests/timers/test_service.py`:
+
+```python
+async def test_system_wakeup_dispatch():
+    from zento.domain.events import Event, EventType, Trust
+    from zento.timers import system
+
+    seen = []
+
+    async def h(user_id, reason):
+        seen.append((user_id, reason))
+
+    system.register_system_wakeup("system_poll", h)
+    ev = Event(id="wakeup:1", user_id=3, type=EventType.WAKEUP, occurred_at=timeutil.now(), source="timer",
+               payload={"kind": "system_poll", "reason": "gmail"}, trust=Trust.SYSTEM)
+    assert await system.dispatch_system_wakeup(ev) is True
+    agent = ev.model_copy(update={"payload": {"kind": "agent", "reason": "x"}})
+    assert await system.dispatch_system_wakeup(agent) is False
+    assert seen == [(3, "gmail")]
+    system.SYSTEM_WAKEUP_HANDLERS.clear()
 ```
 
 - [ ] **Step 4: ORM table** — append to `src/zento/store/models.py`
@@ -1308,7 +1390,7 @@ class WakeupService:
 - [ ] **Step 8: Run tests to verify they pass**
 
 Run: `uv run pytest tests/timers/test_service.py -v`
-Expected: `7 passed`
+Expected: `8 passed`
 
 - [ ] **Step 9: Commit**
 
@@ -1563,25 +1645,31 @@ async def run_timer(stop: asyncio.Event | None = None) -> None:
     await runner.run_forever(stop)
 ```
 
-- [ ] **Step 5: CLI wiring** — in `src/zento/cli.py`
+- [ ] **Step 5: CLI wiring** — in `src/zento/cli.py` (Typer, Phase 1 Task 13)
 
-Add a `timer` command next to the existing `worker` command, in the same CLI style (this snippet uses Typer; with argparse, add a `timer` subparser whose handler runs the same body):
+Add this coroutine after `_worker` and this command after the `worker` command:
 
 ```python
+async def _timer() -> None:
+    from zento.timers.runner import run_timer
+
+    bus = await bootstrap(create_tables=get_settings().is_sqlite)
+    log.info("timer.started")
+    await _run_tasks([asyncio.create_task(run_timer())], bus)
+
+
 @app.command()
 def timer() -> None:
     """Fire agent-owned wakeups (single active instance via Redis leader lock)."""
-    from zento.timers.runner import run_timer
-
-    asyncio.run(run_timer())
+    asyncio.run(_timer())
 ```
 
-In the `dev` command, add the timer to the coroutines it already runs concurrently (inside its `asyncio.gather(...)` or `TaskGroup`):
+In `_dev`, add the timer to the task list, right after the `OutboxSender` task:
 
 ```python
-        from zento.timers.runner import run_timer
-        ...
-        run_timer(),
+    from zento.timers.runner import run_timer  # with the other local imports at the top of _dev
+    ...
+        asyncio.create_task(run_timer()),
 ```
 
 - [ ] **Step 6: Run tests to verify they pass**
@@ -2230,7 +2318,7 @@ Now (user's local time): {local_now}. Quiet hours: {quiet}. Unsolicited messages
 
 
 def _fmt_history(rows) -> str:
-    return "\n".join(f"{'User' if r.role == Role.USER else 'Zento'}: {r.content}" for r in rows) or "(none)"
+    return "\n".join(f"{'User' if r.role == Role.USER else 'Mavis'}: {r.content}" for r in rows) or "(none)"
 
 
 class Reasoner:
@@ -2272,7 +2360,7 @@ class Reasoner:
 - [ ] **Step 4: Implement `src/zento/initiative/composer.py`**
 
 ```python
-"""Turn a notify intent into 1-3 chat bubbles in Zento's voice."""
+"""Turn a notify intent into 1-3 chat bubbles in Mavis's voice."""
 
 from __future__ import annotations
 
@@ -2484,7 +2572,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'zento.initiative.quie
 - [ ] **Step 3: Implement `src/zento/initiative/quiet.py`**
 
 ```python
-"""Notice when the user leaves Zento hanging on a question (USER_QUIET)."""
+"""Notice when the user leaves Mavis hanging on a question (USER_QUIET)."""
 
 from __future__ import annotations
 
@@ -2633,7 +2721,7 @@ git commit -m "feat(initiative): executor (track/wake/act/notify with policy) an
 
 **Interfaces:**
 - Consumes: `LoopService`, `WakeupService`, `InitiativeExecutor.notify`, `Message` ORM, settings `morning_checkin_time`.
-- Produces: `MORNING_ROUTINE = "morning_checkin"`, `MORNING_TITLE = "Morning check-in"`; `BriefSource` protocol (`name: str`, `async items(user_id, start, end) -> list[str]`); `register_brief_source(src)`, `clear_brief_sources()`; `Routines(loops, wakeups, executor)` with `on_user_message(user) -> None`, `next_morning_time(user, next_day=False) -> datetime`, `learned_checkin_time(user, weekend: bool) -> time`, `run(user, payload) -> None`, `morning_checkin(user, loop_id) -> None`.
+- Produces: `MORNING_ROUTINE = "morning_checkin"`, `MORNING_TITLE = "Morning check-in"`; `BriefSource` protocol (`name: str`, `async items(user_id, start, end) -> list[str]`); `register_brief_source(src)`, `clear_brief_sources()`, `brief_sources()`; `Routines(loops, wakeups, executor)` with `on_user_message(user) -> None`, `next_morning_time(user, next_day=False) -> datetime`, `learned_checkin_time(user, weekend: bool) -> time`, `run(user, payload) -> None`, `morning_checkin(user, loop_id) -> None`.
 
 - [ ] **Step 1: Write the failing tests** — `tests/initiative/test_routines.py`
 
@@ -2800,6 +2888,10 @@ def clear_brief_sources() -> None:
     _sources.clear()
 
 
+def brief_sources() -> list[BriefSource]:
+    return list(_sources)
+
+
 def _parse_hhmm(value: str) -> time:
     hh, mm = value.split(":")
     return time(int(hh), int(mm))
@@ -2908,7 +3000,7 @@ git commit -m "feat(initiative): onboarding routine seed and adaptive morning ch
 
 **Files:**
 - Create: `src/zento/initiative/planner.py`, `src/zento/initiative/handler.py`, `src/zento/initiative/wiring.py`
-- Modify: `src/zento/worker/handlers.py` (call `wire_initiative()` inside `register_all()`)
+- Modify: `src/zento/worker/handlers.py` (call `wire_initiative()` inside `register_default_handlers()`)
 - Modify: `src/zento/agents/simple_turn.py` (quiet/routine hooks)
 - Test: `tests/initiative/test_handler.py`, `tests/initiative/test_wiring.py`, `tests/agents/test_turn_hooks.py`
 
@@ -3224,6 +3316,7 @@ from zento.initiative.routines import Routines
 from zento.initiative.untrusted import wrap_untrusted
 from zento.loops.service import LoopService
 from zento.store.repo import users
+from zento.timers import system
 from zento.timers.service import WakeupService
 from zento.worker.runner import register_event_handler
 
@@ -3238,6 +3331,8 @@ class InitiativeHandler:
         self._loops, self._wakeups, self._routines, self._quiet = loops, wakeups, routines, quiet
 
     async def handle(self, event: Event) -> None:
+        if event.type is EventType.WAKEUP and await system.dispatch_system_wakeup(event):
+            return  # Phase 4/5 plumbing (approval reminders, polls, connection checks)
         user = await users.get(event.user_id)
         kind = event.payload.get("kind")
 
@@ -3382,14 +3477,14 @@ def wire_initiative(register_handlers: bool = True) -> Initiative:
     memory = zento.memory.service.get_memory()
     init = build_initiative(zento.bus.get_bus(), memory)
     memory.on_extraction.append(partial(Initiative.loops_from_extraction, init))
-    memory.loops_reader = init.loops
+    memory.set_loops_reader(init.loops)
     if register_handlers:
         register(init.handler)
     _current = init
     return init
 ```
 
-- [ ] **Step 6: Register at worker startup** — in `src/zento/worker/handlers.py`, inside `register_all()`, add:
+- [ ] **Step 6: Register at worker startup** — in `src/zento/worker/handlers.py`, inside `register_default_handlers()`, add:
 
 ```python
     from zento.initiative.wiring import wire_initiative
@@ -3489,7 +3584,7 @@ async def test_interview_prep_pep_talk_then_follow_up(user, clock, recording_bus
     assert sorted(w.kind for w in pending) == [WakeupKind.EVENT_ENDED, WakeupKind.EVENT_STARTING]
     loop_id = pending[0].loop_id
 
-    # Mon 09:01 IST: the prep wakeup fires; Zento sends a pep talk without being asked.
+    # Mon 09:01 IST: the prep wakeup fires; Mavis sends a pep talk without being asked.
     clock.set(datetime(2026, 9, 28, 3, 31, tzinfo=UTC))
     assert await init.timer.tick() == 1
     fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=4, intent="pep talk before prep")))
@@ -3498,7 +3593,7 @@ async def test_interview_prep_pep_talk_then_follow_up(user, clock, recording_bus
     await deliver_pending(channel)
     assert any("You've got this" in str(s) for s in channel.sent)
 
-    # Mon 12:01 IST: the follow-up wakeup fires; Zento asks how it went and closes the loop.
+    # Mon 12:01 IST: the follow-up wakeup fires; Mavis asks how it went and closes the loop.
     clock.set(datetime(2026, 9, 28, 6, 31, tzinfo=UTC))
     assert await init.timer.tick() == 1
     fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="ask how the prep went")))
@@ -3510,7 +3605,7 @@ async def test_interview_prep_pep_talk_then_follow_up(user, clock, recording_bus
     assert await init.loops.active(user.id) == []  # closed as DONE after the follow-up
     closed = await init.loops.get(loop_id)
     assert closed is not None and closed.status is LoopStatus.DONE
-    # The follow-up ended with a question, so Zento will notice if Jai goes quiet.
+    # The follow-up ended with a question, so Mavis will notice if Jai goes quiet.
     assert len(await init.wakeups.pending(user.id, WakeupKind.USER_QUIET)) == 1
 ```
 

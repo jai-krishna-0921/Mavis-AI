@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **Read `docs/superpowers/plans/2026-10-02-zento-00-index.md` first** — its Shared Contracts are binding.
 
-**Goal:** Give Zento a per-user code sandbox (E2B in prod, Docker fallback, local dev-only), let users send files that Zento reads and remembers, and let the orchestrator produce real artefacts — PPTX, DOCX, PDF, XLSX, charts and cited deep-research reports — delivered back as Telegram documents.
+**Goal:** Give Mavis (the Zento agent) a per-user code sandbox (Docker + gVisor via the `sandboxd` sidecar in prod, optional AWS Bedrock AgentCore Code Interpreter, local dev-only), let users send files that Zento reads and remembers, and let the orchestrator produce real artefacts — PPTX, DOCX, PDF, XLSX, charts and cited deep-research reports — delivered back as Telegram documents.
 
-**Architecture:** A `Sandbox` port (index contract) with three backends shares one workspace layout (`/workspace/{inbox,out,.zento}`). Document builders are real Python scripts shipped in `zento/tools/sandbox_scripts/`, uploaded into the sandbox and run there with their data passed as a JSON file (never interpolated into code); the resulting file is copied to `ARTIFACTS_DIR/{user}/{task}/` and recorded in the Phase 4 `artifacts` table. Four new specialists (Docs, Analyst, Coder, DeepResearch) register with the Phase 4 specialist registry so the planner can route to them; artefacts are attached to the task-completion delivery as `Outbound.document_path`.
+**Architecture:** A `Sandbox` port (index contract) with three backends (docker [in-process or via the sandboxd sidecar], agentcore, local) shares one workspace layout (`/workspace/{inbox,out,.zento}`). Document builders are real Python scripts shipped in `zento/tools/sandbox_scripts/`, uploaded into the sandbox and run there with their data passed as a JSON file (never interpolated into code); the resulting file is copied to `ARTIFACTS_DIR/{user}/{task}/` and recorded in the Phase 4 `artifacts` table. Four new specialists (Docs, Analyst, Coder, DeepResearch) register with the Phase 4 specialist registry so the planner can route to them; artefacts are attached to the task-completion delivery as `Outbound.document_path`.
 
-**Tech Stack:** `e2b` (AsyncSandbox, SDK v2), Docker CLI via `asyncio.create_subprocess_exec`, python-pptx, python-docx, openpyxl, WeasyPrint + markdown, pypdf, matplotlib, pandas (sandbox image + dev deps for tests), LangGraph `Send` for the deep-research fan-out.
+**Tech Stack:** Docker CLI via `asyncio.create_subprocess_exec` with gVisor (`runsc`), FastAPI + uvicorn on a unix socket (`sandboxd`), boto3 `bedrock-agentcore` (optional backend), python-pptx, python-docx, openpyxl, WeasyPrint + markdown, pypdf, matplotlib, pandas (sandbox image + dev deps for tests), LangGraph `Send` for the deep-research fan-out.
 
-**Spec:** `docs/superpowers/specs/2026-10-02-zento-pa-design.md` (§5.3 capabilities, §8.3 sandbox holds no credentials, §16 E2B fallback risk)
+**Spec:** `docs/superpowers/specs/2026-10-02-zento-pa-design.md` (§5.3 capabilities, §8.3 sandbox holds no credentials, §16 sandbox fallback risk)
 
 ## Global Constraints
 
@@ -17,8 +17,9 @@
 - Workspace layout in every backend: `/workspace/inbox/` (user uploads), `/workspace/out/` (artefacts), `/workspace/.zento/` (Zento's scripts and data files; hidden from new-file detection). Code runs with **cwd = workspace**; prompts tell models to use relative paths.
 - Sandbox paths given to file APIs must resolve inside `/workspace`; `..` and symlink escapes raise `SandboxPathError`.
 - Execution timeouts: default `SANDBOX_EXEC_TIMEOUT_S=60`; document builders 120 s; file extraction 60 s; deep research per sub-question 90 s, total 15 min (spec §5.2).
-- Docker backend flags (exact): `--rm --network none --memory 1g --memory-swap 1g --cpus 1 --pids-limit 256 --security-opt no-new-privileges --cap-drop ALL --tmpfs /tmp:rw,size=256m`.
-- `local` backend is development-only: logs `sandbox.local_backend_in_use` at warning on construction and `sandbox.local_fallback` at critical when `auto` falls back to it; `auto` only picks it when neither `E2B_API_KEY` nor a reachable Docker daemon exists.
+- Docker backend flags (exact): `--rm [--runtime runsc] --network none --memory 1g --memory-swap 1g --cpus 1 --pids-limit 256 --security-opt no-new-privileges --cap-drop ALL --read-only --user <non-root> --tmpfs /tmp:rw,size=256m`. `--runtime runsc` is added when gVisor is registered (else warn and use runc).
+- The worker never mounts `/var/run/docker.sock`; in production only the `sandboxd` sidecar holds it.
+- `local` backend is development-only: logs `sandbox.local_backend_in_use` at warning on construction and `sandbox.local_fallback` at critical when `auto` falls back to it; `auto` only picks it when there is no sandboxd socket, no reachable Docker daemon and no AWS credentials.
 - Upload limit `MAX_UPLOAD_MB=20`; Telegram outgoing document limit `TELEGRAM_MAX_DOCUMENT_MB=50`.
 - Data handed to builder scripts is serialised to JSON and written to a file; the only values formatted into generated Python are paths Zento itself constructed (sanitised filenames, integer ids), via `repr()`.
 - Third-party content (file contents, web pages) reaches models only inside `<untrusted source="…">…</untrusted>` blocks.
@@ -27,26 +28,25 @@
 ## Review Focus
 
 1. **Path escape** — `write_file(user, "../../etc/x")`, `read_file(user, "/etc/passwd")` or a symlink inside the workspace pointing outside must raise `SandboxPathError`; tools return `error: …` to the model instead of crashing. Pinned in Task 2 (`test_path_traversal_rejected`, `test_symlink_escape_rejected`) and Task 8 (`test_tool_reports_path_error`).
-2. **Runaway code** — an infinite loop must be killed at the timeout, return `ok=False, error="timed out after Ns"`, and leave no process behind. Pinned in Task 2 (`test_timeout_kills_process`), Task 3 (`test_docker_timeout_kills_container`), Task 4 (`test_e2b_timeout_maps_to_error`).
+2. **Runaway code** — an infinite loop must be killed at the timeout, return `ok=False, error="timed out after Ns"`, and leave no process behind. Pinned in Task 2 (`test_timeout_kills_process`), Task 3 (`test_docker_timeout_kills_container`), Task 4 (`test_timeout_stops_session`).
 3. **Oversized files** — a >20 MB upload (declared or actual size) gets a friendly reply and is never stored; an artefact >50 MB is not attached and the user is told. Pinned in Task 9 (`test_declared_size_over_limit_rejected_without_download`, `test_actual_size_over_limit_rejected_and_deleted`) and Task 13 (`test_oversized_artifact_not_attached`).
 4. **Corrupt or unsupported uploads** — a broken PDF or a `.zip` is acknowledged ("couldn't read it") without crashing the turn and without a memory write. Pinned in Task 9 (`test_corrupt_pdf_acknowledged`, `test_unsupported_type_acknowledged`).
 5. **Unruly model outlines** — 12 bullets, 1 000-character bullets, emoji and empty strings still produce a valid deck (bullets capped at 8 with overflow moved to notes, long text clipped). Pinned in Task 6 (`test_pptx_survives_unruly_outline`).
-6. **Secret leakage into the sandbox** — with `OLLAMA_API_KEY` set in the host env, code in the sandbox cannot see it. Pinned in Task 2 (`test_env_has_no_secrets`), Task 3 (`test_docker_argv_isolation_flags`), Task 4 (`test_e2b_create_and_run_use_whitelisted_env`).
+6. **Secret leakage into the sandbox** — with `OLLAMA_API_KEY` set in the host env, code in the sandbox cannot see it. Pinned in Task 2 (`test_env_has_no_secrets`), Task 3 (`test_docker_argv_isolation_flags`), Task 4 (`test_no_secrets_passed`).
 
 ## Contract additions (Phase 6)
 
 These are additions to the index; nothing in the index is changed.
 
-1. **Settings keys** (add to `Settings` in `src/zento/config.py`): `SANDBOX_IMAGE=zento-sandbox:latest`, `SANDBOX_EXEC_TIMEOUT_S=60`, `SANDBOX_IDLE_PAUSE_S=600`, `SANDBOX_DOCKER_NETWORK=none`, `SANDBOX_LOCAL_PYTHON=` (empty ⇒ `sys.executable`), `MAX_UPLOAD_MB=20`, `TELEGRAM_MAX_DOCUMENT_MB=50`, `UPLOADS_DIR=data/uploads`, `WORKSPACES_DIR=data/workspaces`.
+1. **Settings keys** (add to `Settings` in `src/zento/config.py`): `SANDBOX_IMAGE=zento-sandbox:latest`, `SANDBOX_EXEC_TIMEOUT_S=60`, `SANDBOX_DOCKER_NETWORK=none`, `SANDBOX_RUNTIME=auto` (auto|runsc|runc), `SANDBOXD_SOCKET=` (set in compose to `/run/zento/sandboxd.sock`), `AGENTCORE_REGION=ap-south-1`, `AGENTCORE_IDENTIFIER=aws.codeinterpreter.v1`, `AGENTCORE_SESSION_TIMEOUT_S=900`, `AWS_PROFILE=` (empty ⇒ default credential chain), `SANDBOX_LOCAL_PYTHON=` (empty ⇒ `sys.executable`), `MAX_UPLOAD_MB=20`, `TELEGRAM_MAX_DOCUMENT_MB=50`, `UPLOADS_DIR=data/uploads`, `WORKSPACES_DIR=data/workspaces`. `SANDBOX_BACKEND` values are `auto|docker|agentcore|local`. There is no E2B.
 2. **New domain module** `src/zento/domain/artifacts.py`: `ArtifactKind`, `MIME_TYPES`, `kind_for_path()`, `ChartSeries`, `ChartSpec`, `ArtifactRef` (Task 1).
-3. **File map refinement**: the index's single `tools/documents.py` becomes the package `tools/documents/` (`runner.py`, `builders.py`, `convert.py`, `tools.py`); builder/extraction scripts live in `tools/sandbox_scripts/`; sandbox shared helpers in `tools/sandbox/common.py`; LLM-facing sandbox tools in `tools/sandbox_tools.py`; file intake in `files/intake.py`; artefact delivery in `agents/artifact_delivery.py`.
-4. **`Capability.SANDBOX` is always satisfied** — the Phase 5 connection check must never raise `ConnectionRequired` for `SANDBOX` or `WEB`.
-5. **LEARN job payload** used by file intake: `{"text": str, "source_ref": str, "trust": "untrusted"}` — Phase 2's LEARN handler must accept these keys.
-6. **`SpecialistSpec.runner`** — optional `Callable[[str, SpecialistContext], Awaitable[StepResult]]`; when set, the orchestrator calls it instead of the default ReAct runner (Docs and DeepResearch use it).
+3. **File map refinement**: the index's single `tools/documents.py` becomes the package `tools/documents/` (`runner.py`, `builders.py`, `convert.py`, `tools.py`); builder/extraction scripts live in `tools/sandbox_scripts/`; sandbox shared helpers in `tools/sandbox/common.py`; LLM-facing sandbox tools in `tools/sandbox_tools.py`; file intake in `files/intake.py`; artefact delivery in `agents/artifact_delivery.py`; `tools/sandbox/{docker,agentcore,sandboxd_client}.py`; sidecar `sandboxd/server.py` + CLI `zento sandboxd`.
+4. **`Capability.SANDBOX` / `WEB` are always satisfied** — Phase 5's `wiring.capability_check` already returns True for them.
+5. **LEARN job payload** used by file intake: `{"text": str, "source_ref": str, "trust": "untrusted", "conversation": false}` (Phase 2 canonical keys).
+6. Uses Phase 4's `Specialist.runner` (added in reconciliation): `runner: Callable[[int, str, str], Awaitable[StepOutcome]] | None` — `(user_id, instruction, context)`; when set, `run_specialist` calls it instead of the ReAct loop (Docs and DeepResearch use it). The task id is `zento.tools.registry.current_task_id.get()`, the plan deliverable is `zento.agents.specialists.base.current_deliverable.get()` (both set by the orchestrator's `run_step`).
+7. Uses Phase 4's `tasks.add_artifact(task_id, user_id, kind, path, mime, *, title="", size=0) -> int` and `tasks.artifacts_for(task_id) -> list[Artifact]` (`.id .path .kind .title .mime .size`); the orchestrator's `finish()` skips paths already recorded, so a specialist may record its own artefacts and still return their paths in `StepOutcome.artifacts`.
 
-### Interfaces consumed from earlier phases (exact names this plan assumes)
-
-If an earlier phase's plan named any of these differently, rename the usages in this plan before executing it.
+### Interfaces consumed from earlier phases (canonical names, reconciled)
 
 ```python
 # Phase 1
@@ -57,38 +57,40 @@ zento.store.repo.users.get_or_create_by_chat(chat_id: int, name: str | None) -> 
 zento.store.repo.users.get_state(user_id: int) -> dict
 zento.store.repo.users.set_state(user_id: int, **kv) -> None
 zento.store.repo.outbox.enqueue(session, msg: Outbound) -> int
-zento.channels.outbox_sender.deliver_pending(channel: Channel, limit: int = 50) -> int
-#   sender calls channel.send_document(chat_id, msg.document_path, caption=msg.text) when document_path is set
+zento.channels.outbox_sender.deliver_pending(channel: Channel | None = None, limit: int = 50) -> int
+#   sender calls channel.send_document(chat_id, msg.document_path, msg.text) when document_path is set
 
 # Phase 4
-zento.tools.registry.ZentoTool(name: str, description: str, args_schema: type[BaseModel], risk: RiskClass,
-                               fn: Callable[[ToolContext, BaseModel], Awaitable[str]],
-                               requires: Capability | None = None, agents: frozenset[str] = frozenset())
-zento.tools.registry.ToolContext(user_id: int, task_id: int | None = None)
-zento.tools.registry.ToolRegistry()  .register(tool: ZentoTool) -> None  .for_agent(agent: str, user_id: int) -> list[BaseTool]
-zento.tools.registry.REGISTRY: ToolRegistry
+zento.tools.registry.ZentoTool(name, description, args_model: type[BaseModel], risk: RiskClass, fn: ToolFn,
+                               agents: frozenset[str], requires: Capability | None = None, preview=None,
+                               untrusted_output: bool = False, priority: int = 50)
+#   ToolFn = async (user_id: int, args) -> str | dict | list
+zento.tools.registry.ToolContext(user_id: int, timezone: str = "UTC", task_id: int | None = None)
+zento.tools.registry.contextual(fn: async (ToolContext, args) -> str) -> ToolFn    # build ctx-aware tools
+zento.tools.registry.get_registry() -> ToolRegistry   .register(tool)  .get(name)  .for_agent(agent, user_id)
+zento.tools.registry.current_task_id: ContextVar[int | None]
+zento.tools.load_builtin_tools(registry)              # append Phase 6 tool modules here
 zento.tools.web.search(query: str, max_results: int = 5) -> list[SearchHit]     # SearchHit(title, url, snippet)
-zento.tools.web.extract(url: str, max_chars: int = 8000) -> str
-zento.agents.specialists.base.SpecialistContext(user_id: int, task_id: int, deliverable: str = "message",
-                                               upstream: dict[str, str] = {})
-zento.agents.specialists.base.StepResult(text: str, artifact_ids: list[int] = [])
-zento.agents.specialists.base.SpecialistSpec(name, description, prompt, tier: Tier, tool_names: tuple[str, ...], runner=None)
-zento.agents.specialists.base.SPECIALISTS: dict[str, SpecialistSpec]
-zento.agents.specialists.base.register_specialist(spec: SpecialistSpec) -> None
+zento.tools.web.extract(url: str, max_chars: int = 8000) -> str                 # SSRF-guarded
+zento.agents.specialists.base.Specialist(name, description, prompt, tier=Tier.SMART, tool_names=(),
+                                         max_steps=12, runner=None)
+zento.agents.specialists.base.run_specialist(spec, user_id, instruction, context="") -> StepOutcome
+zento.agents.specialists.base.current_deliverable: ContextVar[str]   # "message" | "pptx" | "pdf" | ...
+zento.agents.specialists.SPECIALISTS: dict[str, Specialist]; register_specialist(spec)
+#   the planner prompt lists every registered specialist automatically (orchestrator_graph._planner_system)
+zento.domain.tasks.StepOutcome(ok: bool, text: str = "", artifacts: list[str] = [], error: str | None = None)
 zento.agents.orchestrator.run_task(task_id: int) -> None
-zento.agents.orchestrator.planner_catalog() -> str        # text listing SPECIALISTS for the planner prompt
-zento.agents.orchestrator.PLANNER_SYSTEM: str
-zento.agents.orchestrator._deliver_result(session, task, final_text: str) -> None   # enqueues the final message
 zento.agents.conversation.run_turn(event: Event) -> None
-zento.store.repo.tasks.create(user_id: int, goal: str, context: str = "") -> int
-zento.store.repo.tasks.add_artifact(*, user_id: int, task_id: int, kind: str, path: str, mime: str,
-                                    title: str, size: int) -> int
-zento.store.repo.tasks.list_artifacts(task_id: int) -> list[ArtifactRow]   # .id .path .kind .title .mime .size
+zento.initiative.task_delivery.deliver_task_result(event) -> None   # TASK_COMPLETED -> outbox (+ documents)
+zento.store.repo.tasks.create(user_id: int, goal: str, context: str = "", ...) -> int
+zento.store.repo.tasks.add_artifact(task_id, user_id, kind, path, mime, *, title="", size=0) -> int
+zento.store.repo.tasks.artifacts_for(task_id: int) -> list[Artifact]   # .id .path .kind .title .mime .size
 
 # Test fixtures (tests/conftest.py, Phases 1–4)
-settings, db, bus, channel (FakeChannel: .sent list of dicts {"type": "text"|"document", "chat_id", "text", "path", "caption"}),
-fake_llm (.add(schema_cls, instance) queues a structured() result per schema; .add_text(str) queues a chat reply;
-          unused queued entries are ignored)
+settings, db, bus, user, channel (FakeChannel: .sent: list[SentItem] with .kind ("text"|"document"), .chat_id,
+  .text, .path, .buttons; .texts -> list[str]),
+fake_llm (FIFO: .push_structured(obj) -> next llm.structured() returns it (type-checked against the schema);
+          .push_text(str) / .push_ai(AIMessage) -> next chat_model(...).ainvoke(); empty queue raises)
 ```
 
 ---
@@ -96,7 +98,7 @@ fake_llm (.add(schema_cls, instance) queues a structured() result per schema; .a
 ## File structure
 
 ```
-pyproject.toml                                         modify: e2b dep; dev deps for document libs
+pyproject.toml                                         modify: boto3 dep; dev deps for document libs
 src/zento/config.py                                    modify: Phase 6 settings
 src/zento/domain/artifacts.py                          create: ArtifactKind, ChartSpec, ArtifactRef
 src/zento/tools/sandbox/__init__.py                    create: build_sandbox(), get_sandbox(), set_sandbox()
@@ -104,7 +106,10 @@ src/zento/tools/sandbox/base.py                        create: ExecResult, Sandb
 src/zento/tools/sandbox/common.py                      create: safe_env, path resolution, snapshots, HostWorkspace
 src/zento/tools/sandbox/local.py                       create: LocalSandbox (dev only)
 src/zento/tools/sandbox/docker.py                      create: DockerSandbox
-src/zento/tools/sandbox/e2b.py                         create: E2BSandbox, UserStateIds
+src/zento/tools/sandbox/agentcore.py                   create: AgentCoreSandbox, UserStateSessions
+src/zento/tools/sandbox/sandboxd_client.py             create: SandboxdSandbox (unix-socket client)
+src/zento/sandboxd/server.py                           create: sidecar API (run/write/read/list)
+scripts/verify_agentcore.py                            create: live AgentCore check
 src/zento/tools/sandbox_scripts/__init__.py            create: load(name) -> str
 src/zento/tools/sandbox_scripts/pptx_builder.py        create
 src/zento/tools/sandbox_scripts/docx_builder.py        create
@@ -128,13 +133,14 @@ src/zento/agents/specialists/coder.py                  create
 src/zento/agents/specialists/deep_research.py          create
 src/zento/agents/specialists/__init__.py               modify: import Phase 6 specialists
 src/zento/agents/artifact_delivery.py                  create: artifact_outbounds()
-src/zento/agents/orchestrator.py                       modify: attach artefacts in _deliver_result; planner guidance
+src/zento/agents/orchestrator_graph.py                 modify: planner guidance appended to PLANNER_PROMPT
+src/zento/agents/specialists/context.py                create: SpecialistContext, StepResult, as_runner
+src/zento/initiative/task_delivery.py                  modify: captioned, size-checked artefact documents
 sandbox_image/Dockerfile                               create
-sandbox_image/e2b.toml                                 create
 sandbox_image/build.sh                                 create
 tests/conftest.py                                      modify: local_sandbox, use_local_sandbox, artifacts_dir, user_task
 tests/domain/test_artifacts.py
-tests/tools/sandbox/test_local.py  test_docker.py  test_e2b.py  test_select.py  test_image.py
+tests/tools/sandbox/test_local.py  test_docker.py  test_agentcore.py  test_select.py  test_sandboxd.py  test_image.py
 tests/tools/documents/test_pptx.py  test_other_builders.py  test_convert.py
 tests/tools/test_sandbox_tools.py
 tests/files/test_intake.py
@@ -155,12 +161,12 @@ tests/e2e/test_deck_flow.py
 
 **Interfaces:**
 - Consumes: `Settings` (Phase 1).
-- Produces: `ArtifactKind`, `MIME_TYPES: dict[ArtifactKind, str]`, `kind_for_path(path: str) -> ArtifactKind`, `ChartSeries`, `ChartSpec`, `ArtifactRef(id, kind, title, path, size, mime)`; settings attributes `sandbox_image, sandbox_exec_timeout_s, sandbox_idle_pause_s, sandbox_docker_network, sandbox_local_python, max_upload_mb, telegram_max_document_mb, uploads_dir, workspaces_dir`.
+- Produces: `ArtifactKind`, `MIME_TYPES: dict[ArtifactKind, str]`, `kind_for_path(path: str) -> ArtifactKind`, `ChartSeries`, `ChartSpec`, `ArtifactRef(id, kind, title, path, size, mime)`; settings attributes `sandbox_image, sandbox_exec_timeout_s, sandbox_docker_network, sandbox_runtime, sandboxd_socket, agentcore_region, agentcore_identifier, agentcore_session_timeout_s, aws_profile, sandbox_local_python, max_upload_mb, telegram_max_document_mb, uploads_dir, workspaces_dir`.
 
 - [ ] **Step 1: Add dependencies**
 
 ```bash
-uv add "e2b>=2.0"
+uv add "boto3>=1.40"
 uv add --dev "python-pptx>=1.0" "python-docx>=1.1" "openpyxl>=3.1" "pypdf>=5.0" "weasyprint>=62" "markdown>=3.6" "matplotlib>=3.9" "pandas>=2.2"
 ```
 
@@ -216,7 +222,8 @@ def test_phase6_settings_defaults() -> None:
     s = Settings(_env_file=None)
     assert s.sandbox_image == "zento-sandbox:latest"
     assert s.sandbox_exec_timeout_s == 60
-    assert s.sandbox_idle_pause_s == 600
+    assert s.sandbox_runtime == "auto" and s.sandboxd_socket == ""
+    assert s.agentcore_region == "ap-south-1" and s.agentcore_identifier == "aws.codeinterpreter.v1"
     assert s.sandbox_docker_network == "none"
     assert s.max_upload_mb == 20
     assert s.telegram_max_document_mb == 50
@@ -233,7 +240,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'zento.domain.artifact
 
 `src/zento/domain/artifacts.py`
 ```python
-"""Artefacts Zento produces for the user (decks, documents, charts…)."""
+"""Artefacts Mavis produces for the user (decks, documents, charts…)."""
 
 from __future__ import annotations
 
@@ -321,8 +328,13 @@ In `src/zento/config.py`, add to `class Settings` (next to the existing sandbox 
     # --- sandbox & files (Phase 6) ------------------------------------------
     sandbox_image: str = "zento-sandbox:latest"
     sandbox_exec_timeout_s: int = 60
-    sandbox_idle_pause_s: int = 600
     sandbox_docker_network: str = "none"
+    sandbox_runtime: str = "auto"  # auto | runsc | runc  (gVisor when available)
+    sandboxd_socket: str = ""  # e.g. /run/zento/sandboxd.sock; set => worker uses the sidecar
+    agentcore_region: str = "ap-south-1"
+    agentcore_identifier: str = "aws.codeinterpreter.v1"
+    agentcore_session_timeout_s: int = 900
+    aws_profile: str = ""  # empty => default AWS credential chain (instance role on EC2)
     sandbox_local_python: str = ""  # empty => sys.executable (dev only)
     max_upload_mb: int = 20
     telegram_max_document_mb: int = 50
@@ -770,7 +782,7 @@ git commit -m "feat(sandbox): sandbox port, path safety helpers and dev-only loc
 
 ---
 
-### Task 3: Docker backend
+### Task 3: Docker backend hardened with gVisor
 
 **Files:**
 - Create: `src/zento/tools/sandbox/docker.py`
@@ -778,20 +790,25 @@ git commit -m "feat(sandbox): sandbox port, path safety helpers and dev-only loc
 
 **Interfaces:**
 - Consumes: `HostWorkspace`, `safe_env`, `snapshot`, `diff_new`, `clip_output` (Task 2); `ExecResult`, `WORKSPACE` (Task 2).
-- Produces: `DockerSandbox(root_dir: Path, image: str, network: str = "none", docker_bin: str = "docker")` implementing `Sandbox`; `DockerSandbox.argv(root: Path, name: str, inner: list[str]) -> list[str]`.
+- Produces:
+  - `detect_runtime(preferred: str = "auto", docker_bin: str = "docker") -> str | None`: `"runsc"` when gVisor is registered with the Docker daemon, `None` (= default `runc`) otherwise, logging `sandbox.gvisor_unavailable` at warning. `preferred="runc"` forces `None`; `preferred="runsc"` returns `"runsc"` without probing.
+  - `DockerSandbox(root_dir: Path, image: str, network: str = "none", docker_bin: str = "docker", runtime: str | None = None, user: str | None = None)` implementing `Sandbox`; `DockerSandbox.argv(root: Path, name: str, inner: list[str]) -> list[str]`.
+
+Isolation, all on by default: gVisor user-space kernel (`--runtime runsc`, when installed; Phase 7 installs it on EC2), `--network none`, `--read-only` root filesystem with only `/workspace` (per-user bind mount) and a size-capped `/tmp` tmpfs writable, memory/CPU/PID limits, `no-new-privileges`, all capabilities dropped, non-root user, and the `safe_env()` whitelist as the only environment.
 
 - [ ] **Step 1: Write the failing test**
 
 `tests/tools/sandbox/test_docker.py`
 ```python
 import asyncio
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from zento.tools.sandbox import docker as docker_mod
 from zento.tools.sandbox.common import SAFE_ENV_KEYS
-from zento.tools.sandbox.docker import DockerSandbox
+from zento.tools.sandbox.docker import DockerSandbox, detect_runtime
 
 
 class FakeProc:
@@ -840,15 +857,17 @@ def _env_pairs(argv: list[str]) -> dict[str, str]:
 async def test_docker_argv_isolation_flags(tmp_path: Path, calls: list[dict], monkeypatch) -> None:
     monkeypatch.setenv("OLLAMA_API_KEY", "sk-secret")
     calls.queue.append(FakeProc(out=b"4\n"))
-    sb = DockerSandbox(tmp_path, image="zento-sandbox:latest")
+    sb = DockerSandbox(tmp_path, image="zento-sandbox:latest", runtime="runsc", user="1000:1000")
     res = await sb.run_python(7, "print(2+2)")
     assert res.ok and res.stdout == "4\n"
     argv = calls[0]["argv"]
     assert argv[:3] == ["docker", "run", "--rm"]
     for flag, value in [("--network", "none"), ("--memory", "1g"), ("--memory-swap", "1g"), ("--cpus", "1"),
                         ("--pids-limit", "256"), ("--security-opt", "no-new-privileges"),
-                        ("--cap-drop", "ALL"), ("-w", "/workspace")]:
+                        ("--cap-drop", "ALL"), ("-w", "/workspace"), ("--runtime", "runsc"),
+                        ("--user", "1000:1000")]:
         assert argv[argv.index(flag) + 1] == value
+    assert "--read-only" in argv
     assert f"{(tmp_path / '7').resolve()}:/workspace" in argv
     env = _env_pairs(argv)
     assert set(env) <= SAFE_ENV_KEYS
@@ -856,6 +875,11 @@ async def test_docker_argv_isolation_flags(tmp_path: Path, calls: list[dict], mo
     image_idx = argv.index("zento-sandbox:latest")
     assert argv[image_idx + 1] == "python3"
     assert argv[image_idx + 2].startswith("/workspace/.zento/run_")
+
+
+async def test_no_runtime_flag_without_gvisor(tmp_path: Path, calls: list[dict]) -> None:
+    await DockerSandbox(tmp_path, image="img", runtime=None).run_shell(1, "true")
+    assert "--runtime" not in calls[0]["argv"]
 
 
 async def test_docker_cli_env_does_not_forward_secrets(tmp_path: Path, calls: list[dict], monkeypatch) -> None:
@@ -897,6 +921,24 @@ async def test_docker_files_use_host_workspace(tmp_path: Path) -> None:
     await sb.write_file(3, "/workspace/inbox/x.txt", b"hello")
     assert (tmp_path / "3" / "inbox" / "x.txt").read_bytes() == b"hello"
     assert await sb.read_file(3, "inbox/x.txt") == b"hello"
+
+
+def test_detect_runtime(monkeypatch) -> None:
+    def fake_run(argv, **kw):
+        return subprocess.CompletedProcess(argv, 0, stdout='{"io.containerd.runc.v2":{},"runc":{},"runsc":{}}')
+
+    monkeypatch.setattr(docker_mod.subprocess, "run", fake_run)
+    assert detect_runtime("auto") == "runsc"
+    assert detect_runtime("runc") is None
+    assert detect_runtime("runsc") == "runsc"
+
+
+def test_detect_runtime_falls_back_to_runc_when_gvisor_missing(monkeypatch) -> None:
+    def fake_run(argv, **kw):
+        return subprocess.CompletedProcess(argv, 0, stdout='{"runc":{}}')
+
+    monkeypatch.setattr(docker_mod.subprocess, "run", fake_run)
+    assert detect_runtime("auto") is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -908,36 +950,73 @@ Expected: FAIL with `ImportError: cannot import name 'docker' from 'zento.tools.
 
 `src/zento/tools/sandbox/docker.py`
 ```python
-"""Docker sandbox: one throwaway, network-less container per execution over a host workspace dir."""
+"""Docker sandbox: one throwaway, network-less, read-only, gVisor-isolated container per execution.
+
+The per-user workspace is a host directory bind-mounted at /workspace. In production this class runs
+inside the `sandboxd` sidecar (Task 5), so the worker never holds the Docker socket.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
 
+import structlog
+
 from zento.tools.sandbox.base import WORKSPACE, ExecResult
 from zento.tools.sandbox.common import HostWorkspace, clip_output, diff_new, safe_env, snapshot
 
+log = structlog.get_logger()
 _CLI_ENV_KEYS = ("PATH", "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "HOME", "XDG_RUNTIME_DIR")
 
 
+def detect_runtime(preferred: str = "auto", docker_bin: str = "docker") -> str | None:
+    """gVisor ('runsc') if the daemon has it registered; None means Docker's default runc."""
+    if preferred == "runc":
+        return None
+    if preferred == "runsc":
+        return "runsc"
+    try:
+        probe = subprocess.run([docker_bin, "info", "--format", "{{json .Runtimes}}"],
+                               capture_output=True, text=True, timeout=5, check=False)
+        runtimes = probe.stdout or ""
+    except (OSError, subprocess.TimeoutExpired):
+        runtimes = ""
+    if '"runsc"' in runtimes:
+        return "runsc"
+    log.warning("sandbox.gvisor_unavailable",
+                detail="gVisor (runsc) not registered with Docker; falling back to runc isolation")
+    return None
+
+
+def _default_user() -> str:
+    uid, gid = os.getuid(), os.getgid()
+    return "1000:1000" if uid == 0 else f"{uid}:{gid}"
+
+
 class DockerSandbox(HostWorkspace):
-    def __init__(self, root_dir: Path, image: str, network: str = "none", docker_bin: str = "docker") -> None:
+    def __init__(self, root_dir: Path, image: str, network: str = "none", docker_bin: str = "docker",
+                 runtime: str | None = None, user: str | None = None) -> None:
         super().__init__(root_dir)
         self._image = image
         self._network = network
         self._docker = docker_bin
+        self._runtime = runtime
+        self._user = user or _default_user()
 
     def argv(self, root: Path, name: str, inner: list[str]) -> list[str]:
-        argv = [
-            self._docker, "run", "--rm", "--name", name,
+        argv = [self._docker, "run", "--rm", "--name", name]
+        if self._runtime:
+            argv += ["--runtime", self._runtime]
+        argv += [
             "--network", self._network,
             "--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--pids-limit", "256",
             "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
-            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--read-only", "--user", self._user,
             "--tmpfs", "/tmp:rw,size=256m",
             "-v", f"{root}:{WORKSPACE}", "-w", WORKSPACE,
         ]
@@ -1003,530 +1082,482 @@ class DockerSandbox(HostWorkspace):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/tools/sandbox/test_docker.py -v`
-Expected: PASS — `6 passed`
+Expected: PASS — `9 passed`
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/zento/tools/sandbox/docker.py tests/tools/sandbox/test_docker.py
-git commit -m "feat(sandbox): docker backend with no-network, capped, capability-dropped containers"
+git commit -m "feat(sandbox): gVisor-hardened docker backend (read-only, no network, non-root, capped)"
 ```
 
 ---
 
-### Task 4: E2B backend (persistent per-user sandbox, pause on idle)
+### Task 4: AWS Bedrock AgentCore Code Interpreter backend (optional)
 
 **Files:**
-- Create: `src/zento/tools/sandbox/e2b.py`
-- Test: `tests/tools/sandbox/test_e2b.py`
+- Modify: `pyproject.toml` (`uv add "boto3>=1.40"`)
+- Create: `src/zento/tools/sandbox/agentcore.py`
+- Create: `scripts/verify_agentcore.py`
+- Test: `tests/tools/sandbox/test_agentcore.py`
 
 **Interfaces:**
-- Consumes: `safe_env`, `to_rel`, `diff_new`, `clip_output` (Task 2); `users.get_state/set_state` (Phase 1); `e2b.AsyncSandbox` (SDK v2: `AsyncSandbox.create(template=, timeout=, envs=, metadata=, api_key=)`, `AsyncSandbox.connect(sandbox_id, timeout=, api_key=)` which auto-resumes a paused sandbox, instance `.sandbox_id`, `.commands.run(cmd, cwd=, envs=, timeout=)` → result with `.exit_code/.stdout/.stderr` and raising `CommandExitException` (has `.exit_code/.stdout/.stderr`) on non-zero exit and `TimeoutException` on timeout, `.files.write(path, data)`, `.files.read(path, format="bytes")`, `.files.list(path, depth=)` → entries with `.path/.size/.modified_time/.type`, `.files.remove(path)`, `.set_timeout(seconds)`, `.beta_pause()`).
-- Produces: `SandboxIdStore` protocol (`get(user_id) -> str | None`, `set(user_id, sandbox_id)`), `UserStateIds` (stores `users.state["e2b_sandbox_id"]`), `E2BSandbox(*, api_key: str, template: str | None, idle_pause_s: int, ids: SandboxIdStore, factory: Any = None, clock: Callable[[], float] = time.monotonic, start_reaper: bool = True)` implementing `Sandbox`, plus `reap_idle() -> list[int]` and `close() -> None`.
+- Consumes: `to_rel`, `clip_output`, `HIDDEN_DIRS` (Task 2); `ExecResult`, `WORKSPACE` (Task 2); `users.get_state/set_state` (Phase 1); boto3 `bedrock-agentcore` data-plane client (verified against the AWS API reference, `InvokeCodeInterpreter`): `start_code_interpreter_session(codeInterpreterIdentifier=, name=, sessionTimeoutSeconds=)` → `{"codeInterpreterIdentifier", "sessionId"}`; `invoke_code_interpreter(codeInterpreterIdentifier=, sessionId=, name=, arguments=)` → `{"stream": [ {"result": {"content": [...], "structuredContent": {"stdout", "stderr", "exitCode", "executionTime"}, "isError": bool}} ]}`; tool `name` values used: `executeCode` (`{"code", "language": "python"}`), `executeCommand` (`{"command"}`), `writeFiles` (`{"content": [{"path", "blob"}]}`), `readFiles` (`{"paths": [...]}` → content items with `resource.blob` or `resource.text`), `listFiles` (`{"directoryPath"}` → content items with `name`/`uri`); `stop_code_interpreter_session(codeInterpreterIdentifier=, sessionId=)`.
+- Produces: `SessionStore` protocol (`get(user_id) -> str | None`, `set(user_id, session_id | None)`), `UserStateSessions` (stores `users.state["agentcore_session_id"]`), `AgentCoreSandbox(*, region: str, identifier: str = "aws.codeinterpreter.v1", session_timeout_s: int = 900, sessions: SessionStore, client: Any = None, profile: str | None = None)` implementing `Sandbox`, plus `close(user_id) -> None`.
 
-> **SDK check before coding:** run `uv run python -c "import e2b, inspect; print(inspect.signature(e2b.AsyncSandbox.create)); print(inspect.signature(e2b.AsyncSandbox.connect))"` and confirm the parameter names above. If `files.list` has no `depth` parameter in the installed version, drop the argument (the SDK then lists one level) and walk `inbox` and `out` explicitly in `_snapshot`.
+Notes:
+- Region default `ap-south-1`; credentials come from the standard AWS chain (`AWS_PROFILE`, instance role on EC2). The adapter never passes secrets into executed code.
+- One session per user, id kept in `users.state` so it survives restarts; an expired/unknown session (any `ResourceNotFoundException`/`ValidationException` on invoke) is replaced once, transparently.
+- boto3 is synchronous: every call runs in `asyncio.to_thread`; timeouts wrap the thread and, on expiry, stop the session (the only way to kill runaway code) and clear the stored id.
+- Paths: AgentCore sessions have their own working directory; `/workspace/x` maps to relative `x` (via `to_rel`), so prompts and builders work unchanged.
+- `new_files` is computed by listing `out/` and `inbox/` before and after the run.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Add the dependency**
 
-`tests/tools/sandbox/test_e2b.py`
+Run: `uv add "boto3>=1.40"`
+Expected: `Resolved N packages` with no errors. Then confirm the client exists in the installed botocore:
+Run: `uv run python -c "import boto3; c = boto3.client('bedrock-agentcore', region_name='ap-south-1'); print(all(hasattr(c, m) for m in ('start_code_interpreter_session', 'invoke_code_interpreter', 'stop_code_interpreter_session')))"`
+Expected: `True` (if `UnknownServiceError`, upgrade: `uv add "boto3>=1.40" "botocore>=1.40" --upgrade-package boto3 --upgrade-package botocore`).
+
+- [ ] **Step 2: Write the failing test**
+
+`tests/tools/sandbox/test_agentcore.py`
 ```python
 from typing import Any
 
 import pytest
 
-from zento.tools.sandbox.common import SAFE_ENV_KEYS
-from zento.tools.sandbox.e2b import E2BSandbox
+from zento.tools.sandbox.agentcore import AgentCoreSandbox
+from zento.tools.sandbox.common import SandboxPathError
 
 
-class FakeEntry:
-    def __init__(self, path: str, size: int) -> None:
-        self.path, self.size = path, size
-        self.modified_time = f"t-{size}"
-        self.type = "file"
-        self.name = path.rsplit("/", 1)[-1]
+class ClientError(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
 
 
-class FakeFiles:
+class FakeClient:
+    """Mimics boto3's bedrock-agentcore data plane closely enough for the adapter."""
+
     def __init__(self) -> None:
-        self.data: dict[str, bytes] = {}
+        self.files: dict[str, bytes] = {}
+        self.calls: list[tuple[str, dict]] = []
+        self.started = 0
+        self.stopped: list[str] = []
+        self.expired: set[str] = set()
+        self.next_exec: dict[str, Any] = {"stdout": "", "stderr": "", "exitCode": 0}
 
-    async def write(self, path: str, data: Any) -> None:
-        self.data[path] = data.encode() if isinstance(data, str) else bytes(data)
+    def start_code_interpreter_session(self, **kw: Any) -> dict:
+        self.started += 1
+        self.calls.append(("start", kw))
+        return {"codeInterpreterIdentifier": kw["codeInterpreterIdentifier"], "sessionId": f"s{self.started}"}
 
-    async def read(self, path: str, format: str = "text") -> Any:
-        if path not in self.data:
-            raise FileNotFoundError(path)
-        return bytearray(self.data[path]) if format == "bytes" else self.data[path].decode()
+    def stop_code_interpreter_session(self, **kw: Any) -> dict:
+        self.stopped.append(kw["sessionId"])
+        return {}
 
-    async def list(self, path: str, depth: int = 1) -> list[FakeEntry]:
-        prefix = path.rstrip("/") + "/"
-        return [FakeEntry(p, len(b)) for p, b in self.data.items() if p.startswith(prefix)]
+    def invoke_code_interpreter(self, **kw: Any) -> dict:
+        self.calls.append((kw["name"], kw))
+        if kw["sessionId"] in self.expired:
+            raise ClientError("ResourceNotFoundException")
+        args, name = kw["arguments"], kw["name"]
+        if name == "writeFiles":
+            for item in args["content"]:
+                self.files[item["path"]] = item["blob"]
+            return self._result([])
+        if name == "readFiles":
+            path = args["paths"][0]
+            if path not in self.files:
+                return self._result([{"type": "text", "text": f"file not found: {path}"}], error=True)
+            return self._result([{"type": "resource", "resource": {"uri": f"file:///{path}",
+                                                                    "blob": self.files[path]}}])
+        if name == "listFiles":
+            prefix = args.get("directoryPath", "")
+            names = [p for p in self.files if p.startswith(prefix)]
+            return self._result([{"type": "resource_link", "name": p.rsplit("/", 1)[-1], "uri": f"file:///{p}",
+                                  "size": len(self.files[p])} for p in names])
+        if name in ("executeCode", "executeCommand"):
+            if "out/new.txt" in args.get("code", "") + args.get("command", ""):
+                self.files["out/new.txt"] = b"x"
+            sc = dict(self.next_exec)
+            return self._result([{"type": "text", "text": sc["stdout"]}], structured=sc, error=sc["exitCode"] != 0)
+        raise AssertionError(name)
 
-    async def remove(self, path: str) -> None:
-        self.data.pop(path, None)
-
-
-class CommandExitException(Exception):
-    def __init__(self, exit_code: int, stdout: str = "", stderr: str = "") -> None:
-        super().__init__(f"exit {exit_code}")
-        self.exit_code, self.stdout, self.stderr = exit_code, stdout, stderr
-
-
-class TimeoutException(Exception):
-    pass
-
-
-class FakeResult:
-    def __init__(self, exit_code: int = 0, stdout: str = "ok\n", stderr: str = "") -> None:
-        self.exit_code, self.stdout, self.stderr = exit_code, stdout, stderr
-
-
-class FakeCommands:
-    def __init__(self, files: FakeFiles) -> None:
-        self.files = files
-        self.calls: list[dict] = []
-        self.behaviour = None
-
-    async def run(self, cmd: str, cwd: str | None = None, envs: dict | None = None, timeout: float | None = None):
-        self.calls.append({"cmd": cmd, "cwd": cwd, "envs": envs, "timeout": timeout})
-        if self.behaviour and "mkdir" not in cmd:
-            return await self.behaviour(cmd, self.files)
-        return FakeResult()
-
-
-class FakeSbx:
-    def __init__(self, sandbox_id: str) -> None:
-        self.sandbox_id = sandbox_id
-        self.files = FakeFiles()
-        self.commands = FakeCommands(self.files)
-        self.paused = False
-        self.timeouts: list[int] = []
-
-    async def beta_pause(self) -> bool:
-        self.paused = True
-        return True
-
-    async def set_timeout(self, timeout: int) -> None:
-        self.timeouts.append(timeout)
+    @staticmethod
+    def _result(content: list, structured: dict | None = None, error: bool = False) -> dict:
+        return {"stream": [{"result": {"content": content, "structuredContent": structured or {},
+                                       "isError": error}}]}
 
 
-class FakeFactory:
+class MemSessions:
     def __init__(self) -> None:
-        self.created: list[dict] = []
-        self.connected: list[str] = []
-        self.alive: dict[str, FakeSbx] = {}
-
-    async def create(self, **kwargs) -> FakeSbx:
-        sbx = FakeSbx(f"sbx-{len(self.created) + 1}")
-        self.created.append(kwargs)
-        self.alive[sbx.sandbox_id] = sbx
-        return sbx
-
-    async def connect(self, sandbox_id: str, **kwargs) -> FakeSbx:
-        self.connected.append(sandbox_id)
-        if sandbox_id not in self.alive:
-            raise RuntimeError("sandbox not found")
-        sbx = self.alive[sandbox_id]
-        sbx.paused = False
-        return sbx
-
-
-class DictIds:
-    def __init__(self) -> None:
-        self.d: dict[int, str | None] = {}
+        self.data: dict[int, str | None] = {}
 
     async def get(self, user_id: int) -> str | None:
-        return self.d.get(user_id)
+        return self.data.get(user_id)
 
-    async def set(self, user_id: int, sandbox_id: str | None) -> None:
-        self.d[user_id] = sandbox_id
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.t = 1000.0
-
-    def __call__(self) -> float:
-        return self.t
+    async def set(self, user_id: int, session_id: str | None) -> None:
+        self.data[user_id] = session_id
 
 
 @pytest.fixture
-def env():
-    factory, ids, clock = FakeFactory(), DictIds(), Clock()
-    sb = E2BSandbox(api_key="e2b-key", template="zento-sandbox", idle_pause_s=600, ids=ids,
-                    factory=factory, clock=clock, start_reaper=False)
-    return sb, factory, ids, clock
+def client() -> FakeClient:
+    return FakeClient()
 
 
-async def test_creates_one_sandbox_per_user_and_stores_id(env) -> None:
-    sb, factory, ids, _ = env
-    await sb.run_python(1, "print(1)")
-    await sb.run_python(1, "print(2)")
-    assert len(factory.created) == 1
-    assert ids.d[1] == "sbx-1"
-    await sb.run_python(2, "print(3)")
-    assert len(factory.created) == 2
+@pytest.fixture
+def sb(client: FakeClient) -> AgentCoreSandbox:
+    return AgentCoreSandbox(region="ap-south-1", sessions=MemSessions(), client=client)
 
 
-async def test_e2b_create_and_run_use_whitelisted_env(env) -> None:
-    sb, factory, _, _ = env
-    await sb.run_shell(1, "echo hi")
-    kwargs = factory.created[0]
-    assert kwargs["envs"] == {}
-    assert kwargs["template"] == "zento-sandbox"
-    assert kwargs["api_key"] == "e2b-key"
-    run_call = factory.alive["sbx-1"].commands.calls[-1]
-    assert set(run_call["envs"]) <= SAFE_ENV_KEYS
-    assert run_call["cwd"] == "/workspace"
-    assert run_call["cmd"] == "echo hi"
+async def test_run_python_maps_structured_content(sb: AgentCoreSandbox, client: FakeClient) -> None:
+    client.next_exec = {"stdout": "4\n", "stderr": "", "exitCode": 0}
+    res = await sb.run_python(1, "print(2+2)")
+    assert res.ok and res.stdout == "4\n" and res.error is None
+    name, kw = next(c for c in client.calls if c[0] == "executeCode")
+    assert kw["arguments"] == {"code": "print(2+2)", "language": "python"}
+    assert kw["codeInterpreterIdentifier"] == "aws.codeinterpreter.v1"
 
 
-async def test_connects_to_stored_sandbox(env) -> None:
-    sb, factory, ids, _ = env
-    existing = await factory.create()
-    ids.d[5] = existing.sandbox_id
-    await sb.run_shell(5, "ls")
-    assert factory.connected == [existing.sandbox_id]
-    assert len(factory.created) == 1  # only the one we made by hand
-
-
-async def test_connect_failure_creates_fresh_sandbox(env) -> None:
-    sb, factory, ids, _ = env
-    ids.d[5] = "sbx-gone"
-    await sb.run_shell(5, "ls")
-    assert factory.connected == ["sbx-gone"]
-    assert ids.d[5] == "sbx-1"
-
-
-async def test_python_code_written_to_file_and_removed(env) -> None:
-    sb, factory, _, _ = env
-    await sb.run_python(1, "print('hello')")
-    sbx = factory.alive["sbx-1"]
-    cmd = sbx.commands.calls[-1]["cmd"]
-    assert cmd.startswith("python3 /workspace/.zento/run_")
-    assert not any(p.startswith("/workspace/.zento/run_") for p in sbx.files.data)
-
-
-async def test_exit_exception_maps_to_failed_result(env) -> None:
-    sb, factory, _, _ = env
-
-    async def boom(cmd, files):
-        raise CommandExitException(2, stdout="partial", stderr="NameError: x")
-
+async def test_session_reused_and_persisted(sb: AgentCoreSandbox, client: FakeClient) -> None:
     await sb.run_shell(1, "true")
-    factory.alive["sbx-1"].commands.behaviour = boom
-    res = await sb.run_python(1, "x")
-    assert res.ok is False
-    assert res.error == "exit code 2"
-    assert "NameError" in res.stderr and res.stdout == "partial"
-
-
-async def test_e2b_timeout_maps_to_error(env) -> None:
-    sb, factory, _, _ = env
-
-    async def slow(cmd, files):
-        raise TimeoutException("deadline exceeded")
-
     await sb.run_shell(1, "true")
-    factory.alive["sbx-1"].commands.behaviour = slow
-    res = await sb.run_python(1, "while True: pass", timeout_s=5)
-    assert res.ok is False
-    assert res.error == "timed out after 5s"
+    assert client.started == 1
+    assert await sb._sessions.get(1) == "s1"
 
 
-async def test_new_files_detected(env) -> None:
-    sb, factory, _, _ = env
-
-    async def writes(cmd, files):
-        files.data["/workspace/out/chart.png"] = b"\x89PNG"
-        return FakeResult()
-
+async def test_expired_session_replaced_once(sb: AgentCoreSandbox, client: FakeClient) -> None:
     await sb.run_shell(1, "true")
-    factory.alive["sbx-1"].commands.behaviour = writes
-    res = await sb.run_python(1, "make_chart()")
-    assert res.new_files == ["/workspace/out/chart.png"]
+    client.expired.add("s1")
+    res = await sb.run_shell(1, "true")
+    assert res.ok and client.started == 2 and await sb._sessions.get(1) == "s2"
 
 
-async def test_file_roundtrip_and_path_safety(env) -> None:
-    from zento.tools.sandbox.common import SandboxPathError
+async def test_nonzero_exit(sb: AgentCoreSandbox, client: FakeClient) -> None:
+    client.next_exec = {"stdout": "", "stderr": "Traceback\nValueError", "exitCode": 1}
+    res = await sb.run_python(1, "raise ValueError")
+    assert res.ok is False and res.error == "exit code 1" and "ValueError" in res.stderr
 
-    sb, _, _, _ = env
-    await sb.write_file(1, "inbox/a.txt", b"abc")
-    assert await sb.read_file(1, "/workspace/inbox/a.txt") == b"abc"
-    assert await sb.list_files(1) == ["/workspace/inbox/a.txt"]
+
+async def test_files_round_trip_with_relative_paths(sb: AgentCoreSandbox, client: FakeClient) -> None:
+    await sb.write_file(1, "/workspace/inbox/a.csv", b"x,y\n1,2\n")
+    assert client.files == {"inbox/a.csv": b"x,y\n1,2\n"}
+    assert await sb.read_file(1, "inbox/a.csv") == b"x,y\n1,2\n"
+    assert await sb.list_files(1) == ["/workspace/inbox/a.csv"]
+    with pytest.raises(FileNotFoundError):
+        await sb.read_file(1, "inbox/missing.csv")
     with pytest.raises(SandboxPathError):
-        await sb.read_file(1, "/etc/passwd")
+        await sb.write_file(1, "../../etc/passwd", b"")
 
 
-async def test_reap_idle_pauses_and_next_use_resumes(env) -> None:
-    sb, factory, _, clock = env
+async def test_new_files_detected(sb: AgentCoreSandbox, client: FakeClient) -> None:
+    res = await sb.run_shell(1, "echo x > out/new.txt")
+    assert res.new_files == ["/workspace/out/new.txt"]
+
+
+async def test_timeout_stops_session(sb: AgentCoreSandbox, client: FakeClient, monkeypatch) -> None:
+    import time
+
+    def slow(**kw):
+        time.sleep(2)
+        return FakeClient._result([])
+
     await sb.run_shell(1, "true")
-    clock.t += 601
-    assert await sb.reap_idle() == [1]
-    assert factory.alive["sbx-1"].paused is True
-    await sb.run_shell(1, "true")
-    assert factory.connected == ["sbx-1"]
-    assert factory.alive["sbx-1"].paused is False
+    monkeypatch.setattr(client, "invoke_code_interpreter", slow)
+    res = await sb.run_shell(1, "sleep 99", timeout_s=1)
+    assert res.ok is False and res.error == "timed out after 1s"
+    assert client.stopped == ["s1"] and await sb._sessions.get(1) is None
 
 
-async def test_reap_idle_keeps_recently_used(env) -> None:
-    sb, _, _, clock = env
-    await sb.run_shell(1, "true")
-    clock.t += 30
-    assert await sb.reap_idle() == []
+async def test_no_secrets_passed(sb: AgentCoreSandbox, client: FakeClient, monkeypatch) -> None:
+    monkeypatch.setenv("OLLAMA_API_KEY", "sk-secret")
+    await sb.run_python(1, "import os; print(os.environ)")
+    assert "sk-secret" not in repr(client.calls)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 3: Run test to verify it fails**
 
-Run: `uv run pytest tests/tools/sandbox/test_e2b.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'zento.tools.sandbox.e2b'`
+Run: `uv run pytest tests/tools/sandbox/test_agentcore.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'zento.tools.sandbox.agentcore'`
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 4: Implement**
 
-`src/zento/tools/sandbox/e2b.py`
+`src/zento/tools/sandbox/agentcore.py`
 ```python
-"""E2B sandbox: one persistent microVM per user, paused when idle, resumed on next use."""
+"""AWS Bedrock AgentCore Code Interpreter as a Sandbox backend (managed microVM, no Docker needed).
+
+One session per user (id persisted in users.state). Calls are synchronous boto3, run in threads.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import time
-from collections import defaultdict
-from collections.abc import Callable
-from contextlib import suppress
+import base64
 from typing import Any, Protocol
-from uuid import uuid4
 
 import structlog
 
 from zento.tools.sandbox.base import WORKSPACE, ExecResult
-from zento.tools.sandbox.common import HIDDEN_DIRS, WORKSPACE_SUBDIRS, clip_output, diff_new, safe_env, to_rel
+from zento.tools.sandbox.common import HIDDEN_DIRS, clip_output, to_rel
 
 log = structlog.get_logger()
-_LIFETIME_MARGIN_S = 300
+_SESSION_GONE = {"ResourceNotFoundException", "ValidationException", "ConflictException"}
+_WATCHED_DIRS = ("out", "inbox")
 
 
-class SandboxIdStore(Protocol):
+class SessionStore(Protocol):
     async def get(self, user_id: int) -> str | None: ...
-    async def set(self, user_id: int, sandbox_id: str | None) -> None: ...
+    async def set(self, user_id: int, session_id: str | None) -> None: ...
 
 
-class UserStateIds:
-    """Keeps the user's sandbox id in users.state so it survives restarts and replicas."""
-
-    KEY = "e2b_sandbox_id"
+class UserStateSessions:
+    KEY = "agentcore_session_id"
 
     async def get(self, user_id: int) -> str | None:
         from zento.store.repo import users
 
         return (await users.get_state(user_id)).get(self.KEY)
 
-    async def set(self, user_id: int, sandbox_id: str | None) -> None:
+    async def set(self, user_id: int, session_id: str | None) -> None:
         from zento.store.repo import users
 
-        await users.set_state(user_id, **{self.KEY: sandbox_id})
+        await users.set_state(user_id, **{self.KEY: session_id})
 
 
-def _is_file(entry: Any) -> bool:
-    kind = getattr(entry, "type", None)
-    return getattr(kind, "value", kind) == "file"
+def _error_code(exc: Exception) -> str:
+    return str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
 
 
-def _hidden(path: str) -> bool:
-    return any(part in HIDDEN_DIRS for part in path.split("/"))
+def _first_result(response: dict) -> dict:
+    for event in response.get("stream", []):
+        if "result" in event:
+            return event["result"]
+    return {}
 
 
-class E2BSandbox:
-    def __init__(
-        self,
-        *,
-        api_key: str,
-        template: str | None,
-        idle_pause_s: int,
-        ids: SandboxIdStore,
-        factory: Any = None,
-        clock: Callable[[], float] = time.monotonic,
-        start_reaper: bool = True,
-    ) -> None:
-        self._api_key = api_key
-        self._template = template or None
-        self._idle = idle_pause_s
-        self._lifetime = idle_pause_s + _LIFETIME_MARGIN_S
-        self._ids = ids
-        self._factory = factory
-        self._clock = clock
-        self._start_reaper = start_reaper
-        self._live: dict[int, Any] = {}
-        self._last_used: dict[int, float] = {}
-        self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
-        self._reaper: asyncio.Task | None = None
+def _rel_from_item(item: dict) -> str:
+    uri = str(item.get("uri") or item.get("resource", {}).get("uri") or "")
+    return uri.removeprefix("file://").lstrip("/") or str(item.get("name", ""))
 
-    # --- lifecycle -------------------------------------------------------------
 
-    def _cls(self) -> Any:
-        if self._factory is None:
-            from e2b import AsyncSandbox
+class AgentCoreSandbox:
+    def __init__(self, *, region: str, identifier: str = "aws.codeinterpreter.v1", session_timeout_s: int = 900,
+                 sessions: SessionStore, client: Any = None, profile: str | None = None) -> None:
+        if client is None:
+            import boto3
 
-            self._factory = AsyncSandbox
-        return self._factory
+            client = boto3.Session(profile_name=profile or None).client("bedrock-agentcore", region_name=region)
+        self._client = client
+        self._identifier = identifier
+        self._timeout = session_timeout_s
+        self._sessions = sessions
+        self._locks: dict[int, asyncio.Lock] = {}
 
-    async def _get(self, user_id: int) -> Any:
-        async with self._locks[user_id]:
-            sbx = self._live.get(user_id)
-            if sbx is None:
-                sbx = await self._connect_or_create(user_id)
-                self._live[user_id] = sbx
-            self._last_used[user_id] = self._clock()
-        self._ensure_reaper()
-        return sbx
+    # --- sessions -------------------------------------------------------------------
 
-    async def _connect_or_create(self, user_id: int) -> Any:
-        cls = self._cls()
-        sandbox_id = await self._ids.get(user_id)
-        if sandbox_id:
+    async def _session(self, user_id: int) -> str:
+        sid = await self._sessions.get(user_id)
+        if sid:
+            return sid
+        resp = await asyncio.to_thread(
+            self._client.start_code_interpreter_session,
+            codeInterpreterIdentifier=self._identifier, name=f"zento-{user_id}",
+            sessionTimeoutSeconds=self._timeout,
+        )
+        sid = resp["sessionId"]
+        await self._sessions.set(user_id, sid)
+        return sid
+
+    async def close(self, user_id: int) -> None:
+        sid = await self._sessions.get(user_id)
+        await self._sessions.set(user_id, None)
+        if sid:
             try:
-                sbx = await cls.connect(sandbox_id, timeout=self._lifetime, api_key=self._api_key)
-                log.info("sandbox.e2b.connected", user_id=user_id, sandbox_id=sandbox_id)
-                return sbx
-            except Exception as exc:  # noqa: BLE001 - expired/killed sandboxes are normal
-                log.warning("sandbox.e2b.connect_failed", user_id=user_id, sandbox_id=sandbox_id, error=str(exc))
-        sbx = await cls.create(
-            template=self._template,
-            timeout=self._lifetime,
-            envs={},  # never pass secrets into the VM
-            metadata={"zento_user": str(user_id)},
-            api_key=self._api_key,
-        )
-        await self._ids.set(user_id, sbx.sandbox_id)
-        dirs = " ".join(f"{WORKSPACE}/{d}" for d in WORKSPACE_SUBDIRS)
-        await sbx.commands.run(
-            f"mkdir -p {dirs} 2>/dev/null || (sudo mkdir -p {dirs} && sudo chown -R $(id -u):$(id -g) {WORKSPACE})",
-            timeout=30,
-        )
-        log.info("sandbox.e2b.created", user_id=user_id, sandbox_id=sbx.sandbox_id)
-        return sbx
+                await asyncio.to_thread(self._client.stop_code_interpreter_session,
+                                        codeInterpreterIdentifier=self._identifier, sessionId=sid)
+            except Exception as exc:  # noqa: BLE001 - best effort
+                log.warning("sandbox.agentcore_stop_failed", error=str(exc))
 
-    def _ensure_reaper(self) -> None:
-        if self._start_reaper and (self._reaper is None or self._reaper.done()):
-            self._reaper = asyncio.create_task(self._reap_loop())
-
-    async def _reap_loop(self) -> None:
-        while self._live:
-            await asyncio.sleep(min(60, self._idle))
-            await self.reap_idle()
-
-    async def reap_idle(self) -> list[int]:
-        """Pause sandboxes unused for idle_pause_s. Paused sandboxes keep /workspace."""
-        now = self._clock()
-        paused: list[int] = []
-        for user_id in list(self._live):
-            if now - self._last_used.get(user_id, now) < self._idle:
-                continue
-            async with self._locks[user_id]:
-                sbx = self._live.pop(user_id, None)
-                if sbx is None:
+    async def _invoke(self, user_id: int, name: str, arguments: dict, timeout_s: float = 60) -> dict:
+        for attempt in (1, 2):
+            sid = await self._session(user_id)
+            try:
+                resp = await asyncio.wait_for(asyncio.to_thread(
+                    self._client.invoke_code_interpreter, codeInterpreterIdentifier=self._identifier,
+                    sessionId=sid, name=name, arguments=arguments,
+                ), timeout=timeout_s)
+                return _first_result(resp)
+            except TimeoutError:
+                await self.close(user_id)
+                raise
+            except Exception as exc:  # noqa: BLE001 - classify via boto error code
+                if attempt == 1 and _error_code(exc) in _SESSION_GONE:
+                    log.info("sandbox.agentcore_session_replaced", user_id=user_id)
+                    await self._sessions.set(user_id, None)
                     continue
-                try:
-                    await sbx.beta_pause()
-                    paused.append(user_id)
-                    log.info("sandbox.e2b.paused", user_id=user_id, sandbox_id=sbx.sandbox_id)
-                except Exception as exc:  # noqa: BLE001 - it will simply expire
-                    log.warning("sandbox.e2b.pause_failed", user_id=user_id, error=str(exc))
-        return paused
+                raise
+        raise RuntimeError("unreachable")
 
-    async def close(self) -> None:
-        if self._reaper:
-            self._reaper.cancel()
-        for user_id in list(self._live):
-            self._last_used[user_id] = float("-inf")
-        await self.reap_idle()
-
-    # --- Sandbox port ------------------------------------------------------------
+    # --- Sandbox port -----------------------------------------------------------------
 
     async def run_python(self, user_id: int, code: str, timeout_s: int = 60) -> ExecResult:
-        sbx = await self._get(user_id)
-        path = f"{WORKSPACE}/.zento/run_{uuid4().hex}.py"
-        await sbx.files.write(path, code)
-        try:
-            return await self._exec(sbx, f"python3 {path}", timeout_s)
-        finally:
-            with suppress(Exception):
-                await sbx.files.remove(path)
+        return await self._exec(user_id, "executeCode", {"code": code, "language": "python"}, timeout_s)
 
     async def run_shell(self, user_id: int, cmd: str, timeout_s: int = 60) -> ExecResult:
-        return await self._exec(await self._get(user_id), cmd, timeout_s)
+        return await self._exec(user_id, "executeCommand", {"command": cmd}, timeout_s)
 
-    async def _exec(self, sbx: Any, cmd: str, timeout_s: int) -> ExecResult:
-        before = await self._snapshot(sbx)
-        try:
-            res = await sbx.commands.run(cmd, cwd=WORKSPACE, envs=safe_env(WORKSPACE), timeout=timeout_s)
-            ok = res.exit_code == 0
-            result = ExecResult(
-                ok=ok, stdout=clip_output(res.stdout), stderr=clip_output(res.stderr),
-                error=None if ok else f"exit code {res.exit_code}",
-            )
-        except Exception as exc:
-            if hasattr(exc, "exit_code"):  # e2b CommandExitException
-                result = ExecResult(
-                    ok=False, stdout=clip_output(getattr(exc, "stdout", "")),
-                    stderr=clip_output(getattr(exc, "stderr", "")), error=f"exit code {exc.exit_code}",
-                )
-            elif "timeout" in type(exc).__name__.lower():
-                result = ExecResult(ok=False, error=f"timed out after {timeout_s}s")
-            else:
-                raise
-        result.new_files = diff_new(before, await self._snapshot(sbx))
-        with suppress(Exception):
-            await sbx.set_timeout(self._lifetime)
-        return result
+    async def _exec(self, user_id: int, name: str, arguments: dict, timeout_s: int) -> ExecResult:
+        lock = self._locks.setdefault(user_id, asyncio.Lock())
+        async with lock:
+            before = await self._stamps(user_id)
+            try:
+                result = await self._invoke(user_id, name, arguments, timeout_s)
+            except TimeoutError:
+                return ExecResult(ok=False, error=f"timed out after {timeout_s}s")
+            except Exception as exc:  # noqa: BLE001
+                return ExecResult(ok=False, error=f"sandbox error: {type(exc).__name__}: {str(exc)[:300]}")
+            after = await self._stamps(user_id)
+        sc = result.get("structuredContent") or {}
+        stdout = sc.get("stdout")
+        if stdout is None:
+            stdout = "".join(c.get("text", "") for c in result.get("content", []) if c.get("type") == "text")
+        rc = int(sc.get("exitCode", 1 if result.get("isError") else 0))
+        return ExecResult(
+            ok=rc == 0 and not result.get("isError", False), stdout=clip_output(stdout),
+            stderr=clip_output(sc.get("stderr", "")), error=None if rc == 0 else f"exit code {rc}",
+            new_files=sorted(p for p, stamp in after.items() if before.get(p) != stamp),
+        )
 
-    async def _snapshot(self, sbx: Any) -> dict[str, tuple[str, int]]:
-        entries = await sbx.files.list(WORKSPACE, depth=4)
-        return {
-            e.path: (str(getattr(e, "modified_time", "")), int(getattr(e, "size", 0) or 0))
-            for e in entries
-            if _is_file(e) and not _hidden(e.path)
-        }
+    async def _stamps(self, user_id: int) -> dict[str, int]:
+        stamps: dict[str, int] = {}
+        for d in _WATCHED_DIRS:
+            try:
+                result = await self._invoke(user_id, "listFiles", {"directoryPath": d}, 30)
+            except Exception:  # noqa: BLE001 - change detection is best effort
+                continue
+            for item in result.get("content", []):
+                rel = _rel_from_item(item)
+                if rel and not any(part in HIDDEN_DIRS for part in rel.split("/")):
+                    stamps[f"{WORKSPACE}/{rel}"] = int(item.get("size") or 0)
+        return stamps
 
     async def write_file(self, user_id: int, path: str, data: bytes) -> None:
-        sbx = await self._get(user_id)
-        await sbx.files.write(f"{WORKSPACE}/{to_rel(path)}", data)
+        rel = to_rel(path)
+        await self._invoke(user_id, "writeFiles", {"content": [{"path": rel, "blob": data}]})
 
     async def read_file(self, user_id: int, path: str) -> bytes:
-        sbx = await self._get(user_id)
-        return bytes(await sbx.files.read(f"{WORKSPACE}/{to_rel(path)}", format="bytes"))
+        rel = to_rel(path)
+        result = await self._invoke(user_id, "readFiles", {"paths": [rel]})
+        if result.get("isError"):
+            raise FileNotFoundError(path)
+        for item in result.get("content", []):
+            res = item.get("resource") or {}
+            if "blob" in res:
+                blob = res["blob"]
+                return blob if isinstance(blob, bytes | bytearray) else base64.b64decode(blob)
+            if "text" in res:
+                return str(res["text"]).encode()
+        raise FileNotFoundError(path)
 
     async def list_files(self, user_id: int, path: str = WORKSPACE) -> list[str]:
-        sbx = await self._get(user_id)
         rel = to_rel(path)
-        prefix = f"{WORKSPACE}/{rel}/" if rel else f"{WORKSPACE}/"
-        return sorted(p for p in await self._snapshot(sbx) if p.startswith(prefix))
+        result = await self._invoke(user_id, "listFiles", {"directoryPath": rel})
+        out = []
+        for item in result.get("content", []):
+            item_rel = _rel_from_item(item)
+            if item_rel and not any(part in HIDDEN_DIRS for part in item_rel.split("/")):
+                out.append(f"{WORKSPACE}/{item_rel}")
+        return sorted(out)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+`scripts/verify_agentcore.py` (manual check against the live service; documents library availability):
+```python
+"""Verify AgentCore Code Interpreter works for Zento's document toolchain.
 
-Run: `uv run pytest tests/tools/sandbox/test_e2b.py -v`
-Expected: PASS — `11 passed`
+Usage: AWS_PROFILE=cashfree uv run python scripts/verify_agentcore.py
+"""
 
-- [ ] **Step 5: Commit**
+import asyncio
+
+from zento.tools.sandbox.agentcore import AgentCoreSandbox
+
+REQUIRED = ["pandas", "matplotlib", "pptx", "docx", "openpyxl", "pypdf", "markdown", "weasyprint"]
+PIP_NAMES = {"pptx": "python-pptx", "docx": "python-docx"}
+
+
+class Mem:
+    def __init__(self) -> None:
+        self.d: dict = {}
+
+    async def get(self, user_id):
+        return self.d.get(user_id)
+
+    async def set(self, user_id, sid):
+        self.d[user_id] = sid
+
+
+async def main() -> None:
+    sb = AgentCoreSandbox(region="ap-south-1", sessions=Mem())
+    probe = "import importlib.util as u\n" + "\n".join(
+        f"print('{m}', bool(u.find_spec('{m}')))" for m in REQUIRED)
+    res = await sb.run_python(0, probe)
+    print(res.stdout or res.stderr or res.error)
+    missing = [line.split()[0] for line in res.stdout.splitlines() if line.endswith("False")]
+    if missing:
+        pkgs = " ".join(PIP_NAMES.get(m, m) for m in missing)
+        print(f"missing: {missing}; trying pip install {pkgs}")
+        pip = await sb.run_shell(0, f"pip install --quiet {pkgs}", timeout_s=300)
+        print("pip ok" if pip.ok else f"pip failed (network-restricted session?): {pip.stderr[-500:]}")
+    await sb.close(0)
+
+
+asyncio.run(main())
+```
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `uv run pytest tests/tools/sandbox/test_agentcore.py -v`
+Expected: PASS — `8 passed`
+
+- [ ] **Step 6: Verify against the live service (manual; needs AWS creds)**
+
+Run: `AWS_PROFILE=cashfree uv run python scripts/verify_agentcore.py`
+Expected: one `name True/False` line per library. For any `False`, the script tries `pip install`. If pip fails (sessions on the default `aws.codeinterpreter.v1` interpreter may have no public network), record the result in `docs/superpowers/notes/agentcore.md`. Then either create a custom code interpreter with public network mode (control plane `bedrock-agentcore-control create_code_interpreter`, then set `AGENTCORE_IDENTIFIER` to its id) or keep Docker as the document backend. Do not block the phase on this. AgentCore is the optional second backend.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/zento/tools/sandbox/e2b.py tests/tools/sandbox/test_e2b.py
-git commit -m "feat(sandbox): e2b backend with persistent per-user sandbox and idle pause"
+git add pyproject.toml uv.lock src/zento/tools/sandbox/agentcore.py scripts/verify_agentcore.py tests/tools/sandbox/test_agentcore.py
+git commit -m "feat(sandbox): optional AWS Bedrock AgentCore Code Interpreter backend"
 ```
 
 ---
 
-### Task 5: Backend selection and the sandbox image
+### Task 5: Backend selection, the `sandboxd` sidecar and the sandbox image
 
 **Files:**
 - Modify: `src/zento/tools/sandbox/__init__.py`
-- Create: `sandbox_image/Dockerfile`, `sandbox_image/e2b.toml`, `sandbox_image/build.sh`
-- Test: `tests/tools/sandbox/test_select.py`, `tests/tools/sandbox/test_image.py`
+- Create: `src/zento/sandboxd/__init__.py`, `src/zento/sandboxd/server.py`, `src/zento/tools/sandbox/sandboxd_client.py`
+- Modify: `src/zento/cli.py` (add `sandboxd` command)
+- Create: `sandbox_image/Dockerfile`, `sandbox_image/build.sh`
+- Test: `tests/tools/sandbox/test_select.py`, `tests/tools/sandbox/test_sandboxd.py`, `tests/tools/sandbox/test_image.py`
 
 **Interfaces:**
-- Consumes: `LocalSandbox`, `DockerSandbox`, `E2BSandbox`, `UserStateIds` (Tasks 2–4); `Settings` (Task 1 + index keys `sandbox_backend`, `sandbox_template`, `e2b_api_key`); `ZentoError` (index).
-- Produces: `build_sandbox(settings: Settings) -> Sandbox`, `get_sandbox() -> Sandbox` (index contract), `set_sandbox(sandbox: Sandbox | None) -> None` (tests), module-level `_docker_available() -> bool`.
+- Consumes: `LocalSandbox`, `DockerSandbox`, `detect_runtime`, `AgentCoreSandbox`, `UserStateSessions` (Tasks 2–4); `Settings` (Task 1); `ZentoError` (index).
+- Produces:
+  - `build_sandbox(settings: Settings) -> Sandbox`, `get_sandbox() -> Sandbox` (index contract), `set_sandbox(sandbox: Sandbox | None) -> None` (tests), module-level `_docker_available() -> bool`, `_aws_credentials_available() -> bool`.
+  - `sandboxd.server.create_app(backend: Sandbox) -> FastAPI` with `POST /run_python`, `/run_shell`, `/write_file`, `/read_file`, `/list_files` (JSON; file bytes base64), `GET /health`.
+  - `SandboxdSandbox(socket_path: str, transport: httpx.AsyncBaseTransport | None = None)` implementing `Sandbox` over the unix socket.
+  - CLI `zento sandboxd --socket /run/zento/sandboxd.sock` (serves `create_app(DockerSandbox(...))` with uvicorn `uds=`).
+
+Selection (`SANDBOX_BACKEND=auto|docker|agentcore|local`):
+- `docker`: if `SANDBOXD_SOCKET` is set, use `SandboxdSandbox` (production: the worker talks to the sidecar). Otherwise run `DockerSandbox` in-process (dev box with Docker).
+- `agentcore`: `AgentCoreSandbox(region=AGENTCORE_REGION, identifier=AGENTCORE_IDENTIFIER, profile=AWS_PROFILE)`.
+- `local`: dev only.
+- `auto`: `docker` when the sidecar socket exists or a Docker daemon is reachable; else `agentcore` when AWS credentials resolve; else `local` (critical log).
+
+Why a sidecar: mounting `/var/run/docker.sock` into the worker would give the LLM-driving process root-equivalent control of the host. `sandboxd` holds the socket instead and exposes only five operations (run python, run shell, write, read and list files inside a per-user workspace) over a unix socket shared with the worker through a volume. A worker compromise can then run sandboxed code, nothing more. The trade-off is one extra small container.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1539,36 +1570,47 @@ import pytest
 from zento.config import Settings
 from zento.domain.errors import ZentoError
 from zento.tools import sandbox as sandbox_mod
+from zento.tools.sandbox.agentcore import AgentCoreSandbox
 from zento.tools.sandbox.docker import DockerSandbox
-from zento.tools.sandbox.e2b import E2BSandbox
 from zento.tools.sandbox.local import LocalSandbox
+from zento.tools.sandbox.sandboxd_client import SandboxdSandbox
 
 
 def _settings(tmp_path: Path, **kw) -> Settings:
     return Settings(_env_file=None, workspaces_dir=tmp_path / "ws", **kw)
 
 
-def test_auto_prefers_e2b_when_key_present(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(sandbox_mod, "_docker_available", lambda: True)
-    sb = sandbox_mod.build_sandbox(_settings(tmp_path, sandbox_backend="auto", e2b_api_key="k"))
-    assert isinstance(sb, E2BSandbox)
+@pytest.fixture(autouse=True)
+def _no_probe(monkeypatch):
+    monkeypatch.setattr(sandbox_mod, "detect_runtime", lambda preferred="auto", docker_bin="docker": None)
 
 
-def test_auto_uses_docker_without_e2b_key(tmp_path, monkeypatch) -> None:
+def test_auto_prefers_sidecar_when_socket_exists(tmp_path, monkeypatch) -> None:
+    sock = tmp_path / "sandboxd.sock"
+    sock.touch()
+    sb = sandbox_mod.build_sandbox(_settings(tmp_path, sandbox_backend="auto", sandboxd_socket=str(sock)))
+    assert isinstance(sb, SandboxdSandbox)
+
+
+def test_auto_uses_docker_when_daemon_reachable(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(sandbox_mod, "_docker_available", lambda: True)
-    sb = sandbox_mod.build_sandbox(_settings(tmp_path, sandbox_backend="auto", e2b_api_key=""))
+    sb = sandbox_mod.build_sandbox(_settings(tmp_path, sandbox_backend="auto"))
     assert isinstance(sb, DockerSandbox)
+
+
+def test_auto_uses_agentcore_with_aws_creds_and_no_docker(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(sandbox_mod, "_docker_available", lambda: False)
+    monkeypatch.setattr(sandbox_mod, "_aws_credentials_available", lambda profile: True)
+    monkeypatch.setattr(sandbox_mod, "_agentcore_client", lambda s: object())
+    sb = sandbox_mod.build_sandbox(_settings(tmp_path, sandbox_backend="auto"))
+    assert isinstance(sb, AgentCoreSandbox)
 
 
 def test_auto_falls_back_to_local_only_when_nothing_else(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(sandbox_mod, "_docker_available", lambda: False)
-    sb = sandbox_mod.build_sandbox(_settings(tmp_path, sandbox_backend="auto", e2b_api_key=""))
+    monkeypatch.setattr(sandbox_mod, "_aws_credentials_available", lambda profile: False)
+    sb = sandbox_mod.build_sandbox(_settings(tmp_path, sandbox_backend="auto"))
     assert isinstance(sb, LocalSandbox)
-
-
-def test_explicit_e2b_without_key_is_a_config_error(tmp_path) -> None:
-    with pytest.raises(ZentoError, match="E2B_API_KEY"):
-        sandbox_mod.build_sandbox(_settings(tmp_path, sandbox_backend="e2b", e2b_api_key=""))
 
 
 def test_unknown_backend_rejected(tmp_path) -> None:
@@ -1585,6 +1627,42 @@ def test_get_sandbox_is_cached_and_overridable(local_sandbox) -> None:
         sandbox_mod.set_sandbox(None)
 ```
 
+`tests/tools/sandbox/test_sandboxd.py`
+```python
+import httpx
+
+from zento.sandboxd.server import create_app
+from zento.tools.sandbox.sandboxd_client import SandboxdSandbox
+
+
+def _client(local_sandbox) -> SandboxdSandbox:
+    transport = httpx.ASGITransport(app=create_app(local_sandbox))
+    return SandboxdSandbox("/unused.sock", transport=transport)
+
+
+async def test_sidecar_round_trip(local_sandbox) -> None:
+    sb = _client(local_sandbox)
+    await sb.write_file(1, "/workspace/inbox/a.txt", b"\x00bytes\xff")
+    assert await sb.read_file(1, "inbox/a.txt") == b"\x00bytes\xff"
+    res = await sb.run_python(1, "open('out/x.txt','w').write('hi'); print('done')")
+    assert res.ok and res.stdout.strip() == "done" and res.new_files == ["/workspace/out/x.txt"]
+    assert "/workspace/out/x.txt" in await sb.list_files(1)
+    shell = await sb.run_shell(1, "echo hi")
+    assert shell.stdout.strip() == "hi"
+
+
+async def test_sidecar_maps_errors(local_sandbox) -> None:
+    sb = _client(local_sandbox)
+    import pytest
+
+    from zento.tools.sandbox.common import SandboxPathError
+
+    with pytest.raises(SandboxPathError):
+        await sb.write_file(1, "../../etc/x", b"")
+    with pytest.raises(FileNotFoundError):
+        await sb.read_file(1, "inbox/missing.txt")
+```
+
 `tests/tools/sandbox/test_image.py`
 ```python
 from pathlib import Path
@@ -1598,20 +1676,139 @@ def test_sandbox_image_has_document_toolchain() -> None:
                 "markdown", "pypdf", "libreoffice-core", "fonts-dejavu", "fonts-noto-color-emoji"]:
         assert pkg in dockerfile, pkg
     assert "/workspace" in dockerfile
-
-
-def test_e2b_template_points_at_dockerfile() -> None:
-    toml = (ROOT / "sandbox_image" / "e2b.toml").read_text()
-    assert 'template_name = "zento-sandbox"' in toml
-    assert 'dockerfile = "Dockerfile"' in toml
+    assert "USER 1000:1000" in dockerfile
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/tools/sandbox/test_select.py tests/tools/sandbox/test_image.py -v`
-Expected: FAIL with `AttributeError: module 'zento.tools.sandbox' has no attribute 'build_sandbox'` and `FileNotFoundError` for the Dockerfile.
+Run: `uv run pytest tests/tools/sandbox/test_select.py tests/tools/sandbox/test_sandboxd.py tests/tools/sandbox/test_image.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'zento.tools.sandbox.sandboxd_client'` and `FileNotFoundError` for the Dockerfile.
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Implement the sidecar**
+
+`src/zento/sandboxd/__init__.py`: empty.
+
+`src/zento/sandboxd/server.py`
+```python
+"""sandboxd: the only process that holds the Docker socket. Exposes five sandbox operations, nothing else."""
+
+from __future__ import annotations
+
+import base64
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from zento.tools.sandbox.base import WORKSPACE, ExecResult, Sandbox
+from zento.tools.sandbox.common import SandboxPathError
+
+
+class RunReq(BaseModel):
+    user_id: int
+    code: str = ""
+    cmd: str = ""
+    timeout_s: int = 60
+
+
+class FileReq(BaseModel):
+    user_id: int
+    path: str
+    data_b64: str = ""
+
+
+def create_app(backend: Sandbox) -> FastAPI:
+    app = FastAPI(title="zento-sandboxd", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.get("/health")
+    async def health() -> dict:
+        return {"status": "ok"}
+
+    @app.post("/run_python")
+    async def run_python(req: RunReq) -> ExecResult:
+        return await backend.run_python(req.user_id, req.code, min(req.timeout_s, 600))
+
+    @app.post("/run_shell")
+    async def run_shell(req: RunReq) -> ExecResult:
+        return await backend.run_shell(req.user_id, req.cmd, min(req.timeout_s, 600))
+
+    @app.post("/write_file")
+    async def write_file(req: FileReq) -> dict:
+        try:
+            await backend.write_file(req.user_id, req.path, base64.b64decode(req.data_b64))
+        except SandboxPathError as exc:
+            raise HTTPException(status_code=400, detail=f"path: {exc}") from exc
+        return {"ok": True}
+
+    @app.post("/read_file")
+    async def read_file(req: FileReq) -> dict:
+        try:
+            data = await backend.read_file(req.user_id, req.path)
+        except SandboxPathError as exc:
+            raise HTTPException(status_code=400, detail=f"path: {exc}") from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="not found") from exc
+        return {"data_b64": base64.b64encode(data).decode()}
+
+    @app.post("/list_files")
+    async def list_files(req: FileReq) -> dict:
+        try:
+            return {"files": await backend.list_files(req.user_id, req.path or WORKSPACE)}
+        except SandboxPathError as exc:
+            raise HTTPException(status_code=400, detail=f"path: {exc}") from exc
+
+    return app
+```
+
+`src/zento/tools/sandbox/sandboxd_client.py`
+```python
+"""Sandbox port implemented by calling the sandboxd sidecar over a unix socket."""
+
+from __future__ import annotations
+
+import base64
+
+import httpx
+
+from zento.tools.sandbox.base import WORKSPACE, ExecResult
+from zento.tools.sandbox.common import SandboxPathError
+
+
+class SandboxdSandbox:
+    def __init__(self, socket_path: str, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self._client = httpx.AsyncClient(
+            transport=transport or httpx.AsyncHTTPTransport(uds=socket_path),
+            base_url="http://sandboxd", timeout=httpx.Timeout(660.0),
+        )
+
+    async def _post(self, path: str, body: dict) -> dict:
+        resp = await self._client.post(path, json=body)
+        if resp.status_code == 400:
+            raise SandboxPathError(resp.json().get("detail", "bad path"))
+        if resp.status_code == 404:
+            raise FileNotFoundError(body.get("path", ""))
+        resp.raise_for_status()
+        return resp.json()
+
+    async def run_python(self, user_id: int, code: str, timeout_s: int = 60) -> ExecResult:
+        return ExecResult.model_validate(
+            await self._post("/run_python", {"user_id": user_id, "code": code, "timeout_s": timeout_s}))
+
+    async def run_shell(self, user_id: int, cmd: str, timeout_s: int = 60) -> ExecResult:
+        return ExecResult.model_validate(
+            await self._post("/run_shell", {"user_id": user_id, "cmd": cmd, "timeout_s": timeout_s}))
+
+    async def write_file(self, user_id: int, path: str, data: bytes) -> None:
+        await self._post("/write_file", {"user_id": user_id, "path": path,
+                                         "data_b64": base64.b64encode(data).decode()})
+
+    async def read_file(self, user_id: int, path: str) -> bytes:
+        return base64.b64decode((await self._post("/read_file", {"user_id": user_id, "path": path}))["data_b64"])
+
+    async def list_files(self, user_id: int, path: str = WORKSPACE) -> list[str]:
+        return list((await self._post("/list_files", {"user_id": user_id, "path": path}))["files"])
+```
+
+- [ ] **Step 4: Implement selection**
 
 `src/zento/tools/sandbox/__init__.py`
 ```python
@@ -1622,12 +1819,14 @@ from __future__ import annotations
 import shutil
 import subprocess
 from functools import lru_cache
+from pathlib import Path
 
 import structlog
 
 from zento.config import Settings, get_settings
 from zento.domain.errors import ZentoError
 from zento.tools.sandbox.base import WORKSPACE, ExecResult, Sandbox
+from zento.tools.sandbox.docker import detect_runtime
 
 __all__ = ["WORKSPACE", "ExecResult", "Sandbox", "build_sandbox", "get_sandbox", "set_sandbox"]
 
@@ -1648,41 +1847,62 @@ def _docker_available() -> bool:
     return probe.returncode == 0
 
 
+def _aws_credentials_available(profile: str | None) -> bool:
+    try:
+        import boto3
+
+        return boto3.Session(profile_name=profile or None).get_credentials() is not None
+    except Exception:  # noqa: BLE001 - missing profile, no boto3, etc.
+        return False
+
+
+def _agentcore_client(settings: Settings):
+    import boto3
+
+    return boto3.Session(profile_name=settings.aws_profile or None).client(
+        "bedrock-agentcore", region_name=settings.agentcore_region)
+
+
+def _sidecar_socket(settings: Settings) -> str | None:
+    sock = settings.sandboxd_socket
+    return sock if sock and Path(sock).exists() else None
+
+
 def build_sandbox(settings: Settings) -> Sandbox:
     backend = settings.sandbox_backend
     if backend == "auto":
-        if settings.e2b_api_key:
-            backend = "e2b"
-        elif _docker_available():
+        if _sidecar_socket(settings) or _docker_available():
             backend = "docker"
+        elif _aws_credentials_available(settings.aws_profile):
+            backend = "agentcore"
         else:
             backend = "local"
             log.critical(
                 "sandbox.local_fallback",
-                detail="No E2B_API_KEY and no reachable Docker daemon: code runs UNISOLATED on this host.",
+                detail="No sandboxd socket, no Docker daemon and no AWS credentials: code runs UNISOLATED.",
             )
     match backend:
-        case "e2b":
-            if not settings.e2b_api_key:
-                raise ZentoError("SANDBOX_BACKEND=e2b but E2B_API_KEY is empty")
-            from zento.tools.sandbox.e2b import E2BSandbox, UserStateIds
-
-            return E2BSandbox(
-                api_key=settings.e2b_api_key,
-                template=settings.sandbox_template or None,
-                idle_pause_s=settings.sandbox_idle_pause_s,
-                ids=UserStateIds(),
-            )
         case "docker":
+            if sock := _sidecar_socket(settings):
+                from zento.tools.sandbox.sandboxd_client import SandboxdSandbox
+
+                return SandboxdSandbox(sock)
             from zento.tools.sandbox.docker import DockerSandbox
 
-            return DockerSandbox(settings.workspaces_dir, settings.sandbox_image, settings.sandbox_docker_network)
+            return DockerSandbox(settings.workspaces_dir, settings.sandbox_image, settings.sandbox_docker_network,
+                                 runtime=detect_runtime(settings.sandbox_runtime))
+        case "agentcore":
+            from zento.tools.sandbox.agentcore import AgentCoreSandbox, UserStateSessions
+
+            return AgentCoreSandbox(region=settings.agentcore_region, identifier=settings.agentcore_identifier,
+                                    session_timeout_s=settings.agentcore_session_timeout_s,
+                                    sessions=UserStateSessions(), client=_agentcore_client(settings))
         case "local":
             from zento.tools.sandbox.local import LocalSandbox
 
             return LocalSandbox(settings.workspaces_dir, settings.sandbox_local_python or None)
         case _:
-            raise ZentoError(f"unknown SANDBOX_BACKEND {backend!r} (expected auto|e2b|docker|local)")
+            raise ZentoError(f"unknown SANDBOX_BACKEND {backend!r} (expected auto|docker|agentcore|local)")
 
 
 def get_sandbox() -> Sandbox:
@@ -1698,9 +1918,29 @@ def set_sandbox(sandbox: Sandbox | None) -> None:
     _instance = sandbox
 ```
 
+In `src/zento/cli.py` (Typer), add:
+```python
+@app.command()
+def sandboxd(socket: str = typer.Option("/run/zento/sandboxd.sock", help="unix socket to listen on")) -> None:
+    """Sandbox sidecar: the only process with Docker access (run/write/read/list, nothing else)."""
+    import os
+
+    import uvicorn
+
+    from zento.sandboxd.server import create_app
+    from zento.tools.sandbox.docker import DockerSandbox, detect_runtime
+
+    configure_logging()
+    s = get_settings()
+    backend = DockerSandbox(s.workspaces_dir, s.sandbox_image, s.sandbox_docker_network,
+                            runtime=detect_runtime(s.sandbox_runtime))
+    os.makedirs(os.path.dirname(socket), exist_ok=True)
+    uvicorn.run(create_app(backend), uds=socket, log_level="warning")
+```
+
 `sandbox_image/Dockerfile`
 ```dockerfile
-# Zento sandbox image: used by the Docker backend (zento-sandbox:latest) and as the E2B template.
+# Zento sandbox image (zento-sandbox:latest): run by DockerSandbox under gVisor, read-only rootfs.
 FROM python:3.12-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -1713,7 +1953,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-core libreoffice-impress libreoffice-writer libreoffice-calc \
         libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libharfbuzz-subset0 \
         fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-color-emoji \
-        ca-certificates curl sudo \
+        ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install \
@@ -1721,46 +1961,36 @@ RUN pip install \
         "python-pptx>=1.0" "python-docx>=1.1" "openpyxl>=3.1" \
         "weasyprint>=62" "markdown>=3.6" "pypdf>=5.0"
 
-RUN mkdir -p /workspace/inbox /workspace/out /workspace/.zento && chmod -R 0777 /workspace
+# Fonts/matplotlib caches are baked in because the root filesystem is mounted read-only at runtime.
+RUN groupadd -g 1000 sandbox && useradd -u 1000 -g 1000 -m sandbox \
+    && mkdir -p /workspace && chown 1000:1000 /workspace \
+    && su sandbox -c "python -c 'import matplotlib.pyplot'" && fc-cache -f
+USER 1000:1000
 WORKDIR /workspace
 CMD ["sleep", "infinity"]
-```
-
-`sandbox_image/e2b.toml`
-```toml
-# E2B template config, consumed by `e2b template create` (see build.sh).
-# After building, set SANDBOX_TEMPLATE=zento-sandbox in the environment.
-template_name = "zento-sandbox"
-dockerfile = "Dockerfile"
-cpu_count = 2
-memory_mb = 2048
 ```
 
 `sandbox_image/build.sh`
 ```bash
 #!/usr/bin/env bash
-# Build the sandbox image locally (docker) or as an E2B template (e2b).
+# Build the sandbox image used by DockerSandbox / sandboxd.
 set -euo pipefail
 cd "$(dirname "$0")"
-case "${1:-docker}" in
-  docker) docker build -t zento-sandbox:latest . ;;
-  e2b)    npx -y @e2b/cli template create zento-sandbox -d Dockerfile --cpu-count 2 --memory-mb 2048 ;;
-  *)      echo "usage: $0 [docker|e2b]" >&2; exit 2 ;;
-esac
+docker build -t zento-sandbox:latest .
 ```
 
 Then: `chmod +x sandbox_image/build.sh`
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/tools/sandbox -v`
-Expected: PASS — `38 passed` (13 local + 6 docker + 11 e2b + 6 select + 2 image)
+Expected: PASS — `39 passed` (13 local + 9 docker + 8 agentcore + 6 select + 2 sandboxd + 1 image)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/zento/tools/sandbox/__init__.py sandbox_image tests/tools/sandbox/test_select.py tests/tools/sandbox/test_image.py
-git commit -m "feat(sandbox): backend selection (e2b > docker > local) and sandbox image"
+git add src/zento/tools/sandbox/__init__.py src/zento/tools/sandbox/sandboxd_client.py src/zento/sandboxd src/zento/cli.py sandbox_image tests/tools/sandbox
+git commit -m "feat(sandbox): backend selection, sandboxd sidecar (no docker.sock in the worker) and sandbox image"
 ```
 
 ---
@@ -1825,7 +2055,7 @@ async def test_build_pptx_creates_title_plus_content_slides(local_sandbox, artif
     assert "Teamcenter Basics" in texts
     notes = prs.slides[1].notes_slide.notes_text_frame.text
     assert "Say something about point 1" in notes and "Visual idea: diagram of PLM flow" in notes
-    rows = await tasks.list_artifacts(task_id)
+    rows = await tasks.artifacts_for(task_id)
     assert [(r.id, r.kind, r.title) for r in rows] == [(ref.id, "pptx", "Teamcenter Basics")]
     assert ref.size == path.stat().st_size
 
@@ -2724,12 +2954,12 @@ git commit -m "feat(documents): docx, pdf, xlsx and chart builders plus markdown
 - Test: `tests/tools/test_sandbox_tools.py`
 
 **Interfaces:**
-- Consumes: `ZentoTool`, `ToolContext`, `ToolRegistry`, `REGISTRY` (Phase 4); `get_sandbox` (Task 5); `SandboxPathError` (Task 2); `save_artifact`, `build_chart`, `build_pdf`, `build_xlsx`, `build_pptx`, `build_docx`, `DocumentBuildError` (Tasks 6–7); `RiskClass`, `Capability` (index).
+- Consumes: `ZentoTool`, `ToolContext`, `ToolRegistry`, `contextual`, `load_builtin_tools` (Phase 4); `get_sandbox` (Task 5); `SandboxPathError` (Task 2); `save_artifact`, `build_chart`, `build_pdf`, `build_xlsx`, `build_pptx`, `build_docx`, `DocumentBuildError` (Tasks 6–7); `RiskClass`, `Capability` (index).
 - Produces:
   - `sandbox_tools.register(registry: ToolRegistry) -> None` registering `run_python, run_shell, read_file, write_file, list_files, install_package` (all `RiskClass.WRITE_SELF`, `requires=Capability.SANDBOX`). Agents: `run_python/read_file/list_files` → `{"analyst","coder"}`; `run_shell/write_file/install_package` → `{"coder"}`.
   - `sandbox_tools.collect_artifacts(ctx: ToolContext, sandbox: Sandbox, new_files: list[str]) -> list[ArtifactRef]`, `sandbox_tools.format_exec(res: ExecResult, refs: list[ArtifactRef]) -> str`
   - `documents.tools.register(registry: ToolRegistry) -> None` registering `make_chart` (`{"analyst","docs","deep_research"}`), `make_spreadsheet` (`{"analyst","docs"}`), `make_pdf` (`{"docs","deep_research","analyst"}`), `make_deck` and `make_document` (`{"docs"}`); all `WRITE_SELF`, `requires=Capability.SANDBOX`.
-  - Both modules self-register into `REGISTRY` at import.
+  - Both are registered into the shared registry by Phase 4's `load_builtin_tools` (extended here); tool fns take `(ctx: ToolContext, args)` and are wrapped with `contextual()`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2787,7 +3017,7 @@ async def test_run_python_collects_out_artifacts(use_local_sandbox, artifacts_di
                                          sandbox_tools.RunPythonArgs(code=code))
     assert "ok=True" in out and "done" in out
     assert "saved for the user: #" in out and "plot.png" in out
-    rows = await tasks.list_artifacts(task_id)
+    rows = await tasks.artifacts_for(task_id)
     assert [r.kind for r in rows] == ["image"]
 
 
@@ -2795,7 +3025,7 @@ async def test_run_python_ignores_non_out_files(use_local_sandbox, artifacts_dir
     user_id, task_id = user_task
     await sandbox_tools.run_python(ToolContext(user_id=user_id, task_id=task_id),
                                    sandbox_tools.RunPythonArgs(code="open('scratch.png','wb').write(b'x')"))
-    assert await tasks.list_artifacts(task_id) == []
+    assert await tasks.artifacts_for(task_id) == []
 
 
 async def test_tool_reports_path_error(use_local_sandbox) -> None:
@@ -2859,7 +3089,7 @@ from pydantic import BaseModel, Field, field_validator
 from zento.domain.artifacts import ArtifactRef
 from zento.domain.policy import Capability, RiskClass
 from zento.tools.documents.runner import save_artifact
-from zento.tools.registry import REGISTRY, ToolContext, ToolRegistry, ZentoTool
+from zento.tools.registry import ToolContext, ToolRegistry, ZentoTool, contextual
 from zento.tools.sandbox import get_sandbox
 from zento.tools.sandbox.base import WORKSPACE, ExecResult, Sandbox
 from zento.tools.sandbox.common import SandboxPathError
@@ -2977,8 +3207,8 @@ async def install_package(ctx: ToolContext, args: InstallArgs) -> str:
 
 
 def _tool(name: str, description: str, schema: type[BaseModel], fn, agents: set[str]) -> ZentoTool:
-    return ZentoTool(name=name, description=description, args_schema=schema, risk=RiskClass.WRITE_SELF, fn=fn,
-                     requires=Capability.SANDBOX, agents=frozenset(agents))
+    return ZentoTool(name=name, description=description, args_model=schema, risk=RiskClass.WRITE_SELF,
+                     fn=contextual(fn), requires=Capability.SANDBOX, agents=frozenset(agents))
 
 
 def register(registry: ToolRegistry) -> None:
@@ -2996,9 +3226,6 @@ def register(registry: ToolRegistry) -> None:
               {"coder"}),
     ):
         registry.register(tool)
-
-
-register(REGISTRY)
 ```
 
 `src/zento/tools/documents/tools.py`
@@ -3017,7 +3244,7 @@ from zento.domain.plans import DeckOutline, DocOutline
 from zento.domain.policy import Capability, RiskClass
 from zento.tools.documents.builders import build_chart, build_docx, build_pdf, build_pptx, build_xlsx
 from zento.tools.documents.runner import DocumentBuildError
-from zento.tools.registry import REGISTRY, ToolContext, ToolRegistry, ZentoTool
+from zento.tools.registry import ToolContext, ToolRegistry, ZentoTool, contextual
 from zento.tools.sandbox import get_sandbox
 
 
@@ -3068,8 +3295,8 @@ async def make_document(ctx: ToolContext, args: DocOutline) -> str:
 
 
 def _tool(name: str, description: str, schema: type[BaseModel], fn, agents: set[str]) -> ZentoTool:
-    return ZentoTool(name=name, description=description, args_schema=schema, risk=RiskClass.WRITE_SELF, fn=fn,
-                     requires=Capability.SANDBOX, agents=frozenset(agents))
+    return ZentoTool(name=name, description=description, args_model=schema, risk=RiskClass.WRITE_SELF,
+                     fn=contextual(fn), requires=Capability.SANDBOX, agents=frozenset(agents))
 
 
 def register(registry: ToolRegistry) -> None:
@@ -3085,16 +3312,19 @@ def register(registry: ToolRegistry) -> None:
               {"docs"}),
     ):
         registry.register(tool)
-
-
-register(REGISTRY)
 ```
 
-Append to `src/zento/tools/__init__.py` (keep Phase 4's existing imports):
+In `src/zento/tools/__init__.py`, extend Phase 4's `load_builtin_tools(registry)` so the shared registry gets the Phase 6 tools:
 ```python
-# Phase 6: sandbox and document tools self-register into REGISTRY on import.
-from zento.tools import sandbox_tools  # noqa: E402,F401
-from zento.tools.documents import tools as _document_tools  # noqa: E402,F401
+def load_builtin_tools(registry: ToolRegistry) -> None:
+    from zento.tools import assistant, sandbox_tools, web
+    from zento.tools.documents import tools as document_tools
+
+    for module in (assistant, web):
+        for tool in module.TOOLS:
+            registry.register(tool)
+    sandbox_tools.register(registry)
+    document_tools.register(registry)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -3480,6 +3710,7 @@ async def ingest_file(
                 "text": f"User shared a file named {name} ({ingested.kind}). Contents excerpt:\n{ingested.excerpt[:3000]}",
                 "source_ref": f"file:{file.file_id}",
                 "trust": "untrusted",
+                "conversation": False,
             },
         ))
     return ingested
@@ -3526,19 +3757,20 @@ async def prepare_user_text(
     return PreparedInput(text=f"{text}\n\n{ingested.as_context()}" if text else ingested.as_context())
 ```
 
-Modify `src/zento/agents/conversation.py` — at the start of `run_turn(event)`, right after the typing indicator is sent and **before** the user message is logged or the graph is invoked, insert:
+Modify `src/zento/agents/conversation.py` (Phase 4 Task 11, as extended by Phase 5 Task 16). In `run_turn(event)`, replace the first line `text = turn_support.user_text(event)` with:
 ```python
     from zento.files.intake import prepare_user_text
 
     prepared = await prepare_user_text(event)
     if prepared.reply_now:
         async with Session() as session:
-            await outbox.enqueue(session, Outbound(user_id=event.user_id, text=prepared.reply_now))
+            await outbox.enqueue(session, Outbound(user_id=event.user_id, text=prepared.reply_now,
+                                                   dedupe_key=f"reply:{event.id}:0"))
             await session.commit()
         return
-    user_text = prepared.text
+    text = prepared.text.strip()
 ```
-and use `user_text` everywhere `run_turn` previously read `event.payload["text"]` (message log + graph input). `Session`, `outbox` and `Outbound` are already imported in `conversation.py` by Phase 4; add the imports if they are not.
+Everything after it (the `if not text: return` check, Phase 5's `run_command`, logging, Phase 3 hooks, routing) keeps using `text`. `Session`, `outbox` and `Outbound` are already imported in `conversation.py` by Phase 4.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -3557,12 +3789,13 @@ git commit -m "feat(files): ingest user files into the sandbox, extract text and
 ### Task 10: Docs specialist (decks, Word docs, PDFs, spreadsheets)
 
 **Files:**
+- Create: `src/zento/agents/specialists/context.py` (runner adapter for Phase 4's `Specialist.runner`)
 - Create: `src/zento/agents/specialists/docs.py`
 - Test: `tests/agents/specialists/test_docs.py`
 
 **Interfaces:**
-- Consumes: `SpecialistSpec`, `SpecialistContext`, `StepResult`, `register_specialist` (Phase 4); `llm.structured`, `Tier` (index); `DeckOutline`, `DocOutline` (index); `build_pptx/build_docx/build_pdf/build_xlsx`, `outline_to_markdown`, `DocumentBuildError` (Tasks 6–7); `get_sandbox` (Task 5).
-- Produces: `pick_format(instruction: str, deliverable: str) -> Literal["pptx","docx","pdf","xlsx"]`, `SheetsPayload(title, sheets)`, `run_docs(instruction: str, ctx: SpecialistContext) -> StepResult`, `SPEC` registered as `"docs"`.
+- Consumes: `Specialist(runner=...)`, `current_deliverable` (Phase 4 `specialists.base`), `register_specialist` (Phase 4 `zento.agents.specialists`), `current_task_id` (Phase 4 registry), `StepOutcome`, `tasks.artifacts_for` (Phase 4); `llm.structured`, `Tier` (index); `DeckOutline`, `DocOutline` (index); `build_pptx/build_docx/build_pdf/build_xlsx`, `outline_to_markdown`, `DocumentBuildError` (Tasks 6–7); `get_sandbox` (Task 5).
+- Produces: `context.SpecialistContext(user_id, task_id, deliverable="message", upstream={})`, `context.StepResult(text, artifact_ids=[], ok=True)`, `context.as_runner(fn: async (instruction, SpecialistContext) -> StepResult) -> async (user_id, instruction, context) -> StepOutcome`; `pick_format(instruction: str, deliverable: str) -> Literal["pptx","docx","pdf","xlsx"]`, `SheetsPayload(title, sheets)`, `run_docs(instruction: str, ctx: SpecialistContext) -> StepResult`, `SPEC` registered as `"docs"`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3572,7 +3805,8 @@ import pytest
 from pptx import Presentation
 
 from zento.agents.specialists import docs
-from zento.agents.specialists.base import SPECIALISTS, SpecialistContext
+from zento.agents.specialists import SPECIALISTS
+from zento.agents.specialists.context import SpecialistContext
 from zento.domain.plans import DeckOutline, DocOutline, DocSection, SlideSpec
 from zento.store.repo import tasks
 from zento.tools.documents.runner import DocumentBuildError
@@ -3603,12 +3837,12 @@ def test_docs_is_registered_with_custom_runner() -> None:
 
 async def test_run_docs_builds_deck(fake_llm, use_local_sandbox, artifacts_dir, user_task) -> None:
     user_id, task_id = user_task
-    fake_llm.add(DeckOutline, DeckOutline(title="Green Tea", subtitle="Primer", slides=[
+    fake_llm.push_structured(DeckOutline(title="Green Tea", subtitle="Primer", slides=[
         SlideSpec(title=t, bullets=["a", "b"]) for t in ("Origins", "Health", "Brewing")
     ]))
     result = await docs.run_docs("Make a 3-slide deck about green tea",
                                  SpecialistContext(user_id=user_id, task_id=task_id, deliverable="pptx"))
-    [artifact] = await tasks.list_artifacts(task_id)
+    [artifact] = await tasks.artifacts_for(task_id)
     assert result.artifact_ids == [artifact.id]
     assert "4-slide deck" in result.text
     assert len(Presentation(artifact.path).slides) == 4
@@ -3630,7 +3864,7 @@ async def test_run_docs_uses_upstream_material(fake_llm, use_local_sandbox, arti
 
 async def test_run_docs_reports_build_failure(fake_llm, use_local_sandbox, artifacts_dir, user_task, monkeypatch) -> None:
     user_id, task_id = user_task
-    fake_llm.add(DeckOutline, DeckOutline(title="X", slides=[SlideSpec(title="a")]))
+    fake_llm.push_structured(DeckOutline(title="X", slides=[SlideSpec(title="a")]))
 
     async def boom(*args, **kwargs):
         raise DocumentBuildError("pptx_builder failed (exit code 1): ImportError")
@@ -3649,6 +3883,57 @@ Expected: FAIL with `ImportError: cannot import name 'docs' from 'zento.agents.s
 
 - [ ] **Step 3: Implement**
 
+`src/zento/agents/specialists/context.py`
+```python
+"""Adapter between Phase 6's (instruction, SpecialistContext) -> StepResult runners and Phase 4's
+Specialist.runner signature (user_id, instruction, context) -> StepOutcome."""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+
+from zento.agents.specialists.base import current_deliverable
+from zento.domain.tasks import StepOutcome
+from zento.store.repo import tasks
+from zento.tools.registry import current_task_id
+
+
+@dataclass(frozen=True)
+class SpecialistContext:
+    user_id: int
+    task_id: int
+    deliverable: str = "message"
+    upstream: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StepResult:
+    text: str
+    artifact_ids: list[int] = field(default_factory=list)
+    ok: bool = True
+
+
+Phase6Runner = Callable[[str, SpecialistContext], Awaitable[StepResult]]
+
+
+def as_runner(fn: Phase6Runner) -> Callable[[int, str, str], Awaitable[StepOutcome]]:
+    async def runner(user_id: int, instruction: str, context: str) -> StepOutcome:
+        task_id = current_task_id.get()
+        if task_id is None:
+            return StepOutcome(ok=False, error="files can only be produced inside a task")
+        ctx = SpecialistContext(user_id=user_id, task_id=task_id, deliverable=current_deliverable.get(),
+                                upstream={"context": context} if context else {})
+        result = await fn(instruction, ctx)
+        paths = [a.path for a in await tasks.artifacts_for(task_id) if a.id in set(result.artifact_ids)]
+        failed = not result.ok or result.text.startswith(("Document build failed", "error:"))
+        return StepOutcome(ok=not failed, text=result.text, artifacts=paths,
+                           error=result.text if failed else None)
+
+    runner.__name__ = getattr(fn, "__name__", "runner")
+    return runner
+```
+
 `src/zento/agents/specialists/docs.py`
 ```python
 """Docs specialist: turns instructions + upstream findings into real files."""
@@ -3660,7 +3945,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from zento.agents.specialists.base import SpecialistContext, SpecialistSpec, StepResult, register_specialist
+from zento.agents.specialists import register_specialist
+from zento.agents.specialists.base import Specialist
+from zento.agents.specialists.context import SpecialistContext, StepResult, as_runner
 from zento.domain.plans import DeckOutline, DocOutline
 from zento.llm import models as llm
 from zento.llm.models import Tier
@@ -3698,7 +3985,7 @@ DOC_SYSTEM = """You write clear, well-structured documents. Produce a DocOutline
 SHEET_SYSTEM = """You build spreadsheets. Produce SheetsPayload: a title and sheets mapping sheet name -> rows.
 Row 1 of each sheet is the header. Use numbers (not strings) for numeric cells. No formulas."""
 
-PROMPT = "You are Zento's document specialist. You create decks, Word documents, PDF reports and spreadsheets."
+PROMPT = "You are Mavis's document specialist. You create decks, Word documents, PDF reports and spreadsheets."
 
 
 class SheetsPayload(BaseModel):
@@ -3749,14 +4036,14 @@ async def run_docs(instruction: str, ctx: SpecialistContext) -> StepResult:
     return StepResult(text=summary, artifact_ids=[ref.id])
 
 
-SPEC = SpecialistSpec(
+SPEC = Specialist(
     name="docs",
     description=("Creates files for the user: PowerPoint decks (pptx), Word documents (docx), PDF reports and "
                  "Excel spreadsheets (xlsx), from the request and earlier steps' findings."),
     prompt=PROMPT,
     tier=Tier.SMART,
     tool_names=("make_deck", "make_document", "make_pdf", "make_spreadsheet", "make_chart"),
-    runner=run_docs,
+    runner=as_runner(run_docs),
 )
 register_specialist(SPEC)
 ```
@@ -3769,7 +4056,7 @@ Expected: PASS — `12 passed`
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/zento/agents/specialists/docs.py tests/agents/specialists/test_docs.py
+git add src/zento/agents/specialists/context.py src/zento/agents/specialists/docs.py tests/agents/specialists/test_docs.py
 git commit -m "feat(agents): docs specialist producing pptx, docx, pdf and xlsx artefacts"
 ```
 
@@ -3779,11 +4066,11 @@ git commit -m "feat(agents): docs specialist producing pptx, docx, pdf and xlsx 
 
 **Files:**
 - Create: `src/zento/agents/specialists/analyst.py`, `src/zento/agents/specialists/coder.py`
-- Modify: `src/zento/agents/specialists/__init__.py`, `src/zento/agents/orchestrator.py` (`PLANNER_SYSTEM`)
+- Modify: `src/zento/agents/specialists/__init__.py`, `src/zento/agents/orchestrator_graph.py` (`PLANNER_PROMPT`)
 - Test: `tests/agents/specialists/test_registration.py`
 
 **Interfaces:**
-- Consumes: `SpecialistSpec`, `register_specialist`, `SPECIALISTS` (Phase 4); `planner_catalog()`, `PLANNER_SYSTEM` (Phase 4); `REGISTRY` (Phase 4) with Task 8 tools registered; `Tier` (index).
+- Consumes: `Specialist`, `register_specialist`, `SPECIALISTS` (Phase 4); `orchestrator_graph._planner_system()` / `PLANNER_PROMPT` (Phase 4); `ToolRegistry`, `load_builtin_tools` (Phase 4, with Task 8 tools); `Tier` (index).
 - Produces: `analyst.SPEC` (`"analyst"`, ReAct, tools `run_python, list_files, read_file, make_chart, make_spreadsheet, make_pdf`), `coder.SPEC` (`"coder"`, ReAct, tools `run_python, run_shell, read_file, write_file, list_files, install_package`); importing `zento.agents.specialists` registers `docs`, `analyst`, `coder`, `deep_research` (the last arrives in Task 12; add its import there).
 
 - [ ] **Step 1: Write the failing test**
@@ -3791,12 +4078,18 @@ git commit -m "feat(agents): docs specialist producing pptx, docx, pdf and xlsx 
 `tests/agents/specialists/test_registration.py`
 ```python
 import zento.agents.specialists  # noqa: F401  (registers everything)
-import zento.tools  # noqa: F401  (registers tools)
-from zento.agents.orchestrator import PLANNER_SYSTEM, planner_catalog
-from zento.agents.specialists.base import SPECIALISTS
-from zento.tools.registry import REGISTRY
+from zento.agents import orchestrator_graph as og
+from zento.agents.specialists import SPECIALISTS
+from zento.tools.registry import ToolRegistry
+from zento.tools import load_builtin_tools
 
 PHASE6 = ("docs", "analyst", "coder")
+
+
+def _registry() -> ToolRegistry:
+    reg = ToolRegistry()
+    load_builtin_tools(reg)
+    return reg
 
 
 def test_phase6_specialists_registered() -> None:
@@ -3805,9 +4098,10 @@ def test_phase6_specialists_registered() -> None:
 
 
 def test_specialist_tool_names_resolve_in_registry() -> None:
+    reg = _registry()
     for name in PHASE6:
         spec = SPECIALISTS[name]
-        available = {t.name for t in REGISTRY.for_agent(name, 1)}
+        available = {t.name for t in reg.for_agent(name, 1)}
         missing = set(spec.tool_names) - available
         assert not missing, f"{name} references unknown tools {missing}"
 
@@ -3819,21 +4113,19 @@ def test_analyst_and_coder_use_react_runner() -> None:
     assert "install_package" not in SPECIALISTS["analyst"].tool_names
 
 
-def test_planner_catalog_lists_phase6_specialists() -> None:
-    catalog = planner_catalog()
-    for name in PHASE6:
-        assert name in catalog
+def test_planner_prompt_lists_phase6_specialists_and_deliverables(monkeypatch) -> None:
+    from zento.tools import registry as registry_mod
 
-
-def test_planner_prompt_explains_deliverables() -> None:
-    for word in ("pptx", "docx", "xlsx", "deliverable", "analyst", "deep_research"):
-        assert word in PLANNER_SYSTEM
+    monkeypatch.setattr(registry_mod, "_REGISTRY", _registry())
+    system = og._planner_system()
+    for word in (*PHASE6, "pptx", "docx", "xlsx", "deliverable", "deep_research"):
+        assert word in system, word
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/agents/specialists/test_registration.py -v`
-Expected: FAIL with `AssertionError: analyst` (not registered) and a missing-word assertion on `PLANNER_SYSTEM`.
+Expected: FAIL with `AssertionError: analyst` (not registered) and a missing-word assertion on the planner prompt.
 
 - [ ] **Step 3: Implement**
 
@@ -3843,10 +4135,11 @@ Expected: FAIL with `AssertionError: analyst` (not registered) and a missing-wor
 
 from __future__ import annotations
 
-from zento.agents.specialists.base import SpecialistSpec, register_specialist
+from zento.agents.specialists import register_specialist
+from zento.agents.specialists.base import Specialist
 from zento.llm.models import Tier
 
-PROMPT = """You are Zento's data analyst. You work inside the user's private sandbox.
+PROMPT = """You are Mavis's data analyst. You work inside the user's private sandbox.
 Workflow:
 1. list_files to see what's there (uploads are in inbox/).
 2. Inspect data with run_python using pandas (df.head(), df.dtypes, df.describe()) before concluding anything.
@@ -3856,7 +4149,7 @@ Workflow:
 Working directory is the workspace: use relative paths like inbox/sales.csv.
 Finish with 3-6 crisp findings (numbers included) and say which files you produced."""
 
-SPEC = SpecialistSpec(
+SPEC = Specialist(
     name="analyst",
     description=("Analyses data and files (CSV, Excel, PDF text, uploads) with Python/pandas in the sandbox; "
                  "produces findings, charts and spreadsheets."),
@@ -3873,10 +4166,11 @@ register_specialist(SPEC)
 
 from __future__ import annotations
 
-from zento.agents.specialists.base import SpecialistSpec, register_specialist
+from zento.agents.specialists import register_specialist
+from zento.agents.specialists.base import Specialist
 from zento.llm.models import Tier
 
-PROMPT = """You are Zento's coding specialist, working in the user's private Linux sandbox (Python 3.12).
+PROMPT = """You are Mavis's coding specialist, working in the user's private Linux sandbox (Python 3.12).
 - Write code to files with write_file, run it with run_python or run_shell, read errors, fix, re-run.
 - Install missing packages with install_package (max 5 at a time) only when actually needed.
 - Keep outputs the user should receive under out/ (they are delivered automatically).
@@ -3884,7 +4178,7 @@ PROMPT = """You are Zento's coding specialist, working in the user's private Lin
 Working directory is the workspace: use relative paths.
 Finish by stating what you ran, what worked, and where the outputs are."""
 
-SPEC = SpecialistSpec(
+SPEC = Specialist(
     name="coder",
     description="Writes, runs and debugs code or shell commands in the user's sandbox; can install packages.",
     prompt=PROMPT,
@@ -3900,7 +4194,7 @@ Append to `src/zento/agents/specialists/__init__.py` (keep Phase 4/5 imports):
 from zento.agents.specialists import analyst, coder, docs  # noqa: E402,F401
 ```
 
-Modify `src/zento/agents/orchestrator.py` — append this paragraph to the end of the `PLANNER_SYSTEM` string (inside the string literal):
+Modify `src/zento/agents/orchestrator_graph.py` (Phase 4) — append this paragraph to the end of the `PLANNER_PROMPT` string (inside the string literal; Phase 4's `_planner_system()` already lists every registered specialist):
 ```text
 
 Files and analysis:
@@ -3914,12 +4208,12 @@ Files and analysis:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/agents/specialists/test_registration.py -v`
-Expected: PASS — `5 passed` (the `deep_research` word check passes because the planner prompt mentions it; the specialist itself lands in Task 12).
+Expected: PASS — `4 passed` (the `deep_research` word check passes because the appended planner guidance mentions it; the specialist itself lands in Task 12).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/zento/agents/specialists/analyst.py src/zento/agents/specialists/coder.py src/zento/agents/specialists/__init__.py src/zento/agents/orchestrator.py tests/agents/specialists/test_registration.py
+git add src/zento/agents/specialists/analyst.py src/zento/agents/specialists/coder.py src/zento/agents/specialists/__init__.py src/zento/agents/orchestrator_graph.py tests/agents/specialists/test_registration.py
 git commit -m "feat(agents): analyst and coder specialists; planner knows deliverables and file routing"
 ```
 
@@ -3934,7 +4228,7 @@ git commit -m "feat(agents): analyst and coder specialists; planner knows delive
 - Test: `tests/agents/specialists/test_deep_research.py`
 
 **Interfaces:**
-- Consumes: `web.search`, `web.extract`, `SearchHit` (Phase 4); `llm.structured`, `llm.chat_model`, `Tier` (index); `tracing.callbacks` (index); `SpecialistSpec`, `SpecialistContext`, `StepResult`, `register_specialist` (Phase 4); `build_pdf`, `build_docx`, `build_pptx`, `markdown_to_outline`, `save_artifact`, `slugify`, `DocumentBuildError` (Tasks 6–7); `DeckOutline` (index); `get_sandbox` (Task 5); LangGraph `StateGraph`, `START`, `END`, `Send`.
+- Consumes: `web.search`, `web.extract`, `SearchHit` (Phase 4); `llm.structured`, `llm.chat_model`, `Tier` (index); `tracing.callbacks` (index); `Specialist(runner=...)`, `register_specialist` (Phase 4); `SpecialistContext`, `StepResult`, `as_runner` (Task 10); `build_pdf`, `build_docx`, `build_pptx`, `markdown_to_outline`, `save_artifact`, `slugify`, `DocumentBuildError` (Tasks 6–7); `DeckOutline` (index); `get_sandbox` (Task 5); LangGraph `StateGraph`, `START`, `END`, `Send`.
 - Produces: `SubQuestions`, `Claim`, `Findings`, `number_sources(findings: list[Findings]) -> tuple[list[str], str]`, `strip_references(markdown: str) -> str`, `GRAPH` (compiled), `run_deep_research(instruction: str, ctx: SpecialistContext) -> StepResult`, module constants `PER_QUESTION_TIMEOUT_S = 90`, `TOTAL_TIMEOUT_S = 900`; `SPEC` registered as `"deep_research"`.
 
 - [ ] **Step 1: Write the failing test**
@@ -3948,7 +4242,8 @@ from types import SimpleNamespace
 import pytest
 
 from zento.agents.specialists import deep_research as dr
-from zento.agents.specialists.base import SPECIALISTS, SpecialistContext
+from zento.agents.specialists import SPECIALISTS
+from zento.agents.specialists.context import SpecialistContext
 from zento.store.repo import tasks
 
 HITS = {
@@ -3971,15 +4266,15 @@ def fake_web(monkeypatch):
 
 
 def _script_llm(fake_llm) -> None:
-    fake_llm.add(dr.SubQuestions, dr.SubQuestions(questions=list(HITS)))
-    fake_llm.add(dr.Findings, dr.Findings(claims=[
+    fake_llm.push_structured(dr.SubQuestions(questions=list(HITS)))
+    fake_llm.push_structured(dr.Findings(claims=[
         dr.Claim(text="Teamcenter is Siemens' PLM software", source_url="https://siemens.example/tc"),
         dr.Claim(text="Invented claim", source_url="https://hallucinated.example"),
     ]))
-    fake_llm.add(dr.Findings, dr.Findings(claims=[
+    fake_llm.push_structured(dr.Findings(claims=[
         dr.Claim(text="Automotive OEMs use it", source_url="https://cases.example/tc"),
     ]))
-    fake_llm.add_text("# Teamcenter in brief\n\nTeamcenter is Siemens' PLM suite [1], popular with carmakers [2].\n\n"
+    fake_llm.push_text("# Teamcenter in brief\n\nTeamcenter is Siemens' PLM suite [1], popular with carmakers [2].\n\n"
                       "## Details\n\nMore text.\n\n## References\n1. made up\n")
 
 
@@ -4008,7 +4303,7 @@ async def test_deep_research_cited_report(fake_llm, fake_web, use_local_sandbox,
     _script_llm(fake_llm)
     result = await dr.run_deep_research("Teamcenter basics for an interview",
                                         SpecialistContext(user_id=user_id, task_id=task_id))
-    [artifact] = await tasks.list_artifacts(task_id)
+    [artifact] = await tasks.artifacts_for(task_id)
     report = Path(artifact.path).read_text()
     assert artifact.kind == "markdown"
     assert "## Sources\n1. https://siemens.example/tc\n2. https://cases.example/tc" in report
@@ -4028,7 +4323,7 @@ async def test_deep_research_exports_pdf_when_asked(fake_llm, fake_web, use_loca
     _script_llm(fake_llm)
     await dr.run_deep_research("Teamcenter basics",
                                SpecialistContext(user_id=user_id, task_id=task_id, deliverable="pdf"))
-    kinds = sorted(a.kind for a in await tasks.list_artifacts(task_id))
+    kinds = sorted(a.kind for a in await tasks.artifacts_for(task_id))
     assert kinds == ["markdown", "pdf"]
 
 
@@ -4041,7 +4336,7 @@ async def test_slow_search_times_out_gracefully(fake_llm, use_local_sandbox, art
 
     monkeypatch.setattr(dr.web, "search", hang)
     monkeypatch.setattr(dr, "PER_QUESTION_TIMEOUT_S", 0.2)
-    fake_llm.add(dr.SubQuestions, dr.SubQuestions(questions=["q1", "q2", "q3"]))
+    fake_llm.push_structured(dr.SubQuestions(questions=["q1", "q2", "q3"]))
     result = await dr.run_deep_research("obscure topic", SpecialistContext(user_id=user_id, task_id=task_id))
     assert "couldn't find reliable sources" in result.text
 ```
@@ -4070,7 +4365,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 from pydantic import BaseModel, Field
 
-from zento.agents.specialists.base import SpecialistContext, SpecialistSpec, StepResult, register_specialist
+from zento.agents.specialists import register_specialist
+from zento.agents.specialists.base import Specialist
+from zento.agents.specialists.context import SpecialistContext, StepResult, as_runner
 from zento.domain.plans import DeckOutline
 from zento.llm import models as llm
 from zento.llm.models import Tier
@@ -4276,14 +4573,14 @@ async def run_deep_research(instruction: str, ctx: SpecialistContext) -> StepRes
     return StepResult(text=_summary(report, source_count), artifact_ids=artifact_ids)
 
 
-SPEC = SpecialistSpec(
+SPEC = Specialist(
     name="deep_research",
     description=("Multi-source web research: splits the goal into sub-questions, researches them in parallel, "
                  "and writes a cited report (optionally exported as PDF, Word or a deck)."),
-    prompt="You are Zento's deep research specialist.",
+    prompt="You are Mavis's deep research specialist.",
     tier=Tier.SMART,
     tool_names=("make_pdf", "make_chart"),
-    runner=run_deep_research,
+    runner=as_runner(run_deep_research),
 )
 register_specialist(SPEC)
 ```
@@ -4316,12 +4613,12 @@ git commit -m "feat(agents): deep research specialist with parallel fan-out and 
 
 **Files:**
 - Create: `src/zento/agents/artifact_delivery.py`
-- Modify: `src/zento/agents/orchestrator.py` (`_deliver_result`)
+- Modify: `src/zento/initiative/task_delivery.py` (Phase 4 `_send`: attach artefacts via `artifact_outbounds`)
 - Test: `tests/agents/test_artifact_delivery.py`, `tests/e2e/test_deck_flow.py`
 
 **Interfaces:**
-- Consumes: `tasks.list_artifacts` (Phase 4); `Outbound` (index); `get_settings().telegram_max_document_mb` (Task 1); `outbox.enqueue` (Phase 1); `run_task` (Phase 4); `deliver_pending` (Phase 1); fixtures `fake_llm`, `channel`, `db`.
-- Produces: `artifact_outbounds(user_id: int, task_id: int) -> list[Outbound]`; `_deliver_result` now enqueues one document `Outbound` per deliverable artefact after the final text.
+- Consumes: `tasks.artifacts_for` (Phase 4); `Outbound` (index); `get_settings().telegram_max_document_mb` (Task 1); `outbox.enqueue` (Phase 1); `run_task` (Phase 4); `task_delivery.deliver_task_result` / `_send` (Phase 4); `deliver_pending` (Phase 1); fixtures `fake_llm`, `channel`, `db`, `rec_bus`, `memory_checkpointer`.
+- Produces: `artifact_outbounds(user_id: int, task_id: int, proactive: bool = False) -> list[Outbound]`; Phase 4's `task_delivery._send` now enqueues one captioned document `Outbound` per deliverable artefact (size-checked) after the final text.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4373,37 +4670,42 @@ from pptx import Presentation
 from zento.agents.orchestrator import run_task
 from zento.channels.outbox_sender import deliver_pending
 from zento.domain.decisions import ComposedMessage
+from zento.domain.events import EventType
 from zento.domain.plans import CriticVerdict, DeckOutline, Plan, PlanStep, SlideSpec
+from zento.initiative import task_delivery
 from zento.store.repo import tasks, users
 
 
-async def test_make_three_slide_deck_end_to_end(db, fake_llm, channel, use_local_sandbox, artifacts_dir) -> None:
+async def test_make_three_slide_deck_end_to_end(db, fake_llm, channel, rec_bus, memory_checkpointer,
+                                                use_local_sandbox, artifacts_dir) -> None:
     user, _ = await users.get_or_create_by_chat(4242, "Jai")
     task_id = await tasks.create(user.id, goal="Make a 3-slide deck about green tea")
 
-    fake_llm.add(Plan, Plan(
+    fake_llm.push_structured(Plan(
         goal="Make a 3-slide deck about green tea",
         steps=[PlanStep(id="s1", agent="docs", instruction="Make a 3-slide deck about green tea")],
         deliverable="pptx",
     ))
-    fake_llm.add(DeckOutline, DeckOutline(title="Green Tea", subtitle="A quick primer", slides=[
+    fake_llm.push_structured(DeckOutline(title="Green Tea", subtitle="A quick primer", slides=[
         SlideSpec(title="Origins", bullets=["China, 2737 BC legend", "Spread via Buddhist monks"]),
         SlideSpec(title="Health", bullets=["Rich in catechins", "Moderate caffeine"]),
         SlideSpec(title="Brewing", bullets=["80°C water", "2-3 minutes"]),
     ]))
-    fake_llm.add(CriticVerdict, CriticVerdict(accept=True))
-    fake_llm.add(ComposedMessage, ComposedMessage(send=True, messages=["Here's your green tea deck!"]))
-    fake_llm.add_text("Here's your green tea deck!")
+    fake_llm.push_structured(CriticVerdict(accept=True))
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["Here's your green tea deck!"]))
+    fake_llm.push_text("Here's your green tea deck!")
 
     await run_task(task_id)
+    [completed] = [e for e in rec_bus.events if e.type == EventType.TASK_COMPLETED]
+    await task_delivery.deliver_task_result(completed)   # what the worker's TASK_COMPLETED handler does
     await deliver_pending(channel)
 
-    documents = [m for m in channel.sent if m["type"] == "document"]
+    documents = [m for m in channel.sent if m.kind == "document"]
     assert len(documents) == 1
-    assert documents[0]["chat_id"] == 4242
-    assert documents[0]["path"].endswith("green-tea.pptx")
-    assert len(Presentation(documents[0]["path"]).slides) == 4  # title + 3
-    assert any(m["type"] == "text" for m in channel.sent)
+    assert documents[0].chat_id == 4242
+    assert documents[0].path.endswith("green-tea.pptx")
+    assert len(Presentation(documents[0].path).slides) == 4  # title + 3
+    assert any(m.kind == "text" for m in channel.sent)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -4435,12 +4737,12 @@ def _caption(title: str, kind: str, size: int) -> str:
     return f"{title} ({kind}, {size_txt})"[:200]
 
 
-async def artifact_outbounds(user_id: int, task_id: int) -> list[Outbound]:
+async def artifact_outbounds(user_id: int, task_id: int, proactive: bool = False) -> list[Outbound]:
     limit_mb = get_settings().telegram_max_document_mb
     limit = limit_mb * 1024 * 1024
     outbounds: list[Outbound] = []
     too_big: list[str] = []
-    for artifact in await tasks.list_artifacts(task_id):
+    for artifact in await tasks.artifacts_for(task_id):
         path = Path(artifact.path)
         if not path.is_file():
             log.warning("artifact.missing_on_disk", artifact_id=artifact.id, path=artifact.path)
@@ -4450,25 +4752,27 @@ async def artifact_outbounds(user_id: int, task_id: int) -> list[Outbound]:
             too_big.append(path.name)
             continue
         outbounds.append(Outbound(
-            user_id=user_id, text=_caption(artifact.title, artifact.kind, size), document_path=str(path),
-            dedupe_key=f"artifact:{artifact.id}",
+            user_id=user_id, text=_caption(artifact.title or path.name, artifact.kind, size), document_path=str(path),
+            dedupe_key=f"artifact:{artifact.id}", proactive=proactive,
         ))
     if too_big:
         outbounds.append(Outbound(
             user_id=user_id,
             text=(f"Heads up: {', '.join(too_big)} came out bigger than Telegram's {limit_mb} MB limit, "
                   "so I couldn't attach it. Want me to make a lighter version?"),
+            proactive=proactive, dedupe_key=f"artifact:{task_id}:too_big",
         ))
     return outbounds
 ```
 
-Modify `src/zento/agents/orchestrator.py` — in `_deliver_result(session, task, final_text)`, after the line that enqueues the final text `Outbound` and before the session commit, add:
+Modify `src/zento/initiative/task_delivery.py` (Phase 4 Task 10): in `_send`, replace the loop over `artifacts` (the one enqueuing `Outbound(..., document_path=path, ...)`) with:
 ```python
-    from zento.agents.artifact_delivery import artifact_outbounds
+        from zento.agents.artifact_delivery import artifact_outbounds
 
-    for outbound in await artifact_outbounds(task.user_id, task.id):
-        await outbox.enqueue(session, outbound)
+        for outbound in await artifact_outbounds(user_id, task_id, proactive=proactive):
+            await outbox.enqueue(s, outbound)
 ```
+(`artifacts` stays in the signature; the DB rows are the source of truth.) Re-run Phase 4's `tests/initiative/test_task_delivery.py`; if its artefact test asserted `text == Path(path).name`, update it to the caption format `"<title or filename> (<kind>, <size>)"` and record the artefact with `tasks.add_artifact` (delivery now reads rows, not the payload).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -4480,18 +4784,18 @@ Expected: PASS — `5 passed`
 Run: `uv run pytest -q && uv run ruff check src tests`
 Expected: all tests pass (PDF-dependent tests may be `skipped` if WeasyPrint's system libraries are absent); ruff prints `All checks passed!`
 
-- [ ] **Step 6: Manual smoke (optional, needs Docker or E2B)**
+- [ ] **Step 6: Manual smoke (optional, needs Docker)**
 
 ```bash
-./sandbox_image/build.sh docker            # or: ./sandbox_image/build.sh e2b  and set SANDBOX_TEMPLATE=zento-sandbox
+./sandbox_image/build.sh                   # builds zento-sandbox:latest
 SANDBOX_BACKEND=docker uv run zento dev
 ```
-In Telegram: "make me a 6-slide deck on Teamcenter basics" → a `.pptx` arrives with a one-line caption. Send a CSV → Zento acknowledges it and offers analysis; "chart revenue by month" → PNG arrives.
+In Telegram: "make me a 6-slide deck on Teamcenter basics" → a `.pptx` arrives with a one-line caption. Send a CSV → Mavis acknowledges it and offers analysis; "chart revenue by month" → PNG arrives.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/zento/agents/artifact_delivery.py src/zento/agents/orchestrator.py tests/agents/test_artifact_delivery.py tests/e2e/test_deck_flow.py
+git add src/zento/agents/artifact_delivery.py src/zento/initiative/task_delivery.py tests/agents/test_artifact_delivery.py tests/initiative/test_task_delivery.py tests/e2e/test_deck_flow.py
 git commit -m "feat(agents): deliver task artefacts as telegram documents; e2e deck flow test"
 ```
 
@@ -4499,7 +4803,7 @@ git commit -m "feat(agents): deliver task artefacts as telegram documents; e2e d
 
 ## Self-review notes (completed)
 
-- **Spec coverage (§5.3):** PPT decks → Tasks 6, 10; PDF reports → Tasks 7, 10, 12; Word → Tasks 7, 10, 12; spreadsheets (formulas opt-in) → Tasks 7, 8, 10; charts → Tasks 7, 8; deep analysis → Task 11 (Analyst) + Task 9 intake; deep research → Task 12; reading files users send → Task 9; delivery as Telegram documents → Task 13; sandbox image contents → Task 5. §8.3 (sandbox holds no credentials) → Tasks 2–4 env tests. §16 E2B outage → Task 5 auto fallback to Docker.
+- **Spec coverage (§5.3):** PPT decks → Tasks 6, 10; PDF reports → Tasks 7, 10, 12; Word → Tasks 7, 10, 12; spreadsheets (formulas opt-in) → Tasks 7, 8, 10; charts → Tasks 7, 8; deep analysis → Task 11 (Analyst) + Task 9 intake; deep research → Task 12; reading files users send → Task 9; delivery as Telegram documents → Task 13; sandbox image contents → Task 5. §8.3 (sandbox holds no credentials) → Tasks 2–4 env tests. §16 sandbox outage → Task 5 auto fallback (docker → agentcore → local).
 - **Placeholder scan:** no TBD/TODO; every code step carries full code; modify steps name the exact function and the lines to add.
-- **Type consistency:** `ArtifactRef`, `ExecResult`, `StepResult`, `SpecialistContext`, `ToolContext`, `save_artifact(...)`, `run_builder(...)`, `build_*` signatures are identical across Tasks 6–13; `sandbox_scripts.load` is always called through the module (monkeypatchable).
+- **Type consistency (reconciled with Phase 4):** `ArtifactRef`, `ExecResult`, `StepOutcome`, `Specialist(runner=...)`, `ToolContext`, `save_artifact(...)`, `run_builder(...)`, `build_*` signatures are identical across Tasks 6–13; `sandbox_scripts.load` is always called through the module (monkeypatchable).
 - **Review Focus:** each of the six items has a named test in its owning task.

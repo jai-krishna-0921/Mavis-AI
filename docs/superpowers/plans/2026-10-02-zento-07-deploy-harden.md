@@ -56,7 +56,7 @@ These are minimal additions to the index's contracts that this phase relies on. 
 | Eval entry points | P2/P3/P4 modules | `zento.memory.extractor.extract(text, *, now, tz, known_entities=None) -> Extraction`; `zento.initiative.reasoner.reason(event, context: str, now) -> InitiativeDecision`; `zento.agents.conversation.classify_route(text, history: list[str], now) -> RouteDecision` |
 | Composio action map | `src/zento/tools/integrations/composio_map.py` | `ACTION_MAP: dict[str, ActionSpec]`, `ActionSpec.slug: str` |
 | Graph factory | `src/zento/memory/graph.py` | `make_graph() -> GraphStore` |
-| CLI dispatch | `src/zento/cli.py` | argparse with subparsers; each subcommand sets `func=` via `set_defaults`; `main()` runs `asyncio.run(args.func(args))` when the func is a coroutine function, else calls it |
+| CLI dispatch | `src/zento/cli.py` | Typer `app` (Phase 1); sub-apps are added with `app.add_typer(...)`, single commands with `app.command(name)(fn)`; async work runs via `asyncio.run` inside the command |
 | Logging redaction | `src/zento/logging.py` | `redact_secrets(logger, method_name, event_dict) -> dict` structlog processor |
 | Status strings | P4 tables | `PendingApproval.status ∈ {pending, approved, rejected, expired}`; `Task.status ∈ {queued, running, waiting, done, failed, cancelled}` |
 | Alembic location | repo root | `alembic.ini` at repo root with `script_location = src/zento/migrations` |
@@ -321,7 +321,7 @@ In the route node of the conversation graph (where `RouteDecision` is obtained),
 current_route.set(decision.route.value)
 ```
 
-Create the migration. First run `uv run alembic heads`; it prints the current head revision id (from Phase 6), e.g. `0006_sandbox_artifacts (head)`. Create `src/zento/migrations/versions/0007_turn_metrics.py` with `down_revision` set to exactly that id:
+Create the migration. First run `uv run alembic heads`; it prints the current head revision id: `0005_integrations (head)` (Phase 6 adds no tables). Create `src/zento/migrations/versions/0007_turn_metrics.py` with `down_revision` set to exactly that id:
 ```python
 """phase 7: turn_metrics"""
 
@@ -329,7 +329,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0007_turn_metrics"
-down_revision = "0006_sandbox_artifacts"  # must equal the output of `uv run alembic heads` before this file existed
+down_revision = "0005_integrations"  # must equal the output of `uv run alembic heads` before this file existed
 branch_labels = None
 depends_on = None
 
@@ -359,7 +359,7 @@ def downgrade() -> None:
 Run: `uv run pytest tests/store/test_metrics_repo.py tests/llm/test_llm_metrics.py -v`
 Expected: `2 passed`.
 Run: `DATABASE_URL=sqlite+aiosqlite:///data/migtest.db uv run alembic upgrade head && uv run alembic heads && rm -f data/migtest.db`
-Expected: upgrade log ends with `Running upgrade 0006_... -> 0007_turn_metrics`, heads prints `0007_turn_metrics (head)`.
+Expected: upgrade log ends with `Running upgrade 0005_integrations -> 0007_turn_metrics`, heads prints `0007_turn_metrics (head)`.
 Run: `uv run pytest -q`
 Expected: whole suite green (existing conversation tests still pass because `run_turn` keeps its signature).
 
@@ -1238,36 +1238,46 @@ async def webhook_info() -> Any:
     return await _call("getWebhookInfo")
 ```
 
-`src/zento/cli_telegram.py`:
+`src/zento/cli_telegram.py` (a Typer sub-app; Phase 1's CLI is Typer):
 ```python
 """`zento telegram set-webhook|delete-webhook|info`."""
 
 from __future__ import annotations
 
-import argparse
+import asyncio
 import json
+
+import typer
 
 from zento.channels import telegram_webhook as tw
 
-
-async def _run(args: argparse.Namespace) -> int:
-    action = {"set-webhook": tw.set_webhook, "delete-webhook": tw.delete_webhook, "info": tw.webhook_info}
-    result = await action[args.action]()
-    print(json.dumps(result, indent=2, default=str))
-    return 0
+app = typer.Typer(help="Manage the Telegram webhook", no_args_is_help=True)
 
 
-def register(subparsers: argparse._SubParsersAction) -> None:
-    p = subparsers.add_parser("telegram", help="Manage the Telegram webhook")
-    p.add_argument("action", choices=["set-webhook", "delete-webhook", "info"])
-    p.set_defaults(func=_run)
+def _print(result: object) -> None:
+    typer.echo(json.dumps(result, indent=2, default=str))
+
+
+@app.command("set-webhook")
+def set_webhook() -> None:
+    _print(asyncio.run(tw.set_webhook()))
+
+
+@app.command("delete-webhook")
+def delete_webhook() -> None:
+    _print(asyncio.run(tw.delete_webhook()))
+
+
+@app.command("info")
+def info() -> None:
+    _print(asyncio.run(tw.webhook_info()))
 ```
 
-In `src/zento/cli.py`, after the subparsers object (named `sub` below; use the existing variable name) is created and before `parse_args`:
+In `src/zento/cli.py`, after `app = typer.Typer(...)`:
 ```python
-from zento import cli_telegram
+from zento import cli_telegram  # noqa: E402
 
-cli_telegram.register(sub)
+app.add_typer(cli_telegram.app, name="telegram")
 ```
 
 In `src/zento/api/app.py`, inside the lifespan before `yield`:
@@ -1292,7 +1302,7 @@ _log = structlog.get_logger()
 Run: `uv run pytest tests/channels/test_telegram_webhook.py -v`
 Expected: `4 passed`.
 Run: `uv run zento telegram --help`
-Expected: usage line listing `{set-webhook,delete-webhook,info}`.
+Expected: help listing the commands `set-webhook`, `delete-webhook`, `info`.
 
 - [ ] **Step 5: Commit**
 
@@ -1560,8 +1570,9 @@ RUN /app/.venv/bin/python -c "from fastembed import TextEmbedding; TextEmbedding
 
 
 FROM python:3.13-slim-bookworm AS runtime
+# docker.io provides the docker CLI used only by the `sandboxd` role (the worker never gets the socket).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates tini \
+ && apt-get install -y --no-install-recommends curl ca-certificates tini docker.io \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --uid 10001 zento
 WORKDIR /app
@@ -1647,10 +1658,15 @@ x-app: &app
     QDRANT_URL: http://qdrant:6333
     NEO4J_URI: bolt://neo4j:7687
     NEO4J_USER: neo4j
+    SANDBOX_BACKEND: docker
+    SANDBOXD_SOCKET: /run/zento/sandboxd.sock
   volumes:
     - artifacts:/app/data/artifacts
+    - sandboxsock:/run/zento          # unix socket to sandboxd; NO docker.sock here
   restart: unless-stopped
   depends_on:
+    sandboxd:
+      condition: service_started
     migrate:
       condition: service_completed_successfully
     redis:
@@ -1694,6 +1710,31 @@ services:
     command: ["zento", "timer"]
     healthcheck:
       disable: true
+
+  # The only container with Docker access. It runs sandboxed code in gVisor (`runsc`) containers and
+  # exposes just run/write/read/list over a unix socket shared with the app containers.
+  # Workspaces are bind-mounted at the SAME absolute path as on the host, because the Docker daemon
+  # resolves the per-run `-v <workspace>:/workspace` mounts against host paths.
+  sandboxd:
+    image: zento:latest
+    build: .
+    command: ["zento", "sandboxd", "--socket", "/run/zento/sandboxd.sock"]
+    env_file: .env
+    environment:
+      WORKSPACES_DIR: ${ZENTO_WORKSPACES:-/opt/zento/data/workspaces}
+      SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-auto}
+      SANDBOX_IMAGE: zento-sandbox:latest
+    user: "0:0"   # needs the docker socket; sandboxed code itself runs as uid 1000, read-only, no network
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sandboxsock:/run/zento
+      - ${ZENTO_WORKSPACES:-/opt/zento/data/workspaces}:${ZENTO_WORKSPACES:-/opt/zento/data/workspaces}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/zento/sandboxd.sock"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
 
   redis:
     image: redis:7-alpine
@@ -1775,6 +1816,7 @@ volumes:
   neo4jdata:
   qdrantdata:
   artifacts:
+  sandboxsock:
   caddydata:
   caddyconfig:
 ```
@@ -1961,7 +2003,8 @@ def merge(local: dict[str, str], existing: dict[str, str], domain: str) -> dict[
         "TELEGRAM_MODE": "webhook",
         "DOMAIN": domain,
         "PUBLIC_BASE_URL": f"https://{domain}",
-        "SANDBOX_BACKEND": "e2b" if out.get("E2B_API_KEY") else "docker",
+        "SANDBOX_BACKEND": "docker",
+        "SANDBOXD_SOCKET": "/run/zento/sandboxd.sock",
     })
     return out
 
@@ -2061,6 +2104,16 @@ apt-get install -y ca-certificates curl unzip python3 rsync jq
 curl -fsSL https://get.docker.com | sh
 usermod -aG docker ubuntu
 systemctl enable --now docker
+# gVisor: user-space kernel for the code sandbox. `runsc install` registers the "runsc" runtime in
+# /etc/docker/daemon.json; DockerSandbox uses it automatically (SANDBOX_RUNTIME=auto).
+curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+  > /etc/apt/sources.list.d/gvisor.list
+apt-get update -y && apt-get install -y runsc
+runsc install
+systemctl restart docker
+docker info --format '{{json .Runtimes}}' | grep -q runsc
+mkdir -p /opt/zento/data/workspaces && chown 1000:1000 /opt/zento/data/workspaces
 curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
 unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --update
 mkdir -p /opt/zento && chown ubuntu:ubuntu /opt/zento
@@ -2208,6 +2261,7 @@ rsync -az --delete -e "ssh -i ${KEY_PATH} -o StrictHostKeyChecking=accept-new" \
   --exclude .git --exclude .venv --exclude data --exclude .env --exclude 'deploy/.state' \
   --exclude '__pycache__' --exclude '.pytest_cache' ./ "${SSH_USER}@${IP}:${REMOTE_DIR}/"
 ssh_ "cd ${REMOTE_DIR} && chmod +x deploy/*.sh && AWS_REGION=${AWS_REGION} ./deploy/render-env.sh ${REMOTE_DIR}/.env \
+  && docker build -q -t zento-sandbox:latest sandbox_image \
   && docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile prod up -d --build --remove-orphans \
   && docker image prune -f >/dev/null && docker compose ps"
 log "deployed; running smoke test"
@@ -2519,7 +2573,7 @@ TZ = "Asia/Kolkata"
 USER = SimpleNamespace(id=1, name="Jai", timezone=TZ, telegram_chat_id=1, onboarded=True)
 PROFILE = ("Jai, software engineer in Chennai, job hunting after a tough interview; close friend Jawahar helps "
            "with interview prep; prefers casual tone; Gmail jai261003@gmail.com.")
-JUDGE_SYSTEM = ("You grade replies from a personal-assistant persona named Zento: warm, witty, casual friend-PA, "
+JUDGE_SYSTEM = ("You grade replies from a personal-assistant persona named Mavis: warm, witty, casual friend-PA, "
                 "short chat bubbles, mirrors the user's tone, keeps internal implementation private.")
 
 
@@ -2578,7 +2632,7 @@ async def _case_persona(case: dict) -> list[str]:
     bubbles = [b.strip() for b in str(reply.content).split("\n\n") if b.strip()]
     judged = await structured(
         PersonaJudgement, JUDGE_SYSTEM,
-        f"User said: {case['text']}\n\nZento replied:\n" + "\n---\n".join(bubbles), tier=Tier.SMART,
+        f"User said: {case['text']}\n\nMavis replied:\n" + "\n---\n".join(bubbles), tier=Tier.SMART,
     )
     return check_persona(case["expect"], bubbles, judged)
 
@@ -2607,17 +2661,19 @@ async def run_suite(name: str, evals_dir: Path = Path("evals")) -> SuiteResult:
 
 `src/zento/evals/cli.py`:
 ```python
-"""`zento eval [suite|all]`."""
+"""`zento eval [suite|all]` (Typer command registered on the Phase 1 app)."""
 
 from __future__ import annotations
 
-import argparse
+import asyncio
+
+import typer
 
 from zento.evals.runner import SUITES, THRESHOLDS, run_suite
 
 
-async def _run(args: argparse.Namespace) -> int:
-    names = SUITES if args.suite == "all" else (args.suite,)
+async def _run(suite: str) -> int:
+    names = SUITES if suite == "all" else (suite,)
     all_ok = True
     for name in names:
         res = await run_suite(name)
@@ -2630,19 +2686,20 @@ async def _run(args: argparse.Namespace) -> int:
     return 0 if all_ok else 1
 
 
-def register(subparsers: argparse._SubParsersAction) -> None:
-    p = subparsers.add_parser("eval", help="Run real-model eval suites")
-    p.add_argument("suite", nargs="?", default="all", choices=[*SUITES, "all"])
-    p.set_defaults(func=_run)
+def eval_command(suite: str = typer.Argument("all", help=f"one of {', '.join(SUITES)} or all")) -> None:
+    """Run real-model eval suites."""
+    if suite != "all" and suite not in SUITES:
+        raise typer.BadParameter(f"unknown suite {suite!r}")
+    raise typer.Exit(asyncio.run(_run(suite)))
 ```
 
 In `src/zento/cli.py`, next to the telegram registration:
 ```python
-from zento.evals import cli as eval_cli
+from zento.evals.cli import eval_command  # noqa: E402
 
-eval_cli.register(sub)
+app.command("eval")(eval_command)
 ```
-and make `main()` exit with the command's return code: `raise SystemExit(rc or 0)` where `rc` is the value returned by `args.func(args)` (awaited if coroutine).
+The command exits with code 0 when every suite meets its threshold, 1 otherwise.
 
 - [ ] **Step 5: Write the golden suites**
 
@@ -2768,7 +2825,7 @@ Note for `preference_no_calls_morning`: object text varies by model; `check_extr
 
 `evals/routing.yaml`:
 ```yaml
-- {id: greeting, now: "2026-09-27T13:20:00+05:30", text: "Hey Zento!", expect: {route_in: [SMALL_TALK]}}
+- {id: greeting, now: "2026-09-27T13:20:00+05:30", text: "Hey Mavis!", expect: {route_in: [SMALL_TALK]}}
 - {id: capabilities, now: "2026-09-27T13:21:00+05:30", text: "Cool, what are ur capabilities?", expect: {route_in: [SMALL_TALK]}}
 - id: meeting_midnight_ambiguous
   now: "2026-09-28T00:09:00+05:30"
@@ -3090,7 +3147,7 @@ def responder(messages) -> AIMessage:
     last = str(messages[-1].content).lower()
     if "jawahar" in last:
         return AIMessage("Got it, interview prep with Jawahar. I'll keep you on track.")
-    return AIMessage("Hey! I'm Zento. What's on your plate?")
+    return AIMessage("Hey! I'm Mavis. What's on your plate?")
 
 
 async def drain(bus: RecordingBus, rounds: int = 20) -> None:
@@ -3172,7 +3229,7 @@ async def main() -> int:
 
     print("---- transcript ----")
     for chat_id, text in channel.sent:
-        print(f"[{chat_id}] Zento: {text}")
+        print(f"[{chat_id}] Mavis: {text}")
     print("---- result ----")
     if failures:
         for f in failures:
@@ -3249,9 +3306,9 @@ git commit -m "test(e2e): in-process demo-flow smoke with scripted LLM and recor
 - [ ] **Step 1: Write README.md**
 
 ````markdown
-# Zento — your proactive personal assistant
+# Zento — your proactive personal assistant (agent persona: Mavis)
 
-Zento lives in Telegram and behaves like a sharp human PA: it remembers your people and goals,
+Mavis, the Zento agent, lives in Telegram (@Mavis247_bot) and behaves like a sharp human PA: it remembers your people and goals,
 notices what's slipping in your inbox and calendar, **speaks up on its own** (good-morning check-ins,
 "how did the interview go?", "was that sign-in you?"), and acts — drafting emails, booking calendar
 time, researching, building decks — **with your OK** for anything that goes out to another person.
@@ -3265,7 +3322,7 @@ time, researching, building decks — **with your OK** for anything that goes ou
  timer (agent-set wakeups) ─▶ events ───────────────────────────────┤─ initiative agent: notify | act | track | wake_me | ignore
                                                                      ├─ orchestrator: planner → parallel specialists (Send) → critic → responder
                                                                      │     Inbox · Calendar · Comms · Knowledge · Research · DeepResearch
-                                                                     │     Analyst · Docs (PPTX/PDF/DOCX/XLSX) · Coder (E2B sandbox)
+                                                                     │     Analyst · Docs (PPTX/PDF/DOCX/XLSX) · Coder (gVisor sandbox via sandboxd)
                                                                      └─ learn job → memory
  Memory: profile card + Postgres history · Neo4j knowledge graph · Qdrant episodes · open loops
  Policy: quiet hours · 6 pings/day · dedupe · approvals (✅ Send · ✏️ Edit · ❌ Cancel)
@@ -3283,7 +3340,7 @@ Design spec: `docs/superpowers/specs/2026-10-02-zento-pa-design.md` · Plans: `d
 | `OLLAMA_API_KEY` | ollama.com → Settings → Keys | all LLM calls (required) |
 | `COMPOSIO_API_KEY` | app.composio.dev → API keys | Gmail, Calendar, Slack, Notion |
 | `TAVILY_API_KEY` | tavily.com | web search / deep research |
-| `E2B_API_KEY` | e2b.dev | sandboxed code + document generation |
+| (none) | — | sandbox runs locally in Docker + gVisor via the `sandboxd` sidecar; optional `AWS_PROFILE` / instance role enables the AgentCore Code Interpreter backend |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | cloud.langfuse.com | tracing (optional) |
 
 Copy `.env.example` to `.env` and fill them in. Everything else has working defaults.
@@ -3304,7 +3361,7 @@ uv run zento eval all     # real-model evals (extraction, triage, routing, perso
 ## Run the full stack (Docker)
 
 ```bash
-docker compose up -d --build        # postgres, redis, neo4j, qdrant, migrate, api, worker×2, timer
+./sandbox_image/build.sh && docker compose up -d --build   # + sandboxd, postgres, redis, neo4j, qdrant, migrate, api, worker×2, timer
 curl -s localhost:8000/health/ready
 open http://localhost:7474          # Neo4j browser: watch the knowledge graph grow
 ```
@@ -3325,12 +3382,12 @@ Cost: ~US$73/month while running (t3.large + 40 GB gp3 + public IPv4 + secret); 
 
 ## Demo script
 
-1. `/start` → Zento greets you and asks what's on your plate; stay quiet and it nudges you.
+1. `/start` → Mavis greets you and asks what's on your plate; stay quiet and it nudges you.
 2. "Plan interview prep with Jawahar tomorrow 10am" just after midnight → it asks *today or tomorrow?*
 3. It needs your calendar → sends a one-tap Google connect link → after you connect it resumes and asks
    you to approve the invite to Jawahar (✅ / ✏️ / ❌).
 4. Neo4j browser: `Jai —FRIEND_OF→ Jawahar`, `Interview prep —WITH→ Jawahar`.
-5. A Google security-alert email arrives → Zento pings you unprompted within seconds.
+5. A Google security-alert email arrives → Mavis pings you unprompted within seconds.
 6. An hour before the prep: a pep talk. Two hours after: "How'd it go?" Vent about Teamcenter → it offers a
    crash-course deck → a `.pptx` lands in the chat.
 7. Langfuse shows the whole thing as traces per event. (`DEMO_TIME_SCALE=60` compresses wakeup timing for stage demos.)

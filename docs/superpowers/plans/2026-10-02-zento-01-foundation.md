@@ -18,12 +18,12 @@ These are minimal additions to the index's contracts. Later phases may rely on t
 2. `zento.channels.base.ChannelRateLimited(retry_after: float)`: raised by channels on provider rate limits. Also `zento.channels.get_channel()` / `set_channel()`.
 3. `zento.bus.set_bus()` and `zento.bus.get_redis() -> Redis | None` (a shared client for locks and health checks). `InProcessBus.wait_idle()`, `.dead_events`, `.dead_jobs`.
 4. `messages.log(user_id, role, content, proactive=False, event_id=None) -> bool` gains `event_id` (unique) so retried handlers don't double-log. `Message.event_id` column.
-5. Outbox repo: `enqueue(session, msg) -> int` (dedupes on `dedupe_key`), `enqueue_now(msg) -> int`, `due(now, limit=20)`, `claim(outbox_id, now) -> bool` (5-minute lease), `mark_sent`, `mark_retry`, `mark_failed`, `to_outbound`.
+5. `zento.channels.outbox_sender.deliver_pending(channel=None, limit=50) -> int` (one-shot delivery for tests/REPL). Outbox repo: `enqueue(session, msg) -> int` (dedupes on `dedupe_key`), `enqueue_now(msg) -> int`, `due(now, limit=20)`, `claim(outbox_id, now) -> bool` (5-minute lease), `mark_sent`, `mark_retry`, `mark_failed`, `to_outbound`.
 6. Worker registry: `register_event_handler(event_type, fn, *, replace=False)`, `register_job_handler(kind, fn)`, `clear_handlers()`. **Events** for the same user are serialised under `user_lock`. **Jobs are not serialised**: a job handler that mutates conversation state takes `user_lock` itself. Handlers must be idempotent, because a failing handler causes every handler for that event to re-run on retry.
 7. `zento.api.routes.health.register_readiness_check(name, fn)`.
 8. `zento.agents.persona.split_bubbles(text, max_bubbles=3) -> list[str]`.
 9. `zento.store.db`: `UTCDateTime` (aware-UTC column type), `dispose_engine()`, `ping()`, and a SQLAlchemy naming convention on `Base.metadata`. `zento.store.migrate.upgrade(url=None, revision="head")`.
-10. Users repo extras: `get_by_chat`, `update`, `set_state`, `all_ids`.
+10. Users repo extras: `get_by_chat`, `update`, `get_state`, `set_state`, `all_ids`.
 11. Extra `Settings` keys: `env`, `llm_timeout_fast_s`, `llm_timeout_smart_s`, `log_json`.
 12. **Migration rule for later phases:** add ORM tables to `src/zento/store/models.py` **and** a new Alembic revision in `src/zento/migrations/versions/` matching them. `tests/store/test_migrations.py::test_migrations_match_models` enforces this.
 13. **Test helpers for all phases** (`tests/conftest.py`, `tests/fakes/`): fixtures `settings`, `db`, `bus`, `channel`, `fake_llm`, plus `tests.fakes.wait_until(predicate, timeout=3.0)`.
@@ -87,7 +87,7 @@ touch src/zento/channels/__init__.py src/zento/bus/__init__.py
 ```bash
 uv remove apscheduler composio
 uv add langgraph-checkpoint-postgres langgraph-checkpoint-sqlite "psycopg[binary]" redis alembic \
-       pyahocorasick tavily-python e2b-code-interpreter typer
+       pyahocorasick tavily-python boto3 typer
 uv add --dev pytest pytest-asyncio respx fakeredis ruff
 ```
 
@@ -183,7 +183,6 @@ TEST_ENV = {
     "OLLAMA_API_KEY": "test-key",
     "COMPOSIO_API_KEY": "",
     "TAVILY_API_KEY": "",
-    "E2B_API_KEY": "",
     "LANGFUSE_PUBLIC_KEY": "",
     "LANGFUSE_SECRET_KEY": "",
     "DEMO_TIME_SCALE": "1.0",
@@ -213,7 +212,7 @@ from zento.config import Settings, get_settings
 
 
 def test_defaults(settings) -> None:
-    assert settings.agent_name == "Zento"
+    assert settings.agent_name == "Mavis"
     assert settings.default_timezone == "Asia/Kolkata"
     assert settings.model_fast == "gpt-oss:20b"
     assert settings.model_smart == "gpt-oss:120b"
@@ -296,7 +295,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # --- identity -------------------------------------------------------------
-    agent_name: str = "Zento"
+    agent_name: str = "Mavis"  # the agent persona; "Zento" is the project/package name
     default_timezone: str = "Asia/Kolkata"
     public_base_url: str = "http://localhost:8000"
     env: Literal["dev", "prod", "test"] = "dev"
@@ -333,9 +332,8 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
 
     # --- sandbox --------------------------------------------------------------
-    e2b_api_key: str = ""
-    sandbox_backend: Literal["auto", "e2b", "docker", "local"] = "auto"
-    sandbox_template: str = ""
+    sandbox_backend: Literal["auto", "docker", "agentcore", "local"] = "auto"
+    # Phase 6 adds the rest (sandbox_runtime, sandboxd_socket, agentcore_*, aws_profile, ...).
 
     # --- observability --------------------------------------------------------
     langfuse_public_key: str = ""
@@ -444,7 +442,12 @@ NEO4J_PASSWORD=
 COMPOSIO_API_KEY=
 COMPOSIO_WEBHOOK_SECRET=
 TAVILY_API_KEY=
-E2B_API_KEY=
+
+# --- sandbox (Phase 6): docker (gVisor) via sandboxd sidecar | agentcore | local ---
+SANDBOX_BACKEND=auto
+SANDBOXD_SOCKET=
+AWS_PROFILE=
+AGENTCORE_REGION=ap-south-1
 
 # --- observability ---
 LANGFUSE_PUBLIC_KEY=
@@ -651,7 +654,7 @@ git commit -m "feat(domain): shared contract types for events, memory, loops, de
 - Produces:
   - `zento.store.db`: `utcnow() -> datetime`, `UTCDateTime`, `Base`, `get_engine() -> AsyncEngine`, `Session` (call it: `async with Session() as s`), `init_db()`, `ping() -> bool`, `dispose_engine()`
   - `zento.store.models`: `User`, `Message`, `OutboxMessage`, `ProcessedEvent`
-  - `users`: `get_or_create_by_chat(chat_id, name) -> tuple[User, bool]`, `get(user_id) -> User`, `get_by_chat(chat_id) -> User | None`, `update(user_id, **fields)`, `set_state(user_id, **kv)`, `all_ids() -> list[int]`
+  - `users`: `get_or_create_by_chat(chat_id, name) -> tuple[User, bool]`, `get(user_id) -> User`, `get_by_chat(chat_id) -> User | None`, `update(user_id, **fields)`, `get_state(user_id) -> dict`, `set_state(user_id, **kv)`, `all_ids() -> list[int]`
   - `messages`: `log(user_id, role, content, proactive=False, event_id=None) -> bool`, `recent(user_id, limit=20) -> list[Message]`
   - `outbox`: `enqueue(session, msg) -> int`, `enqueue_now(msg) -> int`, `due(now, limit=20) -> list[OutboxMessage]`, `claim(outbox_id, now) -> bool`, `mark_sent(outbox_id, provider_ids)`, `mark_retry(outbox_id, error, next_attempt_at, count_attempt=True)`, `mark_failed(outbox_id, error)`, `to_outbound(row) -> Outbound`, `LEASE`
   - `events`: `claim(session, event_id) -> bool`
@@ -708,6 +711,7 @@ async def test_update_and_state(db) -> None:
     fresh = await users.get(u.id)
     assert fresh.name == "Jai" and fresh.onboarded
     assert fresh.state == {"gmail_cursor": "abc", "other": 1}
+    assert await users.get_state(u.id) == {"gmail_cursor": "abc", "other": 1}
 
 
 async def test_messages_log_recent_and_dedupe(db) -> None:
@@ -1019,6 +1023,12 @@ async def update(user_id: int, **fields: Any) -> None:
     async with Session() as s:
         await s.execute(sa_update(User).where(User.id == user_id).values(**fields))
         await s.commit()
+
+
+async def get_state(user_id: int) -> dict[str, Any]:
+    async with Session() as s:
+        user = await s.get_one(User, user_id)
+        return dict(user.state or {})
 
 
 async def set_state(user_id: int, **kv: Any) -> None:
@@ -2943,7 +2953,7 @@ git commit -m "feat(bus): EventBus port with in-process and Redis Streams implem
 
 **Interfaces:**
 - Consumes: `outbox` repo (Task 4), `users.get`, `Channel`, `ChannelRateLimited`, `get_channel()`
-- Produces: `OutboxSender(channel: Channel | None = None)` with `run_once(now=None, limit=20) -> int` (count delivered) and `run_forever(interval_s=0.3)`; `MAX_ATTEMPTS = 8`; backoff `min(2**attempts, 300)` seconds
+- Produces: `OutboxSender(channel: Channel | None = None)` with `run_once(now=None, limit=20) -> int` (count delivered) and `run_forever(interval_s=0.3)`; module function `deliver_pending(channel=None, limit=50) -> int`; `MAX_ATTEMPTS = 8`; backoff `min(2**attempts, 300)` seconds
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2980,6 +2990,16 @@ async def test_delivers_text_with_buttons_and_marks_sent(db, channel) -> None:
     row = await _row(oid)
     assert row.status == "sent" and row.provider_message_ids == [1]
     assert await OutboxSender(channel).run_once() == 0  # nothing left
+
+
+async def test_deliver_pending_helper(db, channel) -> None:
+    from zento.channels.outbox_sender import deliver_pending
+
+    uid = await _user()
+    await outbox.enqueue_now(Outbound(user_id=uid, text="one"))
+    await outbox.enqueue_now(Outbound(user_id=uid, text="two"))
+    assert await deliver_pending(channel) == 2
+    assert channel.texts == ["one", "two"]
 
 
 async def test_delivers_document_with_caption(db, channel, tmp_path) -> None:
@@ -3116,12 +3136,17 @@ class OutboxSender:
                 delivered = 0
             if delivered == 0:
                 await asyncio.sleep(interval_s)
+
+
+async def deliver_pending(channel: Channel | None = None, limit: int = 50) -> int:
+    """Deliver everything due right now (used by tests and the local chat REPL)."""
+    return await OutboxSender(channel).run_once(limit=limit)
 ```
 
 - [ ] **Step 4: Run the tests**
 
 Run: `uv run pytest tests/channels/test_outbox_sender.py -v`
-Expected: `6 passed`
+Expected: `7 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -3454,7 +3479,7 @@ NOW = datetime(2026, 10, 2, 4, 30, tzinfo=UTC)  # 10:00 in Asia/Kolkata, a Frida
 async def test_system_prompt_has_identity_time_and_rules(db) -> None:
     user, _ = await users.get_or_create_by_chat(1, "Jai")
     prompt = system_prompt(user, NOW, context="## Known facts\n- Jawahar is a friend")
-    assert "You are Zento" in prompt
+    assert "You are Mavis" in prompt
     assert "Friday 02 October 2026, 10:00" in prompt and "Asia/Kolkata" in prompt
     assert "Jai" in prompt
     assert "behind the curtain" in prompt
@@ -3509,7 +3534,7 @@ async def test_run_turn_replies_in_bubbles_and_logs(db, channel, fake_llm) -> No
         ("user", "hi"), ("assistant", "Hey Jai!\n\nWhat's on your plate today?"),
     ]
     prompt = fake_llm.calls[-1]
-    assert isinstance(prompt[0], SystemMessage) and "You are Zento" in prompt[0].content
+    assert isinstance(prompt[0], SystemMessage) and "You are Mavis" in prompt[0].content
     assert isinstance(prompt[-1], HumanMessage) and prompt[-1].content == "hi"
 
 
@@ -3525,7 +3550,7 @@ async def test_history_is_included(db, channel, fake_llm) -> None:
 
 async def test_start_command_adds_greeting_hint(db, channel, fake_llm) -> None:
     user, _ = await users.get_or_create_by_chat(77, None)
-    fake_llm.push_text("Hey! I'm Zento.")
+    fake_llm.push_text("Hey! I'm Mavis.")
     await run_turn(msg_event(user.id, "/start", command="start"))
     assert "just opened the chat" in fake_llm.calls[-1][0].content
 
@@ -3563,7 +3588,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'zento.agents.persona'
 - [ ] **Step 3: Implement `src/zento/agents/persona.py`**
 
 ```python
-"""Zento's voice. Every user-facing LLM responder builds its system prompt here."""
+"""Mavis's voice (the Zento agent persona). Every user-facing LLM responder builds its system prompt here."""
 
 from __future__ import annotations
 
@@ -3727,7 +3752,7 @@ Expected: `9 passed`
 
 ```bash
 git add src/zento/agents src/zento/worker/handlers.py tests/agents
-git commit -m "feat(agents): Zento persona and simple chat turn with working memory via the outbox"
+git commit -m "feat(agents): Mavis persona and simple chat turn with working memory via the outbox"
 ```
 
 ---
@@ -3809,7 +3834,7 @@ async def test_duplicate_update_published_once(client, bus) -> None:
 
 
 async def test_start_command_and_document(client, bus) -> None:
-    await client.post("/webhooks/telegram", json=update(3, text="/start@ZentoBot"))
+    await client.post("/webhooks/telegram", json=update(3, text="/start@Mavis247_bot"))
     await client.post("/webhooks/telegram", json=update(
         4, text=None, caption="read this",
         document={"file_id": "F1", "file_name": "cv.pdf", "mime_type": "application/pdf", "file_size": 12},
@@ -4338,7 +4363,7 @@ async def _chat() -> None:
     user, _ = await users.get_or_create_by_chat(LOCAL_CHAT_ID, None)
     worker = asyncio.create_task(run_worker(bus, "chat"))
     sender = OutboxSender(console)
-    print("Chatting with Zento locally. /quit to exit.")
+    print(f"Chatting with {get_settings().agent_name} locally. /quit to exit.")
     try:
         while True:
             line = (await asyncio.to_thread(input, "\nyou> ")).strip()
@@ -4383,7 +4408,7 @@ def worker(name: str = typer.Option(default_factory=lambda: f"worker-{socket.get
 
 @app.command()
 def chat() -> None:
-    """Local REPL with Zento (no Telegram needed)."""
+    """Local REPL with the agent (Mavis) — no Telegram needed."""
     asyncio.run(_chat())
 
 
@@ -4453,7 +4478,7 @@ uv run zento dev
 ```
 
 Expected log lines: `dev.started telegram=True`, `telegram.polling_started`. In Telegram, open your bot and send `/start`.
-Expected: "typing…" appears immediately, then Zento greets you within ~2 s.
+Expected: "typing…" appears immediately, then Mavis greets you within ~2 s (bot: @Mavis247_bot).
 
 - [ ] **Step 4: Lock the bot to your chat**
 
