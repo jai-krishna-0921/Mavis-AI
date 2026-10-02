@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -16,6 +17,7 @@ from zento.store.db import utcnow
 from zento.store.repo import users
 
 log = structlog.get_logger(__name__)
+_COMMAND = re.compile(r"^/([A-Za-z0-9_]{1,32})(?:@\w+)?(?:\s|$)")
 
 
 def _file(msg: dict[str, Any]) -> InboundFile | None:
@@ -49,8 +51,8 @@ async def ingest_update(data: dict[str, Any], bus: EventBus) -> bool:
         event_type = EventType.USER_MESSAGE
         text = msg.get("text") or msg.get("caption") or ""
         payload = {"text": text, "message_id": msg.get("message_id")}
-        if text.startswith("/"):
-            payload["command"] = text[1:].split()[0].split("@")[0].lower()
+        if m := _COMMAND.match(text):
+            payload["command"] = m.group(1).lower()
         if file := _file(msg):
             payload["file"] = file.model_dump()
         occurred = datetime.fromtimestamp(msg.get("date") or time.time(), UTC)
