@@ -1,11 +1,11 @@
 from datetime import timedelta
 
-from zento.channels.base import ChannelRateLimited
-from zento.channels.outbox_sender import MAX_ATTEMPTS, OutboxSender
-from zento.domain.messages import Button, Outbound
-from zento.store.db import Session, utcnow
-from zento.store.models import OutboxMessage
-from zento.store.repo import outbox, users
+from mavis.channels.base import ChannelRateLimited
+from mavis.channels.outbox_sender import MAX_ATTEMPTS, OutboxSender
+from mavis.domain.messages import Button, Outbound
+from mavis.store.db import Session, utcnow
+from mavis.store.models import OutboxMessage
+from mavis.store.repo import outbox, users
 
 
 async def _user() -> int:
@@ -31,7 +31,7 @@ async def test_delivers_text_with_buttons_and_marks_sent(db, channel) -> None:
 
 
 async def test_deliver_pending_helper(db, channel) -> None:
-    from zento.channels.outbox_sender import deliver_pending
+    from mavis.channels.outbox_sender import deliver_pending
 
     uid = await _user()
     await outbox.enqueue_now(Outbound(user_id=uid, text="one"))

@@ -1,9 +1,9 @@
 
+from mavis.agents import simple_turn
+from mavis.domain.events import JobKind
+from mavis.domain.memory import Relation
+from mavis.store.repo import users
 from tests.agents.test_simple_turn import msg_event
-from zento.agents import simple_turn
-from zento.domain.events import JobKind
-from zento.domain.memory import Relation
-from zento.store.repo import users
 
 
 async def _capture_jobs(bus, monkeypatch) -> list:

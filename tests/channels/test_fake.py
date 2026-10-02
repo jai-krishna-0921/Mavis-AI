@@ -1,5 +1,5 @@
-from zento.channels.fake import FakeChannel
-from zento.domain.messages import Button
+from mavis.channels.fake import FakeChannel
+from mavis.domain.messages import Button
 
 
 async def test_fake_channel_records_everything(tmp_path) -> None:

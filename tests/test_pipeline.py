@@ -2,10 +2,10 @@
 
 import asyncio
 
-from zento.channels.outbox_sender import OutboxSender
-from zento.channels.telegram_updates import ingest_update
-from zento.domain.events import EventType
-from zento.worker.runner import register_event_handler, run_worker
+from mavis.channels.outbox_sender import OutboxSender
+from mavis.channels.telegram_updates import ingest_update
+from mavis.domain.events import EventType
+from mavis.worker.runner import register_event_handler, run_worker
 
 
 def _update(update_id: int = 900, text: str = "hello there") -> dict:
@@ -15,7 +15,7 @@ def _update(update_id: int = 900, text: str = "hello there") -> dict:
 
 
 async def test_update_flows_to_exactly_one_reply(db, bus, channel, fake_llm) -> None:
-    from zento.agents.simple_turn import run_turn
+    from mavis.agents.simple_turn import run_turn
 
     register_event_handler(EventType.USER_MESSAGE, run_turn)
     fake_llm.push_text("Hey Jai!\n\nWhat's up?")

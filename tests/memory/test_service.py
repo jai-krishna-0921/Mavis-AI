@@ -2,12 +2,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from zento.domain.events import Trust
-from zento.domain.loops import Loop, LoopKind
-from zento.domain.memory import Entity, ExtractedEvent, Extraction, ProfileUpdate, Relation
-from zento.memory import service as service_mod
-from zento.memory.profile import ProfileCard
-from zento.store.repo import profile as profile_repo
+from mavis.domain.events import Trust
+from mavis.domain.loops import Loop, LoopKind
+from mavis.domain.memory import Entity, ExtractedEvent, Extraction, ProfileUpdate, Relation
+from mavis.memory import service as service_mod
+from mavis.memory.profile import ProfileCard
+from mavis.store.repo import profile as profile_repo
 
 
 def friend_extraction(mood=None):
@@ -185,8 +185,8 @@ async def test_untrusted_signal_is_wrapped_in_recall_render(memory, user, fake_l
 
 
 async def test_learn_propagates_llm_error(memory, user, monkeypatch):
-    from zento.domain.errors import LLMError
-    from zento.memory import service as service_mod
+    from mavis.domain.errors import LLMError
+    from mavis.memory import service as service_mod
 
     async def boom(*a, **k):
         raise LLMError("model down")

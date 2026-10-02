@@ -4,12 +4,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from zento.domain.loops import Loop, LoopKind
-from zento.domain.memory import Entity, Relation
-from zento.memory import recall as recall_mod
-from zento.memory.recall import assemble, recall, render_loop
-from zento.memory.spotter import SpotterCache
-from zento.memory.tokens import estimate_tokens
+from mavis.domain.loops import Loop, LoopKind
+from mavis.domain.memory import Entity, Relation
+from mavis.memory import recall as recall_mod
+from mavis.memory.recall import assemble, recall, render_loop
+from mavis.memory.spotter import SpotterCache
+from mavis.memory.tokens import estimate_tokens
 
 
 def test_assemble_orders_and_budgets():

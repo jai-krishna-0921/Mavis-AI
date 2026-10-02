@@ -1,6 +1,6 @@
 import structlog
 
-from zento.logging import REDACTED, configure_logging, redact_secrets
+from mavis.logging import REDACTED, configure_logging, redact_secrets
 
 
 def test_redacts_secret_like_keys() -> None:

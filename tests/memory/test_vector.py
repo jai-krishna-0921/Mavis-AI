@@ -1,4 +1,4 @@
-from zento.memory.vector import QdrantVectorStore
+from mavis.memory.vector import QdrantVectorStore
 
 
 async def test_add_and_search_returns_relevant_first(vector):

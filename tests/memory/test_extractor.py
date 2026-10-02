@@ -3,11 +3,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from zento.domain.errors import LLMError
-from zento.domain.events import Trust
-from zento.domain.memory import Entity, ExtractedEvent, Extraction, LoopDraft, Relation
-from zento.llm import models
-from zento.memory.extractor import extract, wrap_untrusted
+from mavis.domain.errors import LLMError
+from mavis.domain.events import Trust
+from mavis.domain.memory import Entity, ExtractedEvent, Extraction, LoopDraft, Relation
+from mavis.llm import models
+from mavis.memory.extractor import extract, wrap_untrusted
 
 NOW = datetime(2026, 10, 2, 9, 0, tzinfo=UTC)  # Friday 14:30 IST
 

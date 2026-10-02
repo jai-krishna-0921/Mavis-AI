@@ -51,7 +51,7 @@ class FakeLLM:
             raise AssertionError(f"FakeLLM: expected {schema.__name__}, got {type(item).__name__}")
         return item
 
-    # --- drop-in replacements for zento.llm.models ----------------------------
+    # --- drop-in replacements for mavis.llm.models ----------------------------
     def chat_model(self, tier: Any = None, temperature: float = 0.6) -> FakeToolChatModel:
         return FakeToolChatModel(fake=self)
 

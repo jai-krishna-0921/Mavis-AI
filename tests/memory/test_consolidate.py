@@ -1,10 +1,10 @@
+from mavis.domain.errors import LLMError
+from mavis.domain.memory import Entity, Relation
+from mavis.llm import models
+from mavis.memory.consolidate import ProfileDraft, consolidate, merge_duplicates
+from mavis.memory.profile import ProfileCard
+from mavis.store.repo import profile as profile_repo
 from tests.memory.fakes import TableEmbedder
-from zento.domain.errors import LLMError
-from zento.domain.memory import Entity, Relation
-from zento.llm import models
-from zento.memory.consolidate import ProfileDraft, consolidate, merge_duplicates
-from zento.memory.profile import ProfileCard
-from zento.store.repo import profile as profile_repo
 
 
 async def test_merge_duplicates_same_label_only(graph):

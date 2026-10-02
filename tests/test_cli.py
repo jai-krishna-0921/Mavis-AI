@@ -1,7 +1,7 @@
 import pytest
 from typer.testing import CliRunner
 
-from zento.cli import app
+from mavis.cli import app
 
 
 def test_cli_lists_commands() -> None:
@@ -31,7 +31,7 @@ class _Bus:
 async def test_run_tasks_cancel_awaits_tasks_and_disposes_engine(monkeypatch) -> None:
     import asyncio
 
-    from zento import cli
+    from mavis import cli
 
     disposed: list[bool] = []
 
@@ -62,7 +62,7 @@ async def test_run_tasks_cancel_awaits_tasks_and_disposes_engine(monkeypatch) ->
 
 
 async def test_cleanup_disposes_engine_when_bus_close_raises(monkeypatch) -> None:
-    from zento import cli
+    from mavis import cli
 
     disposed: list[bool] = []
 
@@ -80,7 +80,7 @@ async def test_main_cancels_on_sigterm() -> None:
     import os
     import signal
 
-    from zento import cli
+    from mavis import cli
 
     cleaned: list[bool] = []
 
@@ -102,7 +102,7 @@ def test_multi_process_roles_require_redis(settings, monkeypatch, role) -> None:
     monkeypatch.setenv("REDIS_URL", "")
     started: list[str] = []
     monkeypatch.setattr("uvicorn.run", lambda *a, **k: started.append("uvicorn"))
-    monkeypatch.setattr("zento.cli._run", lambda coro: (coro.close(), started.append("run")))
+    monkeypatch.setattr("mavis.cli._run", lambda coro: (coro.close(), started.append("run")))
     result = CliRunner().invoke(app, [role])
     assert result.exit_code == 1
     assert "REDIS_URL" in result.output

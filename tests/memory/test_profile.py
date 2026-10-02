@@ -1,7 +1,7 @@
-from zento.domain.memory import ProfileUpdate
-from zento.memory.profile import MAX_ITEMS, ProfileCard
-from zento.memory.tokens import estimate_tokens
-from zento.store.repo import profile as profile_repo
+from mavis.domain.memory import ProfileUpdate
+from mavis.memory.profile import MAX_ITEMS, ProfileCard
+from mavis.memory.tokens import estimate_tokens
+from mavis.store.repo import profile as profile_repo
 
 
 def test_apply_maps_fields_and_dedupes():

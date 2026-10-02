@@ -1,10 +1,10 @@
 from sqlalchemy import select
 
-from zento.domain.messages import Role
-from zento.memory.summaries import maybe_summarize
-from zento.store import db as dbm
-from zento.store.models import Message
-from zento.store.repo import messages, summaries, users
+from mavis.domain.messages import Role
+from mavis.memory.summaries import maybe_summarize
+from mavis.store import db as dbm
+from mavis.store.models import Message
+from mavis.store.repo import messages, summaries, users
 
 
 async def make_user_with_messages(n: int) -> tuple[int, list[int]]:
@@ -33,7 +33,7 @@ async def test_summarises_messages_outside_window_once(db, fake_llm):
 
 
 async def test_llm_failure_does_not_raise(db, monkeypatch):
-    from zento.llm import models
+    from mavis.llm import models
 
     uid, _ = await make_user_with_messages(45)
 

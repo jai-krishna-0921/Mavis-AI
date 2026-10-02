@@ -1,10 +1,10 @@
 import httpx
 import pytest
 
-from zento.api.app import create_app
-from zento.config import get_settings
-from zento.domain.events import EventType, Trust
-from zento.store.repo import users
+from mavis.api.app import create_app
+from mavis.config import get_settings
+from mavis.domain.events import EventType, Trust
+from mavis.store.repo import users
 
 
 def update(update_id: int, chat_id: int = 100, text: str = "hi", **extra) -> dict:
@@ -176,7 +176,7 @@ async def test_denied_chat_logs_chat_id_at_warning(client, monkeypatch) -> None:
 async def test_empty_allowlist_in_dev_warns_once(client, monkeypatch) -> None:
     from structlog.testing import capture_logs
 
-    from zento.channels import telegram_updates
+    from mavis.channels import telegram_updates
 
     monkeypatch.setattr(telegram_updates, "_warned_open_allowlist", False)
     with capture_logs() as logs:

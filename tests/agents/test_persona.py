@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from zento.agents.persona import split_bubbles, system_prompt
-from zento.store.repo import users
+from mavis.agents.persona import split_bubbles, system_prompt
+from mavis.store.repo import users
 
 NOW = datetime(2026, 10, 2, 4, 30, tzinfo=UTC)  # 10:00 in Asia/Kolkata, a Friday
 
@@ -19,7 +19,7 @@ async def test_system_prompt_has_identity_time_and_rules(db) -> None:
 
 
 async def test_system_prompt_uses_configured_agent_name(db, monkeypatch) -> None:
-    from zento.config import get_settings
+    from mavis.config import get_settings
 
     monkeypatch.setenv("AGENT_NAME", "Nova")
     get_settings.cache_clear()

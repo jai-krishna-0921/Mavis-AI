@@ -1,9 +1,9 @@
 import pytest
 
+from mavis.memory import embeddings
+from mavis.memory.embeddings import cosine, get_embedder, set_embedder
+from mavis.memory.tokens import estimate_tokens
 from tests.memory.fakes import HashEmbedder
-from zento.memory import embeddings
-from zento.memory.embeddings import cosine, get_embedder, set_embedder
-from zento.memory.tokens import estimate_tokens
 
 
 def test_estimate_tokens_rounds_up():
@@ -29,7 +29,7 @@ def test_set_embedder_overrides_default():
 
 
 def test_fast_embedder_is_lazy():
-    e = embeddings.FastEmbedder("BAAI/bge-small-en-v1.5", "/tmp/zento-models-never-used")
+    e = embeddings.FastEmbedder("BAAI/bge-small-en-v1.5", "/tmp/mavis-models-never-used")
     assert e._model is None  # constructing must not download anything
 
 

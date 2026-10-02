@@ -4,9 +4,9 @@ from datetime import datetime, timedelta
 import pytest
 from sqlalchemy.dialects import sqlite
 
-from zento.domain.messages import Button, Outbound, Role
-from zento.store.db import Session, UTCDateTime, utcnow
-from zento.store.repo import events, messages, outbox, users
+from mavis.domain.messages import Button, Outbound, Role
+from mavis.store.db import Session, UTCDateTime, utcnow
+from mavis.store.repo import events, messages, outbox, users
 
 
 async def test_get_or_create_by_chat_is_idempotent(db) -> None:

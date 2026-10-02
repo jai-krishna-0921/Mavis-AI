@@ -1,8 +1,8 @@
 import pytest
 
-from zento.domain.memory import Entity
-from zento.memory import spotter as spotter_mod
-from zento.memory.spotter import EntitySpotter, SpotterCache
+from mavis.domain.memory import Entity
+from mavis.memory import spotter as spotter_mod
+from mavis.memory.spotter import EntitySpotter, SpotterCache
 
 ENTS = [
     Entity(name="Jawahar", label="Person", aliases=["Jawa"]),

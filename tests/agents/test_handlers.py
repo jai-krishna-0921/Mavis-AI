@@ -1,10 +1,10 @@
 from datetime import UTC, datetime
 
-from zento.channels.outbox_sender import OutboxSender
-from zento.domain.events import Event, EventType, Trust
-from zento.store.repo import users
-from zento.worker.handlers import register_default_handlers
-from zento.worker.runner import handle_event
+from mavis.channels.outbox_sender import OutboxSender
+from mavis.domain.events import Event, EventType, Trust
+from mavis.store.repo import users
+from mavis.worker.handlers import register_default_handlers
+from mavis.worker.runner import handle_event
 
 
 async def test_default_handlers_route_user_messages_to_simple_turn(

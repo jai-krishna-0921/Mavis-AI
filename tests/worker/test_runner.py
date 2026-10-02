@@ -3,11 +3,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from zento.domain.errors import LLMError
-from zento.domain.events import Event, EventType, Job, JobKind, Trust
-from zento.store.db import utcnow
-from zento.store.repo import outbox, users
-from zento.worker.runner import (
+from mavis.domain.errors import LLMError
+from mavis.domain.events import Event, EventType, Job, JobKind, Trust
+from mavis.store.db import utcnow
+from mavis.store.repo import outbox, users
+from mavis.worker.runner import (
     FALLBACK_TEXT,
     handle_event,
     handle_job,
@@ -155,7 +155,7 @@ async def test_run_worker_names_consumers_with_suffix(settings) -> None:
 
 async def test_redis_lock_branch_takes_local_lock_first(settings, monkeypatch) -> None:
     # fakeredis has no Lua (evalsha), so redis-py's Lock can't run on it; use a tiny stand-in client.
-    from zento.worker import locks
+    from mavis.worker import locks
 
     class _Lock:
         def __init__(self, held: set[str], name: str) -> None:

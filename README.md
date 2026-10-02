@@ -4,8 +4,6 @@ Mavis is a 24/7 personal assistant that lives in Telegram and behaves like a sha
 
 She is not a request and response chatbot. She greets you in the morning, checks in before the moments that matter, asks how they went afterwards, and keeps track of what you are waiting on.
 
-> The codebase and Python package are named `zento` (the original project name). The agent persona and product are Mavis.
-
 ## What Mavis can do
 
 | Capability | Status |
@@ -81,8 +79,8 @@ Fill in at least these keys in `.env`:
 Then run:
 
 ```bash
-uv run zento chat     # local chat in the terminal, no Telegram needed
-uv run zento dev      # everything in one process, polling Telegram
+uv run mavis chat     # local chat in the terminal, no Telegram needed
+uv run mavis dev      # everything in one process, polling Telegram
 ```
 
 Message your bot on Telegram and Mavis will reply.
@@ -90,9 +88,9 @@ Message your bot on Telegram and Mavis will reply.
 ### Production roles
 
 ```bash
-uv run zento migrate  # apply database migrations
-uv run zento api      # webhook API (requires REDIS_URL and TELEGRAM_WEBHOOK_SECRET)
-uv run zento worker   # conversation and job workers (requires REDIS_URL)
+uv run mavis migrate  # apply database migrations
+uv run mavis api      # webhook API (requires REDIS_URL and TELEGRAM_WEBHOOK_SECRET)
+uv run mavis worker   # conversation and job workers (requires REDIS_URL)
 ```
 
 In production set `ENV=prod` and list your Telegram chat id in `ALLOWED_TELEGRAM_CHAT_IDS`. With an empty list, only dev mode accepts messages from anyone.
@@ -107,7 +105,7 @@ uv run ruff check src tests
 Project layout:
 
 ```
-src/zento/
+src/mavis/
   agents/     persona and conversation turns
   api/        FastAPI app, Telegram webhook, health checks
   bus/        event bus (in-process and Redis Streams)
@@ -124,5 +122,5 @@ docs/superpowers/
 
 ## Documentation
 
-- Design spec: [`docs/superpowers/specs/2026-10-02-zento-pa-design.md`](docs/superpowers/specs/2026-10-02-zento-pa-design.md)
+- Design spec: [`docs/superpowers/specs/2026-10-02-mavis-pa-design.md`](docs/superpowers/specs/2026-10-02-mavis-pa-design.md)
 - Implementation plans, one per phase: [`docs/superpowers/plans/`](docs/superpowers/plans/) (start with the `00-index` file)

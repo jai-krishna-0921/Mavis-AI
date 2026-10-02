@@ -3,12 +3,12 @@ from datetime import UTC, datetime
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from zento.agents.simple_turn import run_turn
-from zento.channels.outbox_sender import OutboxSender
-from zento.domain.errors import LLMError
-from zento.domain.events import Event, EventType, Trust
-from zento.domain.messages import Outbound, Role
-from zento.store.repo import messages, outbox, users
+from mavis.agents.simple_turn import run_turn
+from mavis.channels.outbox_sender import OutboxSender
+from mavis.domain.errors import LLMError
+from mavis.domain.events import Event, EventType, Trust
+from mavis.domain.messages import Outbound, Role
+from mavis.store.repo import messages, outbox, users
 
 
 def msg_event(user_id: int, text: str, event_id: str = "tg:update:1", **payload) -> Event:

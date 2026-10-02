@@ -1,8 +1,8 @@
 import asyncio
 from datetime import UTC, datetime
 
-from zento.bus.inprocess import InProcessBus
-from zento.domain.events import Event, EventType, Job, JobKind
+from mavis.bus.inprocess import InProcessBus
+from mavis.domain.events import Event, EventType, Job, JobKind
 
 
 def ev(event_id: str, user_id: int = 1) -> Event:
