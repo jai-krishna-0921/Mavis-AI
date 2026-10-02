@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from mavis.config import get_settings
+from mavis.domain import timeutil
 from mavis.domain.errors import LLMError
 from mavis.domain.events import Trust
 from mavis.domain.loops import LoopKind
@@ -28,7 +29,7 @@ Rules:
 - Entity labels must be one of: {labels}.
 - Relation types must be one of: {rels}.
 - Resolve relative dates ("tomorrow", "Monday 10am") against the current local time and output ISO-8601
-  WITH the user's UTC offset. If the day is ambiguous (e.g. "tomorrow" said between 00:00 and 04:00 local),
+  WITH the user's UTC offset. If the day is ambiguous (e.g. "tomorrow" said between 00:00 and 04:59 local),
   set ambiguous=true and starts_at=null.
 - loops.kind is one of COMMITMENT, WAITING_ON, GOAL, CONCERN, ROUTINE, WATCH.
 - profile_updates only for stable traits (name, timezone, tone, goals, key_people, routines, dislikes).
@@ -108,7 +109,7 @@ async def extract(
     if not text.strip():
         return Extraction()
     zone = ZoneInfo(tz)
-    now_local = (now or datetime.now(UTC)).astimezone(zone)
+    now_local = (now or timeutil.now()).astimezone(zone)
     system = SYSTEM_PROMPT.format(
         agent=get_settings().agent_name,
         now_local=now_local.strftime("%A %Y-%m-%d %H:%M %z"),

@@ -56,6 +56,7 @@ def scale_offset(delta: timedelta) -> timedelta:
     return delta * scale if scale > 0 else delta
 
 
+DAY_QUESTION_PREFIX = "Since it's just past midnight"
 _TOMORROW = re.compile(r"\b(tomorrow|tmrw|tmr|tomorow)\b", re.IGNORECASE)
 
 
@@ -68,7 +69,7 @@ def needs_day_clarification(text: str, now_local: datetime) -> str | None:
     if not is_ambiguous_day_window(now_local) or not _TOMORROW.search(text):
         return None
     today, nxt = _day_label(now_local), _day_label(now_local + timedelta(days=1))
-    return f"Since it's just past midnight, do you mean today ({today}) or {nxt}?"
+    return f"{DAY_QUESTION_PREFIX}, do you mean today ({today}) or {nxt}?"
 
 
 def time_guidance(now_local: datetime) -> str:

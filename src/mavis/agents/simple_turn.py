@@ -11,7 +11,7 @@ import contextlib
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
-from mavis.agents import persona
+from mavis.agents import clarify, persona
 from mavis.bus import get_bus
 from mavis.channels import get_channel
 from mavis.domain.events import Event, Job, JobKind
@@ -67,8 +67,24 @@ def _previous_reply(history: list[Message]) -> str | None:
     return next((m.content for m in reversed(history[:last_user]) if m.role == Role.ASSISTANT.value), None)
 
 
-async def enqueue_learn(user_id: int, event: Event, text: str, previous_reply: str | None) -> None:
+def _clarified_request(history: list[Message]) -> str | None:
+    """The user message a clarifying question was about, if the last assistant reply was one."""
+    last_user = max((i for i, m in enumerate(history) if m.role == Role.USER.value), default=None)
+    if last_user is None:
+        return None
+    before = history[:last_user]
+    j = max((i for i, m in enumerate(before) if m.role == Role.ASSISTANT.value), default=None)
+    if j is None or not clarify.is_day_question(before[j].content):
+        return None
+    return next((m.content for m in reversed(before[:j]) if m.role == Role.USER.value), None)
+
+
+async def enqueue_learn(
+    user_id: int, event: Event, text: str, previous_reply: str | None, original: str | None = None
+) -> None:
     convo = f"Mavis: {previous_reply}\nUser: {text}" if previous_reply else text
+    if original:
+        convo = f"User: {original}\n{convo}"
     await get_bus().enqueue(Job(
         id=f"learn:{event.id}", user_id=user_id, kind=JobKind.LEARN,
         payload={"text": convo, "source_ref": event.id, "trust": event.trust.value, "conversation": True},
@@ -87,7 +103,19 @@ async def run_turn(event: Event) -> None:
         # The first attempt may have died before enqueuing LEARN, so enqueue again. The bus does not
         # dedupe by job id; the LEARN handler skips a source_ref already recorded as processed.
         history = await messages.recent(user.id, HISTORY_LIMIT)
-        await enqueue_learn(user.id, event, text, _previous_reply(history))
+        await enqueue_learn(user.id, event, text, _previous_reply(history), _clarified_request(history))
+        return
+
+    question = clarify.day_clarification(text, user.timezone)
+    if question is not None:
+        async with Session() as s:
+            key = f"reply:{event.id}:0"
+            await outbox.enqueue(s, Outbound(user_id=user.id, text=question, dedupe_key=key))
+            await s.commit()
+        await messages.log(user.id, Role.ASSISTANT, question, event_id=f"reply:{event.id}")
+        # The request still carries information (people, titles); the hooks skip its ambiguous time.
+        history = await messages.recent(user.id, HISTORY_LIMIT)
+        await enqueue_learn(user.id, event, text, _previous_reply(history), _clarified_request(history))
         return
 
     if user.telegram_chat_id is not None:
@@ -110,4 +138,4 @@ async def run_turn(event: Event) -> None:
             await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=key))
         await s.commit()
     await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles), event_id=f"reply:{event.id}")
-    await enqueue_learn(user.id, event, text, previous_reply)
+    await enqueue_learn(user.id, event, text, previous_reply, _clarified_request(history))
