@@ -39,7 +39,11 @@ def _local_midnight(local: datetime) -> datetime:
 
 
 def _day_key(dedupe_key: str, local_now: datetime) -> str:
-    return f"{dedupe_key}:{local_now.date().isoformat()}"
+    """Scope a key to the local day; keys that already carry today's date are not dated twice."""
+    day = local_now.date().isoformat()
+    if day in dedupe_key or day.replace("-", "") in dedupe_key:
+        return dedupe_key
+    return f"{dedupe_key}:{day}"
 
 
 class PingPolicy:
@@ -55,6 +59,8 @@ class PingPolicy:
             defer = next_quiet_end(local, s.quiet_end).astimezone(UTC)
             return PolicyVerdict(allow=False, defer_until=defer, reason="quiet hours")
         if await self.count_today(user, now) >= s.ping_daily_budget:
+            if not urgent:  # a routine ping is stale by tomorrow: drop it rather than pile up a backlog
+                return PolicyVerdict(allow=False, reason="daily budget reached")
             tomorrow = (_local_midnight(local) + timedelta(days=1)).replace(hour=s.quiet_end)
             return PolicyVerdict(
                 allow=False, defer_until=tomorrow.astimezone(UTC), reason="daily budget reached"
