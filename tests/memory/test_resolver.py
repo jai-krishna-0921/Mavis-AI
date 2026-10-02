@@ -54,3 +54,9 @@ async def test_no_existing_entities_skips_embedding():
 
     res = await resolve(x([Entity(name="Jawahar", label="Person")]), [], Never())
     assert [e.name for e in res.entities] == ["Jawahar"]
+
+
+async def test_same_name_different_label_exact_match_does_not_merge():
+    res = await resolve(x([Entity(name="Siemens", label="Place")]),
+                        [Entity(name="Siemens", label="Organization")], HashEmbedder())
+    assert [(e.name, e.label) for e in res.entities] == [("Siemens", "Place")]

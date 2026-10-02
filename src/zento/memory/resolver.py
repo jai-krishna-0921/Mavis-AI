@@ -23,11 +23,14 @@ class Resolution:
 
 
 async def resolve(extraction: Extraction, existing: list[Entity], embedder: Embedder) -> Resolution:
-    by_norm: dict[str, Entity] = {}
+    by_norm: dict[tuple[str, str], Entity] = {}  # (label, normalised name/alias) -> entity
+    by_name: dict[str, Entity] = {}  # label-agnostic, only for relation endpoints (no labels there)
     for e in existing:
-        by_norm.setdefault(normalize_name(e.name), e)
+        by_norm.setdefault((e.label, normalize_name(e.name)), e)
+        by_name.setdefault(normalize_name(e.name), e)
         for a in e.aliases:
-            by_norm.setdefault(normalize_name(a), e)
+            by_norm.setdefault((e.label, normalize_name(a)), e)
+            by_name.setdefault(normalize_name(a), e)
 
     mapping: dict[str, str] = {}
     out: dict[str, Entity] = {}  # node key -> entity to upsert
@@ -46,8 +49,9 @@ async def resolve(extraction: Extraction, existing: list[Entity], embedder: Embe
         if is_user(e.name):
             mapping[e.name] = "User"
             continue
-        hit = by_norm.get(normalize_name(e.name)) or next(
-            (by_norm[normalize_name(a)] for a in e.aliases if normalize_name(a) in by_norm), None
+        hit = by_norm.get((e.label, normalize_name(e.name))) or next(
+            (by_norm[k] for a in e.aliases if (k := (e.label, normalize_name(a))) in by_norm),
+            None,
         )
         if hit:
             mapping[e.name] = hit.name
@@ -83,7 +87,7 @@ async def resolve(extraction: Extraction, existing: list[Entity], embedder: Embe
             return "User"
         if name in mapping:
             return mapping[name]
-        hit = by_norm.get(normalize_name(name))
+        hit = by_name.get(normalize_name(name))
         return hit.name if hit else name
 
     relations = [r.model_copy(update={"subject": canon(r.subject), "object": canon(r.object)})
