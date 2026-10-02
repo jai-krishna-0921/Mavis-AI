@@ -62,3 +62,15 @@ def fake_llm(monkeypatch):
     monkeypatch.setattr(models, "structured", fake.structured)
     return fake
 
+
+
+@pytest.fixture
+def channel():
+    """A FakeChannel installed as the process channel; inspect `.sent` / `.texts`."""
+    from zento.channels import set_channel
+    from zento.channels.fake import FakeChannel
+
+    ch = FakeChannel()
+    set_channel(ch)
+    yield ch
+    set_channel(None)
