@@ -106,7 +106,11 @@ async def run_turn(event: Event) -> None:
         await enqueue_learn(user.id, event, text, _previous_reply(history), _clarified_request(history))
         return
 
-    question = clarify.day_clarification(text, user.timezone)
+    history = await messages.recent(user.id, HISTORY_LIMIT)
+    previous = _previous_reply(history)
+    # A reply to our day question is the answer, not a new ambiguous request.
+    answering = previous is not None and clarify.is_day_question(previous)
+    question = None if answering else clarify.day_clarification(text, user.timezone, event.occurred_at)
     if question is not None:
         async with Session() as s:
             key = f"reply:{event.id}:0"
@@ -114,17 +118,15 @@ async def run_turn(event: Event) -> None:
             await s.commit()
         await messages.log(user.id, Role.ASSISTANT, question, event_id=f"reply:{event.id}")
         # The request still carries information (people, titles); the hooks skip its ambiguous time.
-        history = await messages.recent(user.id, HISTORY_LIMIT)
-        await enqueue_learn(user.id, event, text, _previous_reply(history), _clarified_request(history))
+        await enqueue_learn(user.id, event, text, previous, _clarified_request(history))
         return
 
     if user.telegram_chat_id is not None:
         with contextlib.suppress(Exception):
             await get_channel().send_typing(user.telegram_chat_id)
 
-    history = await messages.recent(user.id, HISTORY_LIMIT)
     hint = START_HINT if event.payload.get("command") == "start" else ""
-    previous_reply = _previous_reply(history)
+    previous_reply = previous
     context = await build_context(user.id, text, hint)
     prompt: list[BaseMessage] = [SystemMessage(persona.system_prompt(user, utcnow(), context=context))]
     prompt += _to_langchain(history)

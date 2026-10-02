@@ -57,7 +57,7 @@ def scale_offset(delta: timedelta) -> timedelta:
 
 
 DAY_QUESTION_PREFIX = "Since it's just past midnight"
-_TOMORROW = re.compile(r"\b(tomorrow|tmrw|tmr|tomorow)\b", re.IGNORECASE)
+_TOMORROW = re.compile(r"(?<!after )\b(tomorrow|tmrw|tmr|tomorow)\b", re.IGNORECASE)
 
 
 def _day_label(d: datetime) -> str:
