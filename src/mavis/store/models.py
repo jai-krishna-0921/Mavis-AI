@@ -111,3 +111,22 @@ class ConversationSummary(Base):
     upto_message_id: Mapped[int] = mapped_column(Integer)
     summary: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class LoopRow(Base):
+    """An open loop: something unfinished the assistant keeps track of."""
+
+    __tablename__ = "loops"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    title: Mapped[str] = mapped_column(String(300))
+    due_at: Mapped[datetime | None] = mapped_column(default=None, index=True)
+    entities: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(12), default="OPEN", index=True)
+    importance: Mapped[int] = mapped_column(Integer, default=3)
+    watch: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    source: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column()
+    updated_at: Mapped[datetime] = mapped_column()

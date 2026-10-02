@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from mavis.domain.events import Event, Job
+from mavis.domain.memory import Extraction, RecallContext
 from mavis.memory.embeddings import set_embedder
 from mavis.memory.graph import SqliteGraphStore
 from mavis.memory.service import MemoryService, set_memory
@@ -163,3 +165,93 @@ def clock(monkeypatch):
     c = _Clock()
     monkeypatch.setattr(timeutil, "_clock", lambda: c.t)
     return c
+
+
+class RecordingBus:
+    """EventBus double: records publishes/enqueues, dedupes by event id."""
+
+    def __init__(self) -> None:
+        self.events: list[Event] = []
+        self.jobs: list[Job] = []
+        self._seen: set[str] = set()
+
+    async def publish(self, event: Event) -> bool:
+        if event.id in self._seen:
+            return False
+        self._seen.add(event.id)
+        self.events.append(event)
+        return True
+
+    async def enqueue(self, job: Job) -> None:
+        self.jobs.append(job)
+
+    async def consume_events(self, group, consumer, handler):  # pragma: no cover
+        raise NotImplementedError
+
+    async def consume_jobs(self, group, consumer, handler):  # pragma: no cover
+        raise NotImplementedError
+
+    async def close(self) -> None:
+        return None
+
+    def take(self) -> list[Event]:
+        batch, self.events = self.events, []
+        return batch
+
+
+@pytest.fixture
+def recording_bus() -> RecordingBus:
+    return RecordingBus()
+
+
+@pytest.fixture
+def drain():
+    async def _drain(bus: RecordingBus, handler, max_rounds: int = 20) -> int:
+        handled = 0
+        for _ in range(max_rounds):
+            batch = bus.take()
+            if not batch:
+                return handled
+            for event in batch:
+                await handler.handle(event)
+                handled += 1
+        return handled
+
+    return _drain
+
+
+class FakeMemory:
+    """MemoryService double shared by Phases 3+ (Phase 4 relies on learned/forgotten/forget)."""
+
+    def __init__(self) -> None:
+        self.on_extraction: list = []
+        self.loops_reader = None
+        self.profile = ""
+        self.learned: list[tuple[int, str, str]] = []
+        self.forgotten: list[str] = []
+
+    def set_loops_reader(self, reader) -> None:
+        self.loops_reader = reader
+
+    async def recall(self, user_id: int, text: str) -> RecallContext:
+        return RecallContext(profile=self.profile)
+
+    async def learn(self, user_id: int, text: str, source_ref: str = "", trust=None) -> Extraction:
+        self.learned.append((user_id, text, source_ref))
+        return Extraction()
+
+    async def forget(self, user_id: int, needle: str) -> int:
+        self.forgotten.append(needle)
+        return 2
+
+    async def describe_user(self, user_id: int) -> str:
+        return self.profile or "I don't know much about you yet."
+
+
+@pytest.fixture
+def fake_memory() -> Iterator[FakeMemory]:
+    """A FakeMemory installed as the process memory service (set_memory), reset afterwards."""
+    fm = FakeMemory()
+    set_memory(fm)  # type: ignore[arg-type]
+    yield fm
+    set_memory(None)
