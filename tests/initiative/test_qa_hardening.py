@@ -89,7 +89,7 @@ async def test_llm_key_variants_deliver_once(user, clock, recording_bus, fake_me
         fake_llm.push_structured(ComposedMessage(send=True, messages=[f"Send that thank-you note {i}"]))
         await init.handler.handle(Event(id=f"wakeup:{70 + i}", user_id=user.id, type=EventType.WAKEUP,
                                         occurred_at=timeutil.now(), source="timer", trust=Trust.SYSTEM,
-                                        payload={"kind": "agent", "reason": "thank-you", "wakeup_id": 70 + i}))
+                                        payload={"kind": "agent", "reason": "thanks", "wakeup_id": 70 + i}))
     assert await outbox.texts_with_dedupe_prefix("thankyoujawahar:") == ["Send that thank-you note 0"]
 
 
@@ -109,3 +109,64 @@ async def test_same_loop_and_kind_pings_once_per_day(user, clock, recording_bus,
         await init.handler.handle(starting_event(user, loop.id, eid=f"wakeup:{80 + i}"))
     sent = [m.content for m in await messages.recent(user.id) if m.proactive]
     assert sent == ["Prep time 0"]
+
+
+# F1 ----------------------------------------------------------------------------------------------
+
+def agent_event(user, loop_id, eid: str = "wakeup:60") -> Event:
+    return Event(id=eid, user_id=user.id, type=EventType.WAKEUP, occurred_at=timeutil.now(), source="timer",
+                 trust=Trust.SYSTEM, payload={"kind": "agent", "loop_id": loop_id, "wakeup_id": 60,
+                                              "reason": "Second reminder before flight"})
+
+
+async def test_deferred_reminder_is_dropped_once_the_event_has_passed(user, clock, recording_bus, fake_memory,
+                                                                      fake_llm, monkeypatch):
+    from mavis.domain.wakeups import WakeupKind
+    from mavis.timers.runner import wakeup_event
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 23, 30))  # quiet hours
+    flight = ist(28, 0, 30)
+    loop = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Flight to Delhi",
+                                                       due_at=flight, importance=5))
+    recording_bus.take()
+    fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=4, intent="prep for the flight")))
+    await init.handler.handle(agent_event(user, loop.id))
+    [deferred] = await init.wakeups.pending(user.id, WakeupKind.DEFERRED)
+    assert deferred.loop_id == loop.id
+    assert deferred.payload["valid_until"] == flight.isoformat()
+
+    calls = spy_notify(init, monkeypatch)
+    clock.set(deferred.due_at)  # 07:00, the flight left at 00:30
+    await init.handler.handle(wakeup_event(deferred))
+    assert calls == []
+
+
+async def test_deferred_ping_dropped_when_its_loop_closed(user, clock, recording_bus, fake_memory,
+                                                          monkeypatch):
+    from mavis.domain.loops import LoopStatus
+
+    init = build(recording_bus, fake_memory)
+    loop = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.WAITING_ON, title="Reply from Jawahar"))
+    await init.loops.close(loop.id, LoopStatus.DONE)
+    calls = spy_notify(init, monkeypatch)
+    await init.handler.handle(Event(
+        id="wakeup:61", user_id=user.id, type=EventType.WAKEUP, occurred_at=timeutil.now(), source="timer",
+        payload={"kind": "deferred", "wakeup_id": 61, "loop_id": loop.id,
+                 "notify": {"urgency": 3, "intent": "any word from Jawahar?"},
+                 "origin": {"kind": "wakeup", "loop_id": loop.id}}))
+    assert calls == []
+
+
+async def test_old_deferred_payload_without_valid_until_expires(user, clock, recording_bus, fake_memory,
+                                                                monkeypatch):
+    init = build(recording_bus, fake_memory)
+    calls = spy_notify(init, monkeypatch)
+    base = {"kind": "deferred", "wakeup_id": 62, "notify": {"urgency": 3, "intent": "weekly summary"}}
+    stale = (timeutil.now() - timedelta(hours=13)).isoformat()
+    fresh = (timeutil.now() - timedelta(hours=9)).isoformat()
+    for i, due in enumerate([stale, fresh]):
+        await init.handler.handle(Event(id=f"wakeup:{62 + i}", user_id=user.id, type=EventType.WAKEUP,
+                                        occurred_at=timeutil.now(), source="timer",
+                                        payload={**base, "original_due": due}))
+    assert len(calls) == 1

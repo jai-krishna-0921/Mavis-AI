@@ -14,7 +14,7 @@ from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import Loop, LoopKind, LoopStatus
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative import hooks
-from mavis.initiative.executor import InitiativeExecutor
+from mavis.initiative.executor import DEFERRED_TTL, InitiativeExecutor
 from mavis.initiative.filters import EventFilter
 from mavis.initiative.planner import fallback_decision, schedule_default_signals
 from mavis.initiative.quiet import QuietTracker
@@ -33,6 +33,8 @@ MAX_WAKEUP_LATENESS = timedelta(hours=2)
 MAX_LLM_URGENCY = 4
 URGENT_URGENCY = 5
 IMMINENT = timedelta(minutes=15)
+FOLLOW_UP_VALID_FOR = timedelta(hours=24)
+LIVE_STATUSES = (LoopStatus.OPEN,)
 HANDLED_TYPES = tuple(t for t in EventType if t not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED))
 
 
@@ -60,8 +62,8 @@ class InitiativeHandler:
             return
         if event.type is EventType.WAKEUP and kind == WakeupKind.DEFERRED.value:
             origin = event.payload.get("origin")
-            if origin and not await self._origin_still_valid(user.id, origin):
-                log.info("initiative.deferred_stale", event_id=event.id, origin=origin)
+            if reason := await self._deferred_stale(user.id, event.payload):
+                log.info("initiative.deferred_stale", event_id=event.id, origin=origin, reason=reason)
                 return
             original_due = event.payload.get("original_due")
             await self._executor.notify(
@@ -115,10 +117,44 @@ class InitiativeHandler:
             context = wrap_untrusted(result.summary, event.type.value)
         streak = int(event.payload.get("streak", 0)) + 1 if event.type is EventType.USER_QUIET else 0
         await self._executor.apply(user, decision, event, context=context, quiet_streak=streak,
-                                  origin=_origin_for(event))
+                                  origin=await self._origin_for(event))
 
         if event.type is EventType.EVENT_ENDED and event.payload.get("loop_id"):
             await self._loops.close(int(event.payload["loop_id"]), LoopStatus.DONE)
+
+    async def _deferred_stale(self, user_id: int, payload: dict) -> str | None:
+        """Send-time revalidation of a deferred ping: why it should no longer go out, or None."""
+        origin = payload.get("origin") or {}
+        valid_until = payload.get("valid_until") or origin.get("valid_until")
+        if valid_until is None and payload.get("original_due"):  # deferred before valid_until existed
+            valid_until = (datetime.fromisoformat(payload["original_due"]) + DEFERRED_TTL).isoformat()
+        if valid_until and timeutil.now() > timeutil.ensure_utc(datetime.fromisoformat(valid_until)):
+            return "expired"
+        loop_id = payload.get("loop_id") or origin.get("loop_id")
+        if loop_id is not None:
+            loop = await self._loops.get(int(loop_id))
+            if loop is None or loop.user_id != user_id or loop.status not in LIVE_STATUSES:
+                return "loop closed"
+        if origin and not await self._origin_still_valid(user_id, origin):
+            return "origin stale"
+        return None
+
+    async def _origin_for(self, event: Event) -> dict | None:
+        """Why a ping is being sent, carried with it if it is deferred so it can be revalidated."""
+        if event.type is EventType.USER_QUIET:
+            return {"kind": event.type.value, "asked_at": event.payload.get("asked_at")}
+        loop_id = _event_loop_id(event)
+        if loop_id is None:
+            return None
+        origin: dict = {"kind": event.type.value, "loop_id": loop_id}
+        loop = await self._loops.get(loop_id)
+        if loop is not None and loop.due_at is not None:
+            due = timeutil.ensure_utc(loop.due_at)
+            if event.type is EventType.EVENT_ENDED:
+                origin["valid_until"] = (due + FOLLOW_UP_VALID_FOR).isoformat()
+            elif due > timeutil.now():  # a reminder about something is stale once it has started
+                origin["valid_until"] = due.isoformat()
+        return origin
 
     async def _origin_still_valid(self, user_id: int, origin: dict) -> bool:
         """Send-time revalidation: has the reason for this message gone stale?"""
@@ -178,14 +214,6 @@ def _event_loop_id(event: Event) -> int | None:
         return int(raw) if raw is not None else None
     except (TypeError, ValueError):
         return None
-
-
-def _origin_for(event: Event) -> dict | None:
-    if event.type is EventType.USER_QUIET:
-        return {"kind": event.type.value, "asked_at": event.payload.get("asked_at")}
-    if (loop_id := _event_loop_id(event)) is not None:
-        return {"kind": event.type.value, "loop_id": loop_id}
-    return None
 
 
 def _normalize_llm_key(decision: InitiativeDecision) -> InitiativeDecision:
