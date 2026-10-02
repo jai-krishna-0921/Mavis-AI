@@ -6,6 +6,8 @@ from typing import Protocol
 
 from mavis.domain.events import Event, Job
 
+BLOCK_MS = 5_000  # XREADGROUP BLOCK; redis socket read timeout must exceed it
+
 
 class Stream(StrEnum):
     EVENTS = "mavis:events"
