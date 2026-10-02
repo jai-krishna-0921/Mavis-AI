@@ -4,6 +4,7 @@ from mavis.agents import buttons
 from mavis.channels.outbox_sender import OutboxSender
 from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, JobKind, Trust
+from mavis.domain.policy import Capability
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative import hooks, routines
 from mavis.initiative import wiring as initiative_wiring
@@ -195,3 +196,34 @@ def test_reset_fixture_unbinds_stale_system_wakeups():
 def test_system_wakeups_cleared_after_previous_test():
     assert "system_poll" not in system.SYSTEM_WAKEUP_HANDLERS
     assert "system_connection_check" not in system.SYSTEM_WAKEUP_HANDLERS
+
+
+async def test_two_users_first_sync_learn_markers_do_not_collide(db, monkeypatch):
+    from mavis.memory import jobs
+    from mavis.tools.integrations.first_sync import FirstSync
+
+    learned = []
+
+    class FakeMemoryService:
+        async def learn(self, user_id, text, source_ref="", trust=Trust.USER):
+            learned.append((user_id, source_ref))
+
+    monkeypatch.setattr(jobs, "get_memory", lambda: FakeMemoryService())
+    bus = FakeBus()
+    monkeypatch.setattr(wiring, "get_bus", lambda: bus)
+
+    class P:
+        async def execute(self, user, action, args):
+            from mavis.domain.integrations import ToolResult
+            return ToolResult(ok=True, data={"messages": [
+                {"messageId": "1", "sender": "A <a@x.com>", "subject": "hi", "labelIds": ["INBOX"]}]})
+
+    async def tz(_):
+        return "UTC"
+
+    sync = FirstSync(provider=P(), memory=wiring.JobLearner(), loops=None, bus=bus, tz_of=tz)
+    await sync.run(101, Capability.GMAIL)
+    await sync.run(102, Capability.GMAIL)
+    for job in [j for j in bus.jobs if j.kind is JobKind.LEARN]:
+        await jobs.handle_learn(job)
+    assert {u for u, _ in learned} == {101, 102}
