@@ -137,7 +137,7 @@ deploy/aws/migrate-data.sh --yes     # copy demo Postgres, Qdrant and Neo4j to t
 deploy/aws/webhook.sh set            # switch Telegram to the webhook
 ```
 
-Later redeploys are just `deploy/aws/deploy.sh`. It keeps the generated secrets that already exist on the box, so the database password never rotates.
+Later redeploys are just `deploy/aws/deploy.sh`. It reuses the `.env` already on the box: existing keys (generated secrets and any you added by hand) are kept and only missing ones are added, except `ENV`, `PUBLIC_BASE_URL`, `DOMAIN` and `TELEGRAM_MODE`, which follow the run. An ssh failure aborts the deploy rather than regenerating secrets.
 
 The prod `.env` is built by `deploy.sh` from the demo `.env` keys (`OLLAMA_API_KEY`, `TAVILY_API_KEY`, `COMPOSIO_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_CHAT_IDS`) plus generated secrets (`TELEGRAM_WEBHOOK_SECRET`, database passwords) and the in-stack URLs; the template is `deploy/.env.prod.example`. It is copied to `/opt/mavis/.env` with mode 600. `ENV=prod` makes the allowlist mandatory: the api refuses to start without `ALLOWED_TELEGRAM_CHAT_IDS`. `COMPOSIO_WEBHOOK_SECRET` stays empty, which keeps Composio on polling. The Composio connect redirect lands on `https://<host>/connect/callback`, served by the `api` service.
 
@@ -157,11 +157,15 @@ uv run mavis telegram info           # current webhook state (also: set-webhook,
 | Store | Method |
 |---|---|
 | Postgres | `pg_dump` via `docker exec` into the demo container, `psql` restore on the box, then `mavis migrate` |
-| Qdrant | collection snapshot API on the demo, snapshot upload on the box (the temporary snapshot on the demo is deleted again) |
+| Qdrant | collection snapshot API on the demo, then streamed into a one-off container on the box's compose network (Qdrant publishes no host port; the temporary snapshot on the demo is deleted again) |
 | Neo4j | `deploy/aws/graph_export.py` writes all nodes and relationships to JSON with read-only Cypher; `graph_import.py` rebuilds them inside the mavis image. This avoids stopping the database for `neo4j-admin dump` |
 | Redis | not copied (streams and locks are ephemeral) |
 
 Run it before switching Telegram to the webhook, and do not run it again once the box has live data you want to keep.
+
+### Backups
+
+`bootstrap.sh` installs a cron job (03:00) that writes a gzipped `pg_dump` to `/var/backups/mavis` (mode 600, newest 7 kept). It covers Postgres only. Copy the dumps off the box if you hold data you cannot lose, since the volume is deleted with the instance. The instance has termination protection on; `teardown.sh --yes` lifts it.
 
 ### Operations
 
@@ -181,15 +185,15 @@ Limits are set in `docker-compose.prod.yml`. Idle use was measured in a local ru
 | Service | Limit | Idle use |
 |---|---|---|
 | neo4j (heap 256m, pagecache 128m) | 640 MB | about 520 MB |
-| worker (embedding model) | 512 MB | about 400 MB |
-| qdrant | 256 MB | about 110 MB |
-| api | 256 MB | est. 130 MB |
-| postgres | 224 MB | about 30 MB |
-| timer | 192 MB | about 105 MB |
-| redis | 128 MB | about 10 MB |
-| caddy | 64 MB | est. 20 MB |
+| worker (embedding model) | 640 MB | about 400 MB |
+| api | 224 MB | est. 130 MB |
+| qdrant | 192 MB | about 110 MB |
+| postgres | 192 MB | about 30 MB |
+| timer | 160 MB | about 105 MB |
+| redis (maxmemory 64mb) | 96 MB | about 10 MB |
+| caddy | 48 MB | est. 20 MB |
 
-Limits sum to about 2.3 GB on purpose (idle use is about 1.3 GB); the 2 GB swapfile covers spikes, and roughly 400 MB stays free for a future sandbox container.
+Limits sum to about 2.2 GB on purpose (idle use is about 1.35 GB); the 2 GB swapfile covers spikes, and roughly 400 MB stays free for a future sandbox container. On redeploy, `deploy.sh` stops the worker and timer while the image builds, then prunes old images and build cache.
 
 ## Documentation
 
