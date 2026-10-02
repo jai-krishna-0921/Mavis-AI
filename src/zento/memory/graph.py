@@ -38,6 +38,20 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def edge_score(confidence: float, valid_from: datetime, now: datetime) -> float:
+    """Recency x confidence ranking shared by every backend (30-day half-weight decay)."""
+    if valid_from.tzinfo is None:
+        valid_from = valid_from.replace(tzinfo=UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    age_days = max((now - valid_from).total_seconds() / 86400, 0.0)
+    return confidence * 1 / (1 + age_days / 30)
+
+
+def escape_like(needle: str) -> str:
+    return needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class SqliteGraphStore:
     """SQL-backed graph (works on SQLite and Postgres). Fine for one user's world."""
 
@@ -146,7 +160,9 @@ class SqliteGraphStore:
                             seen.add(k)
                             nxt.add(k)
                 frontier = nxt
-        ranked = sorted(edges.values(), key=lambda e: (e.valid_from, e.confidence), reverse=True)
+        candidates = sorted(edges.values(), key=lambda e: e.valid_from, reverse=True)[: limit * 4]
+        now = _now()
+        ranked = sorted(candidates, key=lambda e: edge_score(e.confidence, e.valid_from, now), reverse=True)
         return [e.statement for e in ranked[:limit]]
 
     async def entities(self, user_id: int) -> list[Entity]:
@@ -173,19 +189,19 @@ class SqliteGraphStore:
         n = needle.strip()
         if not n:
             return 0
-        like = f"%{n}%"
+        like = f"%{escape_like(n)}%"
         async with dbm.Session() as s:
             node_keys = list(
                 await s.scalars(
                     select(GraphNode.key).where(
-                        GraphNode.user_id == user_id, GraphNode.label != "User", GraphNode.name.ilike(like)
+                        GraphNode.user_id == user_id, GraphNode.label != "User", GraphNode.name.ilike(like, escape="\\")
                     )
                 )
             )
             res = await s.execute(
                 delete(GraphEdge).where(
                     GraphEdge.user_id == user_id,
-                    or_(GraphEdge.statement.ilike(like), GraphEdge.src_key.in_(node_keys),
+                    or_(GraphEdge.statement.ilike(like, escape="\\"), GraphEdge.src_key.in_(node_keys),
                         GraphEdge.dst_key.in_(node_keys)),
                 )
             )
