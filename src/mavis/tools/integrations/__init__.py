@@ -26,3 +26,12 @@ def get_provider() -> IntegrationProvider:
 @lru_cache
 def get_connection_cache() -> ConnectionCache:
     return ConnectionCache(get_provider(), ttl_s=get_settings().integration_status_ttl_s)
+
+
+async def close_provider() -> None:
+    """Close the provider's HTTP client if one was created in this process (never builds one)."""
+    if get_provider.cache_info().currsize == 0:
+        return
+    aclose = getattr(get_provider(), "aclose", None)
+    if aclose is not None:
+        await aclose()

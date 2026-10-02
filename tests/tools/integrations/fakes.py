@@ -25,6 +25,7 @@ class FakeProvider:
         self.status_calls = 0
         self.fail_subscribe = False
         self.fail_link = False
+        self.configured = True
 
     def set_state(self, user_id: int, capability: Any, state: ConnectionState) -> None:
         self.states.setdefault(user_id, {})[capability.value] = state

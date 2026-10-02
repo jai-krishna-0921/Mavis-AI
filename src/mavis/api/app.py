@@ -12,6 +12,8 @@ from mavis.bus import get_bus
 from mavis.config import get_settings
 from mavis.logging import configure_logging
 from mavis.store.db import dispose_engine, init_db
+from mavis.tools.integrations import close_provider
+from mavis.tools.integrations.wiring import register_integrations
 
 
 @asynccontextmanager
@@ -22,10 +24,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError("TELEGRAM_WEBHOOK_SECRET is required in webhook mode")
     if s.is_sqlite:
         await init_db()  # Postgres schemas are managed by `mavis migrate`
+    register_integrations()
     app.state.bus = get_bus()
-    yield
-    await get_bus().close()
-    await dispose_engine()
+    try:
+        yield
+    finally:
+        await get_bus().close()
+        await close_provider()
+        await dispose_engine()
 
 
 def create_app() -> FastAPI:

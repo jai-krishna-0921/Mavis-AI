@@ -7,6 +7,7 @@ from typing import Protocol
 
 from mavis.domain.events import Event
 from mavis.domain.integrations import ConnectionState, Toolkit, ToolResult, UserRef
+from mavis.memory.extractor import wrap_untrusted
 
 MAX_RESULT_CHARS = 6000
 
@@ -24,7 +25,8 @@ class IntegrationProvider(Protocol):
 def render_result(result: ToolResult, limit: int = MAX_RESULT_CHARS) -> str:
     """The only way a provider result reaches a model: JSON text, truncated."""
     if not result.ok:
-        return f"error: {result.error or 'unknown error'}"[:limit]
+        # provider error text is third-party content: never let it read as instructions
+        return f"error: {wrap_untrusted(result.error or 'unknown error', 'provider_error')}"[:limit]
     data = result.data
     text = data if isinstance(data, str) else json.dumps(data, default=str, ensure_ascii=False)
     return text if len(text) <= limit else text[:limit] + " …[truncated]"
