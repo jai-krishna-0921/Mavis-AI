@@ -185,3 +185,13 @@ async def test_other_task_completed_delegates_to_initiative(db, user, monkeypatc
                payload={"kind": "other"}, trust=Trust.SYSTEM)
     await wiring.dispatch_task_completed(ev)
     assert handled == ["t1"]
+
+
+def test_reset_fixture_unbinds_stale_system_wakeups():
+    wiring.register_integrations()
+    assert "system_poll" in system.SYSTEM_WAKEUP_HANDLERS
+
+
+def test_system_wakeups_cleared_after_previous_test():
+    assert "system_poll" not in system.SYSTEM_WAKEUP_HANDLERS
+    assert "system_connection_check" not in system.SYSTEM_WAKEUP_HANDLERS

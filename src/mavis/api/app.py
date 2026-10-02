@@ -29,9 +29,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        await get_bus().close()
-        await close_provider()
-        await dispose_engine()
+        try:
+            await get_bus().close()
+        finally:
+            try:
+                await close_provider()
+            finally:
+                await dispose_engine()
 
 
 def create_app() -> FastAPI:

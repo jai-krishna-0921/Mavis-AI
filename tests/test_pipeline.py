@@ -38,3 +38,24 @@ async def test_update_flows_to_exactly_one_reply(db, bus, channel, fake_llm) -> 
     finally:
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
+
+
+async def test_webhook_path_answers_callback_and_survives_failure(db, bus, monkeypatch) -> None:
+    from mavis.channels import telegram_updates
+
+    answered: list[str] = []
+    monkeypatch.setattr(telegram_updates, "_default_answer", lambda cid: _record(answered, cid))
+    cb = {"update_id": 901, "callback_query": {"id": "cq9", "data": "conn:no:1", "from": {"id": 321},
+                                               "message": {"message_id": 5, "chat": {"id": 321}}}}
+    assert await ingest_update(cb, bus) is True
+    assert answered == ["cq9"]
+
+    async def boom(cid):
+        raise RuntimeError("telegram down")
+
+    monkeypatch.setattr(telegram_updates, "_default_answer", boom)
+    assert await ingest_update({**cb, "update_id": 902}, bus) is True  # answer failure never blocks
+
+
+async def _record(store: list[str], cid: str) -> None:
+    store.append(cid)
