@@ -1,4 +1,4 @@
-"""initiative engine: loops, wakeups (ping_log added in Task 6)"""
+"""initiative engine: loops, wakeups, ping_log"""
 
 from __future__ import annotations
 
@@ -49,9 +49,28 @@ def upgrade() -> None:
     op.create_index("ix_wakeups_loop_id", "wakeups", ["loop_id"])
     op.create_index("ix_wakeups_dedupe_key", "wakeups", ["dedupe_key"])
     op.create_index("ix_wakeups_status_due", "wakeups", ["status", "due_at"])
+    op.create_index(
+        "uq_wakeups_pending_dedupe",
+        "wakeups",
+        ["user_id", "dedupe_key"],
+        unique=True,
+        sqlite_where=sa.text("status = 'pending' AND dedupe_key IS NOT NULL"),
+        postgresql_where=sa.text("status = 'pending' AND dedupe_key IS NOT NULL"),
+    )
+    op.create_table(
+        "ping_log",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("user_id", sa.Integer, sa.ForeignKey("users.id"), nullable=False),
+        sa.Column("key", sa.String(240), nullable=False),
+        sa.Column("urgency", sa.Integer, nullable=False),
+        sa.Column("sent_at", sa.DateTime(timezone=True), nullable=False),
+        sa.UniqueConstraint("user_id", "key", name="uq_ping_log_user_key"),
+    )
+    op.create_index("ix_ping_log_user_id", "ping_log", ["user_id"])
 
 
 def downgrade() -> None:
+    op.drop_table("ping_log")
     op.drop_table("wakeups")
     op.drop_index("ix_loops_status", table_name="loops")
     op.drop_index("ix_loops_due_at", table_name="loops")
