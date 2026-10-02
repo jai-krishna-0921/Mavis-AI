@@ -36,7 +36,9 @@ def verify_signature(
     except ValueError:
         raise WebhookVerificationError("malformed webhook timestamp") from None
     current = time.time() if now is None else now
-    if tolerance_s and abs(current - ts_int) > tolerance_s:
+    if tolerance_s <= 0:
+        raise ValueError("tolerance_s must be positive")
+    if abs(current - ts_int) > tolerance_s:
         raise WebhookVerificationError("stale webhook timestamp")
     try:
         text = body.decode()
@@ -46,7 +48,8 @@ def verify_signature(
         hmac.new(secret.encode(), f"{wid}.{ts}.{text}".encode(), hashlib.sha256).digest()
     ).decode()
     candidates = [part.split(",", 1)[1] if "," in part else part for part in sig.split()]
-    if not any(hmac.compare_digest(expected, c) for c in candidates):
+    expected_b = expected.encode()
+    if not any(hmac.compare_digest(expected_b, c.encode("utf-8", "replace")) for c in candidates):
         raise WebhookVerificationError("invalid webhook signature")
 
 
@@ -58,12 +61,16 @@ def parse_composio_webhook(
         payload = json.loads(body)
     except ValueError:
         raise IntegrationError("webhook body is not JSON") from None
+    if not isinstance(payload, dict):
+        raise IntegrationError("webhook body is not a JSON object")
     meta = payload.get("metadata") or {}
     data = payload.get("data") or payload.get("payload") or {}
+    if not isinstance(meta, dict) or not isinstance(data, dict):
+        raise IntegrationError("webhook metadata/data is not a JSON object")
     slug = str(meta.get("trigger_slug") or payload.get("trigger_name") or payload.get("type") or "").upper()
     user_id = user_from_provider_id(meta.get("user_id") or data.get("user_id"))
     builder = _BUILDERS.get(slug.split("_", 1)[0])
-    if user_id is None or builder is None or not isinstance(data, dict):
+    if user_id is None or builder is None:
         return []
     event = builder(user_id, data, "composio")
     return [event] if event else []

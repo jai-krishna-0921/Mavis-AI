@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from mavis.domain.errors import WebhookVerificationError
+from mavis.domain.errors import IntegrationError, WebhookVerificationError
 from mavis.domain.events import EventType, Trust
 from mavis.tools.integrations.composio_webhooks import parse_composio_webhook, verify_signature
 from mavis.tools.integrations.normalize import normalize_calendar_event, normalize_email
@@ -149,3 +149,32 @@ def test_calendar_and_slack_extra_keys():
     )
     assert cal["title"] == "Standup" and cal["starts_at"] == cal["start"]
     assert normalize_slack({"channel": "C", "ts": "1", "user": "U1"})["from"] == "U1"
+
+
+def test_non_ascii_signature_is_verification_error():
+    headers, body = signed(v3("GMAIL_NEW_GMAIL_MESSAGE", GMAIL_RAW))
+    headers["webhook-signature"] = "v1,café"
+    with pytest.raises(WebhookVerificationError):
+        verify_signature(SECRET, headers, body)
+
+
+def test_future_timestamp_and_malformed_timestamp_rejected():
+    headers, body = signed(v3("GMAIL_NEW_GMAIL_MESSAGE", GMAIL_RAW), ts=int(time.time()) + 3600)
+    with pytest.raises(WebhookVerificationError, match="stale"):
+        verify_signature(SECRET, headers, body)
+    headers["webhook-timestamp"] = "abc"
+    with pytest.raises(WebhookVerificationError, match="malformed"):
+        verify_signature(SECRET, headers, body)
+
+
+def test_zero_tolerance_rejected_explicitly():
+    headers, body = signed(v3("GMAIL_NEW_GMAIL_MESSAGE", GMAIL_RAW))
+    with pytest.raises(ValueError):
+        verify_signature(SECRET, headers, body, tolerance_s=0)
+
+
+@pytest.mark.parametrize("payload", [[1, 2], {"metadata": "x", "data": {}}, {"metadata": {}, "data": [1]}])
+def test_non_object_payload_shapes_raise_integration_error(payload):
+    headers, body = signed(payload)
+    with pytest.raises(IntegrationError):
+        parse_composio_webhook(headers, body, SECRET)
