@@ -34,7 +34,10 @@ CHAT_EVENT_TYPES = frozenset({EventType.USER_MESSAGE, EventType.BUTTON_PRESSED})
 
 _ack_tasks: set[asyncio.Task] = set()  # strong refs so fire-and-forget acks are not GC'd
 
+StartupFn = Callable[[], Awaitable[object]]
+
 _event_handlers: dict[EventType, list[EventFn]] = defaultdict(list)
+_startup_hooks: list[StartupFn] = []
 _job_handlers: dict[JobKind, JobFn] = {}
 
 
@@ -49,9 +52,25 @@ def register_job_handler(kind: JobKind, fn: JobFn) -> None:
     _job_handlers[kind] = fn
 
 
+def register_startup_hook(fn: StartupFn) -> None:
+    """Runs once when a worker starts consuming (self-healing for chains that live in the database)."""
+    if fn not in _startup_hooks:
+        _startup_hooks.append(fn)
+
+
 def clear_handlers() -> None:
     _event_handlers.clear()
     _job_handlers.clear()
+    _startup_hooks.clear()
+
+
+async def run_startup_hooks() -> None:
+    for fn in list(_startup_hooks):
+        try:
+            await fn()
+        except Exception as exc:  # noqa: BLE001 - a failed heal must not keep the worker down
+            log.warning("worker.startup_hook_failed", hook=getattr(fn, "__name__", "?"),
+                        error=type(exc).__name__)
 
 
 async def _run_handlers(event: Event, handlers: list[EventFn]) -> None:
@@ -126,6 +145,7 @@ async def run_worker(bus: EventBus, consumer: str, concurrency: int | None = Non
     Per-user event order holds because user_lock is FIFO within the process (see worker/locks.py).
     """
     n = max(1, concurrency or get_settings().worker_concurrency)
+    await run_startup_hooks()
     loops = []
     for i in range(n):
         name = f"{consumer}-{i}"
