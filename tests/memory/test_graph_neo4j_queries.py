@@ -190,3 +190,18 @@ async def test_single_valued_closed_only_when_creating_new_edge():
         await q.Neo4jGraphStore("x", "u", "p", driver=drv).upsert_relation(1, rel, "src")
         closed = any("SET r.valid_to" in c[0] for c in drv.calls)
         assert closed == (updated == 0)
+
+
+async def test_merge_copies_drop_aliases_to_keep():
+    def respond(query, p):
+        if query == q.Q_KEY_EXISTS:
+            if p["key"] == q.node_key("Person", "Jawa R"):
+                return [{"key": p["key"], "name": "Jawa R", "aliases": ["JR", "Jawa R"]}]
+            return [{"key": p["key"], "name": "Jawahar", "aliases": []}]
+        return []
+
+    drv = FakeDriver(respond)
+    await q.Neo4jGraphStore("x", "u", "p", driver=drv).merge_entities(1, "Jawahar", "Jawa R", "Person")
+    call = next(c for c in drv.calls if c[0] == q.Q_ADD_ALIASES)
+    assert call[1]["aliases"] == ["Jawa R", "JR"]
+    assert call[1]["norm_aliases"] == ["jawa r", "jr"]

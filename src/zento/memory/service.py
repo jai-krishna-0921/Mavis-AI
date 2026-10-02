@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 
 import structlog
@@ -25,6 +26,18 @@ log = structlog.get_logger()
 
 ExtractionHook = Callable[[int, Extraction, str], Awaitable[None]]
 MIN_EPISODE_WORDS = 4
+RECALL_TOTAL_TIMEOUT_S = 1.5
+INIT_RETRY_COOLDOWN_S = 30.0
+USER_PREFIX = "User: "
+
+
+def user_message_of(text: str) -> str:
+    """The user's own words in a conversation turn: text after the last line starting 'User: '."""
+    lines = text.split("\n")
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith(USER_PREFIX):
+            return "\n".join([lines[i][len(USER_PREFIX):], *lines[i + 1:]]).strip()
+    return text
 
 
 class MemoryService:
@@ -39,6 +52,7 @@ class MemoryService:
         self._spotters = SpotterCache(graph)
         self._ready = False
         self._init_lock = asyncio.Lock()
+        self._init_failed_at: float | None = None
 
     async def init(self) -> None:
         """Idempotent store initialisation; every public coroutine calls it lazily."""
@@ -50,6 +64,11 @@ class MemoryService:
                 await self.vector.init()
                 self._ready = True
 
+    async def warm(self) -> None:
+        """Pay the one-off costs (store init, embedding model load) before the first reply."""
+        await self.init()
+        await self.embedder.embed(["warm-up"])
+
     def set_loops_reader(self, reader: LoopsReader | None) -> None:
         self.loops = reader
 
@@ -59,8 +78,28 @@ class MemoryService:
     # --- hot path ------------------------------------------------------------------
 
     async def recall(self, user_id: int, text: str) -> RecallContext:
+        """Never blocks a reply for long: the whole thing (incl. lazy init) is bounded."""
         try:
-            await self.init()
+            return await asyncio.wait_for(self._recall(user_id, text), RECALL_TOTAL_TIMEOUT_S)
+        except TimeoutError:
+            if not self._ready:
+                self._init_failed_at = time.monotonic()
+            log.warning("memory.recall_timeout", timeout_s=RECALL_TOTAL_TIMEOUT_S)
+            return RecallContext()
+
+    async def _recall(self, user_id: int, text: str) -> RecallContext:
+        if (
+            not self._ready
+            and self._init_failed_at is not None
+            and time.monotonic() - self._init_failed_at < INIT_RETRY_COOLDOWN_S
+        ):
+            return RecallContext()
+        try:
+            try:
+                await self.init()
+            except Exception:
+                self._init_failed_at = time.monotonic()
+                raise
             user = await users.get(user_id)
             card = await profile_repo.get(user_id)
             profile, tz = card.render(), user.timezone
@@ -99,22 +138,32 @@ class MemoryService:
         resolution = await resolve(extraction, await self.graph.entities(user_id), self.embedder)
         for entity in resolution.entities:
             await self.graph.upsert_entity(user_id, entity)
-        for rel in resolution.relations:
-            await self.graph.upsert_relation(user_id, rel, source_ref=source_ref)
-
         facts = [r.statement for r in resolution.relations]
-        await self.vector.add(user_id, facts, kind="fact", source_ref=source_ref)
-        if len(text.split()) >= MIN_EPISODE_WORDS:
-            kind = "episode" if trust is Trust.USER else "signal"
-            await self.vector.add(user_id, [text[:500]], kind=kind, source_ref=source_ref)
+        trusted = trust is Trust.USER
+        if trusted:
+            for rel in resolution.relations:
+                await self.graph.upsert_relation(user_id, rel, source_ref=source_ref)
+            await self.vector.add(user_id, facts, kind="fact", source_ref=source_ref)
+            episode = user_message_of(text)
+        else:
+            # Third-party text: derived facts are signals (wrapped as untrusted in recall); no graph
+            # relations, no profile or mood changes.
+            await self.vector.add(user_id, facts, kind="signal", source_ref=source_ref)
+            episode = text
+        if len(episode.split()) >= MIN_EPISODE_WORDS:
+            await self.vector.add(
+                user_id, [episode[:500]], kind="episode" if trusted else "signal", source_ref=source_ref
+            )
 
-        if extraction.profile_updates:
+        if trusted and extraction.profile_updates:
             await profile_repo.save(user_id, card.apply(extraction.profile_updates))
         self.invalidate(user_id)
 
         final = extraction.model_copy(
             update={"entities": resolution.entities, "relations": resolution.relations}
         )
+        if not trusted:
+            final = final.model_copy(update={"mood": None})
         for hook in self.on_extraction:
             try:
                 await hook(user_id, final, source_ref)

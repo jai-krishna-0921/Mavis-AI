@@ -75,3 +75,24 @@ async def test_default_handlers_register_memory_jobs():
     register_default_handlers()
     assert runner._job_handlers[JobKind.LEARN] is jobs.handle_learn
     assert runner._job_handlers[JobKind.CONSOLIDATE] is jobs.handle_consolidate
+
+
+async def test_handle_learn_is_idempotent_per_source_ref(memory, user, fake_llm, monkeypatch):
+    async def noop(uid):
+        return False
+
+    monkeypatch.setattr(jobs, "maybe_summarize", noop)
+    calls = []
+
+    async def hook(uid, extraction, source_ref):
+        calls.append(source_ref)
+
+    memory.on_extraction.append(hook)
+    fake_llm.push_structured(Extraction())
+    fake_llm.push_structured(Extraction())
+    payload = {"text": "Jawahar is my good friend", "source_ref": "tg:77", "trust": "user"}
+    job = Job(id="learn:tg:77", user_id=user.id, kind=JobKind.LEARN, payload=payload)
+    await jobs.handle_learn(job)
+    await jobs.handle_learn(job)
+    assert calls == ["tg:77"]
+    assert len(fake_llm.structured_calls) == 1

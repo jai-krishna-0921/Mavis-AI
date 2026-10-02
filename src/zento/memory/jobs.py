@@ -9,6 +9,7 @@ from zento.domain.events import Job, JobKind, Trust
 from zento.memory.consolidate import consolidate
 from zento.memory.service import get_memory
 from zento.memory.summaries import maybe_summarize
+from zento.store.repo import events
 from zento.worker.locks import lock
 from zento.worker.runner import register_job_handler
 
@@ -19,11 +20,18 @@ def learn_lock(user_id: int):
 
 async def handle_learn(job: Job) -> None:
     p = job.payload
+    source_ref = str(p.get("source_ref", ""))
+    marker = f"learn:{source_ref}"
     async with learn_lock(job.user_id):
-        await get_memory().learn(job.user_id, str(p.get("text", "")), str(p.get("source_ref", "")),
+        # Redelivery guard: a re-run would extract again (differently) and re-fire hooks.
+        if source_ref and await events.seen(marker):
+            return
+        await get_memory().learn(job.user_id, str(p.get("text", "")), source_ref,
                                  Trust(p.get("trust", Trust.USER.value)))
         if p.get("conversation", True):
             await maybe_summarize(job.user_id)
+        if source_ref:
+            await events.record(marker)
 
 
 async def handle_consolidate(job: Job) -> None:

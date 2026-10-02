@@ -107,3 +107,27 @@ async def test_startup_retries_on_transient_network_errors(db, bus, monkeypatch)
     assert bot.offsets[:2] == [None, 31]
     event, _ = bus._events.get_nowait()
     assert event.id == "tg:update:30"
+
+
+async def test_poller_raises_on_invalid_token_at_startup(db, bus) -> None:
+    import pytest
+    from telegram.error import InvalidToken
+
+    class Bad(PollingBot):
+        async def initialize(self) -> None:
+            raise InvalidToken("nope")
+
+    with pytest.raises(InvalidToken):
+        await run_polling(bus, "token", bot=Bad([]))
+
+
+async def test_poller_raises_on_invalid_token_in_get_updates(db, bus) -> None:
+    import pytest
+    from telegram.error import InvalidToken
+
+    class Bad(PollingBot):
+        async def get_updates(self, **kw):
+            raise InvalidToken("nope")
+
+    with pytest.raises(InvalidToken):
+        await run_polling(bus, "token", bot=Bad([]))
