@@ -10,8 +10,16 @@ from typing import Protocol
 from uuid import uuid4
 
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 
 from mavis.bus import _make_redis, get_redis
+
+# compare-and-pexpire / compare-and-delete: never touch a lock another instance took after our TTL lapsed
+_REFRESH = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] "
+    "then return redis.call('pexpire', KEYS[1], ARGV[2]) end return 0"
+)
+_RELEASE = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0"
 
 
 class LeaderLock(Protocol):
@@ -43,16 +51,26 @@ class RedisLeader:
             current = current.decode()
         return current == self._id
 
+    async def _eval(self, script: str, *args: object) -> int | None:
+        """Run an atomic Lua script; None if scripting is unavailable (fakeredis), so callers fall back."""
+        try:
+            return int(await self._redis.eval(script, 1, self._key, *args))
+        except ResponseError:
+            return None
+
     async def acquire(self) -> bool:
         if await self._redis.set(self._key, self._id, nx=True, px=self._ttl):
             return True
-        if await self._is_mine():
+        refreshed = await self._eval(_REFRESH, self._id, self._ttl)
+        if refreshed is not None:
+            return refreshed == 1
+        if await self._is_mine():  # non-atomic fallback
             await self._redis.pexpire(self._key, self._ttl)
             return True
         return False
 
     async def release(self) -> None:
-        if await self._is_mine():
+        if await self._eval(_RELEASE, self._id) is None and await self._is_mine():
             await self._redis.delete(self._key)
 
 

@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -147,7 +148,17 @@ class WakeupRow(Base):
     """An alarm the agent set for itself."""
 
     __tablename__ = "wakeups"
-    __table_args__ = (Index("ix_wakeups_status_due", "status", "due_at"),)
+    __table_args__ = (
+        Index("ix_wakeups_status_due", "status", "due_at"),
+        Index(
+            "uq_wakeups_pending_dedupe",
+            "user_id",
+            "dedupe_key",
+            unique=True,
+            sqlite_where=text("status = 'pending' AND dedupe_key IS NOT NULL"),
+            postgresql_where=text("status = 'pending' AND dedupe_key IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)

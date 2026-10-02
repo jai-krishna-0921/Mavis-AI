@@ -92,3 +92,14 @@ async def test_run_forever_releases_leader_on_stop(user, clock, recording_bus):
     stop.set()
     await task
     assert released == [True]
+
+
+async def test_payload_cannot_overwrite_reserved_event_fields(user, clock):
+    from mavis.domain.wakeups import Wakeup
+    from mavis.timers.runner import wakeup_event
+
+    w = Wakeup(id=9, user_id=user.id, due_at=timeutil.now(), kind=WakeupKind.AGENT, reason="r", loop_id=2,
+               payload={"kind": "system_poll", "reason": "evil", "loop_id": 99, "wakeup_id": 1, "x": 1})
+    p = wakeup_event(w).payload
+    assert p["kind"] == "agent" and p["reason"] == "r" and p["loop_id"] == 2 and p["wakeup_id"] == 9
+    assert p["x"] == 1

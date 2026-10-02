@@ -6,8 +6,10 @@ from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
+
 from mavis.domain import timeutil
-from mavis.domain.wakeups import Wakeup, WakeupKind
+from mavis.domain.wakeups import RESERVED_PAYLOAD_KEYS, Wakeup, WakeupKind
 from mavis.store.repo import wakeups as repo
 
 
@@ -25,14 +27,22 @@ class WakeupService:
         scale: bool = True,
     ) -> int:
         kind = WakeupKind(kind)
+        if clash := RESERVED_PAYLOAD_KEYS & set(payload or {}):
+            raise ValueError(f"wakeup payload may not set reserved keys: {sorted(clash)}")
         at = timeutil.ensure_utc(at)
         now = timeutil.now()
         if scale and at > now:
             at = now + timeutil.scale_offset(at - now)
         if dedupe_key and (existing := await repo.pending_by_key(user_id, dedupe_key)) is not None:
             return existing.id
-        return await repo.insert(user_id=user_id, due_at=at, kind=kind, reason=reason, loop_id=loop_id,
-                                 payload=payload or {}, dedupe_key=dedupe_key)
+        try:
+            return await repo.insert(user_id=user_id, due_at=at, kind=kind, reason=reason, loop_id=loop_id,
+                                     payload=payload or {}, dedupe_key=dedupe_key)
+        except IntegrityError:
+            # lost a race with a concurrent wake_me on the same dedupe_key (partial unique index)
+            if dedupe_key and (existing := await repo.pending_by_key(user_id, dedupe_key)) is not None:
+                return existing.id
+            raise
 
     async def cancel(self, wakeup_id: int) -> bool:
         return await repo.cancel_ids([wakeup_id]) == 1
