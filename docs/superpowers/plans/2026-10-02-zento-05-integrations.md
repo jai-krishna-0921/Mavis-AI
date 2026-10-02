@@ -45,7 +45,7 @@ Inherits every line of `docs/superpowers/plans/2026-10-02-zento-00-index.md` § 
 | `outbox.enqueue(session, msg)` | `zento/store/repo/outbox.py` | `-> int` |
 | `get_bus()` | `zento/bus/__init__.py` | returns `EventBus` (index contract) |
 | `WakeupService().wake_me(user_id, at, reason, loop_id=None, kind="agent") -> int` | `zento/timers/service.py` | WAKEUP events carry `payload={"wakeup_id", "kind", "reason", "loop_id"}` |
-| `LoopService().upsert(user_id, LoopUpsert) -> Loop` | `zento/loops/service.py` | emits loop events itself |
+| `LoopService(bus).upsert(user_id, LoopUpsert) -> Loop` | `zento/loops/service.py` | emits loop events itself |
 | `get_memory() -> MemoryService` with `.learn(user_id, text, source_ref)` | `zento/memory/service.py` | index contract |
 | `make_graph() -> GraphStore` with `.entities(user_id) -> list[Entity]` | `zento/memory/graph.py` | index contract |
 | `ToolRegistry`, `ZentoTool`, `ToolContext`, `contextual`, `get_registry()` | `zento/tools/registry.py` | `ZentoTool(name, description, args_model, risk, fn, agents, requires=None, preview=None, untrusted_output=False, priority=50, risk_fn=None, preview_needs_ctx=False)`; registry `fn` is `async (user_id, args)`, so context-aware fns are wrapped with `contextual(fn)` where `fn: async (ToolContext, BaseModel) -> str`; with `preview_needs_ctx=True`, `preview: (BaseModel, ToolContext) -> str`; `ToolContext(user_id: int, timezone: str = 'UTC', task_id: int | None = None)`; `registry.register(tool)`; `registry.capability_check: async (user_id, Capability) -> bool` (checked BEFORE approval) |
@@ -4801,7 +4801,7 @@ def get_first_sync() -> FirstSync:
     from zento.loops.service import LoopService
     from zento.memory.service import get_memory
 
-    return FirstSync(provider=get_provider(), memory=get_memory(), loops=LoopService(), bus=get_bus(),
+    return FirstSync(provider=get_provider(), memory=get_memory(), loops=LoopService(get_bus()), bus=get_bus(),
                      tz_of=user_timezone)
 
 
@@ -4923,13 +4923,13 @@ Exit code 1 if any slug, argument key or trigger is missing.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import os
 import sys
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import typer
 
 from zento.domain.integrations import UserRef
 from zento.tools.integrations.actions import (
@@ -4993,12 +4993,12 @@ async def check_catalog(client: httpx.AsyncClient) -> int:
     return problems
 
 
-async def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--connect", help="toolkit slug to print a consent link for")
-    parser.add_argument("--execute", help="Zento action to run for --user (read actions only)")
-    parser.add_argument("--user", type=int, default=1)
-    args = parser.parse_args()
+class _Args:
+    def __init__(self, connect: str | None, execute: str | None, user: int) -> None:
+        self.connect, self.execute, self.user = connect, execute, user
+
+
+async def main(args: _Args) -> int:
     key = os.environ.get("COMPOSIO_API_KEY", "")
     if not key:
         print("COMPOSIO_API_KEY not set", file=sys.stderr)
@@ -5022,8 +5022,16 @@ async def main() -> int:
     return 1 if problems else 0
 
 
+def cli(
+    connect: str | None = typer.Option(None, help="toolkit slug to print a consent link for"),
+    execute: str | None = typer.Option(None, help="Zento action to run for --user (read actions only)"),
+    user: int = typer.Option(1, help="Zento user id"),
+) -> None:
+    raise typer.Exit(asyncio.run(main(_Args(connect, execute, user))))
+
+
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    typer.run(cli)
 ```
 
 - [ ] **Step 2: Run the catalog check**

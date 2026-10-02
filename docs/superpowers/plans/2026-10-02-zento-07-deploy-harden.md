@@ -51,14 +51,14 @@ These are minimal additions to the index's contracts that this phase relies on. 
 | Consumer group name | `src/zento/bus/redis_streams.py` | worker consumer group is `"workers"`; DLQ streams are `f"{Stream.EVENTS.value}:dlq"` and `f"{Stream.JOBS.value}:dlq"` |
 | App factory | `src/zento/api/app.py` | `create_app() -> FastAPI` (module-level `app = create_app()`) |
 | Bus/channel overrides | `src/zento/bus/__init__.py`, `src/zento/channels/__init__.py` | `set_bus(bus: EventBus) -> None`, `set_channel(ch: Channel) -> None`, `get_channel() -> Channel` |
-| Worker dispatch | `src/zento/worker/handlers.py` | `async def handle_event(event: Event) -> None`, `async def handle_job(job: Job) -> None` |
-| Timer fire helper | `src/zento/timers/runner.py` | `async def fire_due(now: datetime) -> int` (claims due wakeups, publishes `WAKEUP` events, returns count) |
-| Eval entry points | P2/P3/P4 modules | `zento.memory.extractor.extract(text, *, now, tz, known_entities=None) -> Extraction`; `zento.initiative.reasoner.reason(event, context: str, now) -> InitiativeDecision`; `zento.agents.conversation.classify_route(text, history: list[str], now) -> RouteDecision` |
-| Composio action map | `src/zento/tools/integrations/composio_map.py` | `ACTION_MAP: dict[str, ActionSpec]`, `ActionSpec.slug: str` |
+| Worker dispatch (existing, Phase 1) | `src/zento/worker/runner.py` | `handle_event(event)`, `handle_job(job)` already exist (Phase 1 Task 10); this phase wraps their bodies in `trace_context` — not a new contract |
+| Timer fire (existing, Phase 3) | `src/zento/timers/runner.py` | uses Phase 3's `TimerRunner(bus, WakeupService(), NoopLeader(), interval_s, loops=LoopService(bus)).tick() -> int` with the clock patched via `zento.domain.timeutil._clock`; the smoke script defines its own `fire_due(at)` helper on top |
+| Eval entry points | `src/zento/evals/entrypoints.py` (new, this phase) | adapters over existing APIs, no edits to P2/P3/P4: `extract_for_eval(text, now) -> Extraction` (P2 `extractor.extract(text, user_name=None, tz=TZ, now=now)`), `reason_for_eval(event, context, now) -> InitiativeDecision` (P3 `REASONER_SYSTEM` + `filters.summarize_event` + `untrusted.wrap_untrusted` + `llm.structured`), `classify_route_for_eval(text, history, now) -> RouteDecision` (P4 `conversation.ROUTER_PROMPT` + `llm.structured`) |
+| Composio action map (existing, Phase 5) | `src/zento/tools/integrations/composio_map.py` | `COMPOSIO_ACTIONS: dict[str, SlugMapping]`, `SlugMapping.slug: str` |
 | Graph factory | `src/zento/memory/graph.py` | `make_graph() -> GraphStore` |
 | CLI dispatch | `src/zento/cli.py` | Typer `app` (Phase 1); sub-apps are added with `app.add_typer(...)`, single commands with `app.command(name)(fn)`; async work runs via `asyncio.run` inside the command |
 | Logging redaction | `src/zento/logging.py` | `redact_secrets(logger, method_name, event_dict) -> dict` structlog processor |
-| Status strings | P4 tables | `PendingApproval.status ∈ {pending, approved, rejected, expired}`; `Task.status ∈ {queued, running, waiting, done, failed, cancelled}` |
+| Status strings | P4 tables | use Phase 4's enums (`zento.domain.tasks`): `ApprovalStatus ∈ {pending, awaiting_edit, resolving, executed, rejected, expired, failed}`; `TaskStatus ∈ {queued, running, awaiting_approval, done, failed, cancelled}` (approval rate = executed / (executed + rejected)) |
 | Alembic location | repo root | `alembic.ini` at repo root with `script_location = src/zento/migrations` |
 
 ---
@@ -92,7 +92,7 @@ src/zento/
   llm/models.py (record_llm_error, current_config)        Tasks 1, 2
   llm/tracing.py                             Task 2
   agents/conversation.py (timing + route)    Task 1
-  worker/handlers.py (trace_context)         Task 2
+  worker/runner.py (trace_context)           Task 2
   api/health_checks.py                       Task 3
   api/routes/health.py                       Task 3
   api/metrics.py                             Task 4
@@ -102,7 +102,7 @@ src/zento/
   api/ratelimit.py                           Task 6
   api/app.py (lifespan + routers)            Tasks 4, 5, 6
   evals/__init__.py evals/checks.py evals/runner.py evals/cli.py   Task 10
-  migrations/versions/0007_turn_metrics.py   Task 1
+  migrations/versions/0006_turn_metrics.py   Task 1
 tests/
   store/test_metrics_repo.py                 Task 1
   llm/test_llm_metrics.py                    Task 1
@@ -129,7 +129,7 @@ README.md                                    Task 12
 - Create: `src/zento/llm/metrics.py`
 - Modify: `src/zento/llm/models.py` (call `record_llm_error()` before raising `LLMError`)
 - Modify: `src/zento/agents/conversation.py` (add `current_route`, wrap `run_turn` with timing)
-- Create: `src/zento/migrations/versions/0007_turn_metrics.py`
+- Create: `src/zento/migrations/versions/0006_turn_metrics.py`
 - Test: `tests/store/test_metrics_repo.py`, `tests/llm/test_llm_metrics.py`
 
 **Interfaces:**
@@ -321,14 +321,14 @@ In the route node of the conversation graph (where `RouteDecision` is obtained),
 current_route.set(decision.route.value)
 ```
 
-Create the migration. First run `uv run alembic heads`; it prints the current head revision id: `0005_integrations (head)` (Phase 6 adds no tables). Create `src/zento/migrations/versions/0007_turn_metrics.py` with `down_revision` set to exactly that id:
+Create the migration. First run `uv run alembic heads`; it prints the current head revision id: `0005_integrations (head)` (Phase 6 adds no tables). Create `src/zento/migrations/versions/0006_turn_metrics.py` with `down_revision` set to exactly that id:
 ```python
 """phase 7: turn_metrics"""
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0007_turn_metrics"
+revision = "0006_turn_metrics"
 down_revision = "0005_integrations"  # must equal the output of `uv run alembic heads` before this file existed
 branch_labels = None
 depends_on = None
@@ -359,7 +359,7 @@ def downgrade() -> None:
 Run: `uv run pytest tests/store/test_metrics_repo.py tests/llm/test_llm_metrics.py -v`
 Expected: `2 passed`.
 Run: `DATABASE_URL=sqlite+aiosqlite:///data/migtest.db uv run alembic upgrade head && uv run alembic heads && rm -f data/migtest.db`
-Expected: upgrade log ends with `Running upgrade 0005_integrations -> 0007_turn_metrics`, heads prints `0007_turn_metrics (head)`.
+Expected: upgrade log ends with `Running upgrade 0005_integrations -> 0006_turn_metrics`, heads prints `0006_turn_metrics (head)`.
 Run: `uv run pytest -q`
 Expected: whole suite green (existing conversation tests still pass because `run_turn` keeps its signature).
 
@@ -367,7 +367,7 @@ Expected: whole suite green (existing conversation tests still pass because `run
 
 ```bash
 git add src/zento/store/models.py src/zento/store/repo/metrics.py src/zento/llm/metrics.py src/zento/llm/models.py \
-  src/zento/agents/conversation.py src/zento/migrations/versions/0007_turn_metrics.py \
+  src/zento/agents/conversation.py src/zento/migrations/versions/0006_turn_metrics.py \
   tests/store/test_metrics_repo.py tests/llm/test_llm_metrics.py
 git commit -m "feat(metrics): record turn latency/route and LLM error counts"
 ```
@@ -379,7 +379,7 @@ git commit -m "feat(metrics): record turn latency/route and LLM error counts"
 **Files:**
 - Modify: `src/zento/llm/tracing.py`
 - Modify: `src/zento/llm/models.py` (`structured()` uses `current_config`)
-- Modify: `src/zento/worker/handlers.py` (wrap dispatch in `trace_context`)
+- Modify: `src/zento/worker/runner.py` (wrap `handle_event`/`handle_job` in `trace_context`)
 - Modify: every `.ainvoke(...)` / `.astream(...)` call with a `config=` in `src/zento/agents/`, `src/zento/initiative/`, `src/zento/memory/` (use `current_config(run_name)`)
 - Modify: `src/zento/cli.py` worker shutdown path (flush Langfuse)
 - Test: `tests/llm/test_tracing.py`, `tests/test_no_raw_callbacks.py`
@@ -565,7 +565,7 @@ from zento.llm.tracing import current_config
     cfg = current_config(f"structured:{schema.__name__}")
 ```
 
-In `src/zento/worker/handlers.py`, wrap both dispatchers:
+In `src/zento/worker/runner.py` (Phase 1 Task 10), wrap both dispatchers:
 ```python
 from zento.llm.tracing import trace_context
 ...
@@ -601,7 +601,7 @@ and change each `config={"callbacks": callbacks(), ...}` to `config=current_conf
 result = await graph.ainvoke(state, config={**current_config("conversation"), "configurable": {"thread_id": thread_id}})
 ```
 
-In `src/zento/cli.py`, in the `worker`, `timer` and `dev` commands' shutdown (`finally:`) blocks add:
+In `src/zento/cli.py`, in the shared shutdown helper `_run_tasks` (Phase 1 Task 13; used by `worker`, `timer` and `dev`) add to its `finally:` block, before `bus.close()`:
 ```python
 from zento.llm.tracing import flush as flush_traces
 ...
@@ -619,7 +619,7 @@ Expected: whole suite green.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/zento/llm/tracing.py src/zento/llm/models.py src/zento/worker/handlers.py src/zento/agents \
+git add src/zento/llm/tracing.py src/zento/llm/models.py src/zento/worker/runner.py src/zento/agents \
   src/zento/initiative src/zento/memory src/zento/cli.py tests/llm/test_tracing.py tests/test_no_raw_callbacks.py
 git commit -m "feat(observability): one Langfuse trace per event with session, user and decision tags"
 ```
@@ -841,7 +841,7 @@ git commit -m "feat(health): readiness probes for postgres, redis, neo4j, qdrant
 - Test: `tests/api/test_admin.py`
 
 **Interfaces:**
-- Consumes: `turn_latencies()` + `TurnMetric` (Task 1), `llm_errors_today()` (Task 1), ORM `Message` (P1, `proactive`, `created_at`), `PendingApproval` and `Task` (P4, `status`), `make_graph()` (P2), `LoopService().active(user_id)` (P3), `ACTION_MAP` (P5), `Stream` (index).
+- Consumes: `turn_latencies()` + `TurnMetric` (Task 1), `llm_errors_today()` (Task 1), ORM `Message` (P1, `proactive`, `created_at`), `PendingApproval` and `Task` (P4, `status`), `make_graph()` (P2), `LoopService(get_bus()).active(user_id)` (P3; constructor takes the bus), `COMPOSIO_ACTIONS` (P5), `Stream` (index).
 - Produces: `async def collect_metrics() -> dict`; `percentile(values: list[int], p: float) -> int | None`; routes `GET /admin/metrics`, `GET /admin/integrations/verify`, `GET /admin/memory/{user_id}`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -909,7 +909,7 @@ async def test_integrations_verify_reports_missing_slugs(admin_env, monkeypatch)
         def __init__(self, slug):
             self.slug = slug
 
-    monkeypatch.setattr(composio_map, "ACTION_MAP", {"mail.search": Spec("GMAIL_FETCH_EMAILS"),
+    monkeypatch.setattr(composio_map, "COMPOSIO_ACTIONS", {"mail.search": Spec("GMAIL_FETCH_EMAILS"),
                                                      "mail.bogus": Spec("GMAIL_NOT_A_TOOL")})
     monkeypatch.setenv("COMPOSIO_API_KEY", "k")
     get_settings.cache_clear()
@@ -995,14 +995,14 @@ async def collect_metrics() -> dict:
             select(PendingApproval.status, func.count()).group_by(PendingApproval.status)
         )).all())
         tasks = dict((await s.execute(select(Task.status, func.count()).group_by(Task.status))).all())
-    decided = appr.get("approved", 0) + appr.get("rejected", 0)
+    decided = appr.get("executed", 0) + appr.get("rejected", 0)  # Phase 4 ApprovalStatus values
     finished = tasks.get("done", 0) + tasks.get("failed", 0)
     return {
         "generated_at": now.isoformat(),
         "streams": await _stream_stats(),
         "turn_latency_ms": {"p50": percentile(lat, 0.5), "p95": percentile(lat, 0.95), "count": len(lat)},
         "pings_today": int(pings_today or 0),
-        "approvals": {**appr, "approval_rate": round(appr.get("approved", 0) / decided, 3) if decided else None},
+        "approvals": {**appr, "approval_rate": round(appr.get("executed", 0) / decided, 3) if decided else None},
         "tasks": {**tasks, "success_rate": round(tasks.get("done", 0) / finished, 3) if finished else None},
         "llm_errors_today": llm_errors_today(),
     }
@@ -1049,7 +1049,7 @@ async def get_metrics() -> dict:
 
 @router.get("/integrations/verify")
 async def verify_integrations() -> dict:
-    from zento.tools.integrations.composio_map import ACTION_MAP
+    from zento.tools.integrations.composio_map import COMPOSIO_ACTIONS
 
     key = get_settings().composio_api_key
     if not key:
@@ -1057,7 +1057,7 @@ async def verify_integrations() -> dict:
     missing: dict[str, str] = {}
     errors: dict[str, str] = {}
     async with httpx.AsyncClient(timeout=10, headers={"x-api-key": key}) as c:
-        for action, spec in ACTION_MAP.items():
+        for action, spec in COMPOSIO_ACTIONS.items():
             try:
                 r = await c.get(f"{COMPOSIO_API}/tools/{spec.slug}")
             except httpx.HTTPError as exc:
@@ -1067,17 +1067,18 @@ async def verify_integrations() -> dict:
                 missing[action] = spec.slug
             elif r.status_code >= 400:
                 errors[action] = f"HTTP {r.status_code}"
-    return {"ok": not missing and not errors, "checked": len(ACTION_MAP), "missing": missing, "errors": errors}
+    return {"ok": not missing and not errors, "checked": len(COMPOSIO_ACTIONS), "missing": missing, "errors": errors}
 
 
 @router.get("/memory/{user_id}")
 async def memory_dump(user_id: int) -> dict:
+    from zento.bus import get_bus
     from zento.loops.service import LoopService
     from zento.memory.graph import make_graph
 
     graph = make_graph()
     await graph.init()
-    loops = await LoopService().active(user_id)
+    loops = await LoopService(get_bus()).active(user_id)
     return {
         "user_id": user_id,
         "relations": await graph.dump(user_id),
@@ -1955,6 +1956,8 @@ Expected: FAIL with `FileNotFoundError` for `deploy/secrets.py`.
 
 - [ ] **Step 3: Implement `deploy/secrets.py`**
 
+> This script is run by `deploy/up.sh` with the deployer's **system `python3`**, outside the uv venv, so it deliberately uses only the stdlib (`argparse`, `json`). It is not part of the `zento` Typer CLI — do not convert it to Typer.
+
 ```python
 #!/usr/bin/env python3
 """Merge local .env with the existing Secrets Manager JSON for zento/prod.
@@ -2367,13 +2370,14 @@ git commit -m "feat(deploy): idempotent EC2 provisioning, secrets manager env, p
 ### Task 10: Real-model evals (`zento eval`)
 
 **Files:**
-- Create: `src/zento/evals/__init__.py` (empty), `src/zento/evals/checks.py`, `src/zento/evals/runner.py`, `src/zento/evals/cli.py`
+- Create: `src/zento/evals/__init__.py` (empty), `src/zento/evals/checks.py`, `src/zento/evals/entrypoints.py`, `src/zento/evals/runner.py`, `src/zento/evals/cli.py`
 - Create: `evals/extraction.yaml`, `evals/triage.yaml`, `evals/routing.yaml`, `evals/persona.yaml`
 - Modify: `src/zento/cli.py` (register `eval`), `pyproject.toml` (add `pyyaml`)
 - Test: `tests/evals/test_checks.py`
 
 **Interfaces:**
-- Consumes: `extract(text, *, now, tz, known_entities=None) -> Extraction` (P2), `reason(event, context, now) -> InitiativeDecision` (P3), `classify_route(text, history, now) -> RouteDecision` (P4), `persona.system_prompt(user, now, context) -> str` (P1), `chat_model(Tier.FAST)`, `structured()` (P1).
+- Consumes: P2 `zento.memory.extractor.extract(text, *, user_name, tz, now=None, trust=Trust.USER, source="") -> Extraction`; P3 `zento.initiative.reasoner.REASONER_SYSTEM`, `zento.initiative.filters.summarize_event(event) -> str`, `zento.initiative.untrusted.wrap_untrusted(text, source) -> str`; P4 `zento.agents.conversation.ROUTER_PROMPT`; P1 `persona.system_prompt(user, now, context) -> str`, `chat_model(Tier.FAST)`, `structured()`.
+- Creates: `src/zento/evals/entrypoints.py` (adapters below) so evals never need new functions in P2–P4 modules.
 - Produces: `check_extraction(expect: dict, got: Extraction, tz: str) -> list[str]`, `check_triage(expect, got: InitiativeDecision) -> list[str]`, `check_routing(expect, got: RouteDecision) -> list[str]`, `check_persona(expect, bubbles: list[str], judged: PersonaJudgement | None) -> list[str]` (each returns failure reasons; empty = pass); `THRESHOLDS = {"extraction": 0.80, "triage": 0.90, "routing": 0.85, "persona": 0.80}`; `async def run_suite(name: str, evals_dir: Path = Path("evals")) -> SuiteResult`; CLI `zento eval [extraction|triage|routing|persona|all]` exits 1 if any suite is below threshold.
 
 - [ ] **Step 1: Add dependency**
@@ -2595,27 +2599,26 @@ class SuiteResult:
 
 
 async def _case_extraction(case: dict) -> list[str]:
-    from zento.memory.extractor import extract
+    from zento.evals.entrypoints import extract_for_eval
 
-    got = await extract(case["text"], now=datetime.fromisoformat(case["now"]), tz=TZ,
-                        known_entities=case.get("known_entities"))
+    got = await extract_for_eval(case["text"], datetime.fromisoformat(case["now"]))
     return check_extraction(case["expect"], got, TZ)
 
 
 async def _case_triage(case: dict) -> list[str]:
-    from zento.initiative.reasoner import reason
+    from zento.evals.entrypoints import reason_for_eval
 
     now = datetime.fromisoformat(case["now"])
     ev = Event(id=f"eval:{case['id']}", user_id=1, type=EventType(case.get("type", "email_received")),
                occurred_at=now, source="eval", payload=case["payload"], trust=Trust.UNTRUSTED)
-    got = await reason(ev, f"## About the user\n{PROFILE}\n\n{case.get('context', '')}", now)
+    got = await reason_for_eval(ev, f"## About the user\n{PROFILE}\n\n{case.get('context', '')}", now)
     return check_triage(case["expect"], got)
 
 
 async def _case_routing(case: dict) -> list[str]:
-    from zento.agents.conversation import classify_route
+    from zento.evals.entrypoints import classify_route_for_eval
 
-    got = await classify_route(case["text"], case.get("history", []), datetime.fromisoformat(case["now"]))
+    got = await classify_route_for_eval(case["text"], case.get("history", []), datetime.fromisoformat(case["now"]))
     return check_routing(case["expect"], got)
 
 
@@ -2658,6 +2661,61 @@ async def run_suite(name: str, evals_dir: Path = Path("evals")) -> SuiteResult:
     res.seconds = time.perf_counter() - t0
     return res
 ```
+
+`src/zento/evals/entrypoints.py`:
+```python
+"""Eval adapters over the production prompts/APIs of Phases 2-4 (no private copies of prompts)."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from zento.config import get_settings
+from zento.domain.decisions import InitiativeDecision, RouteDecision
+from zento.domain.events import Event, Trust
+from zento.domain.memory import Extraction
+from zento.llm import models as llm
+
+TZ = "Asia/Kolkata"
+
+
+async def extract_for_eval(text: str, now: datetime) -> Extraction:
+    from zento.memory.extractor import extract
+
+    return await extract(text, user_name=None, tz=TZ, now=now)
+
+
+async def reason_for_eval(event: Event, context: str, now: datetime) -> InitiativeDecision:
+    from zento.initiative.filters import summarize_event
+    from zento.initiative.reasoner import REASONER_SYSTEM
+    from zento.initiative.untrusted import wrap_untrusted
+
+    s = get_settings()
+    local = now.astimezone(ZoneInfo(TZ))
+    system = REASONER_SYSTEM.format(
+        agent=s.agent_name, name="Jai", local_now=f"{local:%A %Y-%m-%d %H:%M} ({TZ})",
+        quiet=f"{s.quiet_start:02d}:00-{s.quiet_end:02d}:00", pings=0, budget=s.ping_daily_budget,
+    )
+    summary = summarize_event(event)
+    signal = wrap_untrusted(summary, event.type.value) if event.trust is Trust.UNTRUSTED else summary
+    prompt = (f"## Signal ({event.type.value}, id {event.id})\n{signal}\n\n"
+              f"## Related open loops\n- none\n\n{context}\n\n## Recent conversation\n(none)")
+    return await llm.structured(InitiativeDecision, system, prompt, tier=llm.Tier.SMART)
+
+
+async def classify_route_for_eval(text: str, history: list[str], now: datetime) -> RouteDecision:
+    from zento.agents.conversation import ROUTER_PROMPT
+
+    local_now = now.astimezone(ZoneInfo(TZ)).strftime("%A %d %B %Y, %H:%M")
+    recent = "\n".join(history[-6:]) or "(none)"
+    return await llm.structured(
+        RouteDecision, ROUTER_PROMPT.format(now=local_now),
+        f"Recent conversation:\n{recent}\n\nNew message:\n{text}", tier=llm.Tier.FAST,
+    )
+```
+
+> `reason_for_eval` must mirror the `REASONER_SYSTEM.format(...)` call and prompt layout in Phase 3 Task 8's `Reasoner.decide` exactly; if those placeholders differ when implemented, Phase 3's code is the source of truth — update this adapter to match.
 
 `src/zento/evals/cli.py`:
 ```python
@@ -2929,13 +2987,13 @@ git commit -m "feat(evals): golden suites for extraction, triage, routing, perso
 ### Task 11: End-to-end smoke test (scripted LLM, in-process)
 
 **Files:**
-- Create: `tests/fakes/__init__.py` (empty), `tests/fakes/scripted_llm.py`, `tests/fakes/recording_bus.py`
+- Create: `tests/fakes/scripted_llm.py`, `tests/fakes/recording_bus.py` (`tests/fakes/__init__.py` already exists from Phase 1 with `FakeLLM`/`wait_until` — do NOT overwrite it)
 - Create: `scripts/smoke.py`
 - Create: `tests/e2e/__init__.py` (empty), `tests/e2e/test_smoke.py`
 - Modify: `pyproject.toml` (pytest markers; default deselect `e2e`)
 
 **Interfaces:**
-- Consumes: `set_bus`, `set_channel`, `FakeChannel` (P1, `zento.channels.fake.FakeChannel` with `sent: list[tuple[int, str]]` and `documents: list[tuple[int, str]]`), `handle_event`, `handle_job`, `fire_due(now)`, `LoopService().active`, `users.get_or_create_by_chat`, `init_db`, `structured`, `chat_model`, domain types.
+- Consumes: `set_bus`, `set_channel`, `FakeChannel` (P1 `zento.channels.fake.FakeChannel`: `.sent: list[SentItem]` with `.kind` (`text`|`document`|`typing`), `.chat_id`, `.text`, `.path`, `.buttons`), `zento.worker.runner.handle_event/handle_job` (P1), `zento.channels.outbox_sender.deliver_pending(channel)` (P1), P3 `TimerRunner(...).tick()` + `zento.domain.timeutil._clock` + `zento.bus.leader.NoopLeader` + `WakeupService`, `LoopService(bus).active`, `users.get_or_create_by_chat`, `init_db`, `structured`, `chat_model`, domain types.
 - Produces: `ScriptedChatModel` (LangChain `BaseChatModel` with `bind_tools` returning itself, replies from a queue or a responder function); `patch_llm(structured_fn, chat_factory) -> Callable[[], None]` (returns an undo function); `RecordingBus` implementing `EventBus` (`events: list[Event]`, `jobs: list[Job]`, `drain()` helpers); `scripts/smoke.py` `async def main() -> int`.
 
 - [ ] **Step 1: Write the fakes**
@@ -3150,8 +3208,29 @@ def responder(messages) -> AIMessage:
     return AIMessage("Hey! I'm Mavis. What's on your plate?")
 
 
+def _texts(channel: FakeChannel) -> list[str]:
+    return [item.text for item in channel.sent if item.kind == "text"]
+
+
+async def fire_due(at: datetime) -> int:
+    """Move the clock to `at` and run one timer tick (Phase 3 TimerRunner)."""
+    from zento.bus import get_bus
+    from zento.bus.leader import NoopLeader
+    from zento.domain import timeutil
+    from zento.loops.service import LoopService
+    from zento.timers.runner import TimerRunner
+    from zento.timers.service import WakeupService
+
+    timeutil._clock = lambda: at
+    bus = get_bus()
+    runner = TimerRunner(bus, WakeupService(), NoopLeader(), 1.0, loops=LoopService(bus))
+    return await runner.tick()
+
+
 async def drain(bus: RecordingBus, rounds: int = 20) -> None:
-    from zento.worker.handlers import handle_event, handle_job
+    from zento.channels import get_channel
+    from zento.channels.outbox_sender import deliver_pending
+    from zento.worker.runner import handle_event, handle_job
 
     for _ in range(rounds):
         progressed = False
@@ -3160,6 +3239,8 @@ async def drain(bus: RecordingBus, rounds: int = 20) -> None:
             progressed = True
         while (job := bus.next_job()) is not None:
             await handle_job(job)
+            progressed = True
+        if await deliver_pending(get_channel()):
             progressed = True
         if not progressed:
             return
@@ -3173,7 +3254,6 @@ def user_msg(update_id: int, text: str, user_id: int) -> Event:
 async def main() -> int:
     from zento.loops.service import LoopService
     from zento.store.repo import users
-    from zento.timers.runner import fire_due
 
     await init_db()
     undo = patch_llm(fake_structured, lambda *a, **k: ScriptedChatModel(responder=responder))
@@ -3187,31 +3267,31 @@ async def main() -> int:
         # 1. greeting
         await bus.publish(user_msg(1, "/start", user.id))
         await drain(bus)
-        if not channel.sent:
+        if not _texts(channel):
             failures.append("no reply to /start")
 
         # 2. duplicate delivery is ignored
-        before = len(channel.sent)
+        before = len(_texts(channel))
         await bus.publish(user_msg(1, "/start", user.id))
         await drain(bus)
-        if len(channel.sent) != before:
+        if len(_texts(channel)) != before:
             failures.append("duplicate update produced a second reply")
 
         # 3. mention interview prep -> memory + loop + agent-set wakeups
         await bus.publish(user_msg(2, "Interview prep with my friend Jawahar in 3 hours", user.id))
         await drain(bus)
-        loops = await LoopService().active(user.id)
+        loops = await LoopService(bus).active(user.id)
         if not any("jawahar" in lp.title.lower() for lp in loops):
             failures.append(f"no Jawahar loop (loops={[lp.title for lp in loops]})")
 
         # 4. security alert email -> unprompted ping
-        sent_before = len(channel.sent)
+        sent_before = len(_texts(channel))
         await bus.publish(Event(id="gmail:msg:sec1", user_id=user.id, type=EventType.EMAIL_RECEIVED,
                                 occurred_at=datetime.now(UTC), source="composio", trust=Trust.UNTRUSTED,
                                 payload={"from": "Google <no-reply@accounts.google.com>", "subject": "Security alert",
                                          "snippet": "New sign-in on Windows"}))
         await drain(bus)
-        if not any("sign-in" in t.lower() for _, t in channel.sent[sent_before:]):
+        if not any("sign-in" in t.lower() for t in _texts(channel)[sent_before:]):
             failures.append("no security-alert ping")
 
         # 5. fast-forward: pep talk before, follow-up after
@@ -3219,7 +3299,7 @@ async def main() -> int:
         await drain(bus)
         await fire_due(EVENT_AT + timedelta(hours=2, minutes=1))
         await drain(bus)
-        texts = " | ".join(t for _, t in channel.sent).lower()
+        texts = " | ".join(_texts(channel)).lower()
         if "you've got this" not in texts:
             failures.append("no pep talk before the event")
         if "how'd the interview prep" not in texts:
@@ -3228,8 +3308,9 @@ async def main() -> int:
         undo()
 
     print("---- transcript ----")
-    for chat_id, text in channel.sent:
-        print(f"[{chat_id}] Mavis: {text}")
+    for item in channel.sent:
+        if item.kind == "text":
+            print(f"[{item.chat_id}] Mavis: {item.text}")
     print("---- result ----")
     if failures:
         for f in failures:

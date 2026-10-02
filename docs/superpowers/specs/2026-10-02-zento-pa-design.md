@@ -1,5 +1,7 @@
 # Zento — Proactive Personal Assistant Agent: Design Spec
 
+> Agent persona name: **Mavis** (Telegram bot @Mavis247_bot). "Zento" is the project, package and CLI name.
+
 - **Date:** 2026-10-02
 - **Status:** Draft for review
 - **Owner:** JK
@@ -34,7 +36,8 @@ Reference behaviour (from the "Instinct" transcripts the user shared):
 |---|---|
 | Build vs adopt | Own core on **LangGraph**, borrowing ideas from Hermes/OpenClaw (channel gateways, skills, cron-as-agent-tool) |
 | Tenancy | **Single user** product scope; every record still carries `user_id` so multi-user is a later config/onboarding change, not a migration |
-| Persona | Warm, witty friend-PA named **Zento**; short chat bubbles, mirrors tone, empathetic, pushes on goals |
+| Persona | Warm, witty friend-PA named **Mavis** (`AGENT_NAME=Mavis`; project/package stays "Zento"); short chat bubbles, mirrors tone, empathetic, pushes on goals |
+| Sandbox | **Docker + gVisor** on the EC2 host behind a minimal `sandboxd` sidecar (primary); **AWS Bedrock AgentCore Code Interpreter** adapter (optional, ap-south-1); dev-only local subprocess backend. No E2B |
 | Proactivity | **Balanced**: ≤ 6 unsolicited pings/day, quiet hours 23:00–07:00 local, tunable in chat |
 | Models | Ollama Cloud free tier: `gpt-oss:20b` (FAST), `gpt-oss:120b` (SMART); env-swappable |
 | Memory | Own layer: **Neo4j** (graph) + **Qdrant** (episodic) + profile card + open loops |
@@ -86,7 +89,7 @@ Reference behaviour (from the "Instinct" transcripts the user shared):
  learn job → Memory: profile card · Neo4j graph · Qdrant episodes · open loops (emit loop events)
 
  Stores: Postgres (state, outbox, wakeups, loops, tasks, approvals, LangGraph checkpoints)
-         Neo4j · Qdrant · Redis · E2B sandboxes · object store (local dir / S3) for artefacts
+         Neo4j · Qdrant · Redis · sandboxd (Docker+gVisor) / AgentCore · object store (local dir / S3) for artefacts
 ```
 
 ### 2.1 Process roles
@@ -123,7 +126,7 @@ src/zento/
     registry.py             Tool metadata: risk class, required capability, specialist scoping
     integrations/           IntegrationProvider port; composio.py adapter; google_direct.py (later)
     web.py                  Tavily search/extract, DDG fallback
-    sandbox.py              Sandbox port: E2BSandbox, DockerSandbox (fallback)
+    sandbox/                Sandbox port: DockerSandbox (gVisor, via sandboxd sidecar), AgentCoreSandbox (optional), LocalSandbox (dev only)
     documents.py            Artefact builders run inside sandbox (pptx/pdf/docx/xlsx/charts)
     assistant.py            remember/forget, wake_me, track_loop, list_tasks
   policy/                   Risk classes, approval gate, quiet hours, ping budget, dedupe
@@ -132,7 +135,7 @@ src/zento/
   cli.py                    `zento api|worker|timer|dev|chat|eval`
 ```
 
-**Rule:** business logic (`initiative`, `agents`, `memory`, `loops`, `policy`) imports only ports (`Channel`, `IntegrationProvider`, `Sandbox`, `EventBus`, `GraphStore`, `VectorStore`), never Telegram/Composio/E2B SDKs.
+**Rule:** business logic (`initiative`, `agents`, `memory`, `loops`, `policy`) imports only ports (`Channel`, `IntegrationProvider`, `Sandbox`, `EventBus`, `GraphStore`, `VectorStore`), never Telegram/Composio/boto3/Docker SDKs.
 
 ---
 
@@ -291,7 +294,7 @@ Planner (SMART) → Plan{goal, steps[{id, agent, instruction, depends_on[], outp
 | Reading files user sends | Telegram file → object store → uploaded to sandbox `/workspace/inbox/` → extract text (pypdf, python-docx, openpyxl) |
 | Delivery | Artefacts sent back as Telegram documents with a one-line summary |
 
-The sandbox image (E2B custom template / Docker image) is prebuilt with: python 3.12, pandas, numpy, matplotlib, python-pptx, python-docx, openpyxl, weasyprint, pypdf, libreoffice-core (headless).
+Sandbox backends: **Docker + gVisor** (`--runtime=runsc` when installed, else `runc` with a warning; `--network none` by default; memory/CPU/pids limits; read-only root FS; non-root user; per-user `/workspace` volume; no secrets in env). The worker never gets `docker.sock`: a minimal **`sandboxd`** sidecar owns Docker and exposes only run/write/read/list over a unix socket. **AgentCore Code Interpreter** (boto3 `bedrock-agentcore`, `aws.codeinterpreter.v1`, ap-south-1) is an optional backend for microVM isolation; document libraries are pip-installed per session if not preinstalled. `SANDBOX_BACKEND=auto|docker|agentcore|local` (auto: docker if reachable → agentcore if AWS creds → local, dev only). The Docker sandbox image is prebuilt with: python 3.12, pandas, numpy, matplotlib, python-pptx, python-docx, openpyxl, weasyprint, pypdf, libreoffice-core (headless).
 
 ---
 
@@ -353,7 +356,7 @@ Triggers: `GMAIL_NEW_GMAIL_MESSAGE`, `GOOGLECALENDAR_EVENT_CREATED/UPDATED` (or 
 
 1. Every tool declares `requires: Capability` (e.g. `GMAIL`, `CALENDAR`).
 2. When a plan step or direct tool call needs a capability that isn't ACTIVE, the tool layer raises `ConnectionRequired(capability, reason)`; the run is **interrupted** (LangGraph `interrupt`) rather than failing.
-3. Zento sends, in persona voice: what it's trying to do + why it needs access + a one-tap connect link (+ a "Not now" button). Mirrors the Instinct pattern.
+3. Mavis sends, in persona voice: what it's trying to do + why it needs access + a one-tap connect link (+ a "Not now" button). Mirrors the Instinct pattern.
 4. Pending connection → initiative sets a short wakeup series (check status at +1, +3, +10 min) in addition to the callback signal.
 5. On `connection_changed: ACTIVE` → the interrupted run **resumes automatically** ("Connected. Setting up Monday 10am with Jawahar now.") and the **first-sync job** runs (§6.4).
 6. Proactive suggestion: the initiative agent may suggest connecting a service when it would clearly help (max once per service per week; respects "not now").
@@ -431,7 +434,7 @@ Tool call with risk ≥ outward → `interrupt({action, preview})` → Telegram 
 
 ### 8.3 Prompt-injection posture
 
-Third-party content (email bodies, web pages, Slack messages, file contents) is wrapped as `<untrusted source="…">…</untrusted>` with an instruction that it is data. The initiative reasoner has no outward tools. Outward actions always need approval regardless of who suggested them. The sandbox holds no credentials; integration calls happen server-side only.
+Third-party content (email bodies, web pages, Slack messages, file contents) is wrapped as `<untrusted source="…">…</untrusted>` with an instruction that it is data. The initiative reasoner has no outward tools. Outward actions always need approval regardless of who suggested them. The sandbox holds no credentials (no env secrets, no network by default, gVisor syscall isolation, worker has no Docker socket — only the `sandboxd` sidecar does); integration calls happen server-side only.
 
 ### 8.4 Pings policy
 
@@ -481,8 +484,8 @@ Secrets come from env (dev) or AWS Secrets Manager (prod); never logged (structl
 
 ## 13. Deployment
 
-- `Dockerfile` (uv, python 3.13-slim), `docker-compose.yml`: `api, worker, timer, redis, postgres, neo4j, qdrant, caddy`.
-- AWS (profile `cashfree`, region ap-south-1): EC2 `t3.large` (Ubuntu, Docker), Elastic IP, security group 80/443/22 (22 restricted to the deployer's IP), Caddy auto-TLS on `<eip>.nip.io` or a domain, Secrets Manager for keys pulled at boot, CloudWatch agent for logs. Scripted in `deploy/` (bash + AWS CLI), idempotent.
+- `Dockerfile` (uv, python 3.13-slim), `docker-compose.yml`: `api, worker, timer, sandboxd, redis, postgres, neo4j, qdrant, caddy`. Only `sandboxd` mounts `/var/run/docker.sock`; it shares `/run/zento/sandboxd.sock` with the worker.
+- AWS (profile `cashfree`, region ap-south-1): EC2 `t3.large` (Ubuntu, Docker + gVisor `runsc` registered in `/etc/docker/daemon.json` via user-data), Elastic IP, security group 80/443/22 (22 restricted to the deployer's IP), Caddy auto-TLS on `<eip>.nip.io` or a domain, Secrets Manager for keys pulled at boot, CloudWatch agent for logs. Scripted in `deploy/` (bash + AWS CLI), idempotent.
 - Telegram webhook set on deploy (`setWebhook` with secret token); dev uses long-polling (`deleteWebhook`).
 - Scaling path (config only): api/worker → ECS Fargate, Postgres → RDS, Redis → ElastiCache, Neo4j → Aura, Qdrant → Qdrant Cloud, artefacts → S3.
 
@@ -497,12 +500,12 @@ Secrets come from env (dev) or AWS Secrets Manager (prod); never logged (structl
 3. **Initiative**: loops, wakeups/timer, initiative agent, composer, policy (quiet hours/budget/dedupe), onboarding routines. *Demo: interview → pep talk → "how'd it go?"*
 4. **Integrations**: IntegrationProvider port, Composio adapter, connection prompting + resume, triggers/poller, first sync, inbox triage. *Demo: security-alert ping; morning check-in with calendar + inbox.*
 5. **Orchestrator**: planner, Send fan-out, specialists, spawn_agent, critic, approvals via interrupt, task board. *Demo: draft email → Approve/Edit/Cancel; calendar invite with Jawahar.*
-6. **Sandbox and artefacts**: E2B sandbox, file intake, Docs/Analyst/DeepResearch specialists, PPTX/PDF/DOCX/XLSX. *Demo: "make me a 6-slide deck on Teamcenter basics" → .pptx in chat.*
+6. **Sandbox and artefacts**: Docker+gVisor sandbox via `sandboxd` (AgentCore optional), file intake, Docs/Analyst/DeepResearch specialists, PPTX/PDF/DOCX/XLSX. *Demo: "make me a 6-slide deck on Teamcenter basics" → .pptx in chat.*
 7. **Deploy and harden**: Docker/compose, EC2 scripts, webhooks, Langfuse, evals, metrics.
 
 ## 15. Demo script (target)
 
-1. `/start` → Zento greets, asks name and what's on the plate; goes quiet → nudges after the onboarding delay (shortened via `DEMO_TIME_SCALE`).
+1. `/start` → Mavis greets, asks name and what's on the plate; goes quiet → nudges after the onboarding delay (shortened via `DEMO_TIME_SCALE`).
 2. "Interview prep with Jawahar Monday 10am" → asks ambiguity if past midnight → needs Calendar → **prompts connect** → user taps → resumes → asks to approve invite to Jawahar → ✅.
 3. Show Neo4j graph: Jai → FRIEND_OF → Jawahar; Event → WITH → Jawahar.
 4. Fire a Gmail security alert email → unprompted Telegram ping within seconds.
@@ -519,7 +522,8 @@ Secrets come from env (dev) or AWS Secrets Manager (prod); never logged (structl
 | Composio trigger availability/latency | poller fallback emitting identical events |
 | Composio slug drift | single mapping table, verified at boot (`/admin/integrations/verify`) |
 | Free-tier rate limits on Ollama | FAST for most calls, SMART only when needed; backoff; env switch to paid models |
-| E2B outage/key missing | DockerSandbox fallback on EC2; documents feature degrades with a clear message |
+| Docker daemon / gVisor unavailable | `runsc` missing → `runc` with a loud warning; no Docker → AgentCore backend if AWS creds; else documents feature degrades with a clear message (local backend is dev-only) |
+| Sandbox escape via generated code | gVisor, no network, no secrets, read-only root, resource limits, worker has no Docker socket (sidecar exposes only run/write/read/list) |
 | Over-pinging annoys user | budget, quiet hours, engagement-based learning, "ping me less" command |
 | Prompt injection via email | untrusted wrapping, no outward tools in triage, approvals |
 

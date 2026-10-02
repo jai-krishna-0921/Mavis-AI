@@ -2489,7 +2489,7 @@ git commit -m "feat(memory): aho-corasick entity spotting and budgeted recall as
 
 **Files:**
 - Create: `src/zento/memory/service.py`
-- Create: `tests/memory/test_service.py`; Modify: `tests/memory/conftest.py` (add `memory` and `user` fixtures); Modify: `tests/memory/test_recall.py` (append resilience + latency tests)
+- Create: `tests/memory/test_service.py`; Modify: `tests/conftest.py` (add the shared `user` fixture — Phases 3–6 rely on it at the top level); Modify: `tests/memory/conftest.py` (add `memory` fixture); Modify: `tests/memory/test_recall.py` (append resilience + latency tests)
 
 **Interfaces:**
 - Consumes: everything from Tasks 1–9; `zento.store.repo.users.get`; `Trust`.
@@ -2497,10 +2497,9 @@ git commit -m "feat(memory): aho-corasick entity spotting and budgeted recall as
 
 - [ ] **Step 1: Add fixtures**
 
-Append to `tests/memory/conftest.py`:
+Append to `tests/conftest.py` (shared by every later phase — do not define `user` anywhere else):
 
 ```python
-from zento.memory.service import MemoryService, set_memory
 from zento.store.repo import users
 
 
@@ -2508,6 +2507,12 @@ from zento.store.repo import users
 async def user(db):
     u, _ = await users.get_or_create_by_chat(111, "Jai")
     return u
+```
+
+Append to `tests/memory/conftest.py`:
+
+```python
+from zento.memory.service import MemoryService, set_memory
 
 
 @pytest.fixture
@@ -2843,7 +2848,7 @@ Expected: 12 passed (7 service + 3 assembly + resilience + slow latency)
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/zento/memory/service.py tests/memory/
+git add src/zento/memory/service.py tests/memory/ tests/conftest.py
 git commit -m "feat(memory): MemoryService with parallel recall, learn hooks, describe and forget"
 ```
 
