@@ -7,7 +7,7 @@ from collections.abc import Iterator
 import pytest
 
 TEST_ENV = {
-    "ENV": "test",
+    "ENV": "dev",
     "REDIS_URL": "",
     "QDRANT_URL": "",
     "NEO4J_URI": "",

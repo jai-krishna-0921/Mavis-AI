@@ -125,3 +125,83 @@ def test_get_bus_selects_in_process_without_redis(settings) -> None:
         assert get_redis() is None
     finally:
         set_bus(None)
+
+
+async def test_crashing_worker_message_reaches_dlq_after_max_deliveries(rbus) -> None:
+    """Deliveries that never reach the handler's except branch (worker crash) still count."""
+    bus, client = rbus
+    await bus.publish(ev("crashy"))
+    stream = Stream.EVENTS.value
+    await bus._ensure_group(stream, "workers")
+    # five deliveries to consumers that "die" without acking
+    await client.xreadgroup("workers", "dead-0", {stream: ">"}, count=1)
+    for i in range(1, 5):
+        await client.xautoclaim(stream, "workers", f"dead-{i}", min_idle_time=0, start_id="0-0", count=1)
+    [row] = await client.xpending_range(stream, "workers", min="-", max="+", count=1)
+    assert row["times_delivered"] == 5
+
+    calls = 0
+
+    async def handler(e: Event) -> None:
+        nonlocal calls
+        calls += 1
+
+    task = asyncio.create_task(bus.consume_events("workers", "w1", handler))
+
+    async def dead() -> bool:
+        return await client.xlen(f"{stream}:dlq") == 1
+
+    await wait_until(dead, timeout=5)
+    task.cancel()
+    assert calls == 0
+    assert (await client.xpending(stream, "workers"))["pending"] == 0
+
+
+async def test_attempts_come_from_redis_delivery_count(rbus) -> None:
+    bus, client = rbus
+    seen: list[int] = []
+
+    async def handler(j: Job) -> None:
+        seen.append(j.attempts)
+        if len(seen) < 3:
+            raise RuntimeError("boom")
+
+    await bus.enqueue(Job(id="j1", user_id=1, kind=JobKind.LEARN))
+    task = asyncio.create_task(bus.consume_jobs("workers", "w1", handler))
+    await wait_until(lambda: len(seen) == 3)
+    task.cancel()
+    assert seen == [0, 1, 2]
+
+
+async def test_nogroup_after_redis_restart_recreates_group(rbus) -> None:
+    bus, client = rbus
+    got: list[Event] = []
+
+    async def handler(e: Event) -> None:
+        got.append(e)
+
+    await bus.publish(ev("before"))
+    task = asyncio.create_task(bus.consume_events("workers", "w1", handler))
+    await wait_until(lambda: len(got) == 1)
+    await client.flushall()  # simulate a Redis restart without persistence
+    await bus.publish(ev("after"))
+    await wait_until(lambda: len(got) == 2, timeout=5)
+    task.cancel()
+    assert [e.id for e in got] == ["before", "after"]
+
+
+def test_claim_idle_ms_comes_from_settings(settings, monkeypatch) -> None:
+    from zento.bus import get_bus, set_bus
+
+    assert settings.bus_claim_idle_ms == 900_000
+    assert settings.worker_concurrency == 4
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6399/0")
+    monkeypatch.setenv("BUS_CLAIM_IDLE_MS", "1234")
+    from zento.config import get_settings
+
+    get_settings.cache_clear()
+    set_bus(None)
+    try:
+        assert get_bus()._claim_idle_ms == 1234
+    finally:
+        set_bus(None)

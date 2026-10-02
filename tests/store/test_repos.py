@@ -141,4 +141,4 @@ async def test_outbox_enqueue_duplicate_race_returns_existing_and_keeps_transact
             other = await outbox.enqueue(s, Outbound(user_id=u.id, text="y", dedupe_key="k2"))
             await s.commit()  # transaction still usable after the conflict
     assert again == first and other != first
-    assert len(await outbox.due(utcnow())) == 2
+    assert await outbox.texts_with_dedupe_prefix("k") == ["x", "y"]

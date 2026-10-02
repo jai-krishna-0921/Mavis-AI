@@ -91,9 +91,13 @@ class RedisStreamsBus:
                     await self._process(stream.value, group, msg_id, fields, handle)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 if self._closed:
                     return
+                if "NOGROUP" in str(exc):  # Redis restarted without persistence: stream/group are gone
+                    log.warning("bus.group_missing_recreating", stream=stream.value, group=group)
+                    await self._ensure_group(stream.value, group)
+                    continue
                 log.exception("bus.consume_loop_error", stream=stream.value)
                 await asyncio.sleep(1)
 
@@ -110,17 +114,26 @@ class RedisStreamsBus:
         data = fields.get("data") or fields.get(b"data")
         if isinstance(data, bytes):
             data = data.decode()
-        attempts_key = f"zento:attempts:{stream}"
-        prior = int(await self._r.hget(attempts_key, msg_id) or 0)
+        delivered = await self._delivery_count(stream, group, msg_id)
+        if delivered > self._max:
+            # delivered `max` times without ever completing (e.g. the worker keeps crashing)
+            log.error("bus.delivery_limit_exceeded", stream=stream, msg_id=str(msg_id), delivered=delivered)
+            await self._dead_letter(stream, group, msg_id, data)
+            return
         try:
-            await handle(data, prior)
+            await handle(data, delivered - 1)
         except Exception:
-            attempt = await self._r.hincrby(attempts_key, msg_id, 1)
-            log.exception("bus.handler_failed", stream=stream, msg_id=str(msg_id), attempt=attempt)
-            if attempt >= self._max:
-                await self._r.xadd(f"{stream}:dlq", {"data": data, "msg_id": str(msg_id)})
-                await self._r.xack(stream, group, msg_id)
-                await self._r.hdel(attempts_key, msg_id)
+            log.exception("bus.handler_failed", stream=stream, msg_id=str(msg_id), attempt=delivered)
+            if delivered >= self._max:
+                await self._dead_letter(stream, group, msg_id, data)
             return  # unacked: XAUTOCLAIM redelivers after claim_idle_ms
         await self._r.xack(stream, group, msg_id)
-        await self._r.hdel(attempts_key, msg_id)
+
+    async def _delivery_count(self, stream: str, group: str, msg_id: str) -> int:
+        """Redis' own delivery counter (XPENDING), which also counts deliveries that crashed."""
+        rows = await self._r.xpending_range(stream, group, min=msg_id, max=msg_id, count=1)
+        return int(rows[0]["times_delivered"]) if rows else 1
+
+    async def _dead_letter(self, stream: str, group: str, msg_id: str, data: str) -> None:
+        await self._r.xadd(f"{stream}:dlq", {"data": data, "msg_id": str(msg_id)})
+        await self._r.xack(stream, group, msg_id)

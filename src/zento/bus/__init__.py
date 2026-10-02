@@ -24,7 +24,9 @@ def get_bus() -> EventBus:
             from zento.bus.redis_streams import RedisStreamsBus
 
             # the bus owns its own connection pool; get_redis() stays available for locks/health
-            _bus = RedisStreamsBus(Redis.from_url(get_settings().redis_url, decode_responses=True))
+            s = get_settings()
+            _bus = RedisStreamsBus(Redis.from_url(s.redis_url, decode_responses=True),
+                                   claim_idle_ms=s.bus_claim_idle_ms)
         else:
             from zento.bus.inprocess import InProcessBus
 

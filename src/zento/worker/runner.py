@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 import structlog
 
 from zento.bus.base import EventBus
+from zento.config import get_settings
 from zento.domain.errors import LLMError
 from zento.domain.events import Event, EventType, Job, JobKind, Trust
 from zento.domain.messages import Outbound
@@ -79,9 +80,15 @@ async def handle_job(job: Job) -> None:
         await fn(job)
 
 
-async def run_worker(bus: EventBus, consumer: str) -> None:
-    """Consume events and jobs forever (until cancelled)."""
-    await asyncio.gather(
-        bus.consume_events(WORKER_GROUP, consumer, handle_event),
-        bus.consume_jobs(WORKER_GROUP, consumer, handle_job),
-    )
+async def run_worker(bus: EventBus, consumer: str, concurrency: int | None = None) -> None:
+    """Consume events and jobs forever (until cancelled), `concurrency` loops per stream.
+
+    Per-user event order holds because user_lock is FIFO within the process (see worker/locks.py).
+    """
+    n = max(1, concurrency or get_settings().worker_concurrency)
+    loops = []
+    for i in range(n):
+        name = f"{consumer}-{i}"
+        loops.append(bus.consume_events(WORKER_GROUP, name, handle_event))
+        loops.append(bus.consume_jobs(WORKER_GROUP, name, handle_job))
+    await asyncio.gather(*loops)

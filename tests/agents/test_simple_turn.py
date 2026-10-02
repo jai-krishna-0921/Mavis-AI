@@ -8,7 +8,6 @@ from zento.channels.outbox_sender import OutboxSender
 from zento.domain.errors import LLMError
 from zento.domain.events import Event, EventType, Trust
 from zento.domain.messages import Outbound, Role
-from zento.store.db import utcnow
 from zento.store.repo import messages, outbox, users
 
 
@@ -66,7 +65,7 @@ async def test_run_turn_is_idempotent_on_retry(db, channel, fake_llm) -> None:
     event = msg_event(user.id, "hi")
     await run_turn(event)
     await run_turn(event)
-    assert [r.text for r in await outbox.due(utcnow())] == ["First", "Second"]
+    assert await outbox.texts_with_dedupe_prefix("reply:") == ["First", "Second"]
     assert [m.role for m in await messages.recent(user.id)] == ["user", "assistant"]
     assert len(fake_llm.calls) == 1
 
@@ -80,7 +79,7 @@ async def test_retry_after_enqueue_before_assistant_log_backfills_log(db, channe
     await outbox.enqueue_now(Outbound(user_id=user.id, text="Second", dedupe_key=f"reply:{event.id}:1"))
     await run_turn(event)  # crashed earlier before logging the assistant message
     assert fake_llm.calls == []
-    assert [r.text for r in await outbox.due(utcnow())] == ["First", "Second"]
+    assert await outbox.texts_with_dedupe_prefix("reply:") == ["First", "Second"]
     log = await messages.recent(user.id)
     assert [(m.role, m.content) for m in log] == [("user", "hi"), ("assistant", "First\n\nSecond")]
 

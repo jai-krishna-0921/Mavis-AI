@@ -116,3 +116,74 @@ async def test_run_worker_consumes_bus(bus) -> None:
     await bus.wait_idle()
     task.cancel()
     assert got == ["e1"]
+
+
+async def test_concurrent_consumers_keep_per_user_order(settings, bus) -> None:
+    from tests.fakes import wait_until
+
+    log: list[str] = []
+
+    async def slow(event: Event) -> None:
+        log.append(f"start:{event.id}")
+        await asyncio.sleep(0.05 if event.id == "first" else 0)
+        log.append(f"end:{event.id}")
+
+    register_event_handler(EventType.USER_MESSAGE, slow)
+    task = asyncio.create_task(run_worker(bus, "w", concurrency=4))
+    await bus.publish(ev("first", user_id=1))
+    await bus.publish(ev("second", user_id=1))
+    await bus.publish(ev("other", user_id=2))
+    await wait_until(lambda: len(log) == 6)
+    task.cancel()
+    assert log.index("end:first") < log.index("start:second")
+    assert log.index("start:other") < log.index("end:first")  # different users still overlap
+
+
+async def test_run_worker_names_consumers_with_suffix(settings) -> None:
+    names: list[str] = []
+
+    class Spy:
+        async def consume_events(self, group, consumer, handler):
+            names.append(consumer)
+
+        async def consume_jobs(self, group, consumer, handler):
+            names.append(consumer)
+
+    await run_worker(Spy(), "w", concurrency=3)  # type: ignore[arg-type]
+    assert sorted(set(names)) == ["w-0", "w-1", "w-2"] and len(names) == 6
+
+
+async def test_redis_lock_branch_takes_local_lock_first(settings, monkeypatch) -> None:
+    # fakeredis has no Lua (evalsha), so redis-py's Lock can't run on it; use a tiny stand-in client.
+    from zento.worker import locks
+
+    class _Lock:
+        def __init__(self, held: set[str], name: str) -> None:
+            self.held, self.name = held, name
+
+        async def acquire(self) -> bool:
+            assert self.name not in self.held, "redis lock taken twice: local lock was not held first"
+            self.held.add(self.name)
+            return True
+
+        async def release(self) -> None:
+            self.held.discard(self.name)
+
+    class _Client:
+        held: set[str] = set()
+
+        def lock(self, name: str, **_kw) -> _Lock:
+            return _Lock(self.held, name)
+
+    monkeypatch.setattr(locks, "get_redis", lambda: _Client())
+    log: list[str] = []
+
+    async def slow(event: Event) -> None:
+        log.append(f"start:{event.id}")
+        await asyncio.sleep(0.02)
+        log.append(f"end:{event.id}")
+
+    register_event_handler(EventType.USER_MESSAGE, slow)
+    await asyncio.gather(handle_event(ev("a")), handle_event(ev("b")))
+    assert log == ["start:a", "end:a", "start:b", "end:b"]
+    assert _Client.held == set()

@@ -95,3 +95,15 @@ async def test_main_cancels_on_sigterm() -> None:
     os.kill(os.getpid(), signal.SIGTERM)
     await asyncio.wait_for(main, 5)
     assert cleaned == [True]
+
+
+@pytest.mark.parametrize("role", ["api", "worker"])
+def test_multi_process_roles_require_redis(settings, monkeypatch, role) -> None:
+    monkeypatch.setenv("REDIS_URL", "")
+    started: list[str] = []
+    monkeypatch.setattr("uvicorn.run", lambda *a, **k: started.append("uvicorn"))
+    monkeypatch.setattr("zento.cli._run", lambda coro: (coro.close(), started.append("run")))
+    result = CliRunner().invoke(app, [role])
+    assert result.exit_code == 1
+    assert "REDIS_URL" in result.output
+    assert started == []
