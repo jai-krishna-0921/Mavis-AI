@@ -70,7 +70,7 @@ async def merge_duplicates(user_id: int, graph: GraphStore, embedder: Embedder) 
 
 
 async def consolidate(user_id: int, memory: MemoryService) -> dict:
-    """Merge duplicates, then rewrite the card. `profile_rewritten` is True only if a new version was saved."""
+    """Merge duplicates, then rewrite the card; `profile_rewritten` is True only if a version was saved."""
     try:
         merged = await merge_duplicates(user_id, memory.graph, memory.embedder)
     except Exception as exc:  # an embedder/graph hiccup must not block the profile rewrite
