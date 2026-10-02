@@ -87,3 +87,12 @@ async def bus(settings):
     yield b
     await b.close()
     set_bus(None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_worker_registry():
+    """Handlers registered by one test must not leak into the next."""
+    yield
+    from zento.worker.runner import clear_handlers
+
+    clear_handlers()
