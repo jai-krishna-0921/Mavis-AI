@@ -87,7 +87,7 @@ class Reasoner:
             f"## Related open loops\n{loops}\n\n"
             f"{recall}\n\n## Recent conversation\n{history}"
         )
-        decision = await llm.structured(InitiativeDecision, system, prompt, tier=tier)
+        decision = await llm.structured(InitiativeDecision, system, prompt, tier=tier, priority="background")
         log.info(
             "initiative.decided",
             event_id=event.id,

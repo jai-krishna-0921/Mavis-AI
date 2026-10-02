@@ -64,7 +64,9 @@ class Composer:
             f"What to accomplish: {intent}\nUrgency: {urgency}/5\n"
             f"Extra context:\n{context or '-'}\n\nRecent conversation:\n{history}"
         )
-        draft = await llm.structured(ComposedMessage, system, prompt, tier=llm.Tier.FAST)
+        draft = await llm.structured(
+            ComposedMessage, system, prompt, tier=llm.Tier.FAST, priority="background"
+        )
         bubbles = []
         for b in draft.messages:
             b = sanitize_typography(scrub_untrusted_origin(b) if untrusted else b).strip()
