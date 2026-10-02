@@ -187,3 +187,81 @@ async def test_redis_lock_branch_takes_local_lock_first(settings, monkeypatch) -
     await asyncio.gather(handle_event(ev("a")), handle_event(ev("b")))
     assert log == ["start:a", "end:a", "start:b", "end:b"]
     assert _Client.held == set()
+
+
+@pytest.mark.inline_retries
+async def test_inline_retries_send_fallback_once_and_succeed(db, monkeypatch) -> None:
+    from mavis.bus import base
+    from mavis.bus.inprocess import InProcessBus
+
+    async def no_sleep(_s: float) -> None:
+        return None
+
+    monkeypatch.setattr(base, "_sleep", no_sleep)
+    user, _ = await users.get_or_create_by_chat(43, "Jai")
+    calls = 0
+
+    async def flaky(event: Event) -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise LLMError("model timeout")
+
+    register_event_handler(EventType.USER_MESSAGE, flaky)
+    bus = InProcessBus()
+    await bus.publish(ev("tg:update:10", user_id=user.id))
+    task = asyncio.create_task(bus.consume_events("g", "c", handle_event))
+    await bus.wait_idle()
+    task.cancel()
+    assert calls == 3 and bus.dead_events == []
+    assert await outbox.texts_with_dedupe_prefix("fallback:tg:update:10") == [FALLBACK_TEXT]
+
+
+@pytest.mark.inline_retries
+async def test_next_event_of_same_user_waits_for_inline_retries(settings, monkeypatch) -> None:
+    from mavis.bus import base
+
+    async def quick_sleep(_s: float) -> None:
+        await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(base, "_sleep", quick_sleep)
+    order: list[str] = []
+    failed_once = False
+
+    async def handler(event: Event) -> None:
+        nonlocal failed_once
+        order.append(f"start:{event.id}")
+        if event.id == "a" and not failed_once:
+            failed_once = True
+            raise TimeoutError("flaky")
+        order.append(f"ok:{event.id}")
+
+    register_event_handler(EventType.USER_MESSAGE, handler)
+    a = asyncio.create_task(handle_event(ev("a", user_id=7)))
+    await asyncio.sleep(0)
+    b = asyncio.create_task(handle_event(ev("b", user_id=7)))
+    await asyncio.gather(a, b)
+    assert order == ["start:a", "start:a", "ok:a", "start:b", "ok:b"]
+
+
+@pytest.mark.inline_retries
+async def test_non_transient_handler_error_not_retried_inline(settings, monkeypatch) -> None:
+    from mavis.bus import base
+
+    slept: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        slept.append(s)
+
+    monkeypatch.setattr(base, "_sleep", fake_sleep)
+    calls = 0
+
+    async def handler(event: Event) -> None:
+        nonlocal calls
+        calls += 1
+        raise KeyError("bug")
+
+    register_event_handler(EventType.USER_MESSAGE, handler)
+    with pytest.raises(KeyError):
+        await handle_event(ev("z", user_id=8))
+    assert calls == 1 and slept == []

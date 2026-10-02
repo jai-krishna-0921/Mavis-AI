@@ -55,7 +55,7 @@ mavis = "mavis.cli:app"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-markers = ["slow: performance tests (deselect with -m 'not slow')"]
+markers = ["slow: performance tests (deselect with -m 'not slow')", "inline_retries: keep the real INLINE_RETRY_DELAYS_S"]
 testpaths = ["tests"]
 pythonpath = ["."]
 filterwarnings = ["ignore::DeprecationWarning:telegram.*"]
