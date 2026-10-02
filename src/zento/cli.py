@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import signal
 import socket
 from uuid import uuid4
 
@@ -32,22 +33,39 @@ async def bootstrap(create_tables: bool) -> EventBus:
     return get_bus()
 
 
+async def _main(coro) -> None:
+    """Run `coro` as a task that SIGINT/SIGTERM cancel, so its `finally` cleanup runs."""
+    loop = asyncio.get_running_loop()
+    task = asyncio.ensure_future(coro)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):  # non-Unix event loops
+            loop.add_signal_handler(sig, task.cancel)
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
 def _run(coro) -> None:
-    """Run a role until done; Ctrl+C cancels the main task (cleanup runs in `finally`) and exits quietly."""
+    """Run a role until done; Ctrl+C / SIGTERM cancel it gracefully and exit quietly."""
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(coro)
+        asyncio.run(_main(coro))
+
+
+async def _cleanup(tasks: list[asyncio.Task], bus: EventBus) -> None:
+    """Cancel and await tasks, then close the bus; the engine is disposed even if the bus close raises."""
+    try:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await bus.close()
+    finally:
+        await dispose_engine()
 
 
 async def _run_tasks(tasks: list[asyncio.Task], bus: EventBus) -> None:
     try:
         await asyncio.gather(*tasks)
     finally:
-        for t in tasks:
-            t.cancel()
-        with contextlib.suppress(Exception):
-            await asyncio.gather(*tasks, return_exceptions=True)
-        await bus.close()
-        await dispose_engine()
+        await _cleanup(tasks, bus)
 
 
 async def _dev() -> None:
@@ -118,9 +136,7 @@ async def _chat() -> None:
     except (EOFError, KeyboardInterrupt):
         pass
     finally:
-        worker.cancel()
-        await bus.close()
-        await dispose_engine()
+        await _cleanup([worker], bus)
 
 
 @app.command()
