@@ -1,0 +1,55 @@
+# Local infrastructure for Mavis AI development and demos.
+# Ports are offset so they never collide with other local projects.
+#   docker compose -f docker-compose.dev.yml up -d
+name: mavis-dev
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: mavis
+      POSTGRES_PASSWORD: mavis
+      POSTGRES_DB: mavis
+    ports: ["5440:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mavis -d mavis"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6380:6379"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: neo4j/mavis-dev-password
+      NEO4J_PLUGINS: "[]"
+    ports: ["7476:7474", "7689:7687"]
+    volumes: [neo4jdata:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
+      interval: 10s
+      retries: 20
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    ports: ["6340:6333"]
+    volumes: [qdrantdata:/qdrant/storage]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  neo4jdata:
+  qdrantdata:
