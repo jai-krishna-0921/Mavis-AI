@@ -36,7 +36,9 @@ SAMPLES = {
     "mail.send": MailComposeArgs(to=["a@x.com", "b@x.com"], subject="s", body="b", cc=["c@x.com"]),
     "calendar.list": CalendarListArgs(time_min=NOW, time_max=NOW + timedelta(days=1), updated_min=NOW),
     "calendar.free_slots": CalendarSlotsArgs(time_min=NOW, time_max=NOW + timedelta(days=1)),
-    "calendar.create_event": CalendarCreateArgs(summary="x", start=NOW, attendees=["a@x.com"], description="d"),
+    "calendar.create_event": CalendarCreateArgs(
+        summary="x", start=NOW, attendees=["a@x.com"], description="d"
+    ),
     "calendar.update_event": CalendarUpdateArgs(
         event_id="e", summary="x", start=NOW, duration_minutes=30, attendees=[], description="d"
     ),
