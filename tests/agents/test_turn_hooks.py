@@ -55,3 +55,20 @@ async def test_hook_failure_never_breaks_the_reply(user, clock, fake_llm, init, 
 
     await deliver_pending(channel)
     assert any("Still here." in str(s) for s in channel.sent)
+
+
+async def test_user_message_in_quiet_hours_releases_deferred_pings(user, clock, fake_llm, init, channel):
+    from datetime import UTC, datetime, timedelta
+
+    from mavis.domain.decisions import NotifyIntent
+
+    clock.set(datetime(2026, 9, 27, 18, 30, tzinfo=UTC))  # 00:00 IST
+    assert not await init.executor.notify(user, NotifyIntent(urgency=3, intent="weekly summary"))
+    [before] = await init.wakeups.pending(user.id, WakeupKind.DEFERRED)
+    assert before.due_at > timeutil.now() + timedelta(hours=1)
+    fake_llm.push_text("Hey, I'm here.")
+    await simple_turn.run_turn(Event(id="tg:update:13", user_id=user.id, type=EventType.USER_MESSAGE,
+                                     occurred_at=timeutil.now(), source="telegram",
+                                     payload={"text": "hello?"}, trust=Trust.USER))
+    [after] = await init.wakeups.pending(user.id, WakeupKind.DEFERRED)
+    assert after.due_at <= timeutil.now() + timedelta(seconds=20)

@@ -14,11 +14,12 @@ from collections.abc import Awaitable, Callable
 import structlog
 
 from mavis.bus.base import SELF_RETRYING, EventBus, run_with_inline_retries
+from mavis.channels import presence
 from mavis.config import get_settings
 from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Job, JobKind, Trust
 from mavis.domain.messages import Outbound
-from mavis.store.repo import outbox
+from mavis.store.repo import outbox, users
 from mavis.worker.locks import lock, user_lock
 
 log = structlog.get_logger(__name__)
@@ -27,9 +28,11 @@ EventFn = Callable[[Event], Awaitable[None]]
 JobFn = Callable[[Job], Awaitable[None]]
 
 WORKER_GROUP = "workers"
-FALLBACK_TEXT = "Give me a sec, something's slow on my end. I'll get back to you on this."
+FALLBACK_TEXT = "Give me a sec, my brain is a bit slow right now. Try me again in a minute?"
 
 CHAT_EVENT_TYPES = frozenset({EventType.USER_MESSAGE, EventType.BUTTON_PRESSED})
+
+_ack_tasks: set[asyncio.Task] = set()  # strong refs so fire-and-forget acks are not GC'd
 
 _event_handlers: dict[EventType, list[EventFn]] = defaultdict(list)
 _job_handlers: dict[JobKind, JobFn] = {}
@@ -72,12 +75,31 @@ def _event_lock(event: Event):
     return lock(f"initiative:{event.user_id}", timeout_s=600)
 
 
+async def _acknowledge(event: Event) -> None:
+    """React to the user's Telegram message right away, before waiting on the user lock. Best effort."""
+    message_id = event.payload.get("message_id")
+    if event.type is not EventType.USER_MESSAGE or event.source != "telegram" or message_id is None:
+        return
+    try:
+        user = await users.get(event.user_id)
+        if user.telegram_chat_id is not None:
+            await presence.react(user.telegram_chat_id, int(message_id))
+    except Exception as exc:  # noqa: BLE001 - cosmetic, must not fail the turn
+        log.warning("worker.ack_failed", error=type(exc).__name__)
+
+
 async def handle_event(event: Event) -> None:
     handlers = list(_event_handlers.get(event.type, []))
     if not handlers:
         log.debug("worker.no_handler", event_type=event.type)
         return
     with structlog.contextvars.bound_contextvars(event_id=event.id, user_id=event.user_id):
+        # Ack off the critical path: create_task does not run until we suspend, and _event_lock joins
+        # the per-user FIFO before it suspends, so arrival order is kept and the reaction still goes
+        # out right away, even while a previous turn holds the lock.
+        ack = asyncio.create_task(_acknowledge(event))
+        _ack_tasks.add(ack)
+        ack.add_done_callback(_ack_tasks.discard)
         # The user lock is held across the inline retries (and their sleeps) so this user's next
         # event cannot overtake a retrying one. Other users run on the other consumer loops.
         async with _event_lock(event):

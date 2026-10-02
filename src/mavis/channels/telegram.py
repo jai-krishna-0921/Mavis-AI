@@ -124,6 +124,10 @@ class TelegramChannel:
         except Exception as exc:  # noqa: BLE001 - typing is cosmetic
             log.debug("telegram.typing_failed", error=type(exc).__name__)
 
+    async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
+        await self._ensure()
+        await self._bot.set_message_reaction(chat_id=chat_id, message_id=message_id, reaction=emoji)
+
     async def download_file(self, file_id: str, dest_path: str) -> str:
         await self._ensure()
         Path(dest_path).parent.mkdir(parents=True, exist_ok=True)

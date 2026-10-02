@@ -76,8 +76,16 @@ def _model_for(tier: Tier, temperature: float, name: str | None) -> BaseChatMode
     return chat_model(tier, temperature) if name is None else chat_model(tier, temperature, model=name)
 
 
-def _chain(tier: Tier) -> list[str | None]:
-    return [None, *_fallback_names(tier)]
+def _chain(tier: Tier, fallback: bool = True) -> list[str | None]:
+    return [None, *_fallback_names(tier)] if fallback else [None]
+
+
+def _use_fallback(priority: Priority, fallback: bool | None) -> bool:
+    """Interactive calls walk the whole fallback chain. Background calls (LEARN, summaries,
+    consolidation) make one model attempt, so a slow model never holds the single LLM slot for
+    timeout x chain length; a 429 still backs off on that model and the bus retries the job.
+    Pass `fallback=True` to opt a user-visible background call back in."""
+    return priority == "interactive" if fallback is None else fallback
 
 
 def _is_retriable(exc: BaseException) -> bool:
@@ -266,9 +274,10 @@ async def complete(
     temperature: float = 0.6,
     name: str = "complete",
     priority: Priority = "interactive",
+    fallback: bool | None = None,
 ) -> str:
     """Plain-text completion with model fallback. Raises LLMError on failure or empty output."""
-    chain = _chain(tier)
+    chain = _chain(tier, _use_fallback(priority, fallback))
     deadline = _deadline_for(tier, priority)
     out = None
     for i, model in enumerate(chain):
@@ -299,6 +308,7 @@ async def structured[T: BaseModel](
     user: str | list[BaseMessage],
     tier: Tier = Tier.FAST,
     priority: Priority = "interactive",
+    fallback: bool | None = None,
 ) -> T:
     """Return a validated `schema` instance or raise LLMError.
 
@@ -306,7 +316,7 @@ async def structured[T: BaseModel](
     locally. Timeouts/connection/5xx/429 move on to the tier's next fallback model.
     """
     messages = _messages(system, user)
-    chain = _chain(tier)
+    chain = _chain(tier, _use_fallback(priority, fallback))
     deadline = _deadline_for(tier, priority)
     for i, model in enumerate(chain):
         try:

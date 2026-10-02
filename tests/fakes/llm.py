@@ -58,7 +58,8 @@ class FakeLLM:
         return FakeToolChatModel(fake=self)
 
     async def structured(
-        self, schema: type[BaseModel], system: str, user: Any, tier: Any = None, priority: str = "interactive"
+        self, schema: type[BaseModel], system: str, user: Any, tier: Any = None,
+        priority: str = "interactive", fallback: bool | None = None,
     ) -> BaseModel:
         self.structured_calls.append({"schema": schema, "system": system, "user": user, "tier": tier})
         return self.pop_structured(schema)

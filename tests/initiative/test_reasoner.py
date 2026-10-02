@@ -14,7 +14,7 @@ T = datetime(2026, 9, 29, 3, 15, tzinfo=UTC)
 def capture(monkeypatch) -> dict:
     seen: dict = {}
 
-    async def fake(schema, system, user_msg, tier=llm.Tier.FAST, priority="interactive"):
+    async def fake(schema, system, user_msg, tier=llm.Tier.FAST, priority="interactive", fallback=None):
         seen.update(schema=schema, system=system, user=user_msg, tier=tier)
         return InitiativeDecision(ignore_reason="test")
 
