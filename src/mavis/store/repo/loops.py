@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+import re
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
@@ -27,6 +28,7 @@ def to_domain(r: LoopRow) -> Loop:
         importance=r.importance,
         watch=WatchSpec.model_validate(r.watch) if r.watch else None,
         source=r.source,
+        version=r.version or 1,
     )
 
 
@@ -56,11 +58,13 @@ async def insert(user_id: int, data: LoopUpsert) -> Loop:
         return to_domain(row)
 
 
-async def update(loop_id: int, data: LoopUpsert) -> Loop | None:
+async def update(user_id: int, loop_id: int, data: LoopUpsert) -> tuple[Loop, bool] | None:
+    """Merge `data` into the loop; returns (loop, changed). Version/updated_at move only on change."""
     async with Session() as s:
         row = await s.get(LoopRow, loop_id)
-        if row is None:
+        if row is None or row.user_id != user_id:
             return None
+        before = to_domain(row)
         row.kind, row.title, row.status, row.importance = (
             data.kind.value,
             data.title,
@@ -76,10 +80,13 @@ async def update(loop_id: int, data: LoopUpsert) -> Loop | None:
             row.watch = _watch_json(data)
         if data.source:
             row.source = data.source
-        row.updated_at = timeutil.now()
-        await s.commit()
-        await s.refresh(row)
-        return to_domain(row)
+        changed = to_domain(row) != before
+        if changed:
+            row.updated_at = timeutil.now()
+            row.version = (row.version or 1) + 1
+            await s.commit()
+            await s.refresh(row)
+        return to_domain(row), changed
 
 
 async def get(loop_id: int) -> Loop | None:
@@ -104,23 +111,56 @@ async def find_open_duplicate(user_id: int, data: LoopUpsert) -> Loop | None:
     return None
 
 
-async def set_status(loop_id: int, status: LoopStatus) -> Loop | None:
+def normalise_title(title: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", title.casefold()).split())
+
+
+async def find_recently_closed(user_id: int, title: str, since: datetime) -> Loop | None:
+    """A DONE/DROPPED loop with the same normalised title closed after `since`."""
+    wanted = normalise_title(title)
+    closed = (LoopStatus.DONE.value, LoopStatus.DROPPED.value)
+    async with Session() as s:
+        rows = await s.scalars(
+            select(LoopRow).where(
+                LoopRow.user_id == user_id, LoopRow.status.in_(closed), LoopRow.updated_at >= since
+            )
+        )
+        for r in rows:
+            if normalise_title(r.title) == wanted:
+                return to_domain(r)
+    return None
+
+
+async def set_status(user_id: int, loop_id: int, status: LoopStatus) -> tuple[Loop, bool] | None:
     async with Session() as s:
         row = await s.get(LoopRow, loop_id)
-        if row is None:
+        if row is None or row.user_id != user_id:
             return None
+        if row.status == status.value:
+            return to_domain(row), False
         row.status = status.value
         row.updated_at = timeutil.now()
+        row.version = (row.version or 1) + 1
         await s.commit()
         await s.refresh(row)
-        return to_domain(row)
+        return to_domain(row), True
 
 
-async def expire(now) -> list[Loop]:
-    """Mark stale OPEN loops EXPIRED; returns the loops that changed."""
+async def open_user_ids() -> list[int]:
+    async with Session() as s:
+        rows = await s.scalars(
+            select(LoopRow.user_id).where(LoopRow.status == LoopStatus.OPEN.value).distinct()
+        )
+        return list(rows)
+
+
+async def expire(user_id: int, now) -> list[Loop]:
+    """Mark one user's stale OPEN loops EXPIRED; returns the loops that changed."""
     expired: list[Loop] = []
     async with Session() as s:
-        rows = await s.scalars(select(LoopRow).where(LoopRow.status == LoopStatus.OPEN.value))
+        rows = await s.scalars(
+            select(LoopRow).where(LoopRow.user_id == user_id, LoopRow.status == LoopStatus.OPEN.value)
+        )
         for row in rows:
             due = timeutil.ensure_utc(row.due_at)
             deadline = (
@@ -131,6 +171,7 @@ async def expire(now) -> list[Loop]:
             if stale_due or stale_watch:
                 row.status = LoopStatus.EXPIRED.value
                 row.updated_at = now
+                row.version = (row.version or 1) + 1
                 expired.append(to_domain(row))
         await s.commit()
     return expired

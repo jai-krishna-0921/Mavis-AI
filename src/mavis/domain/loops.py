@@ -40,6 +40,7 @@ class Loop(BaseModel):
     importance: int = 3
     watch: WatchSpec | None = None
     source: str = ""
+    version: int = 1                     # bumped on every change; keys LOOP_UPDATED event ids
 
 
 class LoopUpsert(BaseModel):
