@@ -624,9 +624,7 @@ Expected: `7 passed`
 git add src/zento/domain src/zento/config.py src/zento/store src/zento/channels/telegram.py \
   src/zento/agents/interrupts.py src/zento/agents/buttons.py src/zento/timers/system.py \
   src/zento/initiative/hooks.py src/zento/worker/handlers.py src/zento/migrations tests/store tests/channels tests/initiative/test_hooks.py
-git commit -m "feat(integrations): pending connections, URL buttons, hook registries
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(integrations): pending connections, URL buttons, hook registries"
 ```
 
 ---
@@ -1044,9 +1042,7 @@ Expected: `11 passed`
 
 ```bash
 git add src/zento/tools/integrations tests/tools/integrations
-git commit -m "feat(integrations): provider port and Zento action catalog
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(integrations): provider port and Zento action catalog"
 ```
 
 ---
@@ -1279,9 +1275,7 @@ Expected: `7 passed`
 
 ```bash
 git add src/zento/tools/integrations/composio_map.py tests/tools/integrations/test_composio_map.py
-git commit -m "feat(integrations): composio slug and trigger mapping
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(integrations): composio slug and trigger mapping"
 ```
 
 ---
@@ -1687,9 +1681,7 @@ Expected: `14 passed`
 
 ```bash
 git add src/zento/tools/integrations/composio.py tests/tools/integrations/test_composio.py
-git commit -m "feat(integrations): composio REST v3 adapter
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(integrations): composio REST v3 adapter"
 ```
 
 ---
@@ -2076,9 +2068,7 @@ Expected: `9 passed`
 
 ```bash
 git add src/zento/tools/integrations/normalize.py src/zento/tools/integrations/composio_webhooks.py tests/tools/integrations/test_webhooks.py
-git commit -m "feat(integrations): canonical event normalisation and signed webhook parsing
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(integrations): canonical event normalisation and signed webhook parsing"
 ```
 
 ---
@@ -2413,9 +2403,7 @@ Expected: `4 passed`
 
 ```bash
 git add src/zento/tools/integrations/__init__.py src/zento/tools/integrations/connections.py tests/tools/integrations
-git commit -m "feat(integrations): connection status cache and provider factory
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(integrations): connection status cache and provider factory"
 ```
 
 ---
@@ -2705,9 +2693,7 @@ Expected: `9 passed`
 
 ```bash
 git add src/zento/tools/integrations/tools.py tests/tools/integrations/test_tools.py
-git commit -m "feat(integrations): gated integration tools with connect interrupt
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(integrations): gated integration tools with connect interrupt"
 ```
 
 ---
@@ -3206,9 +3192,7 @@ Expected: `13 passed`
 
 ```bash
 git add src/zento/tools/integrations/connect_flow.py tests/tools/integrations/test_connect_flow.py
-git commit -m "feat(integrations): connect flow with prompt, checks, resume and decline
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(integrations): connect flow with prompt, checks, resume and decline"
 ```
 
 ---
@@ -3425,9 +3409,7 @@ Expected: `5 passed`
 
 ```bash
 git add src/zento/api tests/api/test_integration_routes.py
-git commit -m "feat(api): connect callback and signed integrations webhook
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(api): connect callback and signed integrations webhook"
 ```
 
 ---
@@ -3727,9 +3709,7 @@ Expected: `9 passed`
 
 ```bash
 git add src/zento/tools/integrations/activation.py src/zento/tools/integrations/poller.py tests/tools/integrations/test_activation_poller.py
-git commit -m "feat(integrations): trigger activation with self-rescheduling poll fallback
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(integrations): trigger activation with self-rescheduling poll fallback"
 ```
 
 ---
@@ -4017,9 +3997,7 @@ Expected: `3 passed`
 
 ```bash
 git add src/zento/tools/integrations/first_sync.py tests/tools/integrations/test_first_sync.py
-git commit -m "feat(integrations): first sync seeds memory and loops on connect
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(integrations): first sync seeds memory and loops on connect"
 ```
 
 ---
@@ -4236,9 +4214,7 @@ Expected: `9 passed`
 
 ```bash
 git add src/zento/initiative/email_triage.py tests/initiative/test_email_triage.py
-git commit -m "feat(initiative): inbox triage prefilter, signals and security floor
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(initiative): inbox triage prefilter, signals and security floor"
 ```
 
 ---
@@ -4403,9 +4379,7 @@ Expected: `4 passed`
 
 ```bash
 git add src/zento/initiative/briefs_integrations.py tests/initiative/test_briefs_integrations.py
-git commit -m "feat(initiative): calendar and inbox brief sources
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(initiative): calendar and inbox brief sources"
 ```
 
 ---
@@ -4525,9 +4499,7 @@ Expected: `2 passed`
 
 ```bash
 git add src/zento/agents/specialists/inbox.py src/zento/agents/specialists/calendar.py src/zento/agents/specialists/comms.py tests/agents/test_integration_specialists.py
-git commit -m "feat(agents): inbox, calendar and comms specialists
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(agents): inbox, calendar and comms specialists"
 ```
 
 ---
@@ -4706,9 +4678,7 @@ Expected: `5 passed`
 
 ```bash
 git add src/zento/initiative/connect_suggestions.py tests/initiative/test_connect_suggestions.py
-git commit -m "feat(initiative): rate-limited proactive connection suggestions
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(initiative): rate-limited proactive connection suggestions"
 ```
 
 ---
@@ -5098,9 +5068,7 @@ Expected: `All checks passed!`
 
 ```bash
 git add src/zento/agents/commands.py src/zento/agents/conversation.py src/zento/tools/integrations/wiring.py src/zento/worker/runner.py tests/agents/test_commands.py tests/tools/integrations/test_wiring.py
-git commit -m "feat(integrations): slash commands, CONNECT route and production wiring
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(integrations): slash commands, CONNECT route and production wiring"
 ```
 
 ---
@@ -5300,9 +5268,7 @@ Expected: `1 passed`. If it fails because of key names, extend the `pick(...)` k
 
 ```bash
 git add scripts/verify_composio.py tests/fixtures/composio tests/tools/integrations/test_live_fixtures.py src/zento/tools/integrations/composio_map.py src/zento/tools/integrations/normalize.py
-git commit -m "chore(integrations): verify composio slugs/triggers against live API; pin real webhook payload
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "chore(integrations): verify composio slugs/triggers against live API; pin real webhook payload"
 ```
 
 ---

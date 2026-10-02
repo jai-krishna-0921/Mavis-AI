@@ -280,9 +280,7 @@ Expected: `11 passed`
 
 ```bash
 git add src/zento/domain/timeutil.py src/zento/config.py tests/conftest.py tests/domain/test_timeutil.py
-git commit -m "feat(time): clock, tz conversion, midnight ambiguity and demo time scale
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(time): clock, tz conversion, midnight ambiguity and demo time scale"
 ```
 
 ---
@@ -422,9 +420,7 @@ Expected: all tests pass
 
 ```bash
 git add src/zento/agents/clarify.py src/zento/agents/simple_turn.py src/zento/memory/extractor.py tests/agents/test_clarify.py
-git commit -m "feat(turn): ask today-or-tomorrow after midnight; anchor extraction to local time
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(turn): ask today-or-tomorrow after midnight; anchor extraction to local time"
 ```
 
 ---
@@ -944,9 +940,7 @@ Expected: output contains `Running upgrade 0002_memory -> 0003_initiative`
 
 ```bash
 git add src/zento/store/models.py src/zento/migrations/versions/0003_initiative.py src/zento/store/repo/loops.py src/zento/loops tests/conftest.py tests/loops/test_service.py
-git commit -m "feat(loops): open-loop store and service with LOOP_* events and extraction hook
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(loops): open-loop store and service with LOOP_* events and extraction hook"
 ```
 
 ---
@@ -1320,9 +1314,7 @@ Expected: `7 passed`
 
 ```bash
 git add src/zento/domain/wakeups.py src/zento/store/models.py src/zento/migrations/versions/0003_initiative.py src/zento/store/repo/wakeups.py src/zento/timers tests/timers/test_service.py
-git commit -m "feat(timers): agent-owned wakeups with dedupe, demo scaling and safe claiming
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(timers): agent-owned wakeups with dedupe, demo scaling and safe claiming"
 ```
 
 ---
@@ -1606,9 +1598,7 @@ Expected: usage text containing `Fire agent-owned wakeups`
 
 ```bash
 git add src/zento/bus/leader.py src/zento/timers/runner.py src/zento/cli.py tests/bus/test_leader.py tests/timers/test_runner.py
-git commit -m "feat(timer): timer role with Redis leader lock, wakeup events and loop expiry
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(timer): timer role with Redis leader lock, wakeup events and loop expiry"
 ```
 
 ---
@@ -1833,9 +1823,7 @@ Expected: `8 passed`
 
 ```bash
 git add src/zento/store/models.py src/zento/migrations/versions/0003_initiative.py src/zento/policy tests/policy/test_pings.py
-git commit -m "feat(policy): ping policy with midnight-spanning quiet hours, budget and daily dedupe
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(policy): ping policy with midnight-spanning quiet hours, budget and daily dedupe"
 ```
 
 ---
@@ -2089,9 +2077,7 @@ Expected: `9 passed`
 
 ```bash
 git add src/zento/initiative tests/initiative/test_filters.py
-git commit -m "feat(initiative): cheap event filters, watch matching and untrusted wrapping
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(initiative): cheap event filters, watch matching and untrusted wrapping"
 ```
 
 ---
@@ -2336,9 +2322,7 @@ Expected: `7 passed`
 
 ```bash
 git add src/zento/initiative/reasoner.py src/zento/initiative/composer.py tests/initiative/test_reasoner.py tests/initiative/test_composer.py
-git commit -m "feat(initiative): structured reasoner (tool-less, tiered) and persona composer
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(initiative): structured reasoner (tool-less, tiered) and persona composer"
 ```
 
 ---
@@ -2636,9 +2620,7 @@ Expected: `10 passed`
 
 ```bash
 git add src/zento/initiative/quiet.py src/zento/initiative/executor.py tests/initiative/test_quiet.py tests/initiative/test_executor.py
-git commit -m "feat(initiative): executor (track/wake/act/notify with policy) and quiet tracker
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(initiative): executor (track/wake/act/notify with policy) and quiet tracker"
 ```
 
 ---
@@ -2917,9 +2899,7 @@ Expected: `4 passed`
 
 ```bash
 git add src/zento/initiative/routines.py tests/initiative/test_routines.py
-git commit -m "feat(initiative): onboarding routine seed and adaptive morning check-in
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(initiative): onboarding routine seed and adaptive morning check-in"
 ```
 
 ---
@@ -3455,9 +3435,7 @@ Expected: all tests pass
 
 ```bash
 git add src/zento/initiative/planner.py src/zento/initiative/handler.py src/zento/initiative/wiring.py src/zento/worker/handlers.py src/zento/agents/simple_turn.py tests/initiative/test_handler.py tests/initiative/test_wiring.py tests/agents/test_turn_hooks.py
-git commit -m "feat(initiative): event handler with fallback planner, wiring and turn hooks
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(initiative): event handler with fallback planner, wiring and turn hooks"
 ```
 
 ---
@@ -3555,9 +3533,7 @@ Expected: within about a minute, a pep-talk message arrives unprompted, followed
 
 ```bash
 git add tests/e2e/test_interview_followup.py
-git commit -m "test(e2e): interview loop → pep talk → follow-up, driven by agent-owned wakeups
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "test(e2e): interview loop → pep talk → follow-up, driven by agent-owned wakeups"
 ```
 
 ---

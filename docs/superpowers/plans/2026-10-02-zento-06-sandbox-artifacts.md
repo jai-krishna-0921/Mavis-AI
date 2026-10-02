@@ -339,9 +339,7 @@ Expected: PASS — `13 passed`
 
 ```bash
 git add pyproject.toml uv.lock src/zento/config.py src/zento/domain/artifacts.py tests/domain/test_artifacts.py
-git commit -m "feat(artifacts): artefact domain types and phase 6 settings
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(artifacts): artefact domain types and phase 6 settings"
 ```
 
 ---
@@ -767,9 +765,7 @@ Expected: PASS — `13 passed`
 
 ```bash
 git add src/zento/tools/sandbox tests/tools/sandbox/test_local.py tests/conftest.py
-git commit -m "feat(sandbox): sandbox port, path safety helpers and dev-only local backend
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(sandbox): sandbox port, path safety helpers and dev-only local backend"
 ```
 
 ---
@@ -1013,9 +1009,7 @@ Expected: PASS — `6 passed`
 
 ```bash
 git add src/zento/tools/sandbox/docker.py tests/tools/sandbox/test_docker.py
-git commit -m "feat(sandbox): docker backend with no-network, capped, capability-dropped containers
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(sandbox): docker backend with no-network, capped, capability-dropped containers"
 ```
 
 ---
@@ -1518,9 +1512,7 @@ Expected: PASS — `11 passed`
 
 ```bash
 git add src/zento/tools/sandbox/e2b.py tests/tools/sandbox/test_e2b.py
-git commit -m "feat(sandbox): e2b backend with persistent per-user sandbox and idle pause
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(sandbox): e2b backend with persistent per-user sandbox and idle pause"
 ```
 
 ---
@@ -1768,9 +1760,7 @@ Expected: PASS — `38 passed` (13 local + 6 docker + 11 e2b + 6 select + 2 imag
 
 ```bash
 git add src/zento/tools/sandbox/__init__.py sandbox_image tests/tools/sandbox/test_select.py tests/tools/sandbox/test_image.py
-git commit -m "feat(sandbox): backend selection (e2b > docker > local) and sandbox image
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(sandbox): backend selection (e2b > docker > local) and sandbox image"
 ```
 
 ---
@@ -2146,9 +2136,7 @@ Expected: PASS — `4 passed`
 
 ```bash
 git add src/zento/tools/sandbox_scripts src/zento/tools/documents tests/tools/documents/test_pptx.py
-git commit -m "feat(documents): sandbox builder runner, artefact recording and pptx deck builder
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(documents): sandbox builder runner, artefact recording and pptx deck builder"
 ```
 
 ---
@@ -2723,9 +2711,7 @@ Expected: PASS — `15 passed` (4 pptx + 3 convert + 8 builders). If WeasyPrint'
 
 ```bash
 git add src/zento/tools/sandbox_scripts src/zento/tools/documents tests/tools/documents
-git commit -m "feat(documents): docx, pdf, xlsx and chart builders plus markdown/outline conversion
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(documents): docx, pdf, xlsx and chart builders plus markdown/outline conversion"
 ```
 
 ---
@@ -3120,9 +3106,7 @@ Expected: PASS — `10 passed`
 
 ```bash
 git add src/zento/tools/sandbox_tools.py src/zento/tools/documents/tools.py src/zento/tools/__init__.py tests/tools/test_sandbox_tools.py
-git commit -m "feat(tools): sandbox and document tools for analyst, coder and docs specialists
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(tools): sandbox and document tools for analyst, coder and docs specialists"
 ```
 
 ---
@@ -3565,9 +3549,7 @@ Expected: PASS — `test_intake.py` reports `10 passed`; the existing Phase 4 co
 
 ```bash
 git add src/zento/tools/sandbox_scripts/extract_text.py src/zento/files src/zento/agents/conversation.py tests/files/test_intake.py
-git commit -m "feat(files): ingest user files into the sandbox, extract text and remember them
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(files): ingest user files into the sandbox, extract text and remember them"
 ```
 
 ---
@@ -3788,9 +3770,7 @@ Expected: PASS — `12 passed`
 
 ```bash
 git add src/zento/agents/specialists/docs.py tests/agents/specialists/test_docs.py
-git commit -m "feat(agents): docs specialist producing pptx, docx, pdf and xlsx artefacts
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(agents): docs specialist producing pptx, docx, pdf and xlsx artefacts"
 ```
 
 ---
@@ -3940,9 +3920,7 @@ Expected: PASS — `5 passed` (the `deep_research` word check passes because the
 
 ```bash
 git add src/zento/agents/specialists/analyst.py src/zento/agents/specialists/coder.py src/zento/agents/specialists/__init__.py src/zento/agents/orchestrator.py tests/agents/specialists/test_registration.py
-git commit -m "feat(agents): analyst and coder specialists; planner knows deliverables and file routing
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(agents): analyst and coder specialists; planner knows deliverables and file routing"
 ```
 
 ---
@@ -4329,9 +4307,7 @@ Expected: PASS — `test_deep_research.py` `6 passed` (or `5 passed, 1 skipped` 
 
 ```bash
 git add src/zento/agents/specialists/deep_research.py src/zento/agents/specialists/__init__.py tests/agents/specialists
-git commit -m "feat(agents): deep research specialist with parallel fan-out and cited reports
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(agents): deep research specialist with parallel fan-out and cited reports"
 ```
 
 ---
@@ -4516,9 +4492,7 @@ In Telegram: "make me a 6-slide deck on Teamcenter basics" → a `.pptx` arrives
 
 ```bash
 git add src/zento/agents/artifact_delivery.py src/zento/agents/orchestrator.py tests/agents/test_artifact_delivery.py tests/e2e/test_deck_flow.py
-git commit -m "feat(agents): deliver task artefacts as telegram documents; e2e deck flow test
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(agents): deliver task artefacts as telegram documents; e2e deck flow test"
 ```
 
 ---

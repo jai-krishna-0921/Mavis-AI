@@ -934,9 +934,7 @@ git add pyproject.toml uv.lock src/zento/config.py src/zento/domain/tasks.py src
   src/zento/store/repo/tasks.py src/zento/store/repo/approvals.py src/zento/store/repo/policy_rules.py \
   src/zento/store/repo/audit.py migrations/versions tests/conftest.py tests/store/test_tasks_repo.py \
   tests/store/test_approvals_repo.py
-git commit -m "feat(store): task board, approvals, policy rules and audit tables
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(store): task board, approvals, policy rules and audit tables"
 ```
 
 ---
@@ -1353,9 +1351,7 @@ Expected: `10 passed`.
 
 ```bash
 git add src/zento/policy/risk.py src/zento/tools/registry.py src/zento/tools/__init__.py tests/tools/test_registry.py
-git commit -m "feat(tools): risk-classed tool registry with approval queueing and untrusted wrapping
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(tools): risk-classed tool registry with approval queueing and untrusted wrapping"
 ```
 
 ---
@@ -1622,9 +1618,7 @@ Expected: `10 passed` (5 parametrised SSRF cases + 5 others). `test_tools_are_re
 
 ```bash
 git add src/zento/tools/web.py tests/tools/test_web.py
-git commit -m "feat(tools): web search with Tavily/DDG fallback and SSRF-guarded extraction
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(tools): web search with Tavily/DDG fallback and SSRF-guarded extraction"
 ```
 
 ---
@@ -1933,9 +1927,7 @@ Expected: `28 passed`.
 
 ```bash
 git add src/zento/tools/assistant.py src/zento/memory/service.py tests/tools/test_assistant.py
-git commit -m "feat(tools): assistant tools for memory, wakeups, loops, tasks and standing rules
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(tools): assistant tools for memory, wakeups, loops, tasks and standing rules"
 ```
 
 ---
@@ -2116,9 +2108,7 @@ Expected: `5 passed`.
 
 ```bash
 git add src/zento/agents/react.py src/zento/agents/bubbles.py tests/agents/test_react.py
-git commit -m "feat(agents): budgeted ReAct loop and bubble splitter
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(agents): budgeted ReAct loop and bubble splitter"
 ```
 
 ---
@@ -2380,9 +2370,7 @@ Expected: `4 passed`.
 
 ```bash
 git add src/zento/agents/specialists src/zento/agents/spawn.py tests/agents/test_specialists.py
-git commit -m "feat(agents): research and knowledge specialists plus spawn_agent workers
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(agents): research and knowledge specialists plus spawn_agent workers"
 ```
 
 ---
@@ -3006,9 +2994,7 @@ Expected: `11 passed` (1 cycle + 4 parametrised bad-plan cases + 6 graph tests).
 
 ```bash
 git add src/zento/agents/checkpointing.py src/zento/agents/orchestrator_graph.py tests/agents/test_orchestrator_graph.py
-git commit -m "feat(agents): orchestrator graph with parallel Send fan-out, critic and approval gate
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(agents): orchestrator graph with parallel Send fan-out, critic and approval gate"
 ```
 
 ---
@@ -3420,9 +3406,7 @@ Expected: `8 passed`.
 
 ```bash
 git add src/zento/agents/orchestrator.py src/zento/agents/task_dispatch.py src/zento/policy/approvals.py tests/agents/test_task_runner.py
-git commit -m "feat(agents): durable task runner with approval interrupts, progress and limits
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(agents): durable task runner with approval interrupts, progress and limits"
 ```
 
 ---
@@ -3687,9 +3671,7 @@ Expected: `19 passed`.
 
 ```bash
 git add src/zento/policy/approvals.py tests/policy/test_approval_flow.py
-git commit -m "feat(policy): approval buttons, text replies, reminders and expiry
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(policy): approval buttons, text replies, reminders and expiry"
 ```
 
 ---
@@ -3909,9 +3891,7 @@ Expected: all initiative tests pass, including `6 passed` in `test_task_delivery
 
 ```bash
 git add src/zento/initiative/task_delivery.py src/zento/initiative/executor.py tests/initiative/test_task_delivery.py
-git commit -m "feat(initiative): deliver task results with documents; act creates task rows
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(initiative): deliver task results with documents; act creates task rows"
 ```
 
 ---
@@ -4341,9 +4321,7 @@ Expected: `9 passed`.
 
 ```bash
 git add src/zento/agents/conversation.py tests/agents/test_conversation.py
-git commit -m "feat(agents): routed conversation graph with direct tools, tasks and approval replies
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(agents): routed conversation graph with direct tools, tasks and approval replies"
 ```
 
 ---
@@ -4548,9 +4526,7 @@ Expected: `3 passed` in `test_wiring.py`; every `tests/worker` test passes (incl
 
 ```bash
 git add src/zento/agents/wiring.py src/zento/worker/handlers.py tests/agents/test_wiring.py tests/worker
-git commit -m "feat(worker): route turns, buttons, tasks and wakeups through Phase 4 handlers
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(worker): route turns, buttons, tasks and wakeups through Phase 4 handlers"
 ```
 
 ---

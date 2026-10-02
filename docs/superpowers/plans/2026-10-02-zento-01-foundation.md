@@ -143,9 +143,7 @@ Expected: `1 passed`
 
 ```bash
 git add pyproject.toml uv.lock src tests
-git commit -m "chore: reset scaffold, configure deps, pytest and ruff
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "chore: reset scaffold, configure deps, pytest and ruff"
 ```
 
 ---
@@ -473,9 +471,7 @@ Expected: `6 passed`
 
 ```bash
 git add src/zento/config.py src/zento/logging.py .env.example tests/conftest.py tests/test_config.py tests/test_logging.py
-git commit -m "feat(config): settings with all config keys, structlog with secret redaction
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(config): settings with all config keys, structlog with secret redaction"
 ```
 
 ---
@@ -637,9 +633,7 @@ Expected: `22 passed` (16 round-trip cases + 6 tests)
 
 ```bash
 git add src/zento/domain tests/domain
-git commit -m "feat(domain): shared contract types for events, memory, loops, decisions, plans, policy
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(domain): shared contract types for events, memory, loops, decisions, plans, policy"
 ```
 
 ---
@@ -1220,9 +1214,7 @@ Expected: `10 passed`
 
 ```bash
 git add src/zento/store tests/store tests/conftest.py
-git commit -m "feat(store): async engine, UTC datetimes, P1 tables, user/message/outbox/event repos
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(store): async engine, UTC datetimes, P1 tables, user/message/outbox/event repos"
 ```
 
 ---
@@ -1529,9 +1521,7 @@ Expected: `2 passed`. If `test_migrations_match_models` reports a diff, the migr
 
 ```bash
 git add alembic.ini src/zento/migrations src/zento/store/migrate.py tests/store/test_migrations.py
-git commit -m "feat(store): alembic migrations with model/migration drift test
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(store): alembic migrations with model/migration drift test"
 ```
 
 ---
@@ -1958,9 +1948,7 @@ Expected: `7 passed`
 
 ```bash
 git add src/zento/llm tests/fakes tests/llm tests/conftest.py
-git commit -m "feat(llm): tiered model routing, complete(), structured() with JSON fallback; FakeLLM test double
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(llm): tiered model routing, complete(), structured() with JSON fallback; FakeLLM test double"
 ```
 
 ---
@@ -2412,9 +2400,7 @@ Expected: `10 passed`
 
 ```bash
 git add src/zento/channels tests/channels tests/conftest.py
-git commit -m "feat(channels): Channel port, Telegram adapter with splitting/rate limits, fake and console channels
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(channels): Channel port, Telegram adapter with splitting/rate limits, fake and console channels"
 ```
 
 ---
@@ -2944,9 +2930,7 @@ Expected: `9 passed`
 
 ```bash
 git add src/zento/bus tests/bus tests/conftest.py
-git commit -m "feat(bus): EventBus port with in-process and Redis Streams implementations (dedupe, retry, DLQ)
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(bus): EventBus port with in-process and Redis Streams implementations (dedupe, retry, DLQ)"
 ```
 
 ---
@@ -3143,9 +3127,7 @@ Expected: `6 passed`
 
 ```bash
 git add src/zento/channels/outbox_sender.py tests/channels/test_outbox_sender.py
-git commit -m "feat(channels): outbox sender with leasing, backoff and rate-limit deferral
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(channels): outbox sender with leasing, backoff and rate-limit deferral"
 ```
 
 ---
@@ -3436,9 +3418,7 @@ Expected: `7 passed`
 
 ```bash
 git add src/zento/worker tests/worker tests/conftest.py
-git commit -m "feat(worker): per-user serialised event dispatch, handler registry, LLM fallback message
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(worker): per-user serialised event dispatch, handler registry, LLM fallback message"
 ```
 
 ---
@@ -3747,9 +3727,7 @@ Expected: `9 passed`
 
 ```bash
 git add src/zento/agents src/zento/worker/handlers.py tests/agents
-git commit -m "feat(agents): Zento persona and simple chat turn with working memory via the outbox
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(agents): Zento persona and simple chat turn with working memory via the outbox"
 ```
 
 ---
@@ -4215,9 +4193,7 @@ Expected: `11 passed`
 
 ```bash
 git add src/zento/channels/telegram_updates.py src/zento/channels/telegram_poller.py src/zento/api tests/api tests/channels/test_telegram_poller.py
-git commit -m "feat(api): telegram webhook + poller normalising updates to events, health endpoints
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(api): telegram webhook + poller normalising updates to events, health endpoints"
 ```
 
 ---
@@ -4434,9 +4410,7 @@ Expected: all tests pass (≈ 106); `All checks passed!`
 
 ```bash
 git add src/zento/cli.py tests/test_cli.py
-git commit -m "feat(cli): dev, api, worker, chat and migrate entrypoints
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(cli): dev, api, worker, chat and migrate entrypoints"
 ```
 
 ---

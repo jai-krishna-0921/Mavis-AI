@@ -308,9 +308,7 @@ Expected: 5 passed
 
 ```bash
 git add pyproject.toml uv.lock src/zento/memory/tokens.py src/zento/memory/embeddings.py tests/memory/
-git commit -m "feat(memory): embedder port with lazy fastembed and test fakes
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(memory): embedder port with lazy fastembed and test fakes"
 ```
 
 ---
@@ -548,9 +546,7 @@ Expected: 6 passed
 
 ```bash
 git add src/zento/memory/vector.py tests/memory/conftest.py tests/memory/test_vector.py
-git commit -m "feat(memory): qdrant vector store with deterministic ids and user scoping
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(memory): qdrant vector store with deterministic ids and user scoping"
 ```
 
 ---
@@ -1085,9 +1081,7 @@ Expected: 14 passed
 
 ```bash
 git add src/zento/memory/names.py src/zento/memory/graph.py src/zento/store/models.py src/zento/migrations tests/memory/
-git commit -m "feat(memory): bi-temporal SQL graph store with fixed vocabulary
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(memory): bi-temporal SQL graph store with fixed vocabulary"
 ```
 
 ---
@@ -1382,9 +1376,7 @@ Expected: 9 passed
 
 ```bash
 git add src/zento/memory/neo4j_graph.py tests/memory/test_graph_neo4j_queries.py
-git commit -m "feat(memory): neo4j graph store with sanitised cypher builders
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(memory): neo4j graph store with sanitised cypher builders"
 ```
 
 ---
@@ -1621,9 +1613,7 @@ Expected: 7 passed
 
 ```bash
 git add src/zento/memory/extractor.py tests/memory/test_extractor.py
-git commit -m "feat(memory): structured extractor with tz-aware dates and untrusted wrapping
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(memory): structured extractor with tz-aware dates and untrusted wrapping"
 ```
 
 ---
@@ -1812,9 +1802,7 @@ Expected: 5 passed
 
 ```bash
 git add src/zento/memory/resolver.py tests/memory/test_resolver.py
-git commit -m "feat(memory): entity resolution via aliases and same-label similarity
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(memory): entity resolution via aliases and same-label similarity"
 ```
 
 ---
@@ -2048,9 +2036,7 @@ Expected: 6 passed
 
 ```bash
 git add src/zento/memory/profile.py src/zento/store/repo/profile.py tests/memory/test_profile.py
-git commit -m "feat(memory): versioned profile card with token-budgeted rendering
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(memory): versioned profile card with token-budgeted rendering"
 ```
 
 ---
@@ -2225,9 +2211,7 @@ Expected: 3 passed
 
 ```bash
 git add src/zento/store/repo/summaries.py src/zento/memory/summaries.py tests/memory/test_summaries.py
-git commit -m "feat(memory): rolling summaries for conversation outside the working window
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(memory): rolling summaries for conversation outside the working window"
 ```
 
 ---
@@ -2496,9 +2480,7 @@ Expected: 7 passed, or 5 passed + 2 skipped if pyahocorasick is not installed
 
 ```bash
 git add src/zento/memory/spotter.py src/zento/memory/recall.py tests/memory/test_spotter.py tests/memory/test_recall.py
-git commit -m "feat(memory): aho-corasick entity spotting and budgeted recall assembly
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(memory): aho-corasick entity spotting and budgeted recall assembly"
 ```
 
 ---
@@ -2857,9 +2839,7 @@ Expected: 12 passed (7 service + 3 assembly + resilience + slow latency)
 
 ```bash
 git add src/zento/memory/service.py tests/memory/
-git commit -m "feat(memory): MemoryService with parallel recall, learn hooks, describe and forget
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(memory): MemoryService with parallel recall, learn hooks, describe and forget"
 ```
 
 ---
@@ -3039,9 +3019,7 @@ Expected: 4 passed
 
 ```bash
 git add src/zento/memory/consolidate.py tests/memory/test_consolidate.py
-git commit -m "feat(memory): consolidation job rewrites profile card and merges duplicates
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(memory): consolidation job rewrites profile card and merges duplicates"
 ```
 
 ---
@@ -3299,9 +3277,7 @@ Expected: the second reply mentions Jawahar is your friend helping with intervie
 
 ```bash
 git add src/zento/memory/jobs.py src/zento/worker/handlers.py src/zento/agents/simple_turn.py tests/memory/test_jobs.py tests/agents/test_simple_turn_memory.py
-git commit -m "feat(memory): learn/consolidate jobs and recall-aware conversation turns
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(memory): learn/consolidate jobs and recall-aware conversation turns"
 ```
 
 ---

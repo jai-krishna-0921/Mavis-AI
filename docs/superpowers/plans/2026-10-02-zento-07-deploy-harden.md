@@ -369,9 +369,7 @@ Expected: whole suite green (existing conversation tests still pass because `run
 git add src/zento/store/models.py src/zento/store/repo/metrics.py src/zento/llm/metrics.py src/zento/llm/models.py \
   src/zento/agents/conversation.py src/zento/migrations/versions/0007_turn_metrics.py \
   tests/store/test_metrics_repo.py tests/llm/test_llm_metrics.py
-git commit -m "feat(metrics): record turn latency/route and LLM error counts
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(metrics): record turn latency/route and LLM error counts"
 ```
 
 ---
@@ -623,9 +621,7 @@ Expected: whole suite green.
 ```bash
 git add src/zento/llm/tracing.py src/zento/llm/models.py src/zento/worker/handlers.py src/zento/agents \
   src/zento/initiative src/zento/memory src/zento/cli.py tests/llm/test_tracing.py tests/test_no_raw_callbacks.py
-git commit -m "feat(observability): one Langfuse trace per event with session, user and decision tags
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(observability): one Langfuse trace per event with session, user and decision tags"
 ```
 
 ---
@@ -831,9 +827,7 @@ Expected: `3 passed`.
 
 ```bash
 git add src/zento/api/health_checks.py src/zento/api/routes/health.py tests/api/test_health_ready.py
-git commit -m "feat(health): readiness probes for postgres, redis, neo4j, qdrant, ollama with timeouts
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(health): readiness probes for postgres, redis, neo4j, qdrant, ollama with timeouts"
 ```
 
 ---
@@ -1108,9 +1102,7 @@ Expected: `5 passed`.
 
 ```bash
 git add src/zento/api/metrics.py src/zento/api/routes/admin.py src/zento/api/app.py tests/api/test_admin.py
-git commit -m "feat(admin): basic-auth metrics, composio slug verification and memory dump endpoints
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(admin): basic-auth metrics, composio slug verification and memory dump endpoints"
 ```
 
 ---
@@ -1307,9 +1299,7 @@ Expected: usage line listing `{set-webhook,delete-webhook,info}`.
 ```bash
 git add src/zento/channels/telegram_webhook.py src/zento/cli_telegram.py src/zento/cli.py src/zento/api/app.py \
   tests/channels/test_telegram_webhook.py
-git commit -m "feat(telegram): webhook mode on api startup and telegram CLI
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(telegram): webhook mode on api startup and telegram CLI"
 ```
 
 ---
@@ -1531,9 +1521,7 @@ Expected: `No known vulnerabilities found`. If vulnerabilities are listed, bump 
 
 ```bash
 git add src/zento/api/ratelimit.py src/zento/api/app.py tests/api/test_security.py tests/test_redaction.py uv.lock pyproject.toml
-git commit -m "feat(security): webhook rate limiting and hardening tests (secret token, allowlist, redaction)
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(security): webhook rate limiting and hardening tests (secret token, allowlist, redaction)"
 ```
 
 ---
@@ -1626,9 +1614,7 @@ Expected: `10001`; zento usage text listing `api worker timer dev ...`; a `model
 
 ```bash
 git add Dockerfile .dockerignore
-git commit -m "build: multi-stage non-root image with baked embedding model
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "build: multi-stage non-root image with baked embedding model"
 ```
 
 ---
@@ -1850,9 +1836,7 @@ Expected: JSON with `"ok": true` and every check `"ok"` (ollama `"ok"` if `OLLAM
 
 ```bash
 git add docker-compose.yml docker-compose.prod.yml Caddyfile .env.example
-git commit -m "build: compose stack with postgres, redis, neo4j, qdrant and caddy prod profile
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "build: compose stack with postgres, redis, neo4j, qdrant and caddy prod profile"
 ```
 
 ---
@@ -2321,9 +2305,7 @@ Expected: ends with `[zento] smoke OK` and `[zento] done: https://<ip-dashes>.ni
 
 ```bash
 git add deploy .gitignore
-git commit -m "feat(deploy): idempotent EC2 provisioning, secrets manager env, push/down/logs/ssh/smoke scripts
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(deploy): idempotent EC2 provisioning, secrets manager env, push/down/logs/ssh/smoke scripts"
 ```
 
 ---
@@ -2882,9 +2864,7 @@ Expected: a line like `[PASS] routing     11/12 = 92% (threshold 85%, 14.2s)` fo
 
 ```bash
 git add pyproject.toml uv.lock src/zento/evals src/zento/cli.py evals tests/evals
-git commit -m "feat(evals): golden suites for extraction, triage, routing, persona with zento eval
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "feat(evals): golden suites for extraction, triage, routing, persona with zento eval"
 ```
 
 ---
@@ -3252,9 +3232,7 @@ If a step fails, the printed `FAIL:` line names the broken stage; fix the owning
 
 ```bash
 git add tests/fakes tests/e2e scripts/smoke.py pyproject.toml
-git commit -m "test(e2e): in-process demo-flow smoke with scripted LLM and recording bus
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "test(e2e): in-process demo-flow smoke with scripted LLM and recording bus"
 ```
 
 ---
@@ -3383,9 +3361,7 @@ Expected: every line starts with `ok`.
 
 ```bash
 git add README.md
-git commit -m "docs: README with architecture, keys, local/docker/aws runbooks and demo script
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "docs: README with architecture, keys, local/docker/aws runbooks and demo script"
 ```
 
 ---
