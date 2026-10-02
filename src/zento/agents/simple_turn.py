@@ -5,18 +5,25 @@ Replaced by agents/conversation.py in Phase 4 (registered with replace=True).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 
+import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from zento.agents import persona
+from zento.bus import get_bus
 from zento.channels import get_channel
-from zento.domain.events import Event
+from zento.domain.events import Event, Job, JobKind
 from zento.domain.messages import Outbound, Role
 from zento.llm import models as llm
+from zento.memory.service import get_memory
 from zento.store.db import Session, utcnow
 from zento.store.models import Message
 from zento.store.repo import messages, outbox, users
+from zento.store.repo import summaries as summaries_repo
+
+log = structlog.get_logger(__name__)
 
 HISTORY_LIMIT = 20
 START_HINT = (
@@ -38,6 +45,36 @@ def _to_langchain(history: list[Message]) -> list[BaseMessage]:
     return [HumanMessage(m.content) if m.role == Role.USER.value else AIMessage(m.content) for m in history]
 
 
+async def build_context(user_id: int, text: str, hint: str = "") -> str:
+    """Hint + rolling summary + recalled memory for the system prompt. Never raises."""
+    parts = [hint] if hint else []
+    try:
+        memory = get_memory()
+        recall, summary = await asyncio.gather(memory.recall(user_id, text), summaries_repo.latest(user_id))
+        if summary:
+            parts.append(f"## Earlier in our conversation\n{summary.summary}")
+        parts.append(recall.render())
+    except Exception:
+        log.warning("simple_turn.recall_failed", exc_info=True)
+    return "\n\n".join(p for p in parts if p.strip())
+
+
+def _previous_reply(history: list[Message]) -> str | None:
+    """The last assistant message before the most recent user message."""
+    last_user = max((i for i, m in enumerate(history) if m.role == Role.USER.value), default=None)
+    if last_user is None:
+        return None
+    return next((m.content for m in reversed(history[:last_user]) if m.role == Role.ASSISTANT.value), None)
+
+
+async def enqueue_learn(user_id: int, event: Event, text: str, previous_reply: str | None) -> None:
+    convo = f"Mavis: {previous_reply}\nUser: {text}" if previous_reply else text
+    await get_bus().enqueue(Job(
+        id=f"learn:{event.id}", user_id=user_id, kind=JobKind.LEARN,
+        payload={"text": convo, "source_ref": event.id, "trust": event.trust.value, "conversation": True},
+    ))
+
+
 async def run_turn(event: Event) -> None:
     user = await users.get(event.user_id)
     text = user_text(event)
@@ -47,6 +84,10 @@ async def run_turn(event: Event) -> None:
     enqueued = await outbox.texts_with_dedupe_prefix(f"reply:{event.id}:")
     if enqueued:
         await messages.log(user.id, Role.ASSISTANT, "\n\n".join(enqueued), event_id=f"reply:{event.id}")
+        # The first attempt may have died before enqueuing LEARN; the job id is deterministic and the
+        # handler idempotent, so enqueueing again is safe.
+        history = await messages.recent(user.id, HISTORY_LIMIT)
+        await enqueue_learn(user.id, event, text, _previous_reply(history))
         return
 
     if user.telegram_chat_id is not None:
@@ -55,7 +96,9 @@ async def run_turn(event: Event) -> None:
 
     history = await messages.recent(user.id, HISTORY_LIMIT)
     hint = START_HINT if event.payload.get("command") == "start" else ""
-    prompt: list[BaseMessage] = [SystemMessage(persona.system_prompt(user, utcnow(), context=hint))]
+    previous_reply = _previous_reply(history)
+    context = await build_context(user.id, text, hint)
+    prompt: list[BaseMessage] = [SystemMessage(persona.system_prompt(user, utcnow(), context=context))]
     prompt += _to_langchain(history)
 
     reply = await llm.complete(prompt, llm.Tier.FAST, name="simple_turn")
@@ -67,3 +110,4 @@ async def run_turn(event: Event) -> None:
             await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=key))
         await s.commit()
     await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles), event_id=f"reply:{event.id}")
+    await enqueue_learn(user.id, event, text, previous_reply)
