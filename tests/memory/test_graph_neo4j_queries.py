@@ -141,7 +141,10 @@ async def test_merge_repoints_then_dedupes():
             return [{"key": p["key"]}]
         if query == q.Q_DROP_EDGES:
             return [
-                {"t": "WORKS_AT", "outgoing": True, "other": "Organization:siemens", "props": {"statement": "s"}}
+                {
+                    "t": "WORKS_AT", "outgoing": True,
+                    "other": "Organization:siemens", "props": {"statement": "s"},
+                }
             ]
         if query == q.Q_CURRENT_EDGES:
             return [
