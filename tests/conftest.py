@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -141,3 +142,24 @@ async def memory(graph, vector, embedder):
     set_memory(svc)
     yield svc
     set_memory(None)
+
+
+class _Clock:
+    def __init__(self) -> None:
+        # Sunday 27 Sep 2026, 13:30 IST, the opening of the reference transcript.
+        self.t = datetime(2026, 9, 27, 8, 0, tzinfo=UTC)
+
+    def set(self, t: datetime) -> None:
+        self.t = t
+
+    def advance(self, **kwargs: float) -> None:
+        self.t += timedelta(**kwargs)
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    from mavis.domain import timeutil
+
+    c = _Clock()
+    monkeypatch.setattr(timeutil, "_clock", lambda: c.t)
+    return c

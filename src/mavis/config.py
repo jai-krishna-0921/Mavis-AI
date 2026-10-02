@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     quiet_start: int = 23
     quiet_end: int = 7
     demo_time_scale: float = 1.0
+    onboarding_quiet_hours: float = 4.0  # nudge if the user hasn't answered a question after this long
+    morning_checkin_time: str = "08:30"  # default local time for the morning check-in routine
+    timer_interval_s: float = 5.0  # how often the timer role claims due wakeups
 
     # --- admin ----------------------------------------------------------------
     admin_user: str = "admin"
