@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from zento.domain.loops import Loop
 from zento.domain.memory import RecallContext
+from zento.memory.extractor import wrap_untrusted
 from zento.memory.graph import GraphStore
 from zento.memory.spotter import SpotterCache
 from zento.memory.tokens import estimate_tokens
@@ -106,6 +107,11 @@ async def recall(
     async def _graph() -> list[str]:
         return await graph.neighborhood(user_id, names) if names else []
 
+    async def _episodes() -> list[str]:
+        hits = await vector.search_with_kind(user_id, text)
+        # Third-party text (email, etc.) is stored as kind="signal"; it must never reach a prompt raw.
+        return [wrap_untrusted(t, source="memory") if kind == "signal" else t for t, kind in hits]
+
     async def _loops() -> list[str]:
         if loops is None:
             return []
@@ -124,7 +130,7 @@ async def recall(
 
     facts, episodes, loop_lines = await asyncio.gather(
         _safe("graph", _graph(), []),
-        _safe("vector", vector.search(user_id, text), []),
+        _safe("vector", _episodes(), []),
         _safe("loops", _loops(), []),
     )
     return assemble(profile, loop_lines, facts, episodes, budget)

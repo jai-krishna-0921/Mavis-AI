@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
+
+import structlog
 
 from zento.config import get_settings
 from zento.domain.events import Trust
@@ -20,7 +21,7 @@ from zento.memory.vector import QdrantVectorStore, VectorStore
 from zento.store.repo import profile as profile_repo
 from zento.store.repo import users
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 ExtractionHook = Callable[[int, Extraction, str], Awaitable[None]]
 MIN_EPISODE_WORDS = 4
@@ -64,7 +65,7 @@ class MemoryService:
             card = await profile_repo.get(user_id)
             profile, tz = card.render(), user.timezone
         except Exception:
-            log.warning("recall: setup failed; degrading to empty", exc_info=True)
+            log.warning("memory.recall_setup_failed", exc_info=True)
             return RecallContext()
         return await recall_mod.recall(
             user_id,
@@ -118,7 +119,7 @@ class MemoryService:
             try:
                 await hook(user_id, final, source_ref)
             except Exception:
-                log.error("memory: on_extraction hook %r failed", hook, exc_info=True)
+                log.error("memory.hook_failed", hook=repr(hook), exc_info=True)
         return final
 
     # --- user control ------------------------------------------------------------
@@ -135,6 +136,8 @@ class MemoryService:
         return "\n\n".join(parts) or "I don't know much about you yet."
 
     async def forget(self, user_id: int, needle: str) -> int:
+        if not needle.strip():
+            return 0
         await self.init()
         removed = await self.graph.forget(user_id, needle) + await self.vector.forget(user_id, needle)
         card, changed = (await profile_repo.get(user_id)).remove_matching(needle)
