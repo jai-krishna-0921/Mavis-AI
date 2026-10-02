@@ -126,3 +126,28 @@ async def test_three_ignored_checkins_skip_sending_but_reschedule(user, clock, r
         await s.commit()
     await routines.run(user, {"routine": MORNING_ROUTINE, "loop_id": None})  # fake_llm empty would raise
     assert len(await wakeups.pending(user.id, WakeupKind.ROUTINE)) == 1
+
+
+async def test_morning_hooks_run_before_the_brief_and_cannot_block_it(user, clock, recording_bus, fake_memory,
+                                                                       fake_llm):
+    clock.set(datetime(2026, 9, 28, 3, 0, tzinfo=UTC))
+    routines, loops, wakeups = build(recording_bus, fake_memory)
+    routine = await loops.upsert(user.id, LoopUpsert(kind=LoopKind.ROUTINE, title=MORNING_TITLE))
+    seen = []
+
+    async def bad(user_id):
+        raise RuntimeError("boom")
+
+    async def good(user_id):
+        seen.append(user_id)
+
+    routines_mod.clear_morning_hooks()
+    routines_mod.register_morning_hook(bad)
+    routines_mod.register_morning_hook(good)
+    try:
+        fake_llm.push_structured(ComposedMessage(send=True, messages=["Morning!"]))
+        await routines.run(user, {"routine": MORNING_ROUTINE, "loop_id": routine.id})
+    finally:
+        routines_mod.clear_morning_hooks()
+    assert seen == [user.id]
+    assert await wakeups.pending(user.id, WakeupKind.ROUTINE)

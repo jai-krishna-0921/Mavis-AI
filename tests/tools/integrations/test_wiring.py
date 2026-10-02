@@ -35,6 +35,8 @@ def test_register_integrations_wires_everything():
     assert hooks.ENRICHERS == [triage.enrich]
     assert hooks.DECISION_POLICIES == [triage.apply_policy]
     assert sorted(s.name for s in routines.brief_sources()) == ["calendar", "inbox"]
+    assert runner._startup_hooks == [wiring.heal_all_poll_chains]
+    assert routines._morning_hooks == [wiring.heal_poll_chains]
 
 
 def test_register_survives_registry_reset():
@@ -237,3 +239,27 @@ async def test_system_wakeups_ignore_demo_time_scale(db, user, clock, settings, 
     poll = await wiring.wakeup_schedule(user.id, at, "gmail", POLL_KIND)
     due = {w.id: w.due_at for w in await WakeupService().pending(user.id)}
     assert due[check] == at and due[poll] == at
+
+
+async def test_heal_rearms_missing_poll_chains_for_every_user(db, user, clock):
+    clock.set(NOW)
+    other, _ = await users.get_or_create_by_chat(222, "Sam")
+    await users.update_state(user.id, {"polling": {"gmail": True, "googlecalendar": False}})
+    await users.update_state(other.id, {"polling": {"googlecalendar": True}})
+    await wiring.heal_all_poll_chains()
+    await wiring.heal_all_poll_chains()  # idempotent: the pending chain absorbs the second ask
+    svc = WakeupService()
+    assert [w.reason for w in await svc.pending(user.id, WakeupKind.SYSTEM_POLL)] == ["gmail"]
+    assert [w.reason for w in await svc.pending(other.id, WakeupKind.SYSTEM_POLL)] == ["googlecalendar"]
+    # a chain that is still alive is left alone by the morning hook
+    await wiring.heal_poll_chains(user.id)
+    assert len(await svc.pending(user.id, WakeupKind.SYSTEM_POLL)) == 1
+
+
+async def test_connection_checks_pending_sees_scheduled_checks(db, user, clock):
+    clock.set(NOW)
+    assert await wiring.connection_checks_pending(user.id, 5) is False
+    at = timeutil.now() + timedelta(minutes=1)
+    await wiring.wakeup_schedule(user.id, at, "5", "system_connection_check")
+    assert await wiring.connection_checks_pending(user.id, 5) is True
+    assert await wiring.connection_checks_pending(user.id, 6) is False

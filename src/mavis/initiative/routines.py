@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import statistics
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Protocol
@@ -62,6 +63,20 @@ def brief_sources() -> list[BriefSource]:
     return list(_sources)
 
 
+MorningHook = Callable[[int], Awaitable[None]]
+_morning_hooks: list[MorningHook] = []
+
+
+def register_morning_hook(fn: MorningHook) -> None:
+    """Low-frequency maintenance that rides on the daily check-in (e.g. re-arming poll chains)."""
+    if fn not in _morning_hooks:
+        _morning_hooks.append(fn)
+
+
+def clear_morning_hooks() -> None:
+    _morning_hooks.clear()
+
+
 def _parse_hhmm(value: str) -> time:
     hh, mm = value.split(":")
     return time(int(hh), int(mm))
@@ -92,6 +107,11 @@ class Routines:
 
     async def morning_checkin(self, user, loop_id: int | None) -> None:
         failed = False
+        for hook in list(_morning_hooks):
+            try:
+                await hook(user.id)
+            except Exception:  # noqa: BLE001 - maintenance must never block the check-in
+                log.exception("routines.morning_hook_failed", user=user.id)
         try:
             await self._send_morning(user)
         except BaseException:

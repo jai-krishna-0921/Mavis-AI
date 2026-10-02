@@ -10,6 +10,15 @@ from mavis.domain.integrations import ConnectionState, UserRef
 from mavis.domain.policy import Capability
 from mavis.tools.integrations.base import IntegrationProvider
 
+_AUTH_MARKERS = ("answered 401", "answered 403", "unauthor", "invalid_grant", "token expired",
+                 "expired token", "revoked", "reauthor")
+
+
+def is_auth_error(error: str | None) -> bool:
+    """Does a provider error text look like the account's token no longer works?"""
+    text = (error or "").lower()
+    return any(m in text for m in _AUTH_MARKERS)
+
 
 class ConnectionCache:
     def __init__(
@@ -43,5 +52,7 @@ class ConnectionCache:
     async def ensure(
         self, user_id: int, capability: Capability, reason: str, *, revoked: bool = False
     ) -> None:
-        if not await self.is_active(user_id, capability):
-            raise ConnectionRequired(capability, reason, revoked=revoked)
+        state = (await self.status(user_id)).get(capability.value)
+        if state is not ConnectionState.ACTIVE:
+            # FAILED means the account existed and stopped working: ask to reconnect, not to connect.
+            raise ConnectionRequired(capability, reason, revoked=revoked or state is ConnectionState.FAILED)
