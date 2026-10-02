@@ -8,7 +8,7 @@ from collections.abc import Callable
 
 _FENCE = re.compile(r"^\s*```")
 _HR = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$")
-_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*$")
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _BULLET = re.compile(r"^(\s*)[-*+]\s+(.*)$")
@@ -19,6 +19,8 @@ _BOLD = re.compile(r"(?<![\w*])\*\*(?=\S)(.+?)(?<=\S)\*\*(?![\w*])|(?<![\w_])__(
 _ITALIC_STAR = re.compile(r"(?<![\w*])\*(?=[^\s*])([^*\n]+?)(?<=[^\s*])\*(?![\w*])")
 _ITALIC_UNDER = re.compile(r"(?<![\w_])_(?=[^\s_])([^_\n]+?)(?<=[^\s_])_(?![\w_])")
 _SLOT = re.compile("\x00(\\d+)\x00")
+_URL = re.compile(r"https?://[^\s<>`]+")
+_KEEP = re.compile("\x01(\\d+)\x01")
 _TAG = re.compile(r"<(/?)(b|i|code|pre|a)(?:\s[^>]*)?>")
 
 
@@ -33,12 +35,32 @@ def sanitize_typography(text: str) -> str:
     return re.sub(r",[ \t]{2,}", ", ", text)
 
 
+def _sanitize_line(line: str) -> str:
+    """Typography fixes that leave inline code spans untouched."""
+    spans: list[str] = []
+
+    def hold(m: re.Match[str]) -> str:
+        spans.append(m.group(0))
+        return f"\x01{len(spans) - 1}\x01"
+
+    out = sanitize_typography(_CODE.sub(hold, line.replace("\x01", "")))
+    return _KEEP.sub(lambda m: spans[int(m.group(1))], out)
+
+
 def _strip_inline(text: str) -> str:
-    text = _CODE.sub(r"\1", text)
+    keep: list[str] = []
+
+    def hold(m: re.Match[str]) -> str:
+        keep.append(m.group(0))
+        return f"\x01{len(keep) - 1}\x01"
+
+    text = _CODE.sub(r"\1", text.replace("\x01", ""))
     text = _LINK.sub(lambda m: f"{m.group(1)} ({m.group(2)})", text)
+    text = _URL.sub(hold, text)
     text = _BOLD.sub(lambda m: m.group(1) or m.group(2), text)
     text = _ITALIC_STAR.sub(r"\1", text)
-    return _ITALIC_UNDER.sub(r"\1", text)
+    text = _ITALIC_UNDER.sub(r"\1", text)
+    return _KEEP.sub(lambda m: keep[int(m.group(1))], text)
 
 
 def _html_inline(text: str) -> str:
@@ -52,10 +74,12 @@ def _html_inline(text: str) -> str:
     text = _CODE.sub(lambda m: hold(f"<code>{html.escape(m.group(1), quote=False)}</code>"), text)
     text = _LINK.sub(
         lambda m: hold(
-            f'<a href="{html.escape(m.group(2), quote=True)}">{html.escape(m.group(1), quote=False)}</a>'
+            f'<a href="{html.escape(m.group(2), quote=True)}">'
+            f"{_SLOT.sub(lambda s: slots[int(s.group(1))], html.escape(m.group(1), quote=False))}</a>"
         ),
         text,
     )
+    text = _URL.sub(lambda m: hold(html.escape(m.group(0), quote=False)), text)
     text = html.escape(text, quote=False)
     text = _BOLD.sub(lambda m: f"<b>{m.group(1) or m.group(2)}</b>", text)
     text = _ITALIC_STAR.sub(r"<i>\1</i>", text)
@@ -78,17 +102,18 @@ def _render(md: str, *, as_html: bool) -> str:
     inline: Callable[[str], str] = _html_inline if as_html else _strip_inline
     out: list[str] = []
     code: list[str] | None = None
-    for line in sanitize_typography(md).replace("\r\n", "\n").split("\n"):
-        if _FENCE.match(line):
+    for raw in md.replace("\r\n", "\n").split("\n"):
+        if code is not None and not _FENCE.match(raw):
+            code.append(raw)
+            continue
+        if _FENCE.match(raw):
             if code is None:
                 code = []
             else:
                 out.append(_fenced(code, as_html))
                 code = None
             continue
-        if code is not None:
-            code.append(line)
-            continue
+        line = _sanitize_line(raw)
         if _HR.match(line) or (_TABLE_SEP.match(line) and "|" in line):
             continue
         if m := _HEADING.match(line):
@@ -117,6 +142,6 @@ def to_plain(markdown: str) -> str:
 
 def to_telegram_html(markdown: str) -> str:
     rendered = _render(markdown, as_html=True)
-    if _balanced(rendered):
+    if _balanced(rendered) and "\x00" not in rendered:
         return rendered
-    return html.escape(to_plain(markdown), quote=False)
+    return html.escape(to_plain(markdown).replace("\x00", ""), quote=False)

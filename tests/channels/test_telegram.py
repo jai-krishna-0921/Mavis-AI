@@ -14,6 +14,7 @@ class StubBot:
         self.raise_on_send: Exception | None = None
         self._n = 0
         self.fail_html = False
+        self.max_len: int | None = None
         self.parse_modes: list[str | None] = []
         self.previews: list[bool | None] = []
 
@@ -21,15 +22,17 @@ class StubBot:
         self.calls.append(("initialize",))
 
     async def send_message(
-        self, chat_id, text, reply_markup=None, parse_mode=None, disable_web_page_preview=None
+        self, chat_id, text, reply_markup=None, parse_mode=None, link_preview_options=None
     ):
         if self.raise_on_send:
             raise self.raise_on_send
+        if self.max_len is not None and len(text) > self.max_len:
+            raise BadRequest("Message is too long")
         if self.fail_html and parse_mode == "HTML":
             raise BadRequest("Can't parse entities: unsupported start tag")
         self._n += 1
         self.parse_modes.append(parse_mode)
-        self.previews.append(disable_web_page_preview)
+        self.previews.append(link_preview_options.is_disabled)
         self.calls.append(("message", chat_id, text, reply_markup))
         return SimpleNamespace(message_id=self._n)
 
@@ -102,3 +105,19 @@ async def test_other_bad_request_is_not_swallowed() -> None:
     bot.raise_on_send = BadRequest("Chat not found")
     with pytest.raises(BadRequest):
         await TelegramChannel("token", bot=bot).send_text(5, "hi")
+
+
+async def test_expanded_html_over_limit_is_resplit() -> None:
+    bot = StubBot()
+    text = "\n".join(["<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"] * 55)  # ~3.6k raw
+    ids = await TelegramChannel("token", bot=bot).send_text(5, text[:3500])
+    msgs = [c[2] for c in bot.calls if c[0] == "message"]
+    assert len(ids) >= 2 and all(len(m) <= 4096 for m in msgs)
+
+
+async def test_too_long_bad_request_resplits() -> None:
+    bot = StubBot()
+    bot.max_len = 100
+    ids = await TelegramChannel("token", bot=bot).send_text(5, "word " * 60)
+    assert len(ids) >= 3
+    assert all(len(c[2]) <= 100 for c in bot.calls if c[0] == "message")
