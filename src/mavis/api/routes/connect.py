@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
 
@@ -9,9 +11,14 @@ from mavis.bus import get_bus
 from mavis.bus.base import EventBus
 from mavis.domain import timeutil
 from mavis.domain.events import Job, JobKind
+from mavis.domain.integrations import PendingStatus
 from mavis.store.repo import connections
+from mavis.tools.integrations.connect_flow import PENDING_TTL
+from mavis.worker.locks import claim
 
 router = APIRouter()
+
+THROTTLE_S = 10
 
 _PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Connected</title>
@@ -26,9 +33,15 @@ async def connect_callback(p: str | None = None, bus: EventBus = Depends(get_bus
     pending_id = int(p) if p is not None and p.isascii() and p.isdigit() else None
     if pending_id is not None:
         pending = await connections.get_pending(pending_id)
-        if pending is not None:
-            await bus.enqueue(Job(
-                id=f"conncheck:{pending_id}:{int(timeutil.now().timestamp()) // 10}",
-                user_id=pending.user_id, kind=JobKind.CONNECTION_CHECK, payload={"pending_id": pending_id},
-            ))
+        if pending is not None and pending.status == PendingStatus.PENDING.value:
+            created = pending.created_at
+            created = created if created.tzinfo else created.replace(tzinfo=UTC)
+            now = timeutil.now()
+            # Public endpoint: at most one check per pending per window.
+            if now - created <= PENDING_TTL and await claim(f"conncheck:{pending_id}", THROTTLE_S):
+                await bus.enqueue(Job(
+                    id=f"conncheck:{pending_id}:{int(now.timestamp()) // THROTTLE_S}",
+                    user_id=pending.user_id, kind=JobKind.CONNECTION_CHECK,
+                    payload={"pending_id": pending_id},
+                ))
     return HTMLResponse(_PAGE)

@@ -118,3 +118,38 @@ def test_poller_and_webhook_produce_identical_email_events():
     assert (polled.id, polled.type, polled.payload, polled.trust) == (
         pushed.id, pushed.type, pushed.payload, pushed.trust
     )
+
+
+async def test_transient_status_error_keeps_chain_alive(provider, cache, fake_bus, state, rec):
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    provider.results["mail.search"] = ToolResult(ok=True, data={"messages": [RAW]})
+    await state.update(1, {"polling": {"gmail": True}})
+    real = provider.status
+    calls = {"n": 0}
+
+    async def flaky(user):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return await real(user)
+
+    provider.status = flaky
+    poller = make_poller(provider, cache, fake_bus, state, rec)
+    assert await poller.poll(1, Capability.GMAIL) == 0
+    assert rec.scheduled == [(1, NOW + POLL_INTERVAL, "gmail", POLL_KIND)]
+    assert await poller.poll(1, Capability.GMAIL) == 1
+    assert len(rec.scheduled) == 2
+
+
+async def test_gmail_cursor_ignores_missing_timestamp_and_clamps(provider, cache, fake_bus, state, rec):
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    future = dict(RAW, messageId="m2", messageTimestamp="2026-10-05T09:00:00Z")
+    nots = {k: v for k, v in RAW.items() if k != "messageTimestamp"} | {"messageId": "m3"}
+    provider.results["mail.search"] = ToolResult(ok=True, data={"messages": [nots]})
+    await state.update(1, {"polling": {"gmail": True}})
+    poller = make_poller(provider, cache, fake_bus, state, rec)
+    await poller.poll(1, Capability.GMAIL)
+    assert (await state.get(1))["cursors"]["gmail_after"] == int((NOW - timedelta(minutes=10)).timestamp())
+    provider.results["mail.search"] = ToolResult(ok=True, data={"messages": [future]})
+    await poller.poll(1, Capability.GMAIL)
+    assert (await state.get(1))["cursors"]["gmail_after"] == int(NOW.timestamp())
