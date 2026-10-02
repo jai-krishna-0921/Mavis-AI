@@ -6,14 +6,13 @@ Replaced by agents/conversation.py in Phase 4 (registered with replace=True).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from mavis.agents import clarify, commands, persona
 from mavis.bus import get_bus
-from mavis.channels import get_channel
+from mavis.channels import presence
 from mavis.domain.events import Event, Job, JobKind
 from mavis.domain.messages import Outbound, Role
 from mavis.initiative import wiring
@@ -139,24 +138,21 @@ async def run_turn(event: Event) -> None:
         await enqueue_learn(user.id, event, text, previous, _clarified_request(history))
         return
 
-    if user.telegram_chat_id is not None:
-        with contextlib.suppress(Exception):
-            await get_channel().send_typing(user.telegram_chat_id)
-
     hint = START_HINT if event.payload.get("command") == "start" else ""
     previous_reply = previous
-    context = await build_context(user.id, text, hint)
-    prompt: list[BaseMessage] = [SystemMessage(persona.system_prompt(user, utcnow(), context=context))]
-    prompt += _to_langchain(history)
+    async with presence.typing(user.telegram_chat_id):  # refreshed until the reply is queued
+        context = await build_context(user.id, text, hint)
+        prompt: list[BaseMessage] = [SystemMessage(persona.system_prompt(user, utcnow(), context=context))]
+        prompt += _to_langchain(history)
 
-    reply = await llm.complete(prompt, llm.Tier.FAST, name="simple_turn")
-    bubbles = persona.split_bubbles(reply) or [reply]
+        reply = await llm.complete(prompt, llm.Tier.FAST, name="simple_turn")
+        bubbles = persona.split_bubbles(reply) or [reply]
 
-    async with Session() as s:
-        for i, bubble in enumerate(bubbles):
-            key = f"reply:{event.id}:{i}"
-            await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=key))
-        await s.commit()
+        async with Session() as s:
+            for i, bubble in enumerate(bubbles):
+                key = f"reply:{event.id}:{i}"
+                await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=key))
+            await s.commit()
     await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles), event_id=f"reply:{event.id}")
     await enqueue_learn(user.id, event, text, previous_reply, _clarified_request(history))
     await _initiative_hook("quiet.after_assistant_message",
