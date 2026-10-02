@@ -359,3 +359,38 @@ async def test_structured_moves_to_next_model_when_tool_and_json_modes_both_fail
     )
     assert await models.structured(Sample, "sys", "u") == Sample(name="ok", n=3)
     assert log == [s.model_fast, s.model_fast, "gemma4:31b"]
+
+
+async def test_release_between_waiter_cancel_and_cleanup_does_not_leak_slot() -> None:
+    lim = models._Limiter(1)
+    await lim.acquire("interactive", 1)  # holds the only slot
+    waiter = asyncio.create_task(lim.acquire("interactive", 5))
+    await asyncio.sleep(0)  # waiter is queued
+    waiter.cancel()  # its future is cancelled now, but the task has not run its cleanup yet
+    lim.release()  # must skip the dead waiter and must not raise
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    await asyncio.wait_for(lim.acquire("interactive", 1), 1)  # slot still usable
+    lim.release()
+    await asyncio.wait_for(lim.acquire("background", 1), 1)
+
+
+async def test_timed_out_waiter_is_dropped_before_release() -> None:
+    lim = models._Limiter(1)
+    await lim.acquire("interactive", 1)
+    with pytest.raises(LLMError):
+        await lim.acquire("interactive", 0.01)
+    lim.release()
+    await asyncio.wait_for(lim.acquire("interactive", 1), 1)
+
+
+async def test_slot_granted_then_cancel_is_passed_on() -> None:
+    lim = models._Limiter(1)
+    await lim.acquire("interactive", 1)
+    waiter = asyncio.create_task(lim.acquire("interactive", 5))
+    await asyncio.sleep(0)
+    lim.release()  # grants the slot to the waiter (future result set)
+    waiter.cancel()  # cancelled in the same tick, before it resumes
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    await asyncio.wait_for(lim.acquire("interactive", 1), 1)

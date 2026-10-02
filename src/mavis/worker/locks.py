@@ -34,7 +34,7 @@ async def lock(key: str, timeout_s: float = 300) -> AsyncIterator[None]:
 
 
 @contextlib.asynccontextmanager
-async def user_lock(user_id: int, timeout_s: float = 300) -> AsyncIterator[None]:
+async def user_lock(user_id: int, timeout_s: float = 600) -> AsyncIterator[None]:
     # The in-process lock is always taken first. asyncio.Lock wakes waiters in FIFO order, so events
     # for one user handled by concurrent consumers in this process run in arrival order; the Redis
     # lock then only arbitrates between processes.
