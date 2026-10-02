@@ -73,7 +73,7 @@ async def test_gmail_first_sync(provider, fake_bus):
     sync, mem, loops = make(provider, fake_bus)
     noticed = await sync.run(1, Capability.GMAIL)
     assert len(mem.calls) == 1 and "Referral for the Siemens role?" in mem.calls[0][1]
-    assert mem.calls[0][2] == "first_sync:gmail:0"
+    assert mem.calls[0][2] == "first_sync:1:gmail:0"
     assert loops.upserts == []
     assert 1 <= len(noticed) <= 3 and any("security" in n.lower() for n in noticed)
     [ev] = fake_bus.events
@@ -102,7 +102,7 @@ async def test_calendar_first_sync_creates_commitments(provider, fake_bus):
     sync, mem, loops = make(provider, fake_bus)
     noticed = await sync.run(1, Capability.CALENDAR)
     assert loops.upserts == []
-    assert len(mem.calls) == 1 and mem.calls[0][2] == "first_sync:calendar:0"
+    assert len(mem.calls) == 1 and mem.calls[0][2] == "first_sync:1:calendar:0"
     assert [ev.trust for ev in fake_bus.events] == [Trust.UNTRUSTED]
     assert noticed[0].startswith("Next up: Interview with Siemens, Tue 06 Oct 10:00")
 
@@ -123,12 +123,12 @@ async def test_learn_jobs_are_capped_at_three_batches(fake_bus):
         provider=None, memory=mem, loops=FakeLoops(), bus=fake_bus, tz_of=tz_of, clock=lambda: NOW
     )
     lines = [f"line {i}" for i in range(50)]
-    await sync._learn_batches(1, "Header:", lines, "first_sync:gmail")
+    await sync._learn_batches(1, "Header:", lines, "first_sync:1:gmail")
     assert len(mem.calls) <= MAX_LEARN_JOBS == 3
     joined = "\n".join(text for _, text, _ in mem.calls)
     assert all(f"line {i}" in joined for i in range(50))  # combined, nothing dropped
     refs = [ref for _, _, ref in mem.calls]
-    assert refs == ["first_sync:gmail:0", "first_sync:gmail:1", "first_sync:gmail:2"]
+    assert refs == ["first_sync:1:gmail:0", "first_sync:1:gmail:1", "first_sync:1:gmail:2"]
 
 
 async def test_few_lines_make_one_job(fake_bus):
@@ -154,3 +154,13 @@ async def test_gmail_and_calendar_share_the_three_job_budget(provider, fake_bus)
     await sync._learn_batches(1, "H:", lines, "g", GMAIL_LEARN_JOBS)
     await sync._learn_batches(1, "H:", lines, "c", CALENDAR_LEARN_JOBS)
     assert len(mem.calls) == 3
+
+
+async def test_learn_refs_are_scoped_per_user(provider, fake_bus):
+    provider.results["mail.search"] = ToolResult(ok=True, data=EMAILS)
+    sync, mem, _ = make(provider, fake_bus)
+    await sync.run(1, Capability.GMAIL)
+    await sync.run(2, Capability.GMAIL)
+    refs = {(u, ref) for u, _, ref in mem.calls}
+    assert (1, "first_sync:1:gmail:0") in refs and (2, "first_sync:2:gmail:0") in refs
+    assert len({ref for _, ref in refs}) == len(refs)
