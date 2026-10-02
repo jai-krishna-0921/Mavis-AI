@@ -13,8 +13,13 @@ LIST_FIELDS = ("goals", "key_people", "routines", "dislikes", "other")
 SCALAR_FIELDS = ("name", "timezone", "tone")
 MAX_ITEMS = 8
 MAX_TOKENS = 400
-_TITLES = {"goals": "Goals", "key_people": "Key people", "routines": "Routines", "dislikes": "Dislikes",
-           "other": "Other"}
+_TITLES = {
+    "goals": "Goals",
+    "key_people": "Key people",
+    "routines": "Routines",
+    "dislikes": "Dislikes",
+    "other": "Other",
+}
 
 
 def _norm(s: str) -> str:
@@ -62,6 +67,8 @@ class ProfileCard(BaseModel):
 
     def remove_matching(self, needle: str) -> tuple[ProfileCard, bool]:
         n = needle.casefold().strip()
+        if not n:
+            return self, False
         data, changed = self.model_dump(), False
         for f in LIST_FIELDS:
             kept = [x for x in data[f] if n not in x.casefold()]

@@ -5,15 +5,17 @@ from zento.store.repo import profile as profile_repo
 
 
 def test_apply_maps_fields_and_dedupes():
-    card = ProfileCard().apply([
-        ProfileUpdate(field="name", value="Jai"),
-        ProfileUpdate(field="goals", value="Land a job"),
-        ProfileUpdate(field="goals", value="land a job "),
-        ProfileUpdate(field="key_people", value="Jawahar (friend)"),
-        ProfileUpdate(field="weird", value="Night owl"),
-        ProfileUpdate(field="timezone", value="Not/AZone"),
-        ProfileUpdate(field="timezone", value="Asia/Kolkata"),
-    ])
+    card = ProfileCard().apply(
+        [
+            ProfileUpdate(field="name", value="Jai"),
+            ProfileUpdate(field="goals", value="Land a job"),
+            ProfileUpdate(field="goals", value="land a job "),
+            ProfileUpdate(field="key_people", value="Jawahar (friend)"),
+            ProfileUpdate(field="weird", value="Night owl"),
+            ProfileUpdate(field="timezone", value="Not/AZone"),
+            ProfileUpdate(field="timezone", value="Asia/Kolkata"),
+        ]
+    )
     assert card.name == "Jai" and card.timezone == "Asia/Kolkata"
     assert card.goals == ["Land a job"]
     assert card.other == ["Night owl"]
@@ -53,3 +55,10 @@ async def test_repo_versions(db):
     latest = await profile_repo.get(1)
     assert latest.version == 2 and latest.name == "Jai" and latest.tone == "casual"
     assert [c.version for c in await profile_repo.history(1)] == [2, 1]
+
+
+def test_remove_matching_blank_needle_is_noop():
+    card = ProfileCard(key_people=["Jawahar (friend)"])
+    for needle in ("", "  "):
+        out, changed = card.remove_matching(needle)
+        assert not changed and out.key_people == ["Jawahar (friend)"]

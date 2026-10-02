@@ -24,6 +24,9 @@ class VectorStore(Protocol):
     async def init(self) -> None: ...
     async def add(self, user_id: int, texts: list[str], kind: str, source_ref: str = "") -> None: ...
     async def search(self, user_id: int, query: str, k: int = 6, min_score: float = 0.35) -> list[str]: ...
+    async def search_with_kind(
+        self, user_id: int, query: str, k: int = 6, min_score: float = 0.35
+    ) -> list[tuple[str, str]]: ...
     async def forget(self, user_id: int, needle: str) -> int: ...
     async def count(self, user_id: int) -> int: ...
 
@@ -97,6 +100,12 @@ class QdrantVectorStore:
         )
 
     async def search(self, user_id: int, query: str, k: int = 6, min_score: float = 0.35) -> list[str]:
+        return [text for text, _ in await self.search_with_kind(user_id, query, k, min_score)]
+
+    async def search_with_kind(
+        self, user_id: int, query: str, k: int = 6, min_score: float = 0.35
+    ) -> list[tuple[str, str]]:
+        """Like search, but each hit is (text, kind) so callers can treat third-party signals as untrusted."""
         if not query.strip():
             return []
         [vec] = await self._embedder.embed([query])
@@ -108,7 +117,7 @@ class QdrantVectorStore:
             query_filter=_user_filter(user_id),
             with_payload=True,
         )
-        return [p.payload["text"] for p in res.points if p.payload]
+        return [(p.payload["text"], str(p.payload.get("kind", "episode"))) for p in res.points if p.payload]
 
     async def _scroll_user(self, user_id: int) -> list[models.Record]:
         out: list[models.Record] = []
