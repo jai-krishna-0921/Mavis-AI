@@ -84,8 +84,8 @@ async def run_turn(event: Event) -> None:
     enqueued = await outbox.texts_with_dedupe_prefix(f"reply:{event.id}:")
     if enqueued:
         await messages.log(user.id, Role.ASSISTANT, "\n\n".join(enqueued), event_id=f"reply:{event.id}")
-        # The first attempt may have died before enqueuing LEARN; the job id is deterministic and the
-        # handler idempotent, so enqueueing again is safe.
+        # The first attempt may have died before enqueuing LEARN, so enqueue again. The bus does not
+        # dedupe by job id; the LEARN handler skips a source_ref already recorded as processed.
         history = await messages.recent(user.id, HISTORY_LIMIT)
         await enqueue_learn(user.id, event, text, _previous_reply(history))
         return

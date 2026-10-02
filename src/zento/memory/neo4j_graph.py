@@ -52,7 +52,10 @@ Q_ADD_ALIASES = (
     "MATCH (n:Entity {user_id:$u, key:$key}) SET n.aliases = " + _DEDUPE.format(f="aliases", p="aliases")
     + ", n.norm_aliases = " + _DEDUPE.format(f="norm_aliases", p="norm_aliases")
 )
-Q_KEY_EXISTS = "MATCH (n:Entity {user_id:$u, key:$key}) RETURN n.key AS key LIMIT 1"
+Q_KEY_EXISTS = (
+    "MATCH (n:Entity {user_id:$u, key:$key}) "
+    "RETURN n.key AS key, n.name AS name, n.aliases AS aliases LIMIT 1"
+)
 Q_CURRENT_EDGES = (
     "MATCH (a:Entity {user_id:$u})-[r]->(b:Entity {user_id:$u}) WHERE r.valid_to IS NULL "
     "RETURN elementId(r) AS id, a.key AS src, type(r) AS rel, b.key AS dst ORDER BY r.valid_from DESC"
@@ -239,15 +242,18 @@ class Neo4jGraphStore:
             return
         if not await self._run(Q_KEY_EXISTS, u=user_id, key=keep_key):
             return
-        if not await self._run(Q_KEY_EXISTS, u=user_id, key=drop_key):
+        drop_rows = await self._run(Q_KEY_EXISTS, u=user_id, key=drop_key)
+        if not drop_rows:
             return
+        drop_name = drop_rows[0].get("name") or drop
+        moved = list(dict.fromkeys([drop_name, *(drop_rows[0].get("aliases") or [])]))
         for e in await self._run(Q_DROP_EDGES, u=user_id, drop=drop_key):
             other = keep_key if e["other"] == drop_key else e["other"]
             src, dst = (keep_key, other) if e["outgoing"] else (other, keep_key)
             if src != dst:
                 await self._run(_recreate_edge(e["t"]), u=user_id, src=src, dst=dst, props=e["props"])
-        await self._run(Q_ADD_ALIASES, u=user_id, key=keep_key, aliases=[drop],
-                        norm_aliases=[normalize_name(drop)])
+        await self._run(Q_ADD_ALIASES, u=user_id, key=keep_key, aliases=moved,
+                        norm_aliases=list(dict.fromkeys(normalize_name(a) for a in moved)))
         await self._run(Q_DELETE_NODE, u=user_id, key=drop_key)
         doomed = plan_dedupe(await self._run(Q_CURRENT_EDGES, u=user_id))
         if doomed:
