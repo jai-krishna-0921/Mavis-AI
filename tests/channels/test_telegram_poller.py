@@ -55,11 +55,11 @@ async def test_failed_ingest_is_retried_not_lost(db, bus, monkeypatch) -> None:
     real = telegram_poller.ingest_update
     calls = {"n": 0}
 
-    async def flaky(data, b):
+    async def flaky(data, b, answer=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("db hiccup")
-        return await real(data, b)
+        return await real(data, b, answer)
 
     monkeypatch.setattr(telegram_poller, "ingest_update", flaky)
     upd = {"update_id": 50, "message": {"message_id": 1, "date": 1790930000,
@@ -131,3 +131,24 @@ async def test_poller_raises_on_invalid_token_in_get_updates(db, bus) -> None:
 
     with pytest.raises(InvalidToken):
         await run_polling(bus, "token", bot=Bad([]))
+
+
+async def test_poller_answers_callback_queries(db, bus) -> None:
+    upd = {"update_id": 50, "callback_query": {"id": "cq1", "data": "conn:no:1", "from": {"id": 7},
+                                               "message": {"message_id": 3, "chat": {"id": 7}}}}
+    answered: list[str] = []
+
+    class Bot(PollingBot):
+        async def answer_callback_query(self, callback_query_id):
+            answered.append(callback_query_id)
+
+    bot = Bot([[upd]])
+    task = asyncio.create_task(run_polling(bus, "token", bot=bot))
+    for _ in range(100):
+        if len(bot.offsets) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    assert answered == ["cq1"]
+    event, _ = bus._events.get_nowait()
+    assert event.payload["data"] == "conn:no:1"

@@ -6,7 +6,9 @@ CONNECTION_CHANGED -> resume waiting runs, first sync, trigger/poller activation
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import contextlib
+from collections.abc import Awaitable, Callable, Iterator
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -61,6 +63,20 @@ class RepoUserState:
         return await users.update_state(user_id, patch)
 
 
+class ReplyScope:
+    """Gives every reply sent inside it a dedupe key derived from the triggering event, and records it."""
+
+    def __init__(self, event_id: str) -> None:
+        self.event_id, self.texts = event_id, []
+
+    def next_key(self, text: str) -> str:
+        self.texts.append(text)
+        return f"cmdreply:{self.event_id}:{len(self.texts) - 1}"
+
+
+_reply_scope: ContextVar[ReplyScope | None] = ContextVar("connect_reply_scope", default=None)
+
+
 def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
@@ -85,8 +101,19 @@ class ConnectFlow:
         self.on_active = on_active
         self.clock = clock
 
+    @contextlib.contextmanager
+    def reply_scope(self, event_id: str) -> Iterator[ReplyScope]:
+        scope = ReplyScope(event_id)
+        token = _reply_scope.set(scope)
+        try:
+            yield scope
+        finally:
+            _reply_scope.reset(token)
+
     async def send(self, user_id: int, text: str, buttons: list[list[Button]] | None = None) -> None:
-        await self.notify(Outbound(user_id=user_id, text=text, buttons=buttons or []))
+        scope = _reply_scope.get()
+        key = scope.next_key(text) if scope else None
+        await self.notify(Outbound(user_id=user_id, text=text, buttons=buttons or [], dedupe_key=key))
 
     async def _resume(self, task_id: str, user_id: int, connected: bool, tag: str) -> None:
         await self.bus.enqueue(Job(

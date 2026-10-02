@@ -83,3 +83,23 @@ async def test_unconfigured_provider_gets_friendly_message(db, provider, cache, 
     assert rec.sent[-1].text == NOT_CONFIGURED_TEXT
     assert provider.links == [] and provider.disconnected == []
     assert "—" not in NOT_CONFIGURED_TEXT and "–" not in NOT_CONFIGURED_TEXT
+
+
+async def test_command_replies_are_deduped_per_event_and_logged(
+    db, user, provider, cache, fake_bus, rec, state
+):
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    flow = flow_for(provider, cache, fake_bus, rec, state)
+    ev = msg("/connect")
+    ev = ev.model_copy(update={"user_id": user.id})
+    await run_command(ev, flow)
+    await run_command(ev, flow)  # redelivery
+    assert [m.dedupe_key for m in rec.sent] == [f"cmdreply:{ev.id}:0"] * 2
+    history = await messages.recent(user.id, 10)
+    assert [(m.role, m.content) for m in history] == [(Role.ASSISTANT.value, "Which one should I hook up?")]
+
+
+def test_not_configured_copy_is_vendor_neutral():
+    assert "Composio" not in NOT_CONFIGURED_TEXT and "key" not in NOT_CONFIGURED_TEXT.lower()

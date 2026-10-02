@@ -84,3 +84,8 @@ def test_render_result_truncates():
 def test_render_result_error():
     out = render_result(ToolResult(ok=False, error="nope"))
     assert out == "error: " + wrap_untrusted("nope", "provider_error")
+
+
+def test_render_result_error_keeps_closing_tag_when_truncated():
+    out = render_result(ToolResult(ok=False, error="x" * 20_000))
+    assert out.endswith("</untrusted>") and len(out) <= MAX_RESULT_CHARS

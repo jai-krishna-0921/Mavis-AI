@@ -303,6 +303,13 @@ def _reset_integrations():
         hook_list.clear()
     routines.clear_brief_sources()
     buttons.BUTTON_HANDLERS.clear()
+    from mavis.timers import system
+    from mavis.tools.integrations.connect_flow import CHECK_KIND
+    from mavis.tools.integrations.poller import POLL_KIND
+
+    # these two are bound to the (now cache-cleared) flow and poller; the next register call re-points them
+    for kind in (CHECK_KIND, POLL_KIND):
+        system.SYSTEM_WAKEUP_HANDLERS.pop(kind, None)
 
 
 @pytest.fixture

@@ -26,7 +26,9 @@ def render_result(result: ToolResult, limit: int = MAX_RESULT_CHARS) -> str:
     """The only way a provider result reaches a model: JSON text, truncated."""
     if not result.ok:
         # provider error text is third-party content: never let it read as instructions
-        return f"error: {wrap_untrusted(result.error or 'unknown error', 'provider_error')}"[:limit]
+        # truncate the inner text first so the closing tag is never cut off
+        inner = (result.error or "unknown error")[: max(limit - 120, 0)]
+        return f"error: {wrap_untrusted(inner, 'provider_error')}"
     data = result.data
     text = data if isinstance(data, str) else json.dumps(data, default=str, ensure_ascii=False)
     return text if len(text) <= limit else text[:limit] + " …[truncated]"

@@ -5,14 +5,12 @@ from __future__ import annotations
 import re
 
 from mavis.domain.events import Event
+from mavis.domain.messages import Role
 from mavis.domain.policy import Capability
 from mavis.tools.integrations.actions import DISPLAY_NAMES, INTEGRATION_CAPABILITIES
 from mavis.tools.integrations.connect_flow import ConnectFlow
 
-NOT_CONFIGURED_TEXT = (
-    "Connections aren't set up on my end yet, so I can't link Gmail, Calendar or anything else right now. "
-    "Whoever runs me needs to add the Composio key first."
-)
+NOT_CONFIGURED_TEXT = "Connections aren't set up on this Mavis yet."
 COMMANDS = ("connect", "connections", "disconnect")
 
 _KEYWORDS: tuple[tuple[re.Pattern[str], Capability], ...] = (
@@ -61,9 +59,21 @@ async def run_command(event: Event, flow: ConnectFlow | None = None) -> bool:
     if name not in COMMANDS:
         return False
     f = _flow(flow)
+    with f.reply_scope(event.id) as scope:
+        await _run(f, event, name, args)
+    if scope.texts:
+        # log the answer like a normal turn does (deduped by event id), so history isn't missing it
+        from mavis.store.repo import messages
+
+        await messages.log(event.user_id, Role.ASSISTANT, "\n\n".join(scope.texts),
+                           event_id=f"reply:{event.id}")
+    return True
+
+
+async def _run(f: ConnectFlow, event: Event, name: str, args: list[str]) -> None:
     if not _configured(f):
         await f.send(event.user_id, NOT_CONFIGURED_TEXT)
-        return True
+        return
     capability = capability_from_text(" ".join(args)) if args else None
     if name == "connect":
         if capability is not None:
@@ -77,7 +87,6 @@ async def run_command(event: Event, flow: ConnectFlow | None = None) -> bool:
         await f.send(event.user_id, f"Which one? e.g. /disconnect gmail ({options})")
     else:
         await f.disconnect(event.user_id, capability)
-    return True
 
 
 async def handle_connect(user_id: int, text: str, flow: ConnectFlow | None = None) -> str | None:
