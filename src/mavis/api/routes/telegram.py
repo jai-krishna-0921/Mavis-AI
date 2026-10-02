@@ -11,6 +11,7 @@ from mavis.config import get_settings
 router = APIRouter()
 
 
+@router.post("/telegram/webhook")
 @router.post("/webhooks/telegram")
 async def telegram_webhook(
     request: Request,

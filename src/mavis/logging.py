@@ -15,11 +15,24 @@ _SECRET_KEY = re.compile(r"(?i)(key|token|secret|password)")
 REDACTED = "***"
 
 
+_BEARER = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+")
+
+
+def _scrub(value: Any, depth: int = 0) -> Any:
+    if isinstance(value, str):
+        return _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}", value)
+    if depth < 4 and isinstance(value, dict):
+        return {k: REDACTED if isinstance(k, str) and _SECRET_KEY.search(k) else _scrub(v, depth + 1)
+                for k, v in value.items()}
+    return value
+
+
 def redact_secrets(_logger: Any, _method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-    """Mask any log field whose name looks like a credential."""
+    """Mask any log field whose name looks like a credential, nested dicts and Bearer values included."""
     for key in list(event_dict):
-        if key != "event" and _SECRET_KEY.search(key):
-            event_dict[key] = REDACTED
+        if key == "event":
+            continue
+        event_dict[key] = REDACTED if _SECRET_KEY.search(key) else _scrub(event_dict[key])
     return event_dict
 
 
