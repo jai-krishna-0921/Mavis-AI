@@ -60,3 +60,13 @@ async def set_state(user_id: int, **kv: Any) -> None:
 async def all_ids() -> list[int]:
     async with Session() as s:
         return list(await s.scalars(select(User.id).order_by(User.id)))
+
+
+async def update_state(user_id: int, patch: dict) -> dict:
+    """Shallow merge `patch` into users.state and return the merged dict."""
+    async with Session() as s:
+        u = await s.get_one(User, user_id)
+        merged = {**(u.state or {}), **patch}
+        u.state = merged
+        await s.commit()
+        return merged

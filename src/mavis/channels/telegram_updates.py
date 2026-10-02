@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -48,13 +49,44 @@ def _chat_allowed(chat_id: int) -> bool:
     return True
 
 
-async def ingest_update(data: dict[str, Any], bus: EventBus) -> bool:
-    """Normalise and publish one update. Returns True if a new event was published."""
+Answerer = Callable[[str], Awaitable[Any]]
+_default_bot: Any | None = None
+
+
+async def _default_answer(callback_query_id: str) -> None:
+    global _default_bot
+    token = get_settings().telegram_bot_token
+    if not token:
+        return
+    if _default_bot is None:
+        from telegram import Bot
+
+        _default_bot = Bot(token)
+    await _default_bot.answer_callback_query(callback_query_id)
+
+
+async def _answer(answer: Answerer | None, callback_query_id: str | None) -> None:
+    """Stop the button spinner right away. Best effort: it must never block or fail ingestion."""
+    if not callback_query_id:
+        return
+    try:
+        await (answer or _default_answer)(callback_query_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("telegram.answer_callback_failed", error=type(exc).__name__)
+
+
+async def ingest_update(data: dict[str, Any], bus: EventBus, answer: Answerer | None = None) -> bool:
+    """Normalise and publish one update. Returns True if a new event was published.
+
+    `answer(callback_query_id)` acknowledges button taps; the webhook path defaults to a Bot built from
+    the configured token, the poller passes its own bot's method.
+    """
     update_id = data.get("update_id")
     if update_id is None:
         return False
 
     if cq := data.get("callback_query"):
+        await _answer(answer, cq.get("id"))
         message = cq.get("message") or {}
         chat_id = (message.get("chat") or {}).get("id")
         sender = cq.get("from") or {}

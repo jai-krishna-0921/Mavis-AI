@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # --- integrations ---------------------------------------------------------
     composio_api_key: str = ""
     composio_webhook_secret: str = ""
+    composio_base_url: str = "https://backend.composio.dev/api/v3"
+    composio_timeout_s: float = 30.0
+    integration_polling: bool = False
+    integration_status_ttl_s: int = 60
     integration_provider: Literal["composio"] = "composio"
     tavily_api_key: str = ""
 

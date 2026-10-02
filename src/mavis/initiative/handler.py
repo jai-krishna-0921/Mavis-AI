@@ -13,6 +13,7 @@ from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import Loop, LoopKind, LoopStatus
 from mavis.domain.wakeups import WakeupKind
+from mavis.initiative import hooks
 from mavis.initiative.executor import InitiativeExecutor
 from mavis.initiative.filters import EventFilter
 from mavis.initiative.planner import fallback_decision, schedule_default_signals
@@ -87,6 +88,10 @@ class InitiativeHandler:
         if result.drop:
             log.info("initiative.dropped", event_id=event.id, reason=result.reason)
             return
+        if not result.matched_loops and (reason := await hooks.run_prefilters(event)):
+            log.info("initiative.prefiltered", event_id=event.id, reason=reason)
+            return
+        result.extra = await hooks.gather_enrichments(event)
         try:
             decision = await self._reasoner.decide(user, event, result)
         except LLMError as exc:
@@ -98,6 +103,7 @@ class InitiativeHandler:
             if not any(w.loop_id == loop.id for w in decision.wakeups):
                 await schedule_default_signals(self._wakeups, loop)
 
+        decision = await hooks.apply_decision_policies(event, decision)
         decision = _with_default_dedupe(decision, event)
         context = result.summary
         if event.trust is Trust.UNTRUSTED:

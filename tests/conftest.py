@@ -275,3 +275,73 @@ def fake_memory() -> Iterator[FakeMemory]:
     set_memory(fm)  # type: ignore[arg-type]
     yield fm
     set_memory(None)
+
+
+# --- integrations fixtures (shared by tests/tools, tests/agents, tests/initiative) ---------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_integrations():
+    """Process-level integration singletons must not leak between tests."""
+    yield
+    try:
+        from mavis.tools import integrations
+    except ImportError:  # pragma: no cover
+        return
+    integrations.get_provider.cache_clear()
+    integrations.get_connection_cache.cache_clear()
+    from mavis.worker import locks
+
+    locks._claims.clear()
+    from mavis.agents import buttons
+    from mavis.initiative import hooks, routines
+    from mavis.tools.integrations import wiring
+
+    for getter in wiring.WIRING_GETTERS:
+        getter.cache_clear()
+    for hook_list in (hooks.PREFILTERS, hooks.ENRICHERS, hooks.DECISION_POLICIES):
+        hook_list.clear()
+    routines.clear_brief_sources()
+    buttons.BUTTON_HANDLERS.clear()
+    from mavis.timers import system
+    from mavis.tools.integrations.connect_flow import CHECK_KIND
+    from mavis.tools.integrations.poller import POLL_KIND
+
+    # these two are bound to the (now cache-cleared) flow and poller; the next register call re-points them
+    for kind in (CHECK_KIND, POLL_KIND):
+        system.SYSTEM_WAKEUP_HANDLERS.pop(kind, None)
+
+
+@pytest.fixture
+def provider():
+    from tests.tools.integrations.fakes import FakeProvider
+
+    return FakeProvider()
+
+
+@pytest.fixture
+def cache(provider):
+    from mavis.tools.integrations.connections import ConnectionCache
+
+    return ConnectionCache(provider, ttl_s=60)
+
+
+@pytest.fixture
+def fake_bus():
+    from tests.tools.integrations.fakes import FakeBus
+
+    return FakeBus()
+
+
+@pytest.fixture
+def state():
+    from tests.tools.integrations.fakes import FakeState
+
+    return FakeState()
+
+
+@pytest.fixture
+def rec():
+    from tests.tools.integrations.fakes import Recorder
+
+    return Recorder()

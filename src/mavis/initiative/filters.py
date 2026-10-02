@@ -37,6 +37,7 @@ class FilterResult:
     matched_loops: list[Loop] = field(default_factory=list)
     relevance: float = 0.0
     summary: str = ""
+    extra: str = ""
 
 
 def summarize_event(event: Event) -> str:

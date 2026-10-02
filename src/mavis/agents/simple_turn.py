@@ -11,7 +11,7 @@ import contextlib
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
-from mavis.agents import clarify, persona
+from mavis.agents import clarify, commands, persona
 from mavis.bus import get_bus
 from mavis.channels import get_channel
 from mavis.domain.events import Event, Job, JobKind
@@ -106,6 +106,8 @@ async def run_turn(event: Event) -> None:
     await messages.log(user.id, Role.USER, text, event_id=event.id)
     await _initiative_hook("quiet.on_user_message", lambda i: i.quiet.on_user_message(user.id))
     await _initiative_hook("routines.on_user_message", lambda i: i.routines.on_user_message(user))
+    if await commands.run_command(event):
+        return
 
     # Retry after the reply was enqueued: don't call the LLM again (it could split differently).
     enqueued = await outbox.texts_with_dedupe_prefix(f"reply:{event.id}:")
