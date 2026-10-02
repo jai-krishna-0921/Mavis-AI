@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from mavis.store.db import Base, utcnow
@@ -130,3 +130,23 @@ class LoopRow(Base):
     source: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[datetime] = mapped_column()
     updated_at: Mapped[datetime] = mapped_column()
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class WakeupRow(Base):
+    """An alarm the agent set for itself."""
+
+    __tablename__ = "wakeups"
+    __table_args__ = (Index("ix_wakeups_status_due", "status", "due_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    due_at: Mapped[datetime] = mapped_column()
+    kind: Mapped[str] = mapped_column(String(24))
+    reason: Mapped[str] = mapped_column(Text)
+    loop_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(12), default="pending")
+    dedupe_key: Mapped[str | None] = mapped_column(String(200), index=True, nullable=True)
+    created_at: Mapped[datetime] = mapped_column()
+    fired_at: Mapped[datetime | None] = mapped_column(nullable=True)
