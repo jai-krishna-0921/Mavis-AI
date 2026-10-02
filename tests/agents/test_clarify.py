@@ -47,15 +47,20 @@ async def test_ambiguous_tomorrow_asks_before_llm(db, clock, channel, fake_llm, 
     assert [m.role for m in log] == ["user", "assistant"]
 
 
-async def test_answer_turn_learns_the_original_request(db, clock, channel, fake_llm, memory, bus):
+async def test_answer_turn_learns_the_original_request(
+    db, clock, channel, fake_llm, memory, bus, monkeypatch
+):
+    jobs = []
+
+    async def record(job):
+        jobs.append(job)
+
+    monkeypatch.setattr(bus, "enqueue", record)
     clock.set(AFTER_MIDNIGHT_IST)
     user, _ = await users.get_or_create_by_chat(1001, "Jai")
     await simple_turn.run_turn(_event(user.id, "Plan a meeting for tomorrow at 10 am", "tg:update:1"))
     fake_llm.push_text("Got it, Tuesday at 10.")
     await simple_turn.run_turn(_event(user.id, "Tuesday", "tg:update:2"))
-    jobs = []
-    while not bus._jobs.empty():
-        jobs.append(bus._jobs.get_nowait())
     learn = next(j for j in jobs if j.id == "learn:tg:update:2")
     assert learn.payload["text"].startswith("User: Plan a meeting for tomorrow at 10 am\nMavis: ")
     assert learn.payload["text"].endswith("User: Tuesday")
@@ -78,3 +83,35 @@ async def test_extractor_prompt_flags_midnight_ambiguity(db, clock, memory, monk
     # The prompt is anchored to the injectable clock, in the user's local time.
     assert "Monday 2026-09-28 00:09" in seen["system"]
     assert "04:59" in seen["system"]
+
+
+async def test_replying_tomorrow_to_the_question_is_not_asked_again(
+    db, clock, channel, fake_llm, memory, bus, monkeypatch
+):
+    jobs = []
+
+    async def record(job):
+        jobs.append(job)
+
+    monkeypatch.setattr(bus, "enqueue", record)
+    clock.set(AFTER_MIDNIGHT_IST)
+    user, _ = await users.get_or_create_by_chat(1001, "Jai")
+    await simple_turn.run_turn(_event(user.id, "Plan a meeting for tomorrow at 10 am", "tg:update:1"))
+    clock.advance(minutes=3)
+    fake_llm.push_text("Done, Tuesday at 10.")
+    await simple_turn.run_turn(_event(user.id, "tomorrow please", "tg:update:2"))
+    await deliver_pending(channel)
+    assert len(channel.texts) == 2
+    assert channel.texts[1] == "Done, Tuesday at 10."
+    learn = next(j for j in jobs if j.id == "learn:tg:update:2")
+    assert learn.payload["text"].startswith("User: Plan a meeting for tomorrow at 10 am\n")
+
+
+def test_day_after_tomorrow_is_not_flagged(clock):
+    clock.set(AFTER_MIDNIGHT_IST)
+    assert clarify.day_clarification("the day after tomorrow at 10", "Asia/Kolkata") is None
+
+
+def test_window_uses_message_time_not_now(clock):
+    clock.set(datetime(2026, 9, 28, 8, 0, tzinfo=UTC))  # 13:30 IST now, but the message was sent at 00:09
+    assert clarify.day_clarification("tomorrow", "Asia/Kolkata", AFTER_MIDNIGHT_IST) is not None
