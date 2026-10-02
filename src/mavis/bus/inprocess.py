@@ -6,7 +6,7 @@ import asyncio
 
 import structlog
 
-from mavis.bus.base import EventHandler, JobHandler
+from mavis.bus.base import EventHandler, JobHandler, run_handler
 from mavis.domain.events import Event, Job
 
 log = structlog.get_logger(__name__)
@@ -37,7 +37,7 @@ class InProcessBus:
         while not self._closed:
             event, attempts = await self._events.get()
             try:
-                await handler(event)
+                await run_handler(handler, event, what="event", ref=event.id)
             except Exception:
                 log.exception("bus.event_failed", event_id=event.id, attempt=attempts + 1)
                 if attempts + 1 >= self.MAX_ATTEMPTS:
@@ -51,7 +51,7 @@ class InProcessBus:
         while not self._closed:
             job = await self._jobs.get()
             try:
-                await handler(job)
+                await run_handler(handler, job, what="job", ref=job.id)
             except Exception:
                 log.exception("bus.job_failed", job_id=job.id, kind=job.kind, attempt=job.attempts + 1)
                 if job.attempts + 1 >= self.MAX_ATTEMPTS:

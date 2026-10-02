@@ -49,7 +49,7 @@ async def test_ambiguous_event_drops_time(fake_llm):
 async def test_untrusted_text_is_wrapped(monkeypatch):
     seen = {}
 
-    async def spy(schema, system, user, tier=models.Tier.FAST):
+    async def spy(schema, system, user, tier=models.Tier.FAST, priority="interactive"):
         seen["system"], seen["user"] = system, user
         return Extraction()
 

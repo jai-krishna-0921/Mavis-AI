@@ -120,7 +120,7 @@ async def extract(
     )
     body = wrap_untrusted(text, source or "unknown") if trust is Trust.UNTRUSTED else text
     try:
-        raw = await llm.structured(Extraction, system, body, llm.Tier.FAST)
+        raw = await llm.structured(Extraction, system, body, llm.Tier.FAST, priority="background")
     except LLMError as exc:
         log.warning("memory.extract_failed", error=str(exc), source=source)
         raise

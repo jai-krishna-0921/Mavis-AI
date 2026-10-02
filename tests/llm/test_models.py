@@ -67,3 +67,330 @@ async def test_fake_llm_fixture_patches_module(fake_llm) -> None:
     fake_llm.push_structured(Sample(name="z", n=9))
     assert await models.structured(Sample, "s", "u") == Sample(name="z", n=9)
     assert fake_llm.structured_calls[0]["schema"] is Sample
+
+
+# --- fallback chain, concurrency limiter, 429 backoff -------------------------------------------
+import asyncio  # noqa: E402
+
+import httpx  # noqa: E402
+import openai  # noqa: E402
+from langchain_core.messages import AIMessage  # noqa: E402
+
+
+class _Chat:
+    def __init__(self, name: str, log: list[str], script: list, delay: float = 0.0) -> None:
+        self.name, self.log, self.script, self.delay = name, log, script, delay
+
+    async def ainvoke(self, messages, config=None):
+        self.log.append(self.name)
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        item = self.script.pop(0) if self.script else AIMessage(content=f"from {self.name}")
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _timeout() -> Exception:
+    return openai.APITimeoutError(request=httpx.Request("POST", "http://x"))
+
+
+def _http_429() -> Exception:
+    req = httpx.Request("POST", "http://x")
+    return openai.RateLimitError("too many concurrent requests",
+                                 response=httpx.Response(429, request=req), body=None)
+
+
+@pytest.fixture
+def chain(settings, monkeypatch):
+    """Patch chat_model(tier, temperature, model=None) with scripted per-model chats."""
+    log: list[str] = []
+    scripts: dict[str, list] = {}
+
+    def fake(tier=Tier.FAST, temperature=0.6, model=None):
+        name = model or settings.model_fast
+        return _Chat(name, log, scripts.setdefault(name, []))
+
+    async def no_sleep(_s):
+        return None
+
+    monkeypatch.setattr(models, "chat_model", fake)
+    monkeypatch.setattr(models, "_sleep", no_sleep)
+    models._limiters.clear()
+    return log, scripts, settings
+
+
+async def test_complete_falls_back_on_timeout(chain) -> None:
+    log, scripts, s = chain
+    scripts[s.model_fast] = [_timeout()]
+    assert await models.complete([HumanMessage("hi")]) == "from gemma4:31b"
+    assert log == [s.model_fast, "gemma4:31b"]
+
+
+async def test_complete_all_models_fail_raises_llm_error(chain) -> None:
+    log, scripts, s = chain
+    for name in (s.model_fast, *s.model_fast_fallbacks):
+        scripts[name] = [_timeout()]
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("hi")])
+    assert log == [s.model_fast, *s.model_fast_fallbacks]
+
+
+async def test_complete_does_not_fall_back_on_non_retriable(chain) -> None:
+    log, scripts, s = chain
+    scripts[s.model_fast] = [ValueError("bad request")]
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("hi")])
+    assert log == [s.model_fast]
+
+
+async def test_structured_falls_back_on_timeout(chain) -> None:
+    log, scripts, s = chain
+
+    class _Struct(_Chat):
+        def with_structured_output(self, schema, method=None):
+            outer = self
+
+            class R:
+                async def ainvoke(self, messages, config=None):
+                    outer.log.append(outer.name)
+                    if outer.script:
+                        raise outer.script.pop(0)
+                    return schema(name="ok", n=1)
+
+            return R()
+
+    def fake(tier=Tier.FAST, temperature=0.6, model=None):
+        name = model or s.model_fast
+        return _Struct(name, log, scripts.setdefault(name, []))
+
+    models.chat_model = fake  # restored by monkeypatch teardown in `chain`
+    scripts[s.model_fast] = [_timeout()]
+    assert await models.structured(Sample, "sys", "u") == Sample(name="ok", n=1)
+    assert log == [s.model_fast, "gemma4:31b"]
+
+
+async def test_429_retried_on_same_model_then_succeeds(chain) -> None:
+    log, scripts, s = chain
+    scripts[s.model_fast] = [_http_429(), _http_429()]
+    assert await models.complete([HumanMessage("hi")]) == f"from {s.model_fast}"
+    assert log == [s.model_fast] * 3
+
+
+async def test_429_exhausted_moves_to_next_model(chain) -> None:
+    log, scripts, s = chain
+    scripts[s.model_fast] = [_http_429() for _ in range(4)]
+    assert await models.complete([HumanMessage("hi")]) == "from gemma4:31b"
+    assert log == [s.model_fast] * 4 + ["gemma4:31b"]
+
+
+async def test_limiter_caps_concurrency_at_one(chain, monkeypatch) -> None:
+    log, scripts, s = chain
+    active = peak = 0
+
+    class Slow(_Chat):
+        async def ainvoke(self, messages, config=None):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return AIMessage(content="x")
+
+    monkeypatch.setattr(models, "chat_model", lambda *a, **k: Slow("m", log, []))
+    await asyncio.gather(models.complete([HumanMessage("a")]), models.complete([HumanMessage("b")]))
+    assert peak == 1
+
+
+async def test_interactive_jumps_ahead_of_queued_background(chain, monkeypatch) -> None:
+    log, scripts, s = chain
+    order: list[str] = []
+
+    class Tag(_Chat):
+        async def ainvoke(self, messages, config=None):
+            order.append(messages[0].content)
+            await asyncio.sleep(0.02)
+            return AIMessage(content="x")
+
+    monkeypatch.setattr(models, "chat_model", lambda *a, **k: Tag("m", log, []))
+    first = asyncio.create_task(models.complete([HumanMessage("first")]))
+    await asyncio.sleep(0.005)  # `first` holds the only slot
+    bg = asyncio.create_task(models.complete([HumanMessage("bg")], priority="background"))
+    await asyncio.sleep(0.005)
+    fg = asyncio.create_task(models.complete([HumanMessage("fg")]))
+    await asyncio.gather(first, bg, fg)
+    assert order == ["first", "fg", "bg"]
+
+
+async def test_background_waiter_ages_into_interactive(chain, monkeypatch) -> None:
+    log, scripts, s = chain
+    order: list[str] = []
+
+    class Tag(_Chat):
+        async def ainvoke(self, messages, config=None):
+            order.append(messages[0].content)
+            await asyncio.sleep(0.05)
+            return AIMessage(content="x")
+
+    monkeypatch.setattr(models, "chat_model", lambda *a, **k: Tag("m", log, []))
+    monkeypatch.setattr(models, "BACKGROUND_AGING_S", 0.02)
+    first = asyncio.create_task(models.complete([HumanMessage("first")]))
+    await asyncio.sleep(0.005)
+    bg = asyncio.create_task(models.complete([HumanMessage("bg")], priority="background"))
+    await asyncio.sleep(0.03)  # bg is now older than the aging threshold
+    fg = asyncio.create_task(models.complete([HumanMessage("fg")]))
+    await asyncio.gather(first, bg, fg)
+    assert order == ["first", "bg", "fg"]
+
+
+async def test_background_acquire_times_out_with_llm_error(chain, monkeypatch) -> None:
+    log, scripts, s = chain
+
+    class Hold(_Chat):
+        async def ainvoke(self, messages, config=None):
+            await asyncio.sleep(0.2)
+            return AIMessage(content="x")
+
+    monkeypatch.setattr(models, "chat_model", lambda *a, **k: Hold("m", log, []))
+    monkeypatch.setattr(models, "BACKGROUND_ACQUIRE_TIMEOUT_S", 0.03)
+    holder = asyncio.create_task(models.complete([HumanMessage("a")]))
+    await asyncio.sleep(0.005)
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("b")], priority="background")
+    await holder
+
+
+async def test_interactive_deadline_covers_queue_and_attempts(chain, monkeypatch) -> None:
+    log, scripts, s = chain
+
+    class Slow(_Chat):
+        async def ainvoke(self, messages, config=None):
+            await asyncio.sleep(5)
+            return AIMessage(content="x")
+
+    monkeypatch.setattr(models, "chat_model", lambda *a, **k: Slow("m", log, []))
+    monkeypatch.setattr(models, "INTERACTIVE_DEADLINE_S", 0.05)
+    t0 = asyncio.get_running_loop().time()
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("a")])
+    assert asyncio.get_running_loop().time() - t0 < 1
+
+
+async def test_deadline_applies_while_queued(chain, monkeypatch) -> None:
+    log, scripts, s = chain
+
+    class Hold(_Chat):
+        async def ainvoke(self, messages, config=None):
+            await asyncio.sleep(0.3)
+            return AIMessage(content="x")
+
+    monkeypatch.setattr(models, "chat_model", lambda *a, **k: Hold("m", log, []))
+    monkeypatch.setattr(models, "INTERACTIVE_DEADLINE_S", 0.05)
+    holder = asyncio.create_task(models.complete([HumanMessage("a")]))  # times out itself at 0.05
+    await asyncio.sleep(0.001)
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("b")])
+    with pytest.raises(LLMError):
+        await holder
+
+
+async def test_cancelled_waiter_does_not_leak_slot(chain, monkeypatch) -> None:
+    log, scripts, s = chain
+
+    class Hold(_Chat):
+        async def ainvoke(self, messages, config=None):
+            await asyncio.sleep(0.03)
+            return AIMessage(content="x")
+
+    monkeypatch.setattr(models, "chat_model", lambda *a, **k: Hold("m", log, []))
+    holder = asyncio.create_task(models.complete([HumanMessage("a")]))
+    await asyncio.sleep(0.005)
+    waiter = asyncio.create_task(models.complete([HumanMessage("b")]))
+    await asyncio.sleep(0.005)
+    waiter.cancel()
+    holder2 = asyncio.create_task(models.complete([HumanMessage("c")]))
+    await holder
+    assert await asyncio.wait_for(holder2, 1) == "x"
+    # cancelling a call that HOLDS the slot also frees it
+    running = asyncio.create_task(models.complete([HumanMessage("d")]))
+    await asyncio.sleep(0.005)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert await asyncio.wait_for(models.complete([HumanMessage("e")]), 1) == "x"
+
+
+async def test_retry_after_header_is_capped(chain, monkeypatch) -> None:
+    log, scripts, s = chain
+    slept: list[float] = []
+
+    async def rec(sec):
+        slept.append(sec)
+
+    monkeypatch.setattr(models, "_sleep", rec)
+    req = httpx.Request("POST", "http://x")
+    err = openai.RateLimitError(
+        "too many concurrent requests",
+        response=httpx.Response(429, request=req, headers={"retry-after": "18"}), body=None,
+    )
+    scripts[s.model_fast] = [err]
+    assert await models.complete([HumanMessage("hi")]) == f"from {s.model_fast}"
+    assert slept == [models.RETRY_AFTER_CAP_S]
+
+
+async def test_structured_moves_to_next_model_when_tool_and_json_modes_both_fail(chain) -> None:
+    log, scripts, s = chain
+
+    class M(_Chat):
+        def with_structured_output(self, schema, method=None):
+            class R:
+                async def ainvoke(self, messages, config=None):
+                    raise ValueError("tool calling unsupported")
+
+            return R()
+
+        async def ainvoke(self, messages, config=None):
+            self.log.append(self.name)
+            good = self.name == "gemma4:31b"
+            return AIMessage(content='{"name": "ok", "n": 3}' if good else "garbage")
+
+    models.chat_model = lambda tier=Tier.FAST, temperature=0.6, model=None: M(
+        model or s.model_fast, log, []
+    )
+    assert await models.structured(Sample, "sys", "u") == Sample(name="ok", n=3)
+    assert log == [s.model_fast, s.model_fast, "gemma4:31b"]
+
+
+async def test_release_between_waiter_cancel_and_cleanup_does_not_leak_slot() -> None:
+    lim = models._Limiter(1)
+    await lim.acquire("interactive", 1)  # holds the only slot
+    waiter = asyncio.create_task(lim.acquire("interactive", 5))
+    await asyncio.sleep(0)  # waiter is queued
+    waiter.cancel()  # its future is cancelled now, but the task has not run its cleanup yet
+    lim.release()  # must skip the dead waiter and must not raise
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    await asyncio.wait_for(lim.acquire("interactive", 1), 1)  # slot still usable
+    lim.release()
+    await asyncio.wait_for(lim.acquire("background", 1), 1)
+
+
+async def test_timed_out_waiter_is_dropped_before_release() -> None:
+    lim = models._Limiter(1)
+    await lim.acquire("interactive", 1)
+    with pytest.raises(LLMError):
+        await lim.acquire("interactive", 0.01)
+    lim.release()
+    await asyncio.wait_for(lim.acquire("interactive", 1), 1)
+
+
+async def test_slot_granted_then_cancel_is_passed_on() -> None:
+    lim = models._Limiter(1)
+    await lim.acquire("interactive", 1)
+    waiter = asyncio.create_task(lim.acquire("interactive", 5))
+    await asyncio.sleep(0)
+    lim.release()  # grants the slot to the waiter (future result set)
+    waiter.cancel()  # cancelled in the same tick, before it resumes
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    await asyncio.wait_for(lim.acquire("interactive", 1), 1)

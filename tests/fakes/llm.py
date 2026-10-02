@@ -52,11 +52,13 @@ class FakeLLM:
         return item
 
     # --- drop-in replacements for mavis.llm.models ----------------------------
-    def chat_model(self, tier: Any = None, temperature: float = 0.6) -> FakeToolChatModel:
+    def chat_model(
+        self, tier: Any = None, temperature: float = 0.6, model: str | None = None
+    ) -> FakeToolChatModel:
         return FakeToolChatModel(fake=self)
 
     async def structured(
-        self, schema: type[BaseModel], system: str, user: Any, tier: Any = None
+        self, schema: type[BaseModel], system: str, user: Any, tier: Any = None, priority: str = "interactive"
     ) -> BaseModel:
         self.structured_calls.append({"schema": schema, "system": system, "user": user, "tier": tier})
         return self.pop_structured(schema)

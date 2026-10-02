@@ -264,3 +264,68 @@ async def test_consume_survives_transient_timeout(monkeypatch) -> None:
     )
     assert not any(rec["event"] == "bus.consume_loop_error" for rec in logs)
     assert 0.5 in sleeps
+
+
+@pytest.mark.inline_retries
+async def test_inline_retries_then_ack(rbus, monkeypatch) -> None:
+    from mavis.bus import base
+
+    slept: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        slept.append(s)
+
+    monkeypatch.setattr(base, "_sleep", fake_sleep)
+    bus, client = rbus
+    calls = 0
+
+    async def handler(e: Event) -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise TimeoutError("flaky")
+
+    await bus.publish(ev("e1"))
+    task = asyncio.create_task(bus.consume_events("workers", "w1", handler))
+
+    async def acked() -> bool:
+        return calls == 3 and (await client.xpending(Stream.EVENTS.value, "workers"))["pending"] == 0
+
+    await wait_until(acked, timeout=5)
+    task.cancel()
+    assert slept == [2, 5] and calls == 3
+    assert await client.xlen(f"{Stream.EVENTS.value}:dlq") == 0
+
+
+@pytest.mark.inline_retries
+async def test_always_failing_handler_stays_pending_after_inline_retries(rbus, monkeypatch) -> None:
+    from mavis.bus import base
+
+    slept: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        slept.append(s)
+
+    monkeypatch.setattr(base, "_sleep", fake_sleep)
+    bus, client = rbus
+    # claim_idle_ms huge so the message is not re-delivered during the test
+    bus._claim_idle_ms = 10**9
+    calls = 0
+
+    async def handler(e: Event) -> None:
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("boom")
+
+    await bus.publish(ev("bad"))
+    task = asyncio.create_task(bus.consume_events("workers", "w1", handler))
+
+    async def done() -> bool:
+        return calls == 4
+
+    await wait_until(done, timeout=5)
+    await asyncio.sleep(0.05)
+    task.cancel()
+    assert slept == [2, 5, 10] and calls == 4
+    assert (await client.xpending(Stream.EVENTS.value, "workers"))["pending"] == 1
+    assert await client.xlen(f"{Stream.EVENTS.value}:dlq") == 0
