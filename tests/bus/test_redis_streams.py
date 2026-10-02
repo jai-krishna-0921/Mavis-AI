@@ -41,6 +41,26 @@ async def test_publish_dedupes(rbus) -> None:
     assert 0 < await client.ttl("zento:seen:tg:update:7") <= 7 * 24 * 3600
 
 
+async def test_publish_releases_dedupe_key_when_xadd_fails(rbus) -> None:
+    bus, client = rbus
+    real_xadd = client.xadd
+    calls = 0
+
+    async def flaky_xadd(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionError("redis down")
+        return await real_xadd(*args, **kwargs)
+
+    client.xadd = flaky_xadd
+    with pytest.raises(ConnectionError):
+        await bus.publish(ev("tg:update:9"))
+    assert await client.exists("zento:seen:tg:update:9") == 0
+    assert await bus.publish(ev("tg:update:9"))
+    assert await client.xlen(Stream.EVENTS.value) == 1
+
+
 async def test_consume_delivers_and_acks(rbus) -> None:
     bus, client = rbus
     got: list[Event] = []

@@ -38,8 +38,13 @@ class RedisStreamsBus:
         fresh = await self._r.set(f"zento:seen:{event.id}", "1", nx=True, ex=self._ttl)
         if not fresh:
             return False
-        await self._r.xadd(Stream.EVENTS.value, {"data": event.model_dump_json()}, maxlen=MAXLEN,
-                           approximate=True)
+        try:
+            await self._r.xadd(Stream.EVENTS.value, {"data": event.model_dump_json()}, maxlen=MAXLEN,
+                               approximate=True)
+        except BaseException:
+            # release the dedupe key so a retry of this event is not mistaken for a duplicate
+            await self._r.delete(f"zento:seen:{event.id}")
+            raise
         return True
 
     async def enqueue(self, job: Job) -> None:
