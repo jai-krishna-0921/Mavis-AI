@@ -25,6 +25,7 @@ class FakeChannel:
     def __init__(self) -> None:
         self.sent: list[SentItem] = []
         self.fail_next: list[Exception] = []
+        self.reactions: list[tuple[int, int, str]] = []  # (chat_id, message_id, emoji)
         self._next_id = 1
 
     @property
@@ -58,6 +59,9 @@ class FakeChannel:
 
     async def send_typing(self, chat_id: int) -> None:
         self.sent.append(SentItem("typing", chat_id))
+
+    async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
+        self.reactions.append((chat_id, message_id, emoji))
 
     async def download_file(self, file_id: str, dest_path: str) -> str:
         Path(dest_path).parent.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 - test double

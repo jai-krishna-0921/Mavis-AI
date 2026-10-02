@@ -13,6 +13,7 @@ from mavis.domain.messages import Role
 from mavis.domain.policy import PolicyVerdict
 from mavis.store.db import Session
 from mavis.store.models import Message, PingLogRow
+from mavis.store.repo import messages as messages_repo
 
 URGENT = 5
 
@@ -48,7 +49,9 @@ class PingPolicy:
         if dedupe_key and await self._seen(user.id, _day_key(dedupe_key, local)):
             return PolicyVerdict(allow=False, reason="duplicate")
         urgent = urgency >= URGENT  # urgent bypasses quiet hours only, never the daily budget (spec 8.4)
-        if not urgent and in_quiet_hours(local.hour, s.quiet_start, s.quiet_end):
+        if not urgent and in_quiet_hours(local.hour, s.quiet_start, s.quiet_end) and not await self._awake(
+            user.id, now, s.quiet_awake_window_min
+        ):
             defer = next_quiet_end(local, s.quiet_end).astimezone(UTC)
             return PolicyVerdict(allow=False, defer_until=defer, reason="quiet hours")
         if await self.count_today(user, now) >= s.ping_daily_budget:
@@ -57,6 +60,15 @@ class PingPolicy:
                 allow=False, defer_until=tomorrow.astimezone(UTC), reason="daily budget reached"
             )
         return PolicyVerdict(allow=True)
+
+    async def _awake(self, user_id: int, now: datetime, window_min: int) -> bool:
+        """The user wrote recently, so they are up: quiet hours do not apply (budget and dedupe still do)."""
+        if window_min <= 0:
+            return False
+        last = await messages_repo.last_user_message_at(user_id)
+        if last is None:
+            return False
+        return timedelta(0) <= timeutil.ensure_utc(now) - last < timedelta(minutes=window_min)
 
     async def count_today(self, user, now: datetime) -> int:
         """Proactive assistant messages sent during the user's current local day."""

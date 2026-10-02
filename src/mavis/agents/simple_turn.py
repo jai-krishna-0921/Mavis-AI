@@ -6,14 +6,14 @@ Replaced by agents/conversation.py in Phase 4 (registered with replace=True).
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import time
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from mavis.agents import clarify, commands, persona
 from mavis.bus import get_bus
-from mavis.channels import get_channel
+from mavis.channels import presence
 from mavis.domain.events import Event, Job, JobKind
 from mavis.domain.messages import Outbound, Role
 from mavis.initiative import wiring
@@ -22,6 +22,7 @@ from mavis.memory.service import get_memory
 from mavis.store.db import Session, utcnow
 from mavis.store.models import Message
 from mavis.store.repo import messages, outbox, users
+from mavis.store.repo import profile as profile_repo
 from mavis.store.repo import summaries as summaries_repo
 
 log = structlog.get_logger(__name__)
@@ -38,6 +39,10 @@ HISTORY_LIMIT = 20
 START_HINT = (
     "The user just opened the chat with /start. Greet them warmly, introduce yourself in one line, "
     "and ask what's on their plate right now."
+)
+RESTART_HINT = (
+    "The user sent /start again in the middle of an ongoing chat. Welcome them back in one short line. "
+    "Do not introduce yourself again."
 )
 
 
@@ -88,6 +93,41 @@ def _clarified_request(history: list[Message]) -> str | None:
     return next((m.content for m in reversed(before[:j]) if m.role == Role.USER.value), None)
 
 
+CONNECTION_TIMEOUT_S = 1.5
+CONNECTION_RETRY_AFTER_S = 60.0
+_STATE_NAMES = {"ACTIVE": "connected", "INITIATED": "pending", "FAILED": "needs reconnecting"}
+_failed_until: dict[int, float] = {}  # user_id -> monotonic time before which we do not ask again
+
+
+async def connection_states(user_id: int) -> dict[str, str]:
+    """Per-capability link state for the persona. Best effort: {} means unknown.
+
+    A failure or timeout is remembered for CONNECTION_RETRY_AFTER_S so a slow or down provider is not
+    hit (and waited on) every turn.
+    """
+    if time.monotonic() < _failed_until.get(user_id, 0.0):
+        return {}
+    try:
+        from mavis.tools.integrations import get_connection_cache, get_provider
+
+        if not getattr(get_provider(), "configured", True):
+            return {}  # no provider credentials: we cannot know, so the persona says unknown
+        states = await asyncio.wait_for(get_connection_cache().status(user_id), CONNECTION_TIMEOUT_S)
+        return {slug: _STATE_NAMES.get(str(getattr(st, "value", st)), "not connected")
+                for slug, st in states.items()}
+    except Exception:  # noqa: BLE001 - the prompt must never depend on integrations being up
+        _failed_until[user_id] = time.monotonic() + CONNECTION_RETRY_AFTER_S
+        log.debug("simple_turn.connection_state_failed", exc_info=True)
+        return {}
+
+
+async def _known_name(user_id: int) -> str | None:
+    try:
+        return (await profile_repo.get(user_id)).name
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def enqueue_learn(
     user_id: int, event: Event, text: str, previous_reply: str | None, original: str | None = None
 ) -> None:
@@ -106,6 +146,7 @@ async def run_turn(event: Event) -> None:
     await messages.log(user.id, Role.USER, text, event_id=event.id)
     await _initiative_hook("quiet.on_user_message", lambda i: i.quiet.on_user_message(user.id))
     await _initiative_hook("routines.on_user_message", lambda i: i.routines.on_user_message(user))
+    await _initiative_hook("executor.release_deferred", lambda i: i.executor.release_deferred(user))
     if await commands.run_command(event):
         return
 
@@ -138,24 +179,35 @@ async def run_turn(event: Event) -> None:
         await enqueue_learn(user.id, event, text, previous, _clarified_request(history))
         return
 
-    if user.telegram_chat_id is not None:
-        with contextlib.suppress(Exception):
-            await get_channel().send_typing(user.telegram_chat_id)
-
-    hint = START_HINT if event.payload.get("command") == "start" else ""
+    hint = ""
+    if event.payload.get("command") == "start":
+        recent_assistant = any(
+            m.role == Role.ASSISTANT.value for m in persona.recent_messages(history, utcnow())
+        )
+        hint = RESTART_HINT if recent_assistant else START_HINT
     previous_reply = previous
-    context = await build_context(user.id, text, hint)
-    prompt: list[BaseMessage] = [SystemMessage(persona.system_prompt(user, utcnow(), context=context))]
-    prompt += _to_langchain(history)
+    async with presence.typing(user.telegram_chat_id):  # refreshed until the reply is queued
+        context, connections, card_name = await asyncio.gather(
+            build_context(user.id, text, hint), connection_states(user.id), _known_name(user.id)
+        )
+        now = utcnow()
+        known_name = user.name or card_name
+        recent = persona.recent_messages(history, now)
+        prompt: list[BaseMessage] = [SystemMessage(persona.system_prompt(
+            user, now, context=context, connections=connections, known_name=known_name,
+            ask_name=persona.should_ask_name(known_name, history, now, user.timezone),
+            prior_turns=max(len(recent) - 1, 0),  # the current message is already in history
+        ))]
+        prompt += _to_langchain(history)
 
-    reply = await llm.complete(prompt, llm.Tier.FAST, name="simple_turn")
-    bubbles = persona.split_bubbles(reply) or [reply]
+        reply = await llm.complete(prompt, llm.Tier.FAST, name="simple_turn")
+        bubbles = persona.split_bubbles(reply) or [reply]
 
-    async with Session() as s:
-        for i, bubble in enumerate(bubbles):
-            key = f"reply:{event.id}:{i}"
-            await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=key))
-        await s.commit()
+        async with Session() as s:
+            for i, bubble in enumerate(bubbles):
+                key = f"reply:{event.id}:{i}"
+                await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=key))
+            await s.commit()
     await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles), event_id=f"reply:{event.id}")
     await enqueue_learn(user.id, event, text, previous_reply, _clarified_request(history))
     await _initiative_hook("quiet.after_assistant_message",

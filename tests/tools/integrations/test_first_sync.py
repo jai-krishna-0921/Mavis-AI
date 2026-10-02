@@ -113,3 +113,44 @@ async def test_failed_provider_call_still_completes(provider, fake_bus):
     assert await sync.run(1, Capability.GMAIL) == []
     assert fake_bus.events[0].payload["noticed"] == []
     assert fake_bus.events[0].trust is Trust.UNTRUSTED
+
+
+async def test_learn_jobs_are_capped_at_three_batches(fake_bus):
+    from mavis.tools.integrations.first_sync import MAX_LEARN_JOBS
+
+    mem = FakeMemory()
+    sync = FirstSync(
+        provider=None, memory=mem, loops=FakeLoops(), bus=fake_bus, tz_of=tz_of, clock=lambda: NOW
+    )
+    lines = [f"line {i}" for i in range(50)]
+    await sync._learn_batches(1, "Header:", lines, "first_sync:gmail")
+    assert len(mem.calls) <= MAX_LEARN_JOBS == 3
+    joined = "\n".join(text for _, text, _ in mem.calls)
+    assert all(f"line {i}" in joined for i in range(50))  # combined, nothing dropped
+    refs = [ref for _, _, ref in mem.calls]
+    assert refs == ["first_sync:gmail:0", "first_sync:gmail:1", "first_sync:gmail:2"]
+
+
+async def test_few_lines_make_one_job(fake_bus):
+    mem = FakeMemory()
+    sync = FirstSync(
+        provider=None, memory=mem, loops=FakeLoops(), bus=fake_bus, tz_of=tz_of, clock=lambda: NOW
+    )
+    await sync._learn_batches(1, "H:", ["a", "b"], "r")
+    assert len(mem.calls) == 1
+    await sync._learn_batches(1, "H:", [], "r")
+    assert len(mem.calls) == 1
+
+
+async def test_gmail_and_calendar_share_the_three_job_budget(provider, fake_bus):
+    from mavis.tools.integrations.first_sync import CALENDAR_LEARN_JOBS, GMAIL_LEARN_JOBS, MAX_LEARN_JOBS
+
+    assert GMAIL_LEARN_JOBS + CALENDAR_LEARN_JOBS == MAX_LEARN_JOBS == 3
+    mem = FakeMemory()
+    sync = FirstSync(
+        provider=provider, memory=mem, loops=FakeLoops(), bus=fake_bus, tz_of=tz_of, clock=lambda: NOW
+    )
+    lines = [f"l{i}" for i in range(60)]
+    await sync._learn_batches(1, "H:", lines, "g", GMAIL_LEARN_JOBS)
+    await sync._learn_batches(1, "H:", lines, "c", CALENDAR_LEARN_JOBS)
+    assert len(mem.calls) == 3

@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     ping_daily_budget: int = 6
     quiet_start: int = 23
     quiet_end: int = 7
+    quiet_awake_window_min: int = 60  # recent user message lifts quiet hours
     demo_time_scale: float = 1.0
     onboarding_quiet_hours: float = 4.0  # nudge if the user hasn't answered a question after this long
     morning_checkin_time: str = "08:30"  # default local time for the morning check-in routine

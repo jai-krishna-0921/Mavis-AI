@@ -64,3 +64,53 @@ async def test_composer_strips_dashes_from_output(user, clock, fake_memory, fake
     )
     msg = await Composer(fake_memory).compose(user, "pep talk", 2)
     assert "—" not in msg.messages[0] and "–" not in msg.messages[0]
+
+
+async def test_composer_prompt_has_no_greeting_line_and_uses_profile_name(
+    user, clock, fake_memory, fake_llm, monkeypatch
+):
+    from mavis.domain.decisions import ComposedMessage
+    from mavis.domain.messages import Role
+    from mavis.initiative.composer import Composer
+    from mavis.memory.profile import ProfileCard
+    from mavis.store.repo import messages, profile
+
+    seen = {}
+
+    async def fake(schema, system, user_msg, **kwargs):
+        seen["system"] = system
+        return ComposedMessage(send=True, messages=["hi"])
+
+    from mavis.llm import models as llm
+
+    monkeypatch.setattr(llm, "structured", fake)
+    await profile.save(user.id, ProfileCard(name="Jai"))
+    await messages.log(user.id, Role.USER, "hello")
+    await Composer(fake_memory).compose(user, "check in", 3)
+    system = seen["system"]
+    assert "brief hello is fine" not in system and "fresh conversation" not in system
+    assert "Never ask what to call them" in system
+    assert "Their links right now" not in system
+
+
+async def test_composer_without_history_or_name_never_asks_or_greets(
+    db, clock, fake_memory, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from mavis.domain.decisions import ComposedMessage
+    from mavis.initiative.composer import Composer
+    from mavis.llm import models as llm
+    from mavis.store.repo import users
+
+    seen = {}
+
+    async def fake(schema, system, user_msg, **kwargs):
+        seen["system"] = system
+        return ComposedMessage(send=False, messages=[])
+
+    monkeypatch.setattr(llm, "structured", fake)
+    u, _ = await users.get_or_create_by_chat(222, None)
+    await Composer(fake_memory).compose(SimpleNamespace(id=u.id, name=None, timezone="Asia/Kolkata"), "x", 3)
+    assert "brief hello is fine" not in seen["system"] and "Ask once" not in seen["system"]
+    assert "Do not ask again" in seen["system"]
