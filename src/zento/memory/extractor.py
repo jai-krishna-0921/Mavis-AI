@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -37,9 +38,14 @@ Rules:
 - If nothing is worth remembering, return empty lists."""
 
 
+_TAG = re.compile(r"<\s*/?\s*untrusted", re.IGNORECASE)
+_SOURCE_BAD = re.compile(r"[^A-Za-z0-9_.:@-]")
+
+
 def wrap_untrusted(text: str, source: str) -> str:
-    safe = text.replace("</untrusted>", "</ untrusted>")
-    return f'<untrusted source="{source}">\n{safe}\n</untrusted>'
+    safe = _TAG.sub("[untrusted-tag]", text)
+    safe_source = _SOURCE_BAD.sub("_", source)
+    return f'<untrusted source="{safe_source}">\n{safe}\n</untrusted>'
 
 
 def _localise(dt: datetime | None, zone: ZoneInfo) -> datetime | None:
@@ -116,5 +122,5 @@ async def extract(
         raw = await llm.structured(Extraction, system, body, llm.Tier.FAST)
     except LLMError as exc:
         log.warning("memory.extract_failed", error=str(exc), source=source)
-        return Extraction()
+        raise
     return sanitize(raw, zone)
