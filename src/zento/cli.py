@@ -20,6 +20,7 @@ from zento.store.db import dispose_engine, init_db
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Zento personal assistant")
 log = structlog.get_logger(__name__)
 LOCAL_CHAT_ID = -1
+_background: set[asyncio.Task] = set()
 
 
 async def bootstrap(create_tables: bool) -> EventBus:
@@ -30,7 +31,25 @@ async def bootstrap(create_tables: bool) -> EventBus:
     if create_tables:
         await init_db()
     register_default_handlers()
+    _start_memory_warmup()
     return get_bus()
+
+
+def _start_memory_warmup() -> asyncio.Task:
+    """Background warm-up (store init + embedding model load); failures are logged, never raised."""
+
+    async def _warm() -> None:
+        from zento.memory.service import get_memory
+
+        try:
+            await get_memory().warm()
+        except Exception:
+            log.warning("memory.warm_failed", exc_info=True)
+
+    task = asyncio.create_task(_warm())
+    _background.add(task)  # keep a reference so it isn't garbage-collected mid-flight
+    task.add_done_callback(_background.discard)
+    return task
 
 
 async def _main(coro) -> None:
@@ -111,6 +130,7 @@ async def _chat() -> None:
     configure_logging(level="WARNING")
     await init_db()
     register_default_handlers()
+    _start_memory_warmup()
     bus = InProcessBus()
     set_bus(bus)
     console = ConsoleChannel()
