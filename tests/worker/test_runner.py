@@ -265,3 +265,10 @@ async def test_non_transient_handler_error_not_retried_inline(settings, monkeypa
     with pytest.raises(KeyError):
         await handle_event(ev("z", user_id=8))
     assert calls == 1 and slept == []
+
+
+def test_fallback_copy_promises_no_follow_up_and_has_no_dashes():
+    lowered = FALLBACK_TEXT.lower()
+    assert "get back to you" not in lowered and "i'll" not in lowered
+    assert "try me again" in lowered
+    assert "—" not in FALLBACK_TEXT and "–" not in FALLBACK_TEXT

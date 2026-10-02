@@ -28,7 +28,7 @@ EventFn = Callable[[Event], Awaitable[None]]
 JobFn = Callable[[Job], Awaitable[None]]
 
 WORKER_GROUP = "workers"
-FALLBACK_TEXT = "Give me a sec, something's slow on my end. I'll get back to you on this."
+FALLBACK_TEXT = "Give me a sec, my brain is a bit slow right now. Try me again in a minute?"
 
 CHAT_EVENT_TYPES = frozenset({EventType.USER_MESSAGE, EventType.BUTTON_PRESSED})
 
