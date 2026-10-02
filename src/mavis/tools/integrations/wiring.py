@@ -94,6 +94,15 @@ async def connection_checks_pending(user_id: int, pending_id: int) -> bool:
     return any(w.reason == str(pending_id) for w in pending)
 
 
+async def cancel_connection_checks(user_id: int, pending_id: int) -> None:
+    from mavis.timers.service import WakeupService
+
+    service = WakeupService()
+    for w in await service.pending(user_id, WakeupKind.SYSTEM_CONNECTION_CHECK):
+        if w.reason == str(pending_id):
+            await service.cancel(w.id)
+
+
 async def reconnect_prompt(user_id: int, capability: Capability) -> object:
     """Expired or revoked access seen by the poller, a brief or an action: one prompt per day."""
     return await get_connect_flow().prompt_reconnect(user_id, capability)
@@ -144,6 +153,7 @@ def get_connect_flow() -> ConnectFlow:
         provider=get_provider(), cache=get_connection_cache(), bus=_LazyBus(), notify=outbox_notify,
         schedule=wakeup_schedule, state=RepoUserState(), base_url=get_settings().public_base_url,
         on_active=get_activator().on_active, has_checks=connection_checks_pending,
+        cancel_checks=cancel_connection_checks,
     )
 
 

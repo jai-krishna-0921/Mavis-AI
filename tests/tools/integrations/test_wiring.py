@@ -263,3 +263,13 @@ async def test_connection_checks_pending_sees_scheduled_checks(db, user, clock):
     await wiring.wakeup_schedule(user.id, at, "5", "system_connection_check")
     assert await wiring.connection_checks_pending(user.id, 5) is True
     assert await wiring.connection_checks_pending(user.id, 6) is False
+
+
+async def test_cancel_connection_checks_only_touches_that_pending(db, user, clock):
+    clock.set(NOW)
+    at = timeutil.now() + timedelta(minutes=1)
+    await wiring.wakeup_schedule(user.id, at, "5", "system_connection_check")
+    await wiring.wakeup_schedule(user.id, at, "6", "system_connection_check")
+    await wiring.cancel_connection_checks(user.id, 5)
+    assert await wiring.connection_checks_pending(user.id, 5) is False
+    assert await wiring.connection_checks_pending(user.id, 6) is True

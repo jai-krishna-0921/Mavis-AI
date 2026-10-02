@@ -32,6 +32,7 @@ from mavis.tools.integrations.actions import (
 )
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connections import ConnectionCache
+from mavis.worker.locks import claim
 
 log = structlog.get_logger()
 
@@ -51,6 +52,8 @@ Notify = Callable[[Outbound], Awaitable[None]]
 Schedule = Callable[[int, datetime, str, str], Awaitable[int]]  # (user_id, at, reason, kind)
 OnActive = Callable[[int, Capability], Awaitable[None]]
 HasChecks = Callable[[int, int], Awaitable[bool]]  # (user_id, pending_id) -> a check is still scheduled
+CancelChecks = Callable[[int, int], Awaitable[object]]  # (user_id, pending_id): drop its scheduled checks
+FIRST_SYNC_CLAIM_TTL_S = 600
 
 
 class UserState(Protocol):
@@ -101,6 +104,7 @@ class ConnectFlow:
         base_url: str,
         on_active: OnActive | None = None,
         has_checks: HasChecks | None = None,
+        cancel_checks: CancelChecks | None = None,
         clock: Callable[[], datetime] = timeutil.now,
     ) -> None:
         self.provider, self.cache, self.bus = provider, cache, bus
@@ -108,6 +112,7 @@ class ConnectFlow:
         self.base_url = base_url.rstrip("/")
         self.on_active = on_active
         self.has_checks = has_checks
+        self.cancel_checks = cancel_checks
         self.clock = clock
 
     @contextlib.contextmanager
@@ -196,6 +201,15 @@ class ConnectFlow:
         ])
         return True
 
+    async def _close(self, user_id: int, pending_id: int, status: PendingStatus) -> None:
+        """Resolve a pending and drop the check wakeups that would only fire as no-ops."""
+        await connections.resolve(pending_id, status, now=self.clock())
+        if self.cancel_checks is not None:
+            try:
+                await self.cancel_checks(user_id, pending_id)
+            except Exception as exc:  # noqa: BLE001 - leftover checks are harmless no-ops
+                log.warning("connect.cancel_checks_failed", error=type(exc).__name__)
+
     async def _ensure_checks(self, user_id: int, pending_id: int, now: datetime) -> None:
         if self.has_checks is not None and await self.has_checks(user_id, pending_id):
             return
@@ -223,9 +237,15 @@ class ConnectFlow:
         declined = p.status == PendingStatus.DECLINED.value
         capability = Capability(p.capability)
         if not declined and self.clock() - _aware(p.created_at) > PENDING_TTL:
-            await connections.resolve(pending_id, PendingStatus.EXPIRED, now=self.clock())
+            await self._close(p.user_id, pending_id, PendingStatus.EXPIRED)
             return
         state = (await self.cache.status(p.user_id, fresh=True)).get(capability.value, ConnectionState.NONE)
+        if state is ConnectionState.FAILED:
+            st = await self.state.get(p.user_id)
+            if st.get("synced", {}).get(capability.value) or st.get("reconnect_prompted", {}).get(
+                capability.value
+            ):
+                return  # a reconnect after expiry: FAILED is still the old account, keep waiting for ACTIVE
         # After "Not now" the user may still have finished the sign-in, so ACTIVE still counts.
         accepted = (ConnectionState.ACTIVE,) if declined else (ConnectionState.ACTIVE, ConnectionState.FAILED)
         if state not in accepted:
@@ -254,7 +274,7 @@ class ConnectFlow:
 
         if state is ConnectionState.FAILED:
             for p in waiting:
-                await connections.resolve(p.id, PendingStatus.FAILED, now=self.clock())
+                await self._close(user_id, p.id, PendingStatus.FAILED)
                 if p.task_id:
                     await self._resume(p.task_id, user_id, False, f"failed:{p.id}")
             if waiting:
@@ -266,7 +286,7 @@ class ConnectFlow:
 
         resumed = False
         for p in waiting:
-            await connections.resolve(p.id, PendingStatus.ACTIVE, now=self.clock())
+            await self._close(user_id, p.id, PendingStatus.ACTIVE)
             if p.task_id:
                 await self._resume(p.task_id, user_id, True, f"conn:{p.id}")
                 resumed = True
@@ -286,10 +306,14 @@ class ConnectFlow:
         synced = dict(st.get("synced", {}))
         first_time = not synced.get(capability.value)
         if first_time:
-            await self.bus.enqueue(Job(id=f"first_sync:{user_id}:{capability.value}", user_id=user_id,
-                                       kind=JobKind.FIRST_SYNC, payload={"capability": capability.value}))
-            synced[capability.value] = self.clock().isoformat()
-            await self.state.update(user_id, {"synced": synced})
+            # claim(): two paths (command and event handler) can both see "not synced" at once
+            if not await claim(f"first_sync:{user_id}:{capability.value}", FIRST_SYNC_CLAIM_TTL_S):
+                first_time = False
+            else:
+                await self.bus.enqueue(Job(id=f"first_sync:{user_id}:{capability.value}", user_id=user_id,
+                                           kind=JobKind.FIRST_SYNC, payload={"capability": capability.value}))
+                synced[capability.value] = self.clock().isoformat()
+                await self.state.update(user_id, {"synced": synced})
         prompted = dict(st.get("reconnect_prompted", {}))
         if prompted.pop(capability.value, None) is not None:
             await self.state.update(user_id, {"reconnect_prompted": prompted})
@@ -304,7 +328,7 @@ class ConnectFlow:
         if st.get("synced", {}).get(capability.value) and capability.value in st.get("polling", {}):
             return False
         for p in await connections.open_for(user_id, capability):  # the sign-in finished unseen
-            await connections.resolve(p.id, PendingStatus.ACTIVE, now=self.clock())
+            await self._close(user_id, p.id, PendingStatus.ACTIVE)
             if p.task_id:
                 await self._resume(p.task_id, user_id, True, f"conn:{p.id}")
         first_time = await self._activate(user_id, capability)
@@ -321,7 +345,8 @@ class ConnectFlow:
         prompted = dict(st.get("reconnect_prompted", {}))
         if prompted.get(capability.value) == today:
             return False
-        await self.start(user_id, capability, "", revoked=True)
+        if await self.start(user_id, capability, "", revoked=True) is None:
+            return False  # no link went out: try again next time
         prompted[capability.value] = today
         await self.state.update(user_id, {"reconnect_prompted": prompted})
         return True
