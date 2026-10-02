@@ -2,8 +2,10 @@ import asyncio
 import time
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from zento.domain.loops import Loop, LoopKind
-from zento.domain.memory import Entity
+from zento.domain.memory import Entity, Relation
 from zento.memory import recall as recall_mod
 from zento.memory.recall import assemble, recall, render_loop
 from zento.memory.spotter import SpotterCache
@@ -181,3 +183,30 @@ async def test_bad_loop_skips_only_that_loop():
         loops=Loops(),
     )
     assert ctx.loops == ["Good (commitment)"]
+
+
+async def test_service_recall_survives_store_failure(memory, user, monkeypatch):
+    async def boom(*a, **k):
+        raise ConnectionError("qdrant down")
+
+    monkeypatch.setattr(memory.vector, "search", boom)
+    ctx = await memory.recall(user.id, "anything")
+    assert ctx.episodes == []
+
+
+@pytest.mark.slow
+async def test_recall_latency_with_200_facts(memory, user):
+    for i in range(200):
+        await memory.graph.upsert_relation(
+            user.id,
+            Relation(subject="User", rel="KNOWS", object=f"Person {i}", statement=f"Jai knows Person {i}."),
+        )
+    await memory.vector.add(
+        user.id, [f"Jai talked with Person {i} about topic {i}" for i in range(200)], kind="episode"
+    )
+    memory.invalidate(user.id)
+    await memory.recall(user.id, "warm-up Person 7")
+    t0 = time.perf_counter()
+    for i in range(5):
+        await memory.recall(user.id, f"what did Person {i} say?")
+    assert (time.perf_counter() - t0) / 5 < 0.5
