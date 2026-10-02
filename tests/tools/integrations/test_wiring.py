@@ -227,3 +227,13 @@ async def test_two_users_first_sync_learn_markers_do_not_collide(db, monkeypatch
     for job in [j for j in bus.jobs if j.kind is JobKind.LEARN]:
         await jobs.handle_learn(job)
     assert {u for u, _ in learned} == {101, 102}
+
+
+async def test_system_wakeups_ignore_demo_time_scale(db, user, clock, settings, monkeypatch):
+    clock.set(NOW)
+    monkeypatch.setattr(settings, "demo_time_scale", 0.01)
+    at = timeutil.now() + timedelta(minutes=10)
+    check = await wiring.wakeup_schedule(user.id, at, "5", "system_connection_check")
+    poll = await wiring.wakeup_schedule(user.id, at, "gmail", POLL_KIND)
+    due = {w.id: w.due_at for w in await WakeupService().pending(user.id)}
+    assert due[check] == at and due[poll] == at

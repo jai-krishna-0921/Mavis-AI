@@ -144,7 +144,7 @@ def email_event(user_id: int, raw: dict, source: str) -> Event | None:
     if not m["message_id"]:
         return None
     return _event(
-        f"gmail:msg:{m['message_id']}",
+        f"gmail:{user_id}:msg:{m['message_id']}",
         user_id,
         EventType.EMAIL_RECEIVED,
         to_datetime(m["received_at"]),
@@ -159,7 +159,7 @@ def calendar_event(user_id: int, raw: dict, source: str) -> Event | None:
         return None
     version = c["updated"] or c["start"] or ""
     return _event(
-        f"gcal:{c['event_id']}:{version}",
+        f"gcal:{user_id}:{c['event_id']}:{version}",
         user_id,
         EventType.CALENDAR_CHANGED,
         to_datetime(c["updated"]),
@@ -172,7 +172,8 @@ def slack_event(user_id: int, raw: dict, source: str) -> Event | None:
     s = normalize_slack(raw)
     if not (s["channel"] and s["ts"]):
         return None
-    return _event(f"slack:{s['channel']}:{s['ts']}", user_id, EventType.SLACK_MESSAGE, None, source, s)
+    event_id = f"slack:{user_id}:{s['channel']}:{s['ts']}"
+    return _event(event_id, user_id, EventType.SLACK_MESSAGE, None, source, s)
 
 
 def notion_event(user_id: int, raw: dict, source: str) -> Event | None:
@@ -180,7 +181,7 @@ def notion_event(user_id: int, raw: dict, source: str) -> Event | None:
     if not n["page_id"]:
         return None
     return _event(
-        f"notion:{n['page_id']}:{n['last_edited']}",
+        f"notion:{user_id}:{n['page_id']}:{n['last_edited']}",
         user_id,
         EventType.NOTION_CHANGED,
         to_datetime(n["last_edited"]),

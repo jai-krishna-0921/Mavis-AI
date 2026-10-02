@@ -85,7 +85,7 @@ async def test_webhook_publishes_events_once():
         r2 = await c.post("/webhooks/integrations", content=body, headers=headers)
     assert r1.json() == {"accepted": 1, "received": 1}
     assert r2.json() == {"accepted": 0, "received": 1}
-    assert [e.id for e in bus.events] == ["gmail:msg:x1"]
+    assert [e.id for e in bus.events] == ["gmail:1:msg:x1"]
 
 
 async def test_webhook_rejects_bad_signature_and_publishes_nothing():
