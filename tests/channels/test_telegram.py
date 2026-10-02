@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
-from telegram.error import RetryAfter
+from telegram.error import BadRequest, RetryAfter
 
 from mavis.channels.base import ChannelRateLimited
 from mavis.channels.telegram import TelegramChannel
@@ -13,14 +13,23 @@ class StubBot:
         self.calls: list[tuple] = []
         self.raise_on_send: Exception | None = None
         self._n = 0
+        self.fail_html = False
+        self.parse_modes: list[str | None] = []
+        self.previews: list[bool | None] = []
 
     async def initialize(self) -> None:
         self.calls.append(("initialize",))
 
-    async def send_message(self, chat_id, text, reply_markup=None):
+    async def send_message(
+        self, chat_id, text, reply_markup=None, parse_mode=None, disable_web_page_preview=None
+    ):
         if self.raise_on_send:
             raise self.raise_on_send
+        if self.fail_html and parse_mode == "HTML":
+            raise BadRequest("Can't parse entities: unsupported start tag")
         self._n += 1
+        self.parse_modes.append(parse_mode)
+        self.previews.append(disable_web_page_preview)
         self.calls.append(("message", chat_id, text, reply_markup))
         return SimpleNamespace(message_id=self._n)
 
@@ -71,3 +80,25 @@ def test_get_channel_defaults_to_console_without_token(settings) -> None:
         assert isinstance(get_channel(), ConsoleChannel)
     finally:
         set_channel(None)
+
+
+async def test_sends_html_with_parse_mode_and_no_preview() -> None:
+    bot = StubBot()
+    await TelegramChannel("token", bot=bot).send_text(5, "**hi** there")
+    assert bot.parse_modes == ["HTML"] and bot.previews == [True]
+    assert [c for c in bot.calls if c[0] == "message"][0][2] == "<b>hi</b> there"
+
+
+async def test_bad_request_parse_error_falls_back_to_plain() -> None:
+    bot = StubBot()
+    bot.fail_html = True
+    await TelegramChannel("token", bot=bot).send_text(5, "**hi** - there")
+    assert bot.parse_modes == [None]
+    assert [c for c in bot.calls if c[0] == "message"][0][2] == "hi - there"
+
+
+async def test_other_bad_request_is_not_swallowed() -> None:
+    bot = StubBot()
+    bot.raise_on_send = BadRequest("Chat not found")
+    with pytest.raises(BadRequest):
+        await TelegramChannel("token", bot=bot).send_text(5, "hi")
