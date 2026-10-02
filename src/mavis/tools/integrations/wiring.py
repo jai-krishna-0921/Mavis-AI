@@ -83,7 +83,8 @@ async def wakeup_schedule(user_id: int, at: datetime, reason: str, kind: str) ->
             # firing right now (due, still PENDING until commit), or the chain would die.
             if w.due_at > now or at <= now:
                 return w.id
-    return await service.wake_me(user_id, at, reason, kind=kind)
+    # plumbing, not agent intent: never compressed by DEMO_TIME_SCALE
+    return await service.wake_me(user_id, at, reason, kind=kind, scale=False)
 
 
 async def user_timezone(user_id: int) -> str:
