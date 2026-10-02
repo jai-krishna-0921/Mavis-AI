@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     telegram_mode: Literal["polling", "webhook"] = "polling"
     allowed_telegram_chat_ids: list[int] = Field(default_factory=list)
 
+    # --- bus / worker ---------------------------------------------------------
+    bus_claim_idle_ms: int = 900_000  # redeliver an unacked message after this idle time (> longest handler)
+    worker_concurrency: int = 4  # consumer loops per stream per worker process
+
     # --- storage --------------------------------------------------------------
     data_dir: Path = Path("data")
     database_url: str = ""  # empty => sqlite in data_dir; prod: postgresql+psycopg://...

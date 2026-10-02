@@ -31,6 +31,23 @@ def _file(msg: dict[str, Any]) -> InboundFile | None:
     return None
 
 
+_warned_open_allowlist = False
+
+
+def _chat_allowed(chat_id: int) -> bool:
+    """Empty allowlist = allow-all in dev only (warn once); every other env denies."""
+    global _warned_open_allowlist
+    s = get_settings()
+    if s.allowed_telegram_chat_ids:
+        return chat_id in s.allowed_telegram_chat_ids
+    if s.env != "dev":
+        return False
+    if not _warned_open_allowlist:
+        _warned_open_allowlist = True
+        log.warning("telegram.allowlist_empty_allowing_all", hint="set ALLOWED_TELEGRAM_CHAT_IDS")
+    return True
+
+
 async def ingest_update(data: dict[str, Any], bus: EventBus) -> bool:
     """Normalise and publish one update. Returns True if a new event was published."""
     update_id = data.get("update_id")
@@ -61,8 +78,8 @@ async def ingest_update(data: dict[str, Any], bus: EventBus) -> bool:
 
     if chat_id is None:
         return False
-    allowed = get_settings().allowed_telegram_chat_ids
-    if allowed and chat_id not in allowed:
+    if not _chat_allowed(chat_id):
+        # the api role never sends, so no refusal reply: the owner reads chat_id from this log line
         log.warning("telegram.chat_not_allowed", chat_id=chat_id)
         return False
 

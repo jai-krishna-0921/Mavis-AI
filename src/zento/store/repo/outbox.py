@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from zento.domain.messages import Button, Outbound
 from zento.store.db import Session, utcnow
@@ -65,10 +66,19 @@ async def texts_with_dedupe_prefix(prefix: str) -> list[str]:
 
 
 async def due(now: datetime, limit: int = 20) -> list[OutboxMessage]:
+    """Rows ready to send. A user's row is held back while an earlier row of theirs is still
+    pending/sending (retrying or rate-limited), so bubbles are delivered in order per user."""
+    earlier = aliased(OutboxMessage)
+    blocked = (
+        select(earlier.id)
+        .where(earlier.user_id == OutboxMessage.user_id, earlier.id < OutboxMessage.id,
+               earlier.status.in_(_DELIVERABLE))
+        .exists()
+    )
     async with Session() as s:
         rows = await s.scalars(
             select(OutboxMessage)
-            .where(OutboxMessage.status.in_(_DELIVERABLE), OutboxMessage.next_attempt_at <= now)
+            .where(OutboxMessage.status.in_(_DELIVERABLE), OutboxMessage.next_attempt_at <= now, ~blocked)
             .order_by(OutboxMessage.id).limit(limit)
         )
         return list(rows)

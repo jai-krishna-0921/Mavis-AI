@@ -145,10 +145,20 @@ def dev() -> None:
     _run(_dev())
 
 
+def _require_redis(role: str) -> None:
+    """api/worker are multi-process roles: without Redis their in-process bus would drop messages."""
+    if not get_settings().redis_url:
+        typer.echo(f"error: REDIS_URL is required for the `{role}` role (use `zento dev` for one process).",
+                   err=True)
+        raise typer.Exit(1)
+
+
 @app.command()
 def api(host: str = "0.0.0.0", port: int = 8000) -> None:
     """Run the webhook/health API (stateless; scale horizontally)."""
     import uvicorn
+
+    _require_redis("api")
 
     uvicorn.run("zento.api.app:create_app", factory=True, host=host, port=port, proxy_headers=True)
 
@@ -156,6 +166,7 @@ def api(host: str = "0.0.0.0", port: int = 8000) -> None:
 @app.command()
 def worker(name: str = typer.Option(default_factory=lambda: f"worker-{socket.gethostname()}")) -> None:
     """Consume events and jobs and deliver the outbox."""
+    _require_redis("worker")
     _run(_worker(name))
 
 

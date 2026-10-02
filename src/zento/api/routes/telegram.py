@@ -17,7 +17,8 @@ async def telegram_webhook(
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
 ) -> dict[str, bool]:
     secret = get_settings().telegram_webhook_secret
-    if secret and not hmac.compare_digest(
+    # fail closed: without a configured secret nobody can be authenticated, in any mode
+    if not secret or not hmac.compare_digest(
         (x_telegram_bot_api_secret_token or "").encode(), secret.encode()
     ):
         raise HTTPException(status_code=403, detail="bad secret token")

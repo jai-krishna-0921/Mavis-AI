@@ -14,10 +14,16 @@ def update(update_id: int, chat_id: int = 100, text: str = "hi", **extra) -> dic
     return {"update_id": update_id, "message": msg}
 
 
+SECRET = "s3cret"
+
+
 @pytest.fixture
-async def client(db, bus):
+async def client(db, bus, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", SECRET)
+    get_settings.cache_clear()
     transport = httpx.ASGITransport(app=create_app())
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    headers = {"X-Telegram-Bot-Api-Secret-Token": SECRET}
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", headers=headers) as c:
         yield c
 
 
@@ -81,13 +87,24 @@ async def test_callback_query_published_as_button_pressed(client, bus) -> None:
     assert event.payload == {"data": "appr:1:yes", "callback_query_id": "cq1", "message_id": 9}
 
 
-async def test_secret_token_enforced(client, monkeypatch) -> None:
-    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "s3cret")
-    get_settings.cache_clear()
-    assert (await client.post("/webhooks/telegram", json=update(7))).status_code == 403
-    r = await client.post("/webhooks/telegram", json=update(7),
-                          headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"})
+async def test_secret_token_enforced(client) -> None:
+    assert (await client.post("/webhooks/telegram", json=update(7),
+                              headers={"X-Telegram-Bot-Api-Secret-Token": "wrong"})).status_code == 403
+    r = await client.post("/webhooks/telegram", json=update(7))  # default header carries the secret
     assert r.status_code == 200
+
+
+@pytest.mark.parametrize("mode", ["polling", "webhook"])
+async def test_empty_secret_rejects_everything(db, bus, monkeypatch, mode) -> None:
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "")
+    monkeypatch.setenv("TELEGRAM_MODE", mode)
+    get_settings.cache_clear()
+    transport = httpx.ASGITransport(app=create_app())
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        h = "X-Telegram-Bot-Api-Secret-Token"
+        for headers in ({}, {h: ""}, {h: "x"}):
+            assert (await c.post("/webhooks/telegram", json=update(1), headers=headers)).status_code == 403
+    assert bus._events.empty()
 
 
 async def test_disallowed_chat_ignored(client, bus, monkeypatch) -> None:
@@ -122,3 +139,47 @@ async def test_command_parsing(client, bus, text, command) -> None:
     [event] = await _published(bus)
     assert event.payload.get("command") == command
     assert event.payload["text"] == text
+
+
+# --- allowlist policy -------------------------------------------------------------------------
+
+@pytest.mark.parametrize(("env", "allowed", "chat_id", "published"), [
+    ("dev", "[]", 100, True),       # empty list: allow-all only in dev
+    ("prod", "[]", 100, False),     # empty list: deny elsewhere
+    ("test", "[]", 100, False),
+    ("prod", "[100]", 100, True),   # listed: allowed in any env
+    ("dev", "[100]", 100, True),
+    ("dev", "[999]", 100, False),   # unlisted: denied even in dev
+    ("prod", "[999]", 100, False),
+])
+async def test_allowlist_policy(client, bus, monkeypatch, env, allowed, chat_id, published) -> None:
+    monkeypatch.setenv("ENV", env)
+    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", allowed)
+    get_settings.cache_clear()
+    r = await client.post("/webhooks/telegram", json=update(50, chat_id=chat_id))
+    assert r.status_code == 200 and r.json()["published"] is published
+    assert bool(await _published(bus)) is published
+    assert (await users.get_by_chat(chat_id) is not None) is published
+
+
+async def test_denied_chat_logs_chat_id_at_warning(client, monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv("ENV", "prod")
+    get_settings.cache_clear()
+    with capture_logs() as logs:
+        await client.post("/webhooks/telegram", json=update(51, chat_id=4242))
+    [entry] = [e for e in logs if e["event"] == "telegram.chat_not_allowed"]
+    assert entry["chat_id"] == 4242 and entry["log_level"] == "warning"
+
+
+async def test_empty_allowlist_in_dev_warns_once(client, monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    from zento.channels import telegram_updates
+
+    monkeypatch.setattr(telegram_updates, "_warned_open_allowlist", False)
+    with capture_logs() as logs:
+        await client.post("/webhooks/telegram", json=update(52))
+        await client.post("/webhooks/telegram", json=update(53))
+    assert [e["event"] for e in logs].count("telegram.allowlist_empty_allowing_all") == 1

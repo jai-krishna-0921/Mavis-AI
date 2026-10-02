@@ -91,3 +91,21 @@ async def test_deduped_messages_sent_once(db, channel) -> None:
     await outbox.enqueue_now(Outbound(user_id=uid, text="hi", dedupe_key="reply:e1:0"))
     await OutboxSender(channel).run_once()
     assert channel.texts == ["hi"]
+
+
+async def test_later_row_waits_for_earlier_retrying_row_of_same_user(db, channel) -> None:
+    uid = await _user()
+    other, _ = await users.get_or_create_by_chat(556, "Sam")
+    r1 = await outbox.enqueue_now(Outbound(user_id=uid, text="one"))
+    await outbox.enqueue_now(Outbound(user_id=uid, text="two"))
+    await outbox.enqueue_now(Outbound(user_id=other.id, text="sam-1"))
+    channel.fail_next.append(ChannelRateLimited(30))
+    now = utcnow()
+    sender = OutboxSender(channel)
+    await sender.run_once(now)
+    assert channel.texts == ["sam-1"]  # row1 rate-limited; row2 held back; other user unaffected
+    await sender.run_once(now + timedelta(seconds=10))
+    assert channel.texts == ["sam-1"]  # row1 still in backoff
+    assert await sender.run_once(now + timedelta(seconds=31)) == 2
+    assert channel.texts == ["sam-1", "one", "two"]
+    assert (await _row(r1)).status == "sent"

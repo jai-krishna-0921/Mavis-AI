@@ -28,25 +28,37 @@ class OutboxSender:
     async def run_once(self, now: datetime | None = None, limit: int = 20) -> int:
         now = now or utcnow()
         delivered = 0
-        for row in await outbox.due(now, limit):
-            if not await outbox.claim(row.id, now):
-                continue  # another sender owns it
-            try:
-                await self._deliver(row)
-            except ChannelRateLimited as exc:
-                await outbox.mark_retry(row.id, "rate limited", now + timedelta(seconds=exc.retry_after),
-                                        count_attempt=False)
-            except Exception as exc:  # noqa: BLE001
-                attempts = row.attempts + 1
-                log.warning("outbox.delivery_failed", outbox_id=row.id, attempt=attempts, error=repr(exc))
-                if attempts >= MAX_ATTEMPTS:
-                    await outbox.mark_failed(row.id, repr(exc)[:500])
-                else:
-                    await outbox.mark_retry(row.id, repr(exc)[:500],
-                                            now + timedelta(seconds=min(2**attempts, 300)))
-            else:
-                delivered += 1
+        # due() holds back a user's later rows until the earlier one is sent, so re-query after each
+        # pass to pick up the next bubble; stop when a pass delivers nothing (retry/backoff/empty).
+        while delivered < limit:
+            pass_delivered = 0
+            for row in await outbox.due(now, limit - delivered):
+                if not await outbox.claim(row.id, now):
+                    continue  # another sender owns it
+                if await self._attempt(row, now):
+                    pass_delivered += 1
+            if not pass_delivered:
+                break
+            delivered += pass_delivered
         return delivered
+
+    async def _attempt(self, row: OutboxMessage, now: datetime) -> bool:
+        try:
+            await self._deliver(row)
+        except ChannelRateLimited as exc:
+            await outbox.mark_retry(row.id, "rate limited", now + timedelta(seconds=exc.retry_after),
+                                    count_attempt=False)
+        except Exception as exc:  # noqa: BLE001
+            attempts = row.attempts + 1
+            log.warning("outbox.delivery_failed", outbox_id=row.id, attempt=attempts, error=repr(exc))
+            if attempts >= MAX_ATTEMPTS:
+                await outbox.mark_failed(row.id, repr(exc)[:500])
+            else:
+                await outbox.mark_retry(row.id, repr(exc)[:500],
+                                        now + timedelta(seconds=min(2**attempts, 300)))
+        else:
+            return True
+        return False
 
     async def _deliver(self, row: OutboxMessage) -> None:
         user = await users.get(row.user_id)
