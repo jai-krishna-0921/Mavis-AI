@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from mavis.domain.messages import Role
@@ -50,3 +50,13 @@ async def has_user_message_since(user_id: int, since: datetime) -> bool:
                                      Message.created_at > since).limit(1)
         )
         return found is not None
+
+
+async def last_user_message_at(user_id: int) -> datetime | None:
+    """Timestamp (aware UTC) of the user's latest message, or None."""
+    async with Session() as s:
+        ts = await s.scalar(
+            select(func.max(Message.created_at)).where(Message.user_id == user_id,
+                                                       Message.role == Role.USER.value)
+        )
+    return None if ts is None else ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)

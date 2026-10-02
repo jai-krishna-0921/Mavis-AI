@@ -203,3 +203,39 @@ async def test_deliver_question_schedules_user_quiet(user, clock, recording_bus,
     # a went-quiet nudge (streak 1) that itself ends with a question continues the chain
     await executor.deliver(user, ["Noted.", "Want me to follow up?"], dedupe_key="q:1", quiet_streak=1)
     assert len(await wakeups.pending(user.id, WakeupKind.USER_QUIET)) == 1
+
+
+async def test_release_deferred_after_user_message_in_quiet_hours(user, clock, recording_bus, fake_memory):
+    from mavis.domain.messages import Role
+
+    clock.set(datetime(2026, 9, 27, 18, 30, tzinfo=UTC))  # 00:00 IST
+    executor, _, wakeups = build(recording_bus, fake_memory)
+    assert not await executor.notify(user, NotifyIntent(urgency=3, intent="weekly summary"))
+    await messages.log(user.id, Role.USER, "hello?")
+    assert await executor.release_deferred(user) == 1
+    [w] = await wakeups.pending(user.id, WakeupKind.DEFERRED)
+    assert w.due_at == timeutil.now() + timedelta(seconds=20)
+
+
+async def test_release_deferred_noop_outside_quiet_hours(user, clock, recording_bus, fake_memory):
+    clock.set(datetime(2026, 9, 27, 18, 30, tzinfo=UTC))
+    executor, _, wakeups = build(recording_bus, fake_memory)
+    await executor.notify(user, NotifyIntent(urgency=3, intent="weekly summary"))
+    clock.set(datetime(2026, 9, 28, 8, 0, tzinfo=UTC))  # 13:30 IST
+    assert await executor.release_deferred(user) == 0
+
+
+async def test_released_deferred_delivers_when_awake(
+    user, clock, recording_bus, fake_memory, fake_llm, channel
+):
+    from mavis.domain.messages import Role
+
+    clock.set(datetime(2026, 9, 27, 18, 30, tzinfo=UTC))
+    executor, _, _ = build(recording_bus, fake_memory)
+    intent = NotifyIntent(urgency=3, intent="weekly summary", dedupe_key="ws:1")
+    assert not await executor.notify(user, intent)
+    await messages.log(user.id, Role.USER, "hello?")
+    clock.advance(seconds=30)
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["Summary."]))
+    assert await executor.notify(user, intent)  # what the deferred wakeup does when it fires
+    assert await deliver_pending(channel) == 1
