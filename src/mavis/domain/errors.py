@@ -12,10 +12,11 @@ class LLMError(MavisError):
 
 
 class ConnectionRequired(MavisError):
-    def __init__(self, capability: Capability, reason: str) -> None:
+    def __init__(self, capability: Capability, reason: str, *, revoked: bool = False) -> None:
         super().__init__(f"{capability.value} not connected: {reason}")
         self.capability = capability
         self.reason = reason
+        self.revoked = revoked
 
 
 class ApprovalRequired(MavisError):
@@ -28,3 +29,11 @@ class ApprovalRequired(MavisError):
 
 class BudgetExceeded(MavisError):
     """A task exceeded its step/token/time budget."""
+
+
+class IntegrationError(MavisError):
+    """Provider unreachable, misconfigured or refused. Message is safe to show; never contains credentials."""
+
+
+class WebhookVerificationError(IntegrationError):
+    """Inbound webhook failed signature/timestamp verification."""

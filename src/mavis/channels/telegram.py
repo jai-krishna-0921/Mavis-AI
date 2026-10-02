@@ -27,6 +27,14 @@ def _seconds(value: int | float | timedelta) -> float:
     return value.total_seconds() if isinstance(value, timedelta) else float(value)
 
 
+def to_inline_button(b: Button) -> InlineKeyboardButton:
+    if b.url:
+        return InlineKeyboardButton(text=b.label, url=b.url)
+    if not b.data:
+        raise ValueError(f"button {b.label!r} has neither data nor url")
+    return InlineKeyboardButton(text=b.label, callback_data=b.data)
+
+
 class TelegramChannel:
     def __init__(self, token: str, bot: Any | None = None) -> None:
         self._bot = bot or Bot(token)
@@ -42,7 +50,7 @@ class TelegramChannel:
         if not buttons:
             return None
         return InlineKeyboardMarkup(
-            [[InlineKeyboardButton(b.label, callback_data=b.data) for b in row] for row in buttons]
+            [[to_inline_button(b) for b in row] for row in buttons]
         )
 
     async def send_text(

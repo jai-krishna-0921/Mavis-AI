@@ -184,3 +184,18 @@ class PingLogRow(Base):
     key: Mapped[str] = mapped_column(String(240))
     urgency: Mapped[int] = mapped_column(Integer)
     sent_at: Mapped[datetime] = mapped_column()
+
+
+class ConnectionPending(Base):
+    """A connect link we sent and are waiting on. task_id is the interrupted run to resume, if any."""
+
+    __tablename__ = "connections_pending"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    capability: Mapped[str] = mapped_column(String(40), index=True)
+    task_id: Mapped[str | None] = mapped_column(String(80))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(nullable=True)
