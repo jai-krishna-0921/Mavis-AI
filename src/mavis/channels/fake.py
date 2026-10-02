@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from mavis.channels.formatting import to_plain
 from mavis.channels.text import split_text
 from mavis.config import get_settings
 from mavis.domain.messages import Button
@@ -72,7 +73,7 @@ class ConsoleChannel(FakeChannel):
     ) -> list[int]:
         ids = await super().send_text(chat_id, text, buttons)
         name = get_settings().agent_name
-        print(f"\n{name}: {text}")
+        print(f"\n{name}: {to_plain(text)}")
         if buttons:
             print("   " + "  ".join(f"[{b.label} → {b.data}]" for row in buttons for b in row))
         return ids

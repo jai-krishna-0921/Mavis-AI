@@ -9,11 +9,14 @@ from typing import Any
 import structlog
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction
-from telegram.error import RetryAfter
+from telegram.error import BadRequest, RetryAfter
 
 from mavis.channels.base import ChannelRateLimited
+from mavis.channels.formatting import to_plain, to_telegram_html
 from mavis.channels.text import split_text
 from mavis.domain.messages import Button
+
+_CHUNK_LIMIT = 3500  # leave room for HTML tags under Telegram's 4096 cap
 
 log = structlog.get_logger(__name__)
 
@@ -44,16 +47,37 @@ class TelegramChannel:
         self, chat_id: int, text: str, buttons: list[list[Button]] | None = None
     ) -> list[int]:
         await self._ensure()
-        chunks = split_text(text)
+        chunks = split_text(text, _CHUNK_LIMIT)
         ids: list[int] = []
         for i, chunk in enumerate(chunks):
             markup = self._markup(buttons) if i == len(chunks) - 1 else None
             try:
-                msg = await self._bot.send_message(chat_id=chat_id, text=chunk, reply_markup=markup)
+                msg = await self._send_chunk(chat_id, chunk, markup)
             except RetryAfter as exc:
                 raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
             ids.append(msg.message_id)
         return ids
+
+    async def _send_chunk(self, chat_id: int, chunk: str, markup: InlineKeyboardMarkup | None) -> Any:
+        try:
+            return await self._bot.send_message(
+                chat_id=chat_id,
+                text=to_telegram_html(chunk),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=markup,
+            )
+        except BadRequest as exc:
+            message = str(exc).lower()
+            if "parse" not in message and "entities" not in message:
+                raise
+            log.warning("telegram.html_rejected", error=str(exc))
+            return await self._bot.send_message(
+                chat_id=chat_id,
+                text=to_plain(chunk),
+                disable_web_page_preview=True,
+                reply_markup=markup,
+            )
 
     async def send_document(self, chat_id: int, path: str, caption: str = "") -> int:
         await self._ensure()
