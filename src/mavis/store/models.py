@@ -5,7 +5,17 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from mavis.store.db import Base, utcnow
@@ -150,3 +160,16 @@ class WakeupRow(Base):
     dedupe_key: Mapped[str | None] = mapped_column(String(200), index=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column()
     fired_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class PingLogRow(Base):
+    """Unsolicited messages actually sent, keyed per local day for dedupe."""
+
+    __tablename__ = "ping_log"
+    __table_args__ = (UniqueConstraint("user_id", "key", name="uq_ping_log_user_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    key: Mapped[str] = mapped_column(String(240))
+    urgency: Mapped[int] = mapped_column(Integer)
+    sent_at: Mapped[datetime] = mapped_column()
