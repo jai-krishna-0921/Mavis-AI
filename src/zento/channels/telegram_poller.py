@@ -7,6 +7,7 @@ from typing import Any
 
 import structlog
 from telegram import Bot
+from telegram.error import Forbidden, InvalidToken
 
 from zento.bus.base import EventBus
 from zento.channels.telegram_updates import ingest_update
@@ -17,8 +18,24 @@ ALLOWED_UPDATES = ["message", "edited_message", "callback_query"]
 
 async def run_polling(bus: EventBus, token: str, bot: Any | None = None) -> None:
     bot = bot or Bot(token)
-    await bot.initialize()
-    await bot.delete_webhook(drop_pending_updates=False)
+
+    # Startup with retry loop for transient network errors
+    backoff = 1.0
+    while True:
+        try:
+            await bot.initialize()
+            await bot.delete_webhook(drop_pending_updates=False)
+            break
+        except asyncio.CancelledError:
+            raise
+        except (InvalidToken, Forbidden):
+            log.error("telegram.invalid_token")
+            raise
+        except Exception:
+            log.exception("telegram.startup_failed")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
     offset: int | None = None
     backoff = 1.0
     log.info("telegram.polling_started")
@@ -27,6 +44,9 @@ async def run_polling(bus: EventBus, token: str, bot: Any | None = None) -> None
             updates = await bot.get_updates(offset=offset, timeout=25, allowed_updates=ALLOWED_UPDATES)
             backoff = 1.0
         except asyncio.CancelledError:
+            raise
+        except (InvalidToken, Forbidden):
+            log.error("telegram.invalid_token")
             raise
         except Exception:
             log.exception("telegram.get_updates_failed")

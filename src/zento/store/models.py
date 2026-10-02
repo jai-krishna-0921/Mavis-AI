@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, ForeignKey, String, Text
+from sqlalchemy import JSON, BigInteger, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from zento.store.db import Base, utcnow
@@ -61,3 +61,53 @@ class ProcessedEvent(Base):
 
     id: Mapped[str] = mapped_column(String(200), primary_key=True)
     processed_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class GraphNode(Base):
+    """SQLite/Postgres fallback graph: one row per entity in the user's world."""
+
+    __tablename__ = "graph_nodes"
+    __table_args__ = (UniqueConstraint("user_id", "key", name="uq_graph_nodes_user_key"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    key: Mapped[str] = mapped_column(String(240), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    label: Mapped[str] = mapped_column(String(40))
+    aliases: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class GraphEdge(Base):
+    """Bi-temporal-lite edge: valid_to NULL means the fact is current."""
+
+    __tablename__ = "graph_edges"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    src_key: Mapped[str] = mapped_column(String(240), index=True)
+    rel: Mapped[str] = mapped_column(String(40))
+    dst_key: Mapped[str] = mapped_column(String(240), index=True)
+    statement: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[float] = mapped_column(Float, default=0.8)
+    valid_from: Mapped[datetime] = mapped_column(default=utcnow)
+    valid_to: Mapped[datetime | None] = mapped_column(default=None, index=True)
+    source_ref: Mapped[str] = mapped_column(String(200), default="")
+
+
+class ProfileCardRow(Base):
+    __tablename__ = "profile_cards"
+    __table_args__ = (UniqueConstraint("user_id", "version", name="uq_profile_cards_user_version"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    content: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class ConversationSummary(Base):
+    __tablename__ = "conversation_summaries"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    upto_message_id: Mapped[int] = mapped_column(Integer)
+    summary: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
