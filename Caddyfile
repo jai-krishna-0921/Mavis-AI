@@ -1,0 +1,14 @@
+# Automatic Let's Encrypt for {$DOMAIN} (e.g. 13-233-10-5.sslip.io, no domain purchase needed).
+# Only the routes the outside world needs are proxied; everything else is a 404.
+{$DOMAIN} {
+	encode zstd gzip
+
+	@public path /telegram/webhook /webhooks/* /connect/callback /healthz
+	handle @public {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}
