@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from mavis.api.routes import health, telegram
+from mavis.api.routes import connect, health, integrations, telegram
 from mavis.bus import get_bus
 from mavis.config import get_settings
 from mavis.logging import configure_logging
@@ -32,4 +32,6 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Mavis", lifespan=lifespan)
     app.include_router(health.router)
     app.include_router(telegram.router)
+    app.include_router(connect.router)
+    app.include_router(integrations.router)
     return app
