@@ -30,7 +30,18 @@ TEST_ENV = {
     "LANGFUSE_PUBLIC_KEY": "",
     "LANGFUSE_SECRET_KEY": "",
     "DEMO_TIME_SCALE": "1.0",
+    "PRESENCE_REACTION": "\N{EYES}",  # production default is off; presence tests opt in via this
 }
+
+
+@pytest.fixture(autouse=True)
+def _reset_ollama_state():
+    """Global 429 backoff / timeout cooldown is process-wide; it must not leak between tests."""
+    from mavis.llm import models
+
+    models._ollama.reset()
+    yield
+    models._ollama.reset()
 
 
 @pytest.fixture(autouse=True)
@@ -84,7 +95,7 @@ def fake_llm(monkeypatch):
 
 
 @pytest.fixture
-def channel():
+def channel(settings):
     """A FakeChannel installed as the process channel; inspect `.sent` / `.texts`."""
     from mavis.channels import set_channel
     from mavis.channels.fake import FakeChannel
