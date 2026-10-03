@@ -9,9 +9,11 @@ from collections.abc import Awaitable, Callable
 import structlog
 
 from mavis.config import get_settings
+from mavis.domain import timeutil
 from mavis.domain.events import Trust
 from mavis.domain.memory import Extraction, RecallContext
 from mavis.memory import recall as recall_mod
+from mavis.memory.dates import apply_relative_day
 from mavis.memory.embeddings import Embedder, get_embedder
 from mavis.memory.extractor import extract
 from mavis.memory.graph import GraphStore, make_graph
@@ -134,6 +136,8 @@ class MemoryService:
         )
         if not card.tracks_mood:
             extraction = extraction.model_copy(update={"mood": None})
+        if trust is Trust.USER:  # the model sometimes misreads "by Tuesday": fix the plain cases in code
+            extraction = apply_relative_day(extraction, user_message_of(text), timeutil.now(), user.timezone)
 
         resolution = await resolve(extraction, await self.graph.entities(user_id), self.embedder)
         trusted = trust is Trust.USER

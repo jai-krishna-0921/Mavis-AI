@@ -147,6 +147,7 @@ async def run_turn(event: Event) -> None:
     await _initiative_hook("quiet.on_user_message", lambda i: i.quiet.on_user_message(user.id))
     await _initiative_hook("routines.on_user_message", lambda i: i.routines.on_user_message(user))
     await _initiative_hook("executor.release_deferred", lambda i: i.executor.release_deferred(user))
+    await _initiative_hook("loops.on_user_message", lambda i: i.loops.on_user_message(user.id, text))
     if await commands.run_command(event):
         return
 

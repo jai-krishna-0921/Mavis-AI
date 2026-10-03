@@ -57,7 +57,7 @@ async def test_loop_created_llm_failure_schedules_defaults(user, clock, recordin
     assert pending[WakeupKind.EVENT_ENDED].due_at == DUE + timedelta(hours=2)
 
 
-async def test_loop_created_with_reasoner_wakeups_skips_defaults(user, clock, recording_bus, fake_memory,
+async def test_loop_created_with_reasoner_wakeups_keeps_defaults(user, clock, recording_bus, fake_memory,
                                                                  fake_llm):
     init = build(recording_bus, fake_memory)
     loop = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Dentist", due_at=DUE,
@@ -66,7 +66,8 @@ async def test_loop_created_with_reasoner_wakeups_skips_defaults(user, clock, re
     request = WakeupRequest(at=DUE - timedelta(hours=3), reason="remind dentist", loop_id=loop.id)
     fake_llm.push_structured(InitiativeDecision(wakeups=[request]))
     await init.handler.handle(created)
-    assert [w.kind for w in await init.wakeups.pending(user.id)] == [WakeupKind.AGENT]
+    # QA F3: the default follow-up is always scheduled; the model's own wakeup is kept alongside
+    assert [w.kind for w in await init.wakeups.pending(user.id)] == [WakeupKind.AGENT, WakeupKind.EVENT_ENDED]
 
 
 async def test_routine_loop_created_is_ignored(user, clock, recording_bus, fake_memory):
@@ -103,7 +104,7 @@ async def test_event_ended_llm_failure_still_follows_up(user, clock, recording_b
                                              "reason": "Follow up"}))
     await deliver_pending(channel)
     assert any("How'd the interview prep go?" in str(s) for s in channel.sent)
-    assert (await init.loops.get(loop.id)).status is LoopStatus.DONE
+    assert (await init.loops.get(loop.id)).status is LoopStatus.AWAITING_REPLY  # until the user answers
 
 
 async def test_deferred_wakeup_goes_straight_to_notify(user, clock, recording_bus, fake_memory, fake_llm,
