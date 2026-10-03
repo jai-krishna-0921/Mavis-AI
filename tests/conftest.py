@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import BaseModel
 
+from mavis.bus import set_bus
 from mavis.domain.events import Event, Job
 from mavis.domain.memory import Extraction, RecallContext
+from mavis.domain.messages import Outbound
 from mavis.memory.embeddings import set_embedder
 from mavis.memory.graph import SqliteGraphStore
 from mavis.memory.service import MemoryService, set_memory
@@ -259,6 +263,7 @@ class FakeMemory:
         self.loops_reader = None
         self.profile = ""
         self.learned: list[tuple[int, str, str]] = []
+        self.learned_trust: list = []  # trust passed to each learn(), parallel to `learned`
         self.forgotten: list[str] = []
 
     def set_loops_reader(self, reader) -> None:
@@ -269,6 +274,7 @@ class FakeMemory:
 
     async def learn(self, user_id: int, text: str, source_ref: str = "", trust=None) -> Extraction:
         self.learned.append((user_id, text, source_ref))
+        self.learned_trust.append(trust)
         return Extraction()
 
     async def forget(self, user_id: int, needle: str) -> int:
@@ -357,3 +363,86 @@ def rec():
     from tests.tools.integrations.fakes import Recorder
 
     return Recorder()
+
+
+# --- Phase 4 fixtures ------------------------------------------------------------------------------
+# `fake_memory.profile = "Name: Jai. Friend: Jawahar."` gives a test recall content.
+
+
+@pytest.fixture
+def sent(monkeypatch) -> list[Outbound]:
+    """Captures every Outbound passed to outbox.enqueue."""
+    from mavis.store.repo import outbox
+
+    captured: list[Outbound] = []
+
+    async def _enqueue(session, msg: Outbound) -> int:
+        captured.append(msg)
+        return len(captured)
+
+    monkeypatch.setattr(outbox, "enqueue", _enqueue)
+    return captured
+
+
+@pytest.fixture
+def rec_bus() -> Iterator[RecordingBus]:
+    """Installs a RecordingBus as the process bus (set_bus), so modules holding get_bus see it."""
+    rb = RecordingBus()
+    set_bus(rb)  # type: ignore[arg-type]
+    yield rb
+    set_bus(None)
+
+
+@pytest.fixture
+def fresh_registry(monkeypatch):
+    from mavis.tools import registry as registry_mod
+
+    reg = registry_mod.ToolRegistry()
+    monkeypatch.setattr(registry_mod, "_REGISTRY", reg)
+    return reg
+
+
+@pytest.fixture
+def memory_checkpointer(monkeypatch):
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from mavis.agents import checkpointing
+
+    saver = InMemorySaver()
+
+    @asynccontextmanager
+    async def _open():
+        yield saver
+
+    monkeypatch.setattr(checkpointing, "open_checkpointer", _open)
+    return saver
+
+
+class SendNoteArgs(BaseModel):
+    text: str
+
+
+@pytest.fixture
+def note_tool(fresh_registry):
+    """Registers an OUTWARD 'send_note' tool and returns the list of executed texts."""
+    from mavis.domain.policy import RiskClass
+    from mavis.tools.registry import MavisTool
+
+    calls: list[str] = []
+
+    async def _send(user_id: int, args: SendNoteArgs) -> str:
+        calls.append(args.text)
+        return f"sent: {args.text}"
+
+    fresh_registry.register(
+        MavisTool(
+            name="send_note",
+            description="Send a note to a friend.",
+            args_model=SendNoteArgs,
+            risk=RiskClass.OUTWARD,
+            fn=_send,
+            agents=frozenset({"conversation", "spawn"}),
+            preview=lambda a: f"Send note: {a.text}",
+        )
+    )
+    return calls
