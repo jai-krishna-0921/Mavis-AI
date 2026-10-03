@@ -31,7 +31,12 @@ from mavis.initiative.email_triage import EmailTriage, email_prefilter
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.timers.system import register_system_wakeup
 from mavis.tools.integrations import get_connection_cache, get_provider
-from mavis.tools.integrations.actions import CAPABILITY_PURPOSE, DISPLAY_NAMES, INTEGRATION_CAPABILITIES
+from mavis.tools.integrations.actions import (
+    CAPABILITY_PURPOSE,
+    GOOGLE_CAPABILITIES,
+    active_capabilities,
+    display_name,
+)
 from mavis.tools.integrations.activation import Activator
 from mavis.tools.integrations.connect_flow import CHECK_KIND, ConnectFlow, RepoUserState
 from mavis.tools.integrations.first_sync import FirstSync
@@ -207,7 +212,7 @@ async def _notify_first_sync(event: Event) -> None:
         return
     capability = str(event.payload.get("capability", ""))
     try:
-        name = DISPLAY_NAMES[Capability(capability)]
+        name = display_name(Capability(capability))
     except ValueError:
         name = capability
     user = await users.get(event.user_id)
@@ -242,7 +247,7 @@ async def capability_check(user_id: int, capability: Capability) -> bool:
     user is asked to connect first. WEB and SANDBOX always pass. An expired or revoked account raises
     ConnectionRequired(revoked=True) itself, so the prompt says "reconnect". If the provider cannot be
     reached the check passes, and the tool reports "unreachable" instead of sending a connect link."""
-    if capability not in INTEGRATION_CAPABILITIES:
+    if capability not in active_capabilities():
         return True
     from mavis.tools import integrations  # module lookup at call time (tests swap the singletons)
 
@@ -267,8 +272,8 @@ def capability_reason(capability: Capability) -> str:
 def tool_available(tool: MavisTool) -> bool:
     """Integration tools are offered only when a provider is configured (a dev box without a key
     does not waste tool rounds on them)."""
-    if tool.requires not in INTEGRATION_CAPABILITIES:
-        return True
+    if tool.requires not in active_capabilities():
+        return tool.requires is None or tool.requires not in GOOGLE_CAPABILITIES
     from mavis.tools import integrations
 
     try:

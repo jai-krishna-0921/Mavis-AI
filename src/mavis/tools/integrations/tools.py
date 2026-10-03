@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from mavis.domain.errors import ActionFailed, ConnectionRequired, IntegrationError
 from mavis.domain.integrations import ToolResult, UserRef
-from mavis.tools.integrations.actions import ACTIONS, CAPABILITY_PURPOSE, DISPLAY_NAMES, ActionSpec, localize
+from mavis.tools.integrations.actions import ACTIONS, CAPABILITY_PURPOSE, ActionSpec, display_name, localize
 from mavis.tools.integrations.base import IntegrationProvider, render_result
 from mavis.tools.integrations.connections import ConnectionCache
 from mavis.tools.integrations.mail_render import RENDERERS
@@ -61,7 +61,7 @@ async def gated(
     `render` turns successful data into model-facing text (default: truncated JSON).
     """
     provider, cache = _deps(provider, cache)
-    name = DISPLAY_NAMES[ACTIONS[action].capability]
+    name = display_name(ACTIONS[action].capability)
     try:
         result = await call_action(ctx, action, args, provider=provider, cache=cache)
     except IntegrationError as exc:

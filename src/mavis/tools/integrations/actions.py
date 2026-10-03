@@ -12,25 +12,64 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
+from mavis.config import get_settings
 from mavis.domain.policy import Capability, RiskClass
 
 INTEGRATION_CAPABILITIES: tuple[Capability, ...] = (
     Capability.GMAIL, Capability.CALENDAR, Capability.SLACK, Capability.NOTION,
 )
+# Google Workspace (spec 2026-10-03): one googlesuper consent covers all eight Google capabilities.
+WORKSPACE_CAPABILITIES: tuple[Capability, ...] = (
+    Capability.DRIVE, Capability.DOCS, Capability.SHEETS, Capability.TASKS, Capability.CONTACTS,
+    Capability.MEET,
+)
+GOOGLE_CAPABILITIES: tuple[Capability, ...] = (Capability.GMAIL, Capability.CALENDAR, *WORKSPACE_CAPABILITIES)
+GOOGLE_NAME = "Google"
+WORKSPACE_ROW = "Google Workspace"
 DISPLAY_NAMES: dict[Capability, str] = {
     Capability.GMAIL: "Gmail", Capability.CALENDAR: "Google Calendar",
     Capability.SLACK: "Slack", Capability.NOTION: "Notion",
+    Capability.DRIVE: "Google Drive", Capability.DOCS: "Google Docs", Capability.SHEETS: "Google Sheets",
+    Capability.TASKS: "Google Tasks", Capability.CONTACTS: "Google Contacts", Capability.MEET: "Google Meet",
 }
 BRANDS: dict[Capability, str] = {
     Capability.GMAIL: "Google", Capability.CALENDAR: "Google",
     Capability.SLACK: "Slack", Capability.NOTION: "Notion",
+    **{c: "Google" for c in WORKSPACE_CAPABILITIES},
 }
 CAPABILITY_PURPOSE: dict[Capability, str] = {
     Capability.GMAIL: "check and handle your email",
     Capability.CALENDAR: "work with your calendar",
     Capability.SLACK: "work with your Slack",
     Capability.NOTION: "work with your Notion pages",
+    Capability.DRIVE: "find and work with your Drive files",
+    Capability.DOCS: "read and write your Google Docs",
+    Capability.SHEETS: "work with your Google Sheets",
+    Capability.TASKS: "manage your to-do list in Google Tasks",
+    Capability.CONTACTS: "look up your contacts",
+    Capability.MEET: "set up Google Meet calls",
 }
+
+
+def workspace_enabled() -> bool:
+    return get_settings().google_workspace_enabled
+
+
+def active_capabilities() -> tuple[Capability, ...]:
+    """Capabilities Mavis offers right now. With the Workspace flag off this is exactly the old four."""
+    if workspace_enabled():
+        return INTEGRATION_CAPABILITIES + WORKSPACE_CAPABILITIES
+    return INTEGRATION_CAPABILITIES
+
+
+def is_google(capability: Capability) -> bool:
+    """Routed through the one Google consent (only while the Workspace flag is on)."""
+    return workspace_enabled() and capability in GOOGLE_CAPABILITIES
+
+
+def display_name(capability: Capability) -> str:
+    """What connect prompts call the account: "Google" for every Google capability when Workspace is on."""
+    return GOOGLE_NAME if is_google(capability) else DISPLAY_NAMES.get(capability, capability.value)
 
 
 # --- argument models -----------------------------------------------------------------------------
