@@ -261,8 +261,12 @@ def test_calendar_twin_with_a_reworded_description_is_one_action() -> None:
     assert approvals.equivalent(_invite(description="Looking forward"),
                                 _invite(description="Excited to meet you!"),
                                 _identity("calendar_create_event"))
+    # phase A fix round 1: the body is what the email says, so a reworded body is another message
+    # (with the same target, it corrects the waiting card instead: tests/policy/test_approval_identity.py)
     mail = {"to": ["raj@example.com"], "subject": "Interview", "cc": []}
-    assert approvals.equivalent({**mail, "body": "Hi Raj"}, {**mail, "body": "Hello Raj,"},
+    assert not approvals.equivalent({**mail, "body": "Hi Raj"}, {**mail, "body": "Hello Raj,"},
+                                    _identity("mail_send"))
+    assert approvals.equivalent({**mail, "body": "Hi Raj"}, {**mail, "body": " hi  raj"},
                                 _identity("mail_send"))
 
 

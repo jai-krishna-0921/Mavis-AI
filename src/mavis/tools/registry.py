@@ -31,6 +31,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed, ApprovalRequired, ConnectionRequired, NeedsUserDetail
 from mavis.domain.policy import Capability, RiskClass
+from mavis.domain.tasks import ApprovalStatus
 from mavis.policy.risk import truncate, wrap_untrusted
 from mavis.store.db import utcnow
 from mavis.store.repo import approvals, audit, policy_rules, tasks
@@ -67,6 +68,12 @@ ALREADY_WAITING_RESULT = (
     "ALREADY_AWAITING_APPROVAL #{id}: this same action is already waiting for the user's OK on an "
     "earlier card. Nothing new was queued and it has NOT been done yet. Tell the user it's waiting on "
     "that card; do not queue it again."
+)
+
+UPDATED_WAITING_RESULT = (
+    "UPDATED_WAITING_APPROVAL #{id}: {shown}\nThe card already waiting for this was updated to this "
+    "version and shown to the user again. It has NOT been done yet. Tell the user the corrected version "
+    "is waiting for their OK; do not queue it again."
 )
 
 # Serialises "find open approval, else create" so identical parallel tool calls queue one approval.
@@ -185,10 +192,14 @@ class MavisTool:
     # Async pre-step with network access (file metadata, allowlists), run by invoke() before the taint and
     # approval checks; never by execute_approved (the user already saw the preview and said yes).
     prepare: PrepareFn | None = None
-    # What makes two calls the same action, for approval dedupe and supersede: the argument names
-    # that identify it (an invite: start + attendees; an email: to + subject). Empty, or any of them
-    # empty in a call, means the whole canonical argument set is the identity.
+    # What makes two calls the SAME action (approval dedupe and supersede): the arguments that determine
+    # what the action does. Empty, or any of them empty in a call, means the whole canonical argument
+    # set is the identity.
     identity: tuple[str, ...] = ()
+    # A coarser "same target" key (an invite: start + attendees; an email: to + subject). A new request
+    # with the same target but other content corrects the waiting card instead of queuing a second one.
+    # Empty, or any of them empty in a call, means no target matching.
+    target: tuple[str, ...] = ()
     # The argument holding when the action takes effect (an event start). An approval whose action
     # time has passed expires and can no longer be approved.
     action_time: str | None = None
@@ -450,8 +461,20 @@ class ToolRegistry:
                         # turn): one card per action, never a second one to approve twice.
                         log.info("tool.approval_already_waiting", tool=tool.name, approval_id=twin.id)
                         return ALREADY_WAITING_RESULT.format(id=twin.id)
+                    corrected = None if existing is not None else next(iter(
+                        await approvals.waiting_same_target(user_id, tool.name, req.arguments,
+                                                            target=tool.target, tainted=tainted,
+                                                            statuses=[ApprovalStatus.PENDING])), None)
+                    if corrected is not None:
+                        # A corrected version of a card still waiting on a tap: update that card rather
+                        # than report a "duplicate" whose card shows the old content, or queue a second.
+                        await approvals.update_args(corrected.id, req.arguments, req.preview)
+                        await audit.record(user_id, actor="agent", action="approval.updated",
+                                           detail={"approval_id": corrected.id, "tool": tool.name})
                     if existing is not None:
                         approval_id = existing.id
+                    elif corrected is not None:
+                        approval_id = corrected.id
                     else:
                         approval_id = await approvals.create(
                             user_id=user_id,
@@ -462,6 +485,14 @@ class ToolRegistry:
                             expires_at=utcnow() + timedelta(hours=get_settings().approval_ttl_hours),
                             tainted=tainted,
                         )
+                if corrected is not None:
+                    from mavis.policy import approvals as approval_flow  # lazy: policy imports registry
+
+                    await approval_flow.send_approval_prompt(user_id, {"approval_id": corrected.id})
+                    log.info("tool.approval_updated", tool=tool.name, approval_id=corrected.id)
+                    shown = wrap_untrusted(truncate(req.preview, _PREVIEW_IN_RESULT_CHARS),
+                                           "approval_preview")
+                    return UPDATED_WAITING_RESULT.format(id=corrected.id, shown=shown)
                 log.info("tool.queued_for_approval", tool=tool.name, approval_id=approval_id)
                 run = current_run.get()
                 if run is not None and approval_id not in run.queued_approvals:

@@ -268,7 +268,25 @@ async def supersede_duplicates(decided, *, executed: bool) -> int:
             n += 1
     if n:
         log.info("approval.duplicates_superseded", approval_id=decided.id, count=n)
+    if executed:
+        await _note_versions_sent(decided)
     return n
+
+
+VERSION_SENT_TEXT = ("A version of this was already sent. This one is different and still waiting, in case "
+                     "you want it too:\n\n{preview}")
+
+
+async def _note_versions_sent(decided) -> None:
+    """Open cards for the same target with different content stay open (they may be a real, different
+    action), but the user is told a version already went out, with the card's buttons."""
+    tool = _declared(decided.tool)
+    for card in await approvals.waiting_same_target(
+            decided.user_id, decided.tool, decided.arguments or {}, target=tool.target if tool else (),
+            tainted=None, statuses=[ApprovalStatus.PENDING], exclude_id=decided.id):
+        await say(card.user_id, VERSION_SENT_TEXT.format(preview=verbatim(card.preview)),
+                  approval_buttons(card.id), dedupe_key=f"approval:{card.id}:version_sent:{decided.id}",
+                  tainted=bool(card.tainted))
 
 
 async def handle_approval_button(event: Event) -> None:
