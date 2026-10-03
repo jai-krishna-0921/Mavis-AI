@@ -4,6 +4,9 @@ from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
+
+from mavis.domain.events import Trust
 
 
 class LoopKind(StrEnum):
@@ -23,6 +26,23 @@ class LoopStatus(StrEnum):
     DROPPED = "DROPPED"
 
 
+class LoopOrigin(StrEnum):
+    """Which writer created a loop. Set by code from the writer, never inferred from `source`."""
+
+    CONVERSATION = "conversation"  # extracted from, or tracked during, a chat turn
+    REASONER = "reasoner"          # the initiative reasoner's `track`
+    FEEDBACK = "feedback"          # a user's button press (attention dispute)
+    ROUTINE = "routine"            # seeded by Mavis itself (morning check-in)
+    UNKNOWN = "unknown"            # rows written before provenance was recorded
+
+
+def least_trusted(a: Trust, b: Trust) -> Trust:
+    """Taint is sticky: combining anything with untrusted content yields untrusted content."""
+    if Trust.UNTRUSTED in (a, b):
+        return Trust.UNTRUSTED
+    return a
+
+
 class WatchSpec(BaseModel):
     from_contains: str | None = None     # sender email/name substring
     thread_id: str | None = None
@@ -40,8 +60,15 @@ class Loop(BaseModel):
     status: LoopStatus = LoopStatus.OPEN
     importance: int = 3
     watch: WatchSpec | None = None
-    source: str = ""
+    source: str = ""                     # reference only (an event id); never read as trust
     version: int = 1                     # bumped on every change; keys LOOP_UPDATED event ids
+    # Provenance: UNTRUSTED when any defining content came from a turn/run that saw third-party content.
+    trust: Trust = Trust.UNTRUSTED
+    origin: LoopOrigin = LoopOrigin.UNKNOWN
+
+    @property
+    def trusted(self) -> bool:
+        return self.trust is not Trust.UNTRUSTED
 
 
 class LoopUpsert(BaseModel):
@@ -54,3 +81,7 @@ class LoopUpsert(BaseModel):
     importance: int = Field(ge=1, le=5, default=3)
     watch: WatchSpec | None = None
     source: str = ""
+    # Set by the writing code from the origin's trust, hidden from (and reset on) model output. The
+    # default is the safe one: a writer that forgets to say yields an untrusted loop.
+    trust: SkipJsonSchema[Trust] = Trust.UNTRUSTED
+    origin: SkipJsonSchema[LoopOrigin] = LoopOrigin.UNKNOWN

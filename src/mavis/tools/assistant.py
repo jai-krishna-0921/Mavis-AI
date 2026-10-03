@@ -12,7 +12,7 @@ from mavis import bus
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.events import Trust
-from mavis.domain.loops import LoopKind, LoopUpsert
+from mavis.domain.loops import LoopKind, LoopOrigin, LoopUpsert
 from mavis.domain.policy import RiskClass
 from mavis.loops import service as loops_service
 from mavis.memory import service as memory_service
@@ -135,7 +135,9 @@ async def track_loop(user_id: int, args: TrackLoopArgs) -> str:
     loop = await loops_service.LoopService(bus.get_bus()).upsert(
         user_id,
         LoopUpsert(kind=args.kind, title=args.title, due_at=due, entities=args.entities,
-                   importance=args.importance, source="tool:track_loop"),
+                   importance=args.importance, source="tool:track_loop",
+                   # the user asked for it in chat (and approved it when the turn was tainted)
+                   trust=Trust.USER, origin=LoopOrigin.CONVERSATION),
     )
     return f"Tracking loop #{loop.id}: {loop.title}"
 

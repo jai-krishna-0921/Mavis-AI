@@ -16,6 +16,7 @@ from mavis.domain.decisions import (
     WakeupRequest,
 )
 from mavis.domain.events import Event, EventType, JobKind
+from mavis.domain.loops import LoopOrigin
 from mavis.domain.tasks import ApprovalStatus, TaskOrigin, TaskStatus
 from mavis.initiative.handler import _quiet_after_turn
 from mavis.store.db import utcnow
@@ -26,10 +27,10 @@ from mavis.tools.registry import current_task_id
 GOAL = "Send an interview invite to Jane for Friday 3pm"
 
 
-def _loop_created(source: str) -> Event:
+def _loop_created(origin: LoopOrigin) -> Event:
     return Event(id="loop:7:created", user_id=1, type=EventType.LOOP_CREATED,
                  occurred_at=datetime.now(UTC), source="loops",
-                 payload={"id": 7, "title": "Interview Jane", "source": source})
+                 payload={"id": 7, "title": "Interview Jane", "source": "x", "origin": origin.value})
 
 
 def _decision() -> InitiativeDecision:
@@ -44,19 +45,19 @@ def _decision() -> InitiativeDecision:
 
 
 def test_quiet_after_turn_drops_acts_for_loops_from_chat() -> None:
-    out = _quiet_after_turn(_loop_created("tg:update:412982316"), _decision())
+    out = _quiet_after_turn(_loop_created(LoopOrigin.CONVERSATION), _decision())
     assert out.act == [] and out.notify is None
     assert len(out.wakeups) == 1  # follow-through stays
 
 
 def test_quiet_after_turn_drops_acts_even_without_a_notify() -> None:
     d = _decision().model_copy(update={"notify": None})
-    assert _quiet_after_turn(_loop_created("tg:update:1"), d).act == []
+    assert _quiet_after_turn(_loop_created(LoopOrigin.CONVERSATION), d).act == []
 
 
 def test_quiet_after_turn_keeps_acts_for_other_sources() -> None:
     d = _decision()
-    assert _quiet_after_turn(_loop_created("gmail:abc"), d).act == d.act
+    assert _quiet_after_turn(_loop_created(LoopOrigin.REASONER), d).act == d.act
 
 
 # --- task dedupe -----------------------------------------------------------------------------------

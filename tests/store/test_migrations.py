@@ -74,3 +74,27 @@ def test_0011_downgrade_drops_workspace_rows_with_the_source_column(tmp_path) ->
     command.downgrade(cfg, "0010_hotfix_approval_taint")
     rows = [r[0] for r in sqlite3.connect(db_file).execute("select message_id from attention_observations")]
     assert rows == ["m1"]  # a Workspace row would read as an email once the column is gone
+
+
+def test_0012_loop_provenance_backfill(tmp_path) -> None:
+    """Legacy loops read as untrusted; only writer constants (not origin prefixes) are recognised."""
+    db_file = tmp_path / "m.db"
+    url = f"sqlite+aiosqlite:///{db_file.as_posix()}"
+    upgrade(url, "0011_attention_source")
+    con = sqlite3.connect(db_file)
+    con.execute("insert into users (id, telegram_chat_id, name, timezone, onboarded, state, created_at) "
+                "values (1, 5, 'x', 'UTC', 0, '{}', '2026-10-03 00:00:00')")
+    sources = ["tool:track_loop", "onboarding", "tg:update:412982316", "cli:abc", "gmail:msg:1",
+               "untrusted:gmail:msg:2", "wakeup:32", ""]
+    for source in sources:
+        con.execute("insert into loops (user_id, kind, title, entities, status, importance, source, "
+                    "created_at, updated_at, version) values (1, 'COMMITMENT', ?, '[]', 'OPEN', 3, ?, "
+                    "'2026-10-03 00:00:00', '2026-10-03 00:00:00', 1)", (f"t {source}", source))
+    con.commit()
+    con.close()
+    upgrade(url)
+    rows = sqlite3.connect(db_file).execute("select source, trust, origin from loops")
+    got = {r[0]: (r[1], r[2]) for r in rows}
+    assert got.pop("tool:track_loop") == ("user", "conversation")
+    assert got.pop("onboarding") == ("system", "routine")
+    assert set(got.values()) == {("untrusted", "unknown")}

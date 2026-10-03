@@ -83,7 +83,8 @@ async def handle_learn(job: Job) -> None:
             return
         try:
             await get_memory().learn(job.user_id, str(p.get("text", "")), source_ref,
-                                     Trust(p.get("trust", Trust.USER.value)))
+                                     Trust(p.get("trust", Trust.USER.value)),
+                                     conversation=bool(p.get("conversation", True)))
         except LLMError as exc:
             retry = int(p.get("retry", 0))
             if retry < len(LEARN_RETRY_DELAYS):

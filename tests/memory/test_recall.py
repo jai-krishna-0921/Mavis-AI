@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from mavis.domain.events import Trust
 from mavis.domain.loops import Loop, LoopKind
 from mavis.domain.memory import Entity, Relation
 from mavis.memory import recall as recall_mod
@@ -31,6 +32,7 @@ def test_render_loop_in_user_tz():
         id=1,
         user_id=1,
         kind=LoopKind.COMMITMENT,
+        trust=Trust.USER,
         title="Interview prep with Jawahar",
         due_at=datetime(2026, 10, 5, 4, 30, tzinfo=UTC),
     )
@@ -73,20 +75,23 @@ class _Loops:
     async def active(self, user_id, entities=None, due_within: timedelta | None = None):
         self.calls.append((entities, due_within))
         if entities:
-            return [Loop(id=1, user_id=user_id, kind=LoopKind.COMMITMENT, title="Call Jawahar")]
+            return [Loop(id=1, user_id=user_id, kind=LoopKind.COMMITMENT, title="Call Jawahar",
+                         trust=Trust.USER)]
         return [
             Loop(
                 id=3,
                 user_id=user_id,
                 kind=LoopKind.COMMITMENT,
+                trust=Trust.USER,
                 title="Later",
                 due_at=datetime(2026, 10, 4, tzinfo=UTC),
             ),
-            Loop(id=1, user_id=user_id, kind=LoopKind.COMMITMENT, title="Call Jawahar"),
+            Loop(id=1, user_id=user_id, kind=LoopKind.COMMITMENT, title="Call Jawahar", trust=Trust.USER),
             Loop(
                 id=2,
                 user_id=user_id,
                 kind=LoopKind.COMMITMENT,
+                trust=Trust.USER,
                 title="Unrelated in 10h",
                 due_at=datetime(2026, 10, 3, tzinfo=UTC),
             ),
@@ -165,11 +170,12 @@ async def test_recall_times_out_slow_source(monkeypatch):
 async def test_bad_loop_skips_only_that_loop():
     class Loops(_Loops):
         async def active(self, user_id, entities=None, due_within=None):
-            good = Loop(id=1, user_id=1, kind=LoopKind.COMMITMENT, title="Good")
+            good = Loop(id=1, user_id=1, kind=LoopKind.COMMITMENT, title="Good", trust=Trust.USER)
             bad = Loop(
                 id=2,
                 user_id=1,
                 kind=LoopKind.COMMITMENT,
+                trust=Trust.USER,
                 title="Bad",
                 due_at=datetime(2026, 10, 3, tzinfo=UTC),
             )

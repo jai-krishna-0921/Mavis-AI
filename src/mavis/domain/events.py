@@ -32,6 +32,15 @@ class Trust(StrEnum):
     UNTRUSTED = "untrusted"  # third-party content (email, web, slack, files)
 
 
+class Provenance(BaseModel):
+    """Where derived content came from, carried explicitly from its origin. `source_ref` is a reference
+    for logs and joins only: trust is never inferred from its shape."""
+
+    source_ref: str = ""
+    trust: Trust = Trust.UNTRUSTED
+    conversation: bool = False  # a chat turn (the user's own words), as opposed to an ingested document
+
+
 class Event(BaseModel):
     id: str = Field(description="Idempotency key, e.g. 'tg:update:123'")
     user_id: int

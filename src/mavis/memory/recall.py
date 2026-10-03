@@ -32,9 +32,12 @@ class LoopsReader(Protocol):
 def render_loop(loop: Loop, tz: str) -> str:
     kind = loop.kind.value.lower().replace("_", " ")
     if loop.due_at is None:
-        return f"{loop.title} ({kind})"
-    local = loop.due_at.astimezone(ZoneInfo(tz))
-    return f"{loop.title} ({kind}, due {local.strftime('%a %d %b %H:%M')})"
+        line = f"{loop.title} ({kind})"
+    else:
+        local = loop.due_at.astimezone(ZoneInfo(tz))
+        line = f"{loop.title} ({kind}, due {local.strftime('%a %d %b %H:%M')})"
+    # a loop derived from third-party content is data, never an instruction (spec 8.3)
+    return line if loop.trusted else wrap_untrusted(line, source="loop")
 
 
 def assemble(

@@ -10,7 +10,7 @@ import structlog
 
 from mavis.config import get_settings
 from mavis.domain import timeutil
-from mavis.domain.events import Trust
+from mavis.domain.events import Provenance, Trust
 from mavis.domain.memory import Extraction, RecallContext
 from mavis.memory import recall as recall_mod
 from mavis.memory.dates import apply_relative_day
@@ -26,7 +26,7 @@ from mavis.store.repo import users
 
 log = structlog.get_logger()
 
-ExtractionHook = Callable[[int, Extraction, str], Awaitable[None]]
+ExtractionHook = Callable[[int, Extraction, Provenance], Awaitable[None]]
 MIN_EPISODE_WORDS = 4
 RECALL_TOTAL_TIMEOUT_S = 1.5
 INIT_RETRY_COOLDOWN_S = 30.0
@@ -122,9 +122,12 @@ class MemoryService:
     # --- background ----------------------------------------------------------------
 
     async def learn(
-        self, user_id: int, text: str, source_ref: str = "", trust: Trust = Trust.USER
+        self, user_id: int, text: str, source_ref: str = "", trust: Trust = Trust.USER,
+        conversation: bool = True,
     ) -> Extraction:
         """Extract and persist. LLMError from extraction propagates; the LEARN job drops it (best effort).
+
+        `trust` and `conversation` are the origin's provenance; hooks receive them unchanged.
 
         Idempotent on retry: graph writes are MERGEs, vector ids are uuid5 of the text.
         """
@@ -171,9 +174,10 @@ class MemoryService:
         )
         if not trusted:
             final = final.model_copy(update={"mood": None})
+        prov = Provenance(source_ref=source_ref, trust=trust, conversation=conversation)
         for hook in self.on_extraction:
             try:
-                await hook(user_id, final, source_ref)
+                await hook(user_id, final, prov)
             except Exception:
                 log.error("memory.hook_failed", hook=repr(hook), exc_info=True)
         return final
