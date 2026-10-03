@@ -43,6 +43,18 @@ async def test_callback_enqueues_check_and_renders_page(db):
     assert job.kind is JobKind.CONNECTION_CHECK and job.payload == {"pending_id": pid} and job.user_id == 1
 
 
+async def test_callback_after_not_now_still_checks(db):
+    from mavis.domain.integrations import PendingStatus
+
+    bus = FakeBus()
+    pid = await connections.create_pending(1, Capability.GMAIL, "", None)
+    await connections.resolve(pid, PendingStatus.DECLINED)
+    async with client(app_with(bus)) as c:
+        await c.get(f"/connect/callback?p={pid}")
+    [job] = bus.jobs  # they tapped "Not now" and then signed in anyway: still checked
+    assert job.kind is JobKind.CONNECTION_CHECK and job.payload == {"pending_id": pid}
+
+
 async def test_callback_unknown_pending_still_renders(db):
     bus = FakeBus()
     async with client(app_with(bus)) as c:

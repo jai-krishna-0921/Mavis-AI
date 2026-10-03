@@ -3,6 +3,7 @@ from datetime import timedelta
 from mavis.domain.events import Event, EventType, JobKind, Trust
 from mavis.domain.integrations import ConnectionState, PendingStatus
 from mavis.domain.policy import Capability
+from mavis.domain.wakeups import WakeupKind
 from mavis.store.repo import connections
 from mavis.tools.integrations.connect_flow import (
     CHECK_DELAYS,
@@ -262,18 +263,32 @@ async def test_disconnect_failure_hides_exception_text(db, provider, cache, fake
     assert "—" not in rec.sent[-1].text and "–" not in rec.sent[-1].text
 
 
-async def test_connection_after_not_now_still_activates(db, provider, cache, fake_bus, rec, state):
-    flow = make_flow(provider, cache, fake_bus, rec, state)
-    pid = await flow.start(1, Capability.GMAIL, "")
-    await flow.decline(1, pid)
-    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+async def test_connection_after_not_now_still_activates(db, provider, cache, fake_bus, rec, state, clock):
+    """Wired like production (real check wakeups and cancel_checks): a sign-in finished after "Not now"
+    is found by the prompt's scheduled check and activates."""
+    from mavis.timers.service import WakeupService
+    from mavis.tools.integrations.wiring import (
+        cancel_connection_checks,
+        connection_checks_pending,
+        wakeup_schedule,
+    )
+
+    clock.set(NOW)
     activated = []
 
     async def on_active(user_id, cap):
         activated.append(cap)
 
-    flow.on_active = on_active
-    await flow.check(pid)
+    flow = ConnectFlow(provider=provider, cache=cache, bus=fake_bus, notify=rec.notify,
+                       schedule=wakeup_schedule, state=state, base_url="https://mavis.test",
+                       on_active=on_active, has_checks=connection_checks_pending,
+                       cancel_checks=cancel_connection_checks, clock=lambda: NOW)
+    pid = await flow.start(1, Capability.GMAIL, "")
+    await flow.decline(1, pid)
+    checks = await WakeupService().pending(1, WakeupKind.SYSTEM_CONNECTION_CHECK)
+    assert checks and {w.reason for w in checks} == {str(pid)}  # "Not now" keeps the prompt's checks
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    await flow.on_check_wakeup(1, checks[0].reason)  # what the timer delivers for that wakeup
     [ev] = fake_bus.events
     await flow.on_connection_changed(ev)
     assert [j.kind for j in fake_bus.jobs] == [JobKind.FIRST_SYNC]
