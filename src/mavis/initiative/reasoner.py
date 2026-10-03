@@ -9,7 +9,7 @@ from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision
 from mavis.domain.events import Event, Trust
 from mavis.domain.loops import Loop
-from mavis.domain.messages import Role
+from mavis.domain.messages import Role, tainted_event_id
 from mavis.domain.timefmt import due_label
 from mavis.initiative.filters import FilterResult
 from mavis.initiative.untrusted import wrap_untrusted
@@ -82,8 +82,13 @@ class Reasoner:
             else result.summary
         )
         loops = "\n".join(_loop_line(lp, user.timezone, now) for lp in result.matched_loops) or "- none"
-        recall = (await self._memory.recall(user.id, result.summary)).render()
-        history = _fmt_history(await messages.recent(user.id, 10))
+        recalled = await self._memory.recall(user.id, result.summary)
+        recall = recalled.render()
+        rows = await messages.recent(user.id, 10)
+        history = _fmt_history(rows)
+        # what this run actually read: any third-party-derived input taints what it writes
+        tainted = (event.trust is Trust.UNTRUSTED or any(not lp.trusted for lp in result.matched_loops)
+                   or recalled.untrusted or any(tainted_event_id(r.event_id) for r in rows))
         prompt = (
             f"## Signal ({event.type.value}, id {event.id})\n{signal}\n\n"
             f"## Related open loops\n{loops}\n\n"
@@ -94,6 +99,7 @@ class Reasoner:
         decision = await llm.structured(
             InitiativeDecision, system, prompt, tier=tier, priority="background", fallback=True
         )
+        decision = decision.model_copy(update={"tainted": tainted})  # code decides, never the model
         log.info(
             "initiative.decided",
             event_id=event.id,

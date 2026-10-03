@@ -92,21 +92,22 @@ async def update(user_id: int, loop_id: int, data: LoopUpsert) -> tuple[Loop, bo
         if row is None or row.user_id != user_id:
             return None
         before = to_domain(row)
-        status = data.status.value
-        if row.status == LoopStatus.AWAITING_REPLY.value and data.status is LoopStatus.OPEN:
-            status = row.status  # OPEN is just the upsert default: an update must not reopen it silently
-        row.kind, row.title, row.status, row.importance = (
-            data.kind.value,
-            data.title,
-            status,
-            data.importance,
-        )
-        if data.due_at is not None:
+        given = data.model_fields_set  # partial update: what the writer did not set stays unchanged
+        if "kind" in given and data.kind is not None:
+            row.kind = data.kind.value
+        if "title" in given and data.title:
+            row.title = data.title
+        if "status" in given:
+            row.status = data.status.value
+        if "importance" in given:
+            row.importance = data.importance
+        if "due_at" in given and data.due_at is not None:
             row.due_at = timeutil.ensure_utc(data.due_at)
-        merged = list(row.entities or [])
-        merged += [e for e in data.entities if e.casefold() not in {m.casefold() for m in merged}]
-        row.entities = merged
-        if data.watch is not None:
+        if "entities" in given:
+            merged = list(row.entities or [])
+            merged += [e for e in data.entities if e.casefold() not in {m.casefold() for m in merged}]
+            row.entities = merged
+        if "watch" in given and data.watch is not None:
             row.watch = _watch_json(data)
         if data.source:
             row.source = data.source
