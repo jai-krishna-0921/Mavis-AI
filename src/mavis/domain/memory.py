@@ -62,6 +62,7 @@ class RecallContext(BaseModel):
     loops: list[str] = Field(default_factory=list)
     facts: list[str] = Field(default_factory=list)
     episodes: list[str] = Field(default_factory=list)
+    untrusted: bool = False  # some included item is third-party derived (a signal, an untrusted loop)
 
     def render(self) -> str:
         parts: list[str] = []

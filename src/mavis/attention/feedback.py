@@ -24,8 +24,8 @@ from mavis.attention.sanitize import domain_label
 from mavis.attention.schema import EmailKind, Feedback
 from mavis.attention.speaker import PREFIX, can_mute, format_amount
 from mavis.domain import timeutil
-from mavis.domain.events import Event
-from mavis.domain.loops import LoopKind, LoopUpsert
+from mavis.domain.events import Event, Trust
+from mavis.domain.loops import LoopKind, LoopOrigin, LoopUpsert
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.loops.service import LoopService
@@ -167,6 +167,8 @@ class FeedbackHandler:
                     title=dispute_title(obs, user.timezone),
                     importance=5,
                     source=event.id,
+                    trust=Trust.USER,  # the user's own button press
+                    origin=LoopOrigin.FEEDBACK,
                 ),
             )
             what = "payment" if _is_money(obs) else "security change"

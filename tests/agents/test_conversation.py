@@ -79,7 +79,7 @@ async def _texts(event_id: str = "tg:update:1") -> list[str]:
 
 async def test_small_talk_is_one_call_with_bubbles_learn_and_history(user, channel, fake_llm, fake_memory,
                                                                      jobs, tools):
-    fake_llm.push_text("Hey Jai!\n\nHow did the prep go?")
+    fake_llm.push_text("Hey Jai!\n---\nHow did the prep go?")
     await run_turn(_event(user.id, "hey"))
     assert len(fake_llm.calls) == 1
     assert await _texts() == ["Hey Jai!", "How did the prep go?"]

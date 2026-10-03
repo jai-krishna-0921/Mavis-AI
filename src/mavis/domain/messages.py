@@ -10,6 +10,11 @@ from pydantic import BaseModel, Field
 TAINT_SUFFIX = ":tainted"
 
 
+def tainted_event_id(event_id: str | None) -> bool:
+    """A history row logged with the taint marker: written after reading third-party content."""
+    return bool(event_id and event_id.endswith(TAINT_SUFFIX))
+
+
 class Role(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"

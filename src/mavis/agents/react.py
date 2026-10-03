@@ -44,6 +44,7 @@ class ReactResult:
     # ApprovalRequired raised by a tool outside the registry: nothing was queued or done.
     unqueued_approvals: list[ApprovalRequired] = field(default_factory=list)
     tainted: bool = False  # the model saw untrusted tool output during this run
+    read_untrusted: bool = False  # a tool in THIS loop returned third-party text (not inherited taint)
     wrapped_up: bool = False  # wrap_up forced a final answer (step budget or deadline reached)
 
 
@@ -108,6 +109,7 @@ async def react_loop(
     run = parent or ToolRun()
     run.tainted = run.tainted or tainted
     first_approval = len(run.queued_approvals)
+    first_read = run.untrusted_reads
     token = current_run.set(run)
     tools_called: list[str] = []
     unqueued: list[ApprovalRequired] = []
@@ -131,6 +133,7 @@ async def react_loop(
                     text=_text_of(ai.content).strip(), steps=steps, messages=history,
                     tools_called=tools_called, queued_approvals=run.queued_approvals[first_approval:],
                     unqueued_approvals=unqueued, tainted=run.tainted, wrapped_up=final,
+                    read_untrusted=run.untrusted_reads > first_read,
                 )
             steps += 1
             if steps > max_steps:

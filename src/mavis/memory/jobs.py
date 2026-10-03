@@ -66,6 +66,15 @@ def _not_before(p: dict) -> datetime | None:
         return None
 
 
+def _anchor(p: dict) -> datetime | None:
+    """When the learned text was written (a LEARN job may run long after)."""
+    raw = p.get("anchor_at")
+    try:
+        return timeutil.ensure_utc(datetime.fromisoformat(str(raw))) if raw else None
+    except ValueError:
+        return None
+
+
 def learn_lock(user_id: int):
     return lock(f"learn:{user_id}")
 
@@ -83,7 +92,9 @@ async def handle_learn(job: Job) -> None:
             return
         try:
             await get_memory().learn(job.user_id, str(p.get("text", "")), source_ref,
-                                     Trust(p.get("trust", Trust.USER.value)))
+                                     Trust(p.get("trust", Trust.USER.value)),
+                                     conversation=bool(p.get("conversation", True)),
+                                     anchor_at=_anchor(p))
         except LLMError as exc:
             retry = int(p.get("retry", 0))
             if retry < len(LEARN_RETRY_DELAYS):

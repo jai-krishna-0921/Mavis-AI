@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Protocol
-from zoneinfo import ZoneInfo
 
+from mavis.domain import timeutil
 from mavis.domain.loops import Loop
 from mavis.domain.memory import RecallContext
+from mavis.domain.timefmt import due_label
 from mavis.memory.extractor import wrap_untrusted
 from mavis.memory.graph import GraphStore
 from mavis.memory.spotter import SpotterCache
@@ -29,12 +30,16 @@ class LoopsReader(Protocol):
     ) -> list[Loop]: ...
 
 
-def render_loop(loop: Loop, tz: str) -> str:
+def render_loop(loop: Loop, tz: str, now: datetime | None = None) -> str:
+    """One loop for a prompt. The due time is relative to `now` (default: the clock at render time),
+    computed here, so the model never does date arithmetic and never reads an overdue item as upcoming."""
     kind = loop.kind.value.lower().replace("_", " ")
     if loop.due_at is None:
-        return f"{loop.title} ({kind})"
-    local = loop.due_at.astimezone(ZoneInfo(tz))
-    return f"{loop.title} ({kind}, due {local.strftime('%a %d %b %H:%M')})"
+        line = f"{loop.title} ({kind})"
+    else:
+        line = f"{loop.title} ({kind}, {due_label(loop.due_at, now or timeutil.now(), tz)})"
+    # a loop derived from third-party content is data, never an instruction (spec 8.3)
+    return line if loop.trusted else wrap_untrusted(line, source="loop")
 
 
 def assemble(
@@ -75,11 +80,15 @@ async def _safe[T](what: str, coro, default: T) -> T:
     return default
 
 
-def _render_loops(found: list[Loop], tz: str) -> list[str]:
+def _render_loops(found: list[Loop], tz: str, tainted: set[str] | None = None) -> list[str]:
     out: list[str] = []
+    now = timeutil.now()
     for loop in found:
         try:
-            out.append(render_loop(loop, tz))
+            line = render_loop(loop, tz, now)
+            out.append(line)
+            if not loop.trusted and tainted is not None:
+                tainted.add(line)
         except Exception:
             log.warning("recall: skipping unrenderable loop %s", getattr(loop, "id", "?"), exc_info=True)
     return out
@@ -103,6 +112,7 @@ async def recall(
         return (await spotters.get(user_id)).spot(text)
 
     names = await _safe("entity spotting", _spot(), [])
+    tainted: set[str] = set()  # the items derived from third-party content, by identity
 
     async def _graph() -> list[str]:
         return await graph.neighborhood(user_id, names) if names else []
@@ -110,7 +120,13 @@ async def recall(
     async def _episodes() -> list[str]:
         hits = await vector.search_with_kind(user_id, text)
         # Third-party text (email, etc.) is stored as kind="signal"; it must never reach a prompt raw.
-        return [wrap_untrusted(t, source="memory") if kind == "signal" else t for t, kind in hits]
+        out = []
+        for t, kind in hits:
+            if kind == "signal":
+                t = wrap_untrusted(t, source="memory")
+                tainted.add(t)
+            out.append(t)
+        return out
 
     async def _loops() -> list[str]:
         if loops is None:
@@ -126,14 +142,16 @@ async def recall(
             if loop.id not in seen:
                 seen.add(loop.id)
                 merged.append(loop)
-        return _render_loops(merged, tz)
+        return _render_loops(merged, tz, tainted)
 
     facts, episodes, loop_lines = await asyncio.gather(
         _safe("graph", _graph(), []),
         _safe("vector", _episodes(), []),
         _safe("loops", _loops(), []),
     )
-    return assemble(profile, loop_lines, facts, episodes, budget)
+    ctx = assemble(profile, loop_lines, facts, episodes, budget)
+    ctx.untrusted = any(item in tainted for item in [*ctx.loops, *ctx.episodes])
+    return ctx
 
 
 async def _none() -> list[Loop]:

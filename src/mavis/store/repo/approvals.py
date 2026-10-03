@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -41,13 +41,6 @@ def args_hash(arguments: dict) -> str:
     return hashlib.sha256(canon.encode()).hexdigest()
 
 
-# Free text a model rewords on every attempt, ignored ONLY for tools whose other arguments identify
-# the action (an invite: start + guests + title; an email: to + subject). For every other tool (Slack
-# message, reply, Notion page, notes) the text IS the action and is compared, case/space-normalised.
-_IGNORED_TEXT: dict[str, frozenset[str]] = {
-    "calendar_create_event": frozenset({"description"}),
-    "mail_send": frozenset({"body"}),
-}
 _WAITING = [ApprovalStatus.PENDING.value, ApprovalStatus.AWAITING_EDIT.value]
 
 
@@ -67,27 +60,55 @@ def _canon(value: Any) -> Any:
     return value
 
 
-def equivalence_key(tool: str, arguments: dict) -> str:
-    """Canonical form of an action's arguments for duplicate detection: whitespace and case folded,
-    lists sorted, ISO datetimes in UTC, and for the tools in _IGNORED_TEXT the reworded free text
-    dropped."""
+def equivalence_key(arguments: dict, identity: Sequence[str] = ()) -> str:
+    """Canonical identity of an action for duplicate detection: whitespace and case folded, lists
+    sorted, ISO datetimes in UTC. `identity` is the tool's declared identifying arguments; when it is
+    empty, or any of those arguments is empty in this call (an invite with no guests), the action is
+    identified by all of its canonical arguments."""
     canon = _canon(arguments or {})
-    ignored = _IGNORED_TEXT.get(tool, frozenset())
-    keyed = {k: v for k, v in canon.items() if k not in ignored}
-    return json.dumps(keyed, sort_keys=True, default=str, ensure_ascii=False)
+    if identity and all(field in canon for field in identity):
+        canon = {field: canon[field] for field in identity}
+    return json.dumps(canon, sort_keys=True, default=str, ensure_ascii=False)
 
 
-def equivalent(tool: str, a: dict, b: dict) -> bool:
-    return equivalence_key(tool, a) == equivalence_key(tool, b)
+def target_key(arguments: dict, target: Sequence[str]) -> str | None:
+    """The coarser "same target" key (canonical, like equivalence_key), or None when the tool declares
+    no target or a target field is empty in this call (then nothing is matched by target)."""
+    canon = _canon(arguments or {})
+    if not target or not all(field in canon for field in target):
+        return None
+    return json.dumps({f: canon[f] for f in target}, sort_keys=True, default=str, ensure_ascii=False)
 
 
-async def waiting_equivalents(user_id: int, tool: str, arguments: dict, *, tainted: bool,
+async def waiting_same_target(user_id: int, tool: str, arguments: dict, *, target: Sequence[str],
+                              tainted: bool | None, statuses: Sequence[ApprovalStatus],
                               exclude_id: int | None = None) -> list[PendingApproval]:
-    """This user's approvals still waiting on them (PENDING / AWAITING_EDIT) for the same tool and
-    equivalent arguments, in any task, oldest first, with the same taint: a request from a clean run
-    is never merged into a card a tainted run queued (its text may be attacker-shaped), nor the
-    reverse."""
-    want = equivalence_key(tool, arguments)
+    """Open approvals of this user and tool with the same target key (see target_key), oldest first."""
+    want = target_key(arguments, target)
+    if want is None:
+        return []
+    async with Session() as s:
+        rows = await s.scalars(
+            select(PendingApproval)
+            .where(PendingApproval.user_id == user_id, PendingApproval.tool == tool,
+                   PendingApproval.status.in_([x.value for x in statuses]))
+            .order_by(PendingApproval.id)
+        )
+        return [r for r in rows if r.id != exclude_id and (tainted is None or bool(r.tainted) == tainted)
+                and target_key(r.arguments or {}, target) == want]
+
+
+def equivalent(a: dict, b: dict, identity: Sequence[str] = ()) -> bool:
+    return equivalence_key(a, identity) == equivalence_key(b, identity)
+
+
+async def waiting_equivalents(user_id: int, tool: str, arguments: dict, *, identity: Sequence[str] = (),
+                              tainted: bool | None, exclude_id: int | None = None) -> list[PendingApproval]:
+    """This user's approvals still waiting on them (PENDING / AWAITING_EDIT) for the same tool and the
+    same action identity, in any task, oldest first. `tainted` (True/False) keeps only rows of that
+    taint: a request from a clean run is never merged into a card a tainted run queued (its text may be
+    attacker-shaped), nor the reverse. None matches either (closing a card is always safe)."""
+    want = equivalence_key(arguments, identity)
     async with Session() as s:
         rows = await s.scalars(
             select(PendingApproval)
@@ -95,8 +116,17 @@ async def waiting_equivalents(user_id: int, tool: str, arguments: dict, *, taint
                    PendingApproval.status.in_(_WAITING))
             .order_by(PendingApproval.id)
         )
-        return [r for r in rows if r.id != exclude_id and bool(r.tainted) == tainted
-                and equivalence_key(tool, r.arguments or {}) == want]
+        return [r for r in rows if r.id != exclude_id and (tainted is None or bool(r.tainted) == tainted)
+                and equivalence_key(r.arguments or {}, identity) == want]
+
+
+async def pending_rows(user_id: int | None = None) -> list[PendingApproval]:
+    """PENDING approvals (waiting on a tap), oldest first, for one user or everyone."""
+    stmt = select(PendingApproval).where(PendingApproval.status == ApprovalStatus.PENDING.value)
+    if user_id is not None:
+        stmt = stmt.where(PendingApproval.user_id == user_id)
+    async with Session() as s:
+        return list(await s.scalars(stmt.order_by(PendingApproval.id)))
 
 
 async def find_open(user_id: int, task_id: int | None, tool: str, arguments: dict) -> PendingApproval | None:

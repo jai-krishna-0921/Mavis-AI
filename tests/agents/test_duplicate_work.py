@@ -16,6 +16,7 @@ from mavis.domain.decisions import (
     WakeupRequest,
 )
 from mavis.domain.events import Event, EventType, JobKind
+from mavis.domain.loops import LoopOrigin
 from mavis.domain.tasks import ApprovalStatus, TaskOrigin, TaskStatus
 from mavis.initiative.handler import _quiet_after_turn
 from mavis.store.db import utcnow
@@ -26,10 +27,10 @@ from mavis.tools.registry import current_task_id
 GOAL = "Send an interview invite to Jane for Friday 3pm"
 
 
-def _loop_created(source: str) -> Event:
+def _loop_created(origin: LoopOrigin) -> Event:
     return Event(id="loop:7:created", user_id=1, type=EventType.LOOP_CREATED,
                  occurred_at=datetime.now(UTC), source="loops",
-                 payload={"id": 7, "title": "Interview Jane", "source": source})
+                 payload={"id": 7, "title": "Interview Jane", "source": "x", "origin": origin.value})
 
 
 def _decision() -> InitiativeDecision:
@@ -44,19 +45,19 @@ def _decision() -> InitiativeDecision:
 
 
 def test_quiet_after_turn_drops_acts_for_loops_from_chat() -> None:
-    out = _quiet_after_turn(_loop_created("tg:update:412982316"), _decision())
+    out = _quiet_after_turn(_loop_created(LoopOrigin.CONVERSATION), _decision())
     assert out.act == [] and out.notify is None
     assert len(out.wakeups) == 1  # follow-through stays
 
 
 def test_quiet_after_turn_drops_acts_even_without_a_notify() -> None:
     d = _decision().model_copy(update={"notify": None})
-    assert _quiet_after_turn(_loop_created("tg:update:1"), d).act == []
+    assert _quiet_after_turn(_loop_created(LoopOrigin.CONVERSATION), d).act == []
 
 
 def test_quiet_after_turn_keeps_acts_for_other_sources() -> None:
     d = _decision()
-    assert _quiet_after_turn(_loop_created("gmail:abc"), d).act == d.act
+    assert _quiet_after_turn(_loop_created(LoopOrigin.REASONER), d).act == d.act
 
 
 # --- task dedupe -----------------------------------------------------------------------------------
@@ -101,22 +102,30 @@ def _invite(summary: str = "Interview: Jane", description: str = "Looking forwar
             "attendees": ["jane@example.com"], "description": description}
 
 
+def _identity(tool: str) -> tuple[str, ...]:
+    """The identity a real tool declares (phase A: declared on the tool, not listed here)."""
+    from mavis.tools.registry import get_registry
+
+    return get_registry().get(tool).identity
+
+
 def test_equivalent_args_ignore_free_text_and_formatting() -> None:
+    ident = _identity("calendar_create_event")
     a = _invite()
     b = _invite(summary="  interview:   JANE ", description="See you then!")
     b["start"] = "2026-10-09T09:30:00Z"  # same instant
-    assert approvals.equivalent("calendar_create_event", a, b)
+    assert approvals.equivalent(a, b, ident)
     c = _invite()
     c["attendees"] = ["bob@example.com"]
-    assert not approvals.equivalent("calendar_create_event", a, c)
+    assert not approvals.equivalent(a, c, ident)
     d = _invite()
     d["start"] = "2026-10-10T15:00:00+05:30"
-    assert not approvals.equivalent("calendar_create_event", a, d)
+    assert not approvals.equivalent(a, d, ident)
 
 
 def test_text_only_args_compare_in_full() -> None:
-    assert not approvals.equivalent("send_note", {"text": "hi"}, {"text": "bye"})
-    assert approvals.equivalent("send_note", {"text": "hi"}, {"text": " HI "})
+    assert not approvals.equivalent({"text": "hi"}, {"text": "bye"})
+    assert approvals.equivalent({"text": "hi"}, {"text": " HI "})
 
 
 async def test_queue_reuses_an_equivalent_pending_approval_from_another_task(user, note_tool) -> None:
@@ -234,23 +243,31 @@ async def test_superseded_decision_closes_the_approval_without_running_it(
 def test_slack_messages_with_different_text_are_different_actions() -> None:
     a = {"channel": "#team", "text": "Standup moved to 11"}
     b = {"channel": "#team", "text": "Lunch is on me today"}
-    assert not approvals.equivalent("slack_send", a, b)
-    assert approvals.equivalent("slack_send", a, {"channel": "#team", "text": "  standup moved to 11 "})
+    ident = _identity("slack_send")
+    assert not approvals.equivalent(a, b, ident)
+    assert approvals.equivalent(a, {"channel": "#team", "text": "  standup moved to 11 "}, ident)
 
 
 def test_replies_with_different_bodies_are_different_actions() -> None:
     a = {"thread_id": "t1", "to": "raj@example.com", "body": "Yes, Monday works."}
     b = {"thread_id": "t1", "to": "raj@example.com", "body": "Sorry, I can't make it."}
-    assert not approvals.equivalent("mail_reply", a, b)
+    assert not approvals.equivalent(a, b, _identity("mail_reply"))
     page = {"parent_id": "p1", "title": "Notes"}
-    assert not approvals.equivalent("notion_create_page", {**page, "content": "a"}, {**page, "content": "b"})
+    assert not approvals.equivalent({**page, "content": "a"}, {**page, "content": "b"},
+                                    _identity("notion_create_page"))
 
 
 def test_calendar_twin_with_a_reworded_description_is_one_action() -> None:
-    assert approvals.equivalent("calendar_create_event", _invite(description="Looking forward"),
-                                _invite(description="Excited to meet you!"))
+    assert approvals.equivalent(_invite(description="Looking forward"),
+                                _invite(description="Excited to meet you!"),
+                                _identity("calendar_create_event"))
+    # phase A fix round 1: the body is what the email says, so a reworded body is another message
+    # (with the same target, it corrects the waiting card instead: tests/policy/test_approval_identity.py)
     mail = {"to": ["raj@example.com"], "subject": "Interview", "cc": []}
-    assert approvals.equivalent("mail_send", {**mail, "body": "Hi Raj"}, {**mail, "body": "Hello Raj,"})
+    assert not approvals.equivalent({**mail, "body": "Hi Raj"}, {**mail, "body": "Hello Raj,"},
+                                    _identity("mail_send"))
+    assert approvals.equivalent({**mail, "body": "Hi Raj"}, {**mail, "body": " hi  raj"},
+                                _identity("mail_send"))
 
 
 async def test_queue_keeps_two_slack_messages_to_one_channel(user, fresh_registry) -> None:
@@ -332,7 +349,7 @@ def _mail_tool(fresh_registry):
         return "sent"
 
     fresh_registry.register(MavisTool("mail_send", "Send an email.", MailArgs, RiskClass.OUTWARD, _send,
-                                      agents=frozenset({"conversation"})))
+                                      agents=frozenset({"conversation"}), identity=("to", "subject")))
 
 
 async def test_untainted_request_is_not_absorbed_by_a_tainted_pending_twin(user, fresh_registry) -> None:

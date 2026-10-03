@@ -8,7 +8,9 @@ from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision
 from mavis.domain.events import Event, Trust
-from mavis.domain.messages import Role
+from mavis.domain.loops import Loop
+from mavis.domain.messages import Role, tainted_event_id
+from mavis.domain.timefmt import due_label
 from mavis.initiative.filters import FilterResult
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.llm import models as llm
@@ -39,7 +41,7 @@ offers, plans or activities that are not there, and never offer something the us
 - If the recent conversation shows the user just talked about this and got an answer, do not notify \
 about it now: track it and schedule a wakeup for later instead.
 - When a wakeup is about one of the listed loops, set its loop_id to that loop's id (the number in brackets).
-- Never use em dashes or en dashes in anything you write.
+- Never use dashes as punctuation: a colon after a label, "to" for ranges ("3 to 4 PM").
 - If nothing is worth doing, leave everything empty and set ignore_reason.
 
 Now (user's local time): {local_now}. Quiet hours: {quiet}.
@@ -48,6 +50,12 @@ Unsolicited messages sent today: {pings}/{budget}."""
 
 def _fmt_history(rows) -> str:
     return "\n".join(f"{'User' if r.role == Role.USER else 'Mavis'}: {r.content}" for r in rows) or "(none)"
+
+
+def _loop_line(lp: Loop, tz: str, now) -> str:
+    due = due_label(lp.due_at, now, tz)  # computed here: the model never subtracts timestamps
+    title = lp.title if lp.trusted else wrap_untrusted(lp.title, "loop")  # third-party derived: data only
+    return f"- [{lp.id}] {lp.kind.value} '{title}' {due} importance {lp.importance}"
 
 
 class Reasoner:
@@ -73,21 +81,14 @@ class Reasoner:
             if event.trust is Trust.UNTRUSTED
             else result.summary
         )
-        loops = (
-            "\n".join(
-                f"- [{lp.id}] {lp.kind.value} '{lp.title}' "
-                + (
-                    f"due {timeutil.to_local(lp.due_at, user.timezone):%a %d %b %H:%M}"
-                    if lp.due_at
-                    else "no due date"
-                )
-                + f" importance {lp.importance}"
-                for lp in result.matched_loops
-            )
-            or "- none"
-        )
-        recall = (await self._memory.recall(user.id, result.summary)).render()
-        history = _fmt_history(await messages.recent(user.id, 10))
+        loops = "\n".join(_loop_line(lp, user.timezone, now) for lp in result.matched_loops) or "- none"
+        recalled = await self._memory.recall(user.id, result.summary)
+        recall = recalled.render()
+        rows = await messages.recent(user.id, 10)
+        history = _fmt_history(rows)
+        # what this run actually read: any third-party-derived input taints what it writes
+        tainted = (event.trust is Trust.UNTRUSTED or any(not lp.trusted for lp in result.matched_loops)
+                   or recalled.untrusted or any(tainted_event_id(r.event_id) for r in rows))
         prompt = (
             f"## Signal ({event.type.value}, id {event.id})\n{signal}\n\n"
             f"## Related open loops\n{loops}\n\n"
@@ -98,6 +99,7 @@ class Reasoner:
         decision = await llm.structured(
             InitiativeDecision, system, prompt, tier=tier, priority="background", fallback=True
         )
+        decision = decision.model_copy(update={"tainted": tainted})  # code decides, never the model
         log.info(
             "initiative.decided",
             event_id=event.id,

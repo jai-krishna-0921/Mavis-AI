@@ -145,6 +145,9 @@ class LoopRow(Base):
     created_at: Mapped[datetime] = mapped_column()
     updated_at: Mapped[datetime] = mapped_column()
     version: Mapped[int] = mapped_column(Integer, default=1)
+    # Provenance (phase A): explicit, never inferred from `source`. Rows from before it read as untrusted.
+    trust: Mapped[str] = mapped_column(String(12), default="untrusted", server_default="untrusted")
+    origin: Mapped[str] = mapped_column(String(16), default="unknown", server_default="unknown")
 
 
 class WakeupRow(Base):

@@ -84,9 +84,11 @@ def test_localize_naive_datetimes_to_user_tz():
     assert out.start.astimezone(UTC) == START
 
 
-def test_localize_keeps_aware_datetimes():
+def test_localize_keeps_the_wall_clock_of_aware_datetimes():
+    """Phase A7: a model-written offset is never trusted; the wall clock is, in the user's zone."""
     aware = CalendarCreateArgs(summary="x", start=START)
-    assert localize(aware, "Asia/Kolkata").start == START
+    out = localize(aware, "Asia/Kolkata").start
+    assert out.replace(tzinfo=None) == START.replace(tzinfo=None) and str(out.tzinfo) == "Asia/Kolkata"
 
 
 def test_render_result_truncates():

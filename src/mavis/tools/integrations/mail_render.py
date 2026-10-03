@@ -79,10 +79,12 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
-def render_search(data: Any) -> str:
+def render_search(data: Any, args: Any = None) -> str:
     msgs = extract_messages(data)
     if not msgs:
-        return "No emails matched."
+        # a neutral fact naming the query; what to make of it is in the chat rules (TOOL_RULES)
+        query = " ".join(str(getattr(args, "query", "") or "").split())
+        return f"No emails matched the query {query!r}." if query else "No emails matched the query."
     lines = [f"{len(msgs)} email(s). Call mail_read with a message_id to read one in full."]
     for raw in msgs:
         m = normalize_email(raw)
