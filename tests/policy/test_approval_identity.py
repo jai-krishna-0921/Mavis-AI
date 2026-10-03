@@ -259,3 +259,78 @@ async def test_approving_a_past_action_is_refused_with_a_clear_message(
     assert ran == []
     assert (await approvals.get(aid)).status == ApprovalStatus.EXPIRED
     assert "already passed" in (await tasks.get(tid)).result_text
+
+
+# --- fix round 1, C1: the action-time expiry follows the CURRENT arguments ------------------------------
+
+
+def _times(tool: str, at: str) -> dict:
+    return {"calendar_create_event": _invite(start=at),
+            "calendar_update_event": {"event_id": "e9", "start": at},
+            "pay_bill": {"account": "A", "amount": 3, "at": at}}[tool]
+
+
+async def _action_wakeups(user_id: int, aid: int) -> list[datetime]:
+    from mavis.timers.service import WakeupService
+
+    return sorted(w.due_at for w in await WakeupService().pending(user_id, WakeupKind.SYSTEM_APPROVAL_EXPIRE)
+                  if w.reason == f"approval:{aid}:action_time")
+
+
+@pytest.mark.parametrize("tool", ["calendar_create_event", "calendar_update_event", "pay_bill"])
+@pytest.mark.parametrize("first,second", [
+    ("2026-10-03T14:00:00Z", "2026-10-04T09:00:00Z"),        # moved later
+    ("2026-10-03T20:00:00+05:30", "2026-10-03T19:00:00+05:30"),  # moved earlier (IST offsets)
+    ("2026-10-03T21:00:00", "2026-10-03T23:00:00"),            # naive: the user's timezone
+])
+async def test_edit_moves_the_action_time_expiry(user, rec_bus, sent, clock, tools, tool, first, second):
+    clock.set(NOW)
+    aid = await _card(user.id, tool, _times(tool, first))
+    await flow.send_approval_prompt(user.id, {"approval_id": aid})
+    assert len(await _action_wakeups(user.id, aid)) == 1
+    await approvals.update_args(aid, _times(tool, second), "edited")
+    await flow.send_approval_prompt(user.id, {"approval_id": aid})  # the gate re-prompts after an edit
+    row = await approvals.get(aid)
+    tz = "Asia/Kolkata"
+    assert await _action_wakeups(user.id, aid) == [flow.action_time(row, tz)]
+
+
+@pytest.mark.parametrize("tool", ["calendar_create_event", "pay_bill"])
+async def test_stale_action_time_wakeup_does_nothing_when_the_time_moved(user, rec_bus, sent, clock, tools,
+                                                                        tool):
+    clock.set(NOW)
+    aid = await _card(user.id, tool, _times(tool, "2026-10-03T12:30:00Z"))
+    await approvals.update_args(aid, _times(tool, "2026-10-04T12:30:00Z"), "edited")
+    clock.set(NOW + timedelta(hours=1))  # the old time has passed, the new one has not
+    await flow.on_expire_wakeup(user.id, f"approval:{aid}:action_time")
+    assert (await approvals.get(aid)).status == ApprovalStatus.PENDING
+
+
+@pytest.mark.parametrize("tool", ["calendar_create_event", "calendar_update_event", "pay_bill"])
+async def test_action_time_wakeup_never_claims_a_card_being_edited(user, rec_bus, sent, clock, tools, tool):
+    clock.set(NOW)
+    aid = await _card(user.id, tool, _times(tool, "2026-10-03T11:00:00Z"))
+    await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.AWAITING_EDIT)
+    await flow.on_expire_wakeup(user.id, f"approval:{aid}:action_time")
+    assert (await approvals.get(aid)).status == ApprovalStatus.AWAITING_EDIT
+
+
+@pytest.mark.parametrize("tool", ["calendar_create_event", "calendar_update_event", "pay_bill"])
+async def test_action_time_wakeup_expires_a_pending_card_whose_time_passed(user, rec_bus, sent, clock, tools,
+                                                                          tool):
+    clock.set(NOW)
+    aid = await _card(user.id, tool, _times(tool, "2026-10-03T11:59:00Z"))
+    await flow.on_expire_wakeup(user.id, f"approval:{aid}:action_time")
+    assert (await approvals.get(aid)).status == ApprovalStatus.EXPIRED
+    assert any("already passed" in m.text for m in sent)
+
+
+async def test_revise_reschedules_the_action_time_expiry(user, rec_bus, sent, clock, tools, fake_llm):
+    from mavis.agents.orchestrator_graph import revise_approval
+
+    clock.set(NOW)
+    aid = await _card(user.id, "pay_bill", _times("pay_bill", "2026-10-03T13:00:00Z"))
+    await flow.send_approval_prompt(user.id, {"approval_id": aid})
+    fake_llm.push_structured(PayArgs(account="A", amount=3, at=datetime(2026, 10, 3, 16, 0, tzinfo=UTC)))
+    await revise_approval(await approvals.get(aid), "make it 4pm UTC")
+    assert await _action_wakeups(user.id, aid) == [datetime(2026, 10, 3, 16, 0, tzinfo=UTC)]

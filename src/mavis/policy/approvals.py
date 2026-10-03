@@ -22,6 +22,7 @@ from mavis.domain import timeutil
 from mavis.domain.events import Event, Job, JobKind
 from mavis.domain.messages import TAINT_SUFFIX, Button, Outbound, Role
 from mavis.domain.tasks import ApprovalStatus, TaskStatus
+from mavis.domain.wakeups import WakeupKind
 from mavis.llm import models as llm
 from mavis.store.db import Session, utcnow
 from mavis.store.repo import approvals, audit, messages, outbox, tasks, users
@@ -125,17 +126,57 @@ async def send_approval_prompt(user_id: int, payload: dict) -> None:
                               dedupe_key=f"approval:{approval.id}:remind")
         await wakeups.wake_me(user_id, now + ttl, f"approval:{approval.id}", kind="system_approval_expire",
                               scale=False, dedupe_key=f"approval:{approval.id}:expire")
-        timezone = (await users.get(user_id)).timezone
-        at = action_time(approval, timezone)
-        if at is not None and now < at < now + ttl:  # the action's own time comes first: expire then
-            await wakeups.wake_me(user_id, at, f"approval:{approval.id}", kind="system_approval_expire",
-                                  scale=False, dedupe_key=f"approval:{approval.id}:action_time")
+    await sync_action_time_expiry(approval)  # every prompt, so an edited time is followed
+
+
+def action_time_reason(approval_id: int) -> str:
+    return f"approval:{approval_id}:action_time"
+
+
+async def sync_action_time_expiry(approval) -> None:
+    """Keep exactly one pending expiry wakeup at the action time of the approval's CURRENT arguments:
+    cancel any for an older time, schedule one for the current time if it is still ahead."""
+    tool = _declared(approval.tool)
+    if tool is None or tool.action_time is None:
+        return  # the tool's actions have no time of their own
+    try:
+        timezone = (await users.get(approval.user_id)).timezone
+    except Exception:  # noqa: BLE001
+        timezone = "UTC"
+    at = action_time(approval, timezone)
+    wanted = at if at is not None and at > utcnow() else None
+    wakeups = timers_service.WakeupService()
+    reason = action_time_reason(approval.id)
+    kept = False
+    for w in await wakeups.pending(approval.user_id, WakeupKind.SYSTEM_APPROVAL_EXPIRE):
+        if w.reason != reason:
+            continue
+        if wanted is not None and w.due_at == wanted and not kept:
+            kept = True
+        else:
+            await wakeups.cancel(w.id)
+    if wanted is not None and not kept:
+        await wakeups.wake_me(approval.user_id, wanted, reason, kind=WakeupKind.SYSTEM_APPROVAL_EXPIRE,
+                              scale=False, dedupe_key=f"{reason}:{wanted.isoformat()}")
+
+
+async def expire_at_action_time(user_id: int, approval_id: int) -> None:
+    """The action-time wakeup fired: expire only a card still waiting on a tap whose CURRENT action time
+    has passed. A card being edited, or one whose time was moved, is left alone."""
+    approval = await approvals.get(approval_id)
+    if approval is None or approval.user_id != user_id or approval.status != ApprovalStatus.PENDING:
+        return
+    if await passed_action_time(approval) is None:
+        return
+    if await approvals.claim(approval_id, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING):
+        await _resume(approval, "past")
 
 
 # --- decisions ------------------------------------------------------------------------
 
 _BUTTON = re.compile(r"^ap:(\d+):(ok|edit|no)$")
 _REASON = re.compile(r"^approval:(\d+)$")
+_ACTION_REASON = re.compile(r"^approval:(\d+):action_time$")
 _OPENABLE = {ApprovalStatus.PENDING, ApprovalStatus.AWAITING_EDIT}
 _DONE = {ApprovalStatus.EXECUTED, ApprovalStatus.REJECTED, ApprovalStatus.EXPIRED, ApprovalStatus.FAILED}
 
@@ -345,8 +386,10 @@ async def on_remind_wakeup(user_id: int, reason: str) -> None:
 
 
 async def on_expire_wakeup(user_id: int, reason: str) -> None:
-    """System wakeup handler for kind system_approval_expire."""
-    if (approval_id := approval_id_from_reason(reason)) is not None:
+    """System wakeup handler for kind system_approval_expire (the TTL, or the action's own time)."""
+    if (m := _ACTION_REASON.match(reason or "")) is not None:
+        await expire_at_action_time(user_id, int(m.group(1)))
+    elif (approval_id := approval_id_from_reason(reason)) is not None:
         await expire(user_id, approval_id)
     await sweep(user_id)
 
