@@ -1,4 +1,9 @@
-"""Phase 1 conversational turn: persona + last 20 messages -> FAST model -> bubbles in the outbox.
+"""Conversational turn: persona + last 20 messages -> FAST model with READ-ONLY tools -> bubbles.
+
+The model may look things up (mail search/read, calendar, web, memory, task list) through a small
+bounded react loop. Nothing outward or approval-gated is exposed here: sending, creating, forgetting
+and standing rules wait for the Phase 4 conversation graph and its approval flow. A small-talk turn
+is still exactly one model call (the model answers without asking for a tool).
 
 Replaced by agents/conversation.py in Phase 4 (registered with replace=True).
 """
@@ -10,15 +15,20 @@ import time
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.tools import BaseTool
 
 from mavis.agents import clarify, commands, persona
+from mavis.agents.react import react_loop
 from mavis.bus import get_bus
 from mavis.channels import presence
+from mavis.domain.errors import ConnectionRequired
 from mavis.domain.events import Event, Job, JobKind
 from mavis.domain.messages import Outbound, Role
+from mavis.domain.policy import RiskClass
 from mavis.initiative import wiring
 from mavis.llm import models as llm
 from mavis.memory.service import get_memory
+from mavis.policy.risk import UNTRUSTED_NOTE
 from mavis.store.db import Session, utcnow
 from mavis.store.models import Message
 from mavis.store.repo import messages, outbox, users
@@ -140,6 +150,84 @@ async def enqueue_learn(
     ))
 
 
+# --- read-only tools for chat turns ---------------------------------------------------------------
+
+# Explicit allowlist, and every entry must also be a plain READ tool (checked at selection time), so a
+# catalog change can never slip an outward, destructive or memory-writing tool into chat.
+CHAT_TOOL_NAMES = (
+    "mail_search", "mail_read",
+    "calendar_list", "calendar_find", "calendar_free_slots",
+    "web_search", "web_extract",
+    "what_do_you_know", "list_tasks",
+)
+CHAT_MAX_STEPS = 4  # tool rounds; then the model must answer with what it has
+CHAT_DEADLINE_S = 40.0  # after this, no more tool rounds: answer now
+CHAT_TOOL_TIMEOUT_S = 20.0  # per tool call (provider round trips), well inside the turn deadline
+WRAP_UP_FALLBACK = "I couldn't finish checking that just now. Want me to try again?"
+
+TOOLS_GUIDE = (
+    "Looking things up\n"
+    "- You have read-only tools: search and read their Gmail, check their calendar and free time, search "
+    "the web and read a page, recall what you know, list background tasks. Use them when the answer "
+    "depends on their email, calendar or the web, instead of saying you don't have it in front of you.\n"
+    "- For an email: mail_search first (it returns message ids), then mail_read with the right message_id "
+    "for the full text. Don't call a tool for small talk.\n"
+    "- These tools only read. You cannot send, reply, create events or change anything from here; if "
+    "they ask, say that needs their OK and is coming next.\n"
+    f"- {UNTRUSTED_NOTE}"
+)
+
+
+def chat_tools(user_id: int) -> list[BaseTool]:
+    """The READ-only tools a chat turn may use. Never raises: no tools means a plain reply."""
+    try:
+        from mavis.tools.registry import get_registry
+
+        registry = get_registry()
+        safe = []
+        for name in CHAT_TOOL_NAMES:
+            try:
+                tool = registry.get(name)
+            except KeyError:
+                continue
+            if tool.risk is RiskClass.READ and tool.risk_fn is None:
+                safe.append(name)
+        return registry.for_agent("conversation", user_id, names=safe)
+    except Exception:  # noqa: BLE001 - tools are an extra; the turn must still answer
+        log.warning("simple_turn.tools_unavailable", exc_info=True)
+        return []
+
+
+def _connect_hint(exc: ConnectionRequired) -> str:
+    from mavis.tools.integrations.actions import DISPLAY_NAMES
+
+    name = DISPLAY_NAMES.get(exc.capability, exc.capability.value)
+    word = "calendar" if exc.capability.value == "googlecalendar" else exc.capability.value
+    return f"I need your {name} linked for that. Send /connect {word} and I'll take it from there."
+
+
+async def _connect_prompt(event: Event, user_id: int, exc: ConnectionRequired) -> list[str]:
+    """Hand a missing/expired link to the connect flow (button prompt). Returns the texts it sent.
+
+    If the flow itself fails, a plain /connect hint goes out instead: never an error.
+    """
+    try:
+        from mavis.tools.integrations.wiring import get_connect_flow
+
+        flow = get_connect_flow()
+        with flow.reply_scope(event.id) as scope:
+            await flow.start(user_id, exc.capability, exc.reason, revoked=exc.revoked)
+        if scope.texts:
+            return scope.texts
+    except Exception:  # noqa: BLE001 - the user still gets told what to do
+        log.warning("simple_turn.connect_flow_failed", capability=exc.capability.value, exc_info=True)
+    hint = _connect_hint(exc)
+    async with Session() as s:
+        await outbox.enqueue(s, Outbound(user_id=user_id, text=hint, dedupe_key=f"reply:{event.id}:0"))
+        await s.commit()
+    return [hint]
+
+
 async def run_turn(event: Event) -> None:
     user = await users.get(event.user_id)
     text = user_text(event)
@@ -194,14 +282,38 @@ async def run_turn(event: Event) -> None:
         now = utcnow()
         known_name = user.name or card_name
         recent = persona.recent_messages(history, now)
-        prompt: list[BaseMessage] = [SystemMessage(persona.system_prompt(
+        system = persona.system_prompt(
             user, now, context=context, connections=connections, known_name=known_name,
             ask_name=persona.should_ask_name(known_name, history, now, user.timezone),
             prior_turns=max(len(recent) - 1, 0),  # the current message is already in history
-        ))]
+        )
+        tools = chat_tools(user.id)
+        if tools:
+            system = f"{system}\n\n{TOOLS_GUIDE}"
+        prompt: list[BaseMessage] = [SystemMessage(system)]
         prompt += _to_langchain(history)
 
-        reply = await llm.complete(prompt, llm.Tier.FAST, name="simple_turn")
+        connect_texts: list[str] = []
+        try:
+            result = await react_loop(
+                tools, prompt, CHAT_MAX_STEPS, tier=llm.Tier.FAST, temperature=0.6, name="simple_turn",
+                wrap_up=True, deadline_s=CHAT_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
+            )
+        except ConnectionRequired as exc:
+            result = None
+            connect_texts = await _connect_prompt(event, user.id, exc)
+        if result is None:
+            # The connect prompt (with buttons) is already queued under the flow's own dedupe keys.
+            await messages.log(user.id, Role.ASSISTANT, "\n\n".join(connect_texts),
+                               event_id=f"reply:{event.id}")
+            await enqueue_learn(user.id, event, text, previous_reply, _clarified_request(history))
+            await _initiative_hook("quiet.after_assistant_message",
+                                   lambda i: i.quiet.after_assistant_message(user.id, connect_texts[-1]))
+            return
+        if result.tools_called:
+            log.info("simple_turn.tools", tools=result.tools_called, steps=result.steps,
+                     tainted=result.tainted, wrapped_up=result.wrapped_up)
+        reply = result.text or WRAP_UP_FALLBACK
         bubbles = persona.split_bubbles(reply) or [reply]
 
         async with Session() as s:
