@@ -64,7 +64,7 @@ The scaffold under `src/mavis/` predates the spec and is untracked. Its useful p
 - [ ] **Step 1: Remove the scaffold and recreate the package skeleton**
 
 ```bash
-cd /home/jk/Documents/Mavis-AI
+cd /home/jk/Documents/Zento-AI
 git status --porcelain src/   # confirm src/ is untracked (?? src/) before deleting
 rm -rf src/mavis
 mkdir -p src/mavis/{domain,llm,store/repo,bus,channels,agents,worker,api/routes} tests

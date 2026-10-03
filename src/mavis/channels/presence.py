@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 import structlog
 
 from mavis.channels import get_channel
+from mavis.config import get_settings
 
 log = structlog.get_logger(__name__)
 
@@ -21,9 +22,11 @@ TYPING_REFRESH_S = 4.0
 CALL_TIMEOUT_S = 3.0
 
 
-async def react(chat_id: int, message_id: int | None, emoji: str = ACK_EMOJI) -> None:
-    """Add a reaction to the user's message. Never raises."""
-    if message_id is None:
+async def react(chat_id: int, message_id: int | None, emoji: str | None = None) -> None:
+    """Add a reaction to the user's message. Never raises. Off unless PRESENCE_REACTION is set
+    (or an explicit emoji is passed)."""
+    emoji = emoji or get_settings().presence_reaction
+    if message_id is None or not emoji:
         return
     try:
         fn = getattr(get_channel(), "react", None)

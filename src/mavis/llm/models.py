@@ -60,6 +60,25 @@ def chat_model(tier: Tier = Tier.FAST, temperature: float = 0.6, model: str | No
     )
 
 
+def secondary_chat_model(tier: Tier = Tier.FAST, temperature: float = 0.6) -> BaseChatModel:
+    """Chat model on the optional secondary OpenAI-compatible provider (call only if configured)."""
+    s = get_settings()
+    fast = tier is Tier.FAST
+    return _build(
+        s.llm_secondary_model_fast if fast else s.llm_secondary_model_smart,
+        s.llm_secondary_base_url,
+        s.llm_secondary_api_key,
+        temperature,
+        s.llm_timeout_fast_s if fast else s.llm_timeout_smart_s,
+    )
+
+
+def _secondary_ready(tier: Tier) -> bool:
+    s = get_settings()
+    model = s.llm_secondary_model_fast if tier is Tier.FAST else s.llm_secondary_model_smart
+    return bool(s.llm_secondary_base_url and model)
+
+
 def _fallback_names(tier: Tier) -> list[str]:
     s = get_settings()
     fast = tier is Tier.FAST
@@ -71,7 +90,9 @@ def _fallback_names(tier: Tier) -> list[str]:
     return names
 
 
-def _model_for(tier: Tier, temperature: float, name: str | None) -> BaseChatModel:
+def _model_for(tier: Tier, temperature: float, name: str | None, secondary: bool = False) -> BaseChatModel:
+    if secondary:
+        return secondary_chat_model(tier, temperature)
     # primary goes through the plain chat_model(tier, temperature) call so test fakes keep working
     return chat_model(tier, temperature) if name is None else chat_model(tier, temperature, model=name)
 
@@ -88,25 +109,42 @@ def _use_fallback(priority: Priority, fallback: bool | None) -> bool:
     return priority == "interactive" if fallback is None else fallback
 
 
-def _is_retriable(exc: BaseException) -> bool:
-    """Timeouts, connection failures, 5xx and 429: another model may well succeed."""
-    if isinstance(exc, (TimeoutError, httpx.TimeoutException, httpx.TransportError)):
-        return True
-    if isinstance(exc, (openai.APITimeoutError, openai.APIConnectionError, openai.RateLimitError,
-                        openai.InternalServerError)):
+def _is_timeout(exc: BaseException) -> bool:
+    return isinstance(exc, (TimeoutError, httpx.TimeoutException, openai.APITimeoutError))
+
+
+def _is_connection_error(exc: BaseException) -> bool:
+    return isinstance(exc, (httpx.TransportError, openai.APIConnectionError)) and not _is_timeout(exc)
+
+
+def _is_provider_down(exc: BaseException) -> bool:
+    """Timeout, 429 or connection failure: the PROVIDER (account) is saturated or unreachable, so
+    another model on the same account cannot help. Only a secondary provider can."""
+    return _is_timeout(exc) or _is_rate_limited(exc) or _is_connection_error(exc)
+
+
+def _is_model_specific(exc: BaseException) -> bool:
+    """404 model not found or 5xx from this model: the next model in the chain may well work."""
+    if isinstance(exc, (openai.NotFoundError, openai.InternalServerError)):
         return True
     status = getattr(exc, "status_code", None)
-    return isinstance(status, int) and (status == 429 or status >= 500)
+    return isinstance(status, int) and (status == 404 or status >= 500)
+
+
+def _is_retriable(exc: BaseException) -> bool:
+    return _is_provider_down(exc) or _is_model_specific(exc)
 
 
 Priority = Literal["interactive", "background"]
-RETRY_AFTER_CAP_S = 5.0  # a server Retry-After of 18s would make a reply crawl; fall back instead
-RATE_LIMIT_BACKOFF_S = (0.5, 1.0, 2.0)  # same-model retries on 429 before moving to the next model
+RETRY_AFTER_CAP_S = 30.0
+# global backoff after a 429 without Retry-After; reset on the first success
+RATE_LIMIT_BACKOFF_S = (5.0, 10.0, 20.0, 30.0)
+MAX_ATTEMPTS = 6  # same-model attempts per call (timeouts / 429s), always bounded by the deadline
 
 
 BACKGROUND_AGING_S = 30.0  # a background waiter this old is treated as interactive (no starvation)
 BACKGROUND_ACQUIRE_TIMEOUT_S = 600.0  # below BUS_CLAIM_IDLE_MS (15 min): never outlive a bus claim
-INTERACTIVE_DEADLINE_S = 25.0  # chain-wide budget (queue + attempts + 429 backoffs) for a FAST reply
+INTERACTIVE_DEADLINE_S = 45.0  # chain-wide budget (queue + attempts + 429 backoffs) for a FAST reply
 BACKGROUND_DEADLINE_S = 120.0  # same, for background calls and SMART-tier calls
 
 
@@ -170,16 +208,61 @@ class _Limiter:
             pick.fut.set_result(None)
 
 
-# one limiter per event loop: asyncio primitives must not be shared across loops (pytest runs many)
+# one limiter per event loop and provider: asyncio primitives must not be shared across loops
 _limiters: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Limiter] = weakref.WeakKeyDictionary()
+_secondary_limiters: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Limiter] = (
+    weakref.WeakKeyDictionary()
+)
 
 
-def _limiter() -> _Limiter:
+def _limiter(secondary: bool = False) -> _Limiter:
     loop = asyncio.get_running_loop()
-    lim = _limiters.get(loop)
+    table = _secondary_limiters if secondary else _limiters
+    lim = table.get(loop)
     if lim is None:
-        lim = _limiters[loop] = _Limiter(get_settings().llm_max_concurrency)
+        s = get_settings()
+        lim = table[loop] = _Limiter(s.llm_secondary_max_concurrency if secondary else s.llm_max_concurrency)
     return lim
+
+
+class _OllamaState:
+    """Process-wide view of the Ollama account: global 429 backoff and timeout cooldown."""
+
+    def __init__(self) -> None:
+        self.backoff_until = 0.0
+        self.level = 0
+        self.cooldown_until = 0.0
+
+    def reset(self) -> None:
+        self.backoff_until = self.cooldown_until = 0.0
+        self.level = 0
+
+    def backoff_remaining(self) -> float:
+        return max(0.0, self.backoff_until - time.monotonic())
+
+    def unavailable_s(self) -> float:
+        return max(self.backoff_until, self.cooldown_until) - time.monotonic()
+
+    def note_success(self) -> None:
+        self.backoff_until = 0.0
+        self.level = 0
+
+    def note_rate_limit(self, retry_after: float | None) -> float:
+        if retry_after is None:
+            dur = RATE_LIMIT_BACKOFF_S[min(self.level, len(RATE_LIMIT_BACKOFF_S) - 1)]
+            self.level += 1
+        else:
+            dur = retry_after
+        self.backoff_until = max(self.backoff_until, time.monotonic() + dur)
+        return dur
+
+    def note_timeout(self) -> float:
+        cooldown = get_settings().llm_timeout_cooldown_s
+        self.cooldown_until = max(self.cooldown_until, time.monotonic() + cooldown)
+        return cooldown
+
+
+_ollama = _OllamaState()
 
 
 def _is_rate_limited(exc: BaseException) -> bool:
@@ -223,32 +306,71 @@ def _deadline_for(tier: Tier, priority: Priority) -> _Deadline:
     return _Deadline(INTERACTIVE_DEADLINE_S if fast_reply else BACKGROUND_DEADLINE_S)
 
 
-async def _call[R](op: Callable[[], Awaitable[R]], priority: Priority, deadline: _Deadline) -> R:
-    """One model attempt under the limiter and the chain deadline; 429 backs off on the SAME model."""
-    for delay in (*RATE_LIMIT_BACKOFF_S, None):
+async def _await_backoff(priority: Priority, deadline: _Deadline) -> None:
+    """Global 429 backoff: everyone waits. Interactive callers only if the wait fits the deadline."""
+    remaining = _ollama.backoff_remaining()
+    if remaining <= 0:
+        return
+    left = deadline.check()
+    if priority == "interactive" and remaining >= left:
+        raise LLMError("LLM rate-limit backoff outlasts the deadline")
+    await _sleep(min(remaining, left))
+
+
+async def _call[R](
+    op: Callable[[], Awaitable[R]], priority: Priority, deadline: _Deadline,
+    *, secondary: bool = False, may_fail_over: bool = False,
+) -> R:
+    """One model attempt under the provider's limiter and the deadline.
+
+    Ollama: after a client timeout the slot stays occupied for the cooldown (the abandoned request
+    still runs server-side); a 429 sets the process-wide backoff. Both retry the SAME model, unless
+    `may_fail_over` (a secondary provider exists), in which case they are raised straight away.
+    """
+    last: Exception | None = None
+    for _ in range(MAX_ATTEMPTS):
+        deadline.check()
+        if not secondary:
+            await _await_backoff(priority, deadline)
         left = deadline.check()
-        lim = _limiter()
+        lim = _limiter(secondary)
         await lim.acquire(priority, left if priority == "interactive"
                           else min(left, BACKGROUND_ACQUIRE_TIMEOUT_S))
-        wait: float | None = None
+        hold = 0.0
         try:
             try:
                 async with asyncio.timeout(deadline.check()):
-                    return await op()
+                    result = await op()
             except TimeoutError as exc:
+                if not secondary:
+                    hold = _ollama.note_timeout()
                 if deadline.remaining() <= 0:
                     raise LLMError("LLM deadline exceeded") from exc
                 raise
+            if not secondary:
+                _ollama.note_success()
+            return result
         except Exception as exc:  # noqa: BLE001
-            if delay is None or not _is_rate_limited(exc):
+            if isinstance(exc, LLMError) or secondary:
                 raise
-            wait = _retry_after_s(exc)
-            log.warning("llm.rate_limited", retry_in_s=delay if wait is None else wait)
+            if _is_timeout(exc):
+                hold = hold or _ollama.note_timeout()
+                log.warning("llm.timeout_cooldown", hold_s=hold)
+            elif _is_rate_limited(exc):
+                dur = _ollama.note_rate_limit(_retry_after_s(exc))
+                log.warning("llm.rate_limited", backoff_s=dur)
+            else:
+                raise
+            if may_fail_over:
+                raise
+            last = exc
         finally:
-            lim.release()
-        # outside the slot so others can use it; never sleep past the deadline
-        await _sleep(min(delay if wait is None else wait, max(deadline.remaining(), 0.0)))
-    raise AssertionError("unreachable")  # pragma: no cover
+            if hold > 0:
+                asyncio.get_running_loop().call_later(hold, lim.release)  # server still busy
+            else:
+                lim.release()
+    assert last is not None
+    raise last
 
 
 def _log_fallback(tier: Tier, frm: str | None, to: str | None, exc: BaseException) -> None:
@@ -268,6 +390,11 @@ def _text_of(content: Any) -> str:
     return "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
 
 
+def _prefer_secondary(tier: Tier, priority: Priority) -> bool:
+    """Interactive calls skip a saturated Ollama (cooldown / backoff) when a secondary exists."""
+    return priority == "interactive" and _secondary_ready(tier) and _ollama.unavailable_s() > 0
+
+
 async def complete(
     messages: list[BaseMessage],
     tier: Tier = Tier.FAST,
@@ -276,20 +403,44 @@ async def complete(
     priority: Priority = "interactive",
     fallback: bool | None = None,
 ) -> str:
-    """Plain-text completion with model fallback. Raises LLMError on failure or empty output."""
+    """Plain-text completion. Falls back to another model only on model-specific errors, and once to
+    the secondary provider when Ollama is saturated or unreachable. Raises LLMError on failure."""
     chain = _chain(tier, _use_fallback(priority, fallback))
-    deadline = _deadline_for(tier, priority)
     out = None
-    for i, model in enumerate(chain):
+    tried_secondary = False
+
+    async def via_secondary() -> Any:
+        llm = _model_for(tier, temperature, None, secondary=True)
+        return await _call(lambda: llm.ainvoke(messages, config=run_config(name)), priority,
+                           _deadline_for(tier, priority), secondary=True)
+
+    if _prefer_secondary(tier, priority):
+        tried_secondary = True
         try:
-            llm = _model_for(tier, temperature, model)
-            out = await _call(lambda m=llm: m.ainvoke(messages, config=run_config(name)), priority, deadline)
-            break
+            out = await via_secondary()
         except Exception as exc:  # noqa: BLE001
-            if _is_retriable(exc) and i + 1 < len(chain):
-                _log_fallback(tier, model, chain[i + 1], exc)
-                continue
-            raise LLMError(f"{tier.value} model call failed: {type(exc).__name__}") from exc
+            log.warning("llm.secondary_failed", error=type(exc).__name__)
+    if out is None:
+        deadline = _deadline_for(tier, priority)
+        for i, model in enumerate(chain):
+            try:
+                llm = _model_for(tier, temperature, model)
+                out = await _call(lambda m=llm: m.ainvoke(messages, config=run_config(name)), priority,
+                                  deadline, may_fail_over=_secondary_ready(tier) and not tried_secondary)
+                break
+            except Exception as exc:  # noqa: BLE001
+                if _is_model_specific(exc) and i + 1 < len(chain):
+                    _log_fallback(tier, model, chain[i + 1], exc)
+                    continue
+                if _is_provider_down(exc) and _secondary_ready(tier) and not tried_secondary:
+                    tried_secondary = True
+                    log.warning("llm.secondary_fallback", tier=tier.value, error=type(exc).__name__)
+                    try:
+                        out = await via_secondary()
+                        break
+                    except Exception as exc2:  # noqa: BLE001
+                        raise LLMError(f"{tier.value} model call failed: {type(exc2).__name__}") from exc2
+                raise LLMError(f"{tier.value} model call failed: {type(exc).__name__}") from exc
     assert out is not None
     text = _text_of(out.content).strip()
     if not text:
@@ -313,19 +464,42 @@ async def structured[T: BaseModel](
     """Return a validated `schema` instance or raise LLMError.
 
     Per model: 1) native tool-calling structured output; 2) up to two JSON-mode attempts validated
-    locally. Timeouts/connection/5xx/429 move on to the tier's next fallback model.
+    locally. Only model-specific errors (404, 5xx) or invalid output move to the tier's next model;
+    timeouts/429/connection errors retry the same model after cooldown/backoff, or go once to the
+    secondary provider if configured (same tool-calling / JSON-mode path via ChatOpenAI).
     """
     messages = _messages(system, user)
     chain = _chain(tier, _use_fallback(priority, fallback))
+    tried_secondary = False
+
+    async def via_secondary() -> T:
+        return await _structured_with(None, schema, messages, tier, priority,
+                                      _deadline_for(tier, priority), secondary=True)
+
+    if _prefer_secondary(tier, priority):
+        tried_secondary = True
+        try:
+            return await via_secondary()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("llm.secondary_failed", error=type(exc).__name__)
     deadline = _deadline_for(tier, priority)
     for i, model in enumerate(chain):
         try:
-            return await _structured_with(model, schema, messages, tier, priority, deadline)
+            return await _structured_with(model, schema, messages, tier, priority, deadline,
+                                          may_fail_over=_secondary_ready(tier) and not tried_secondary)
         except (_Unavailable, _Invalid) as failure:
             exc = failure.__cause__ or failure
-            if i + 1 < len(chain):
+            if i + 1 < len(chain) and (isinstance(failure, _Invalid) or _is_model_specific(exc)):
                 _log_fallback(tier, model, chain[i + 1], exc)
                 continue
+            if isinstance(failure, _Unavailable) and _is_provider_down(exc) \
+                    and _secondary_ready(tier) and not tried_secondary:
+                log.warning("llm.secondary_fallback", tier=tier.value, error=type(exc).__name__)
+                try:
+                    return await via_secondary()
+                except (_Unavailable, _Invalid) as f2:
+                    e2 = f2.__cause__ or f2
+                    raise LLMError(f"could not get a valid {schema.__name__}: {type(e2).__name__}") from e2
             if isinstance(failure, _Invalid):
                 raise LLMError(str(failure)) from failure
             raise LLMError(f"could not get a valid {schema.__name__}: {type(exc).__name__}") from exc
@@ -342,12 +516,14 @@ class _Unavailable(Exception):
 
 async def _structured_with[T: BaseModel](
     model: str | None, schema: type[T], messages: list[BaseMessage], tier: Tier, priority: Priority,
-    deadline: _Deadline,
+    deadline: _Deadline, *, secondary: bool = False, may_fail_over: bool = False,
 ) -> T:
     cfg = run_config(f"structured:{schema.__name__}")
     try:
-        runnable = _model_for(tier, 0.1, model).with_structured_output(schema, method="function_calling")
-        result = await _call(lambda: runnable.ainvoke(messages, config=cfg), priority, deadline)
+        runnable = _model_for(tier, 0.1, model, secondary).with_structured_output(
+            schema, method="function_calling")
+        result = await _call(lambda: runnable.ainvoke(messages, config=cfg), priority, deadline,
+                             secondary=secondary, may_fail_over=may_fail_over)
         if isinstance(result, schema):
             return result
         if isinstance(result, dict):
@@ -366,8 +542,9 @@ async def _structured_with[T: BaseModel](
     last: Exception | None = None
     for _ in range(2):
         try:
-            llm = _model_for(tier, 0.1, model)
-            raw = await _call(lambda m=llm: m.ainvoke(messages + [hint], config=cfg), priority, deadline)
+            llm = _model_for(tier, 0.1, model, secondary)
+            raw = await _call(lambda m=llm: m.ainvoke(messages + [hint], config=cfg), priority, deadline,
+                              secondary=secondary, may_fail_over=may_fail_over)
         except LLMError:
             raise
         except Exception as exc:  # noqa: BLE001
