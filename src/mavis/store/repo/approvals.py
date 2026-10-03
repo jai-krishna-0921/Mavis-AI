@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterable
 from datetime import datetime
 
@@ -25,6 +27,32 @@ async def create(
         s.add(a)
         await s.commit()
         return a.id
+
+
+def args_hash(arguments: dict) -> str:
+    canon = json.dumps(arguments, sort_keys=True, default=str, ensure_ascii=False)
+    return hashlib.sha256(canon.encode()).hexdigest()
+
+
+async def find_open(user_id: int, task_id: int | None, tool: str, arguments: dict) -> PendingApproval | None:
+    """An open approval for the same user, task, tool and canonical arguments, if any."""
+    want = args_hash(arguments)
+    task_clause = PendingApproval.task_id.is_(None) if task_id is None else PendingApproval.task_id == task_id
+    async with Session() as s:
+        rows = await s.scalars(
+            select(PendingApproval)
+            .where(
+                PendingApproval.user_id == user_id,
+                PendingApproval.tool == tool,
+                task_clause,
+                PendingApproval.status.in_(_OPEN),
+            )
+            .order_by(PendingApproval.id)
+        )
+        for row in rows:
+            if args_hash(row.arguments or {}) == want:
+                return row
+    return None
 
 
 async def get(approval_id: int) -> PendingApproval | None:

@@ -8,8 +8,10 @@ and <untrusted> wrapping of third-party output.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import weakref
 from collections.abc import Awaitable, Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -19,6 +21,7 @@ from typing import Any
 import structlog
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
 
 from mavis.config import get_settings
 from mavis.domain.errors import ApprovalRequired, ConnectionRequired
@@ -32,6 +35,18 @@ log = structlog.get_logger()
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _WORD_RE = re.compile(r"[a-z0-9]+")
 NEVER_AUTO_APPROVE = frozenset({"add_policy_rule", "forget"})
+_PREVIEW_IN_RESULT_CHARS = 500
+
+# Serialises "find open approval, else create" so identical parallel tool calls queue one approval.
+_queue_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
+
+
+def _queue_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _queue_locks.get(loop)
+    if lock is None:
+        lock = _queue_locks[loop] = asyncio.Lock()
+    return lock
 
 current_user_id: ContextVar[int | None] = ContextVar("current_user_id", default=None)
 current_task_id: ContextVar[int | None] = ContextVar("current_task_id", default=None)
@@ -54,7 +69,7 @@ async def tool_context(user_id: int) -> ToolContext:
 
     try:
         tz = (await users.get(user_id)).timezone
-    except Exception:  # noqa: BLE001 - unknown user in a unit test: fall back to UTC
+    except SQLAlchemyError:  # unknown user or no DB (unit tests): fall back to UTC
         tz = "UTC"
     return ToolContext(user_id=user_id, timezone=tz, task_id=current_task_id.get())
 
@@ -109,6 +124,8 @@ class ToolRegistry:
     # --- catalogue -------------------------------------------------------------
 
     def register(self, tool: MavisTool) -> None:
+        if not isinstance(tool.risk, RiskClass):
+            raise ValueError(f"tool {tool.name!r} needs a RiskClass risk")
         if not _NAME_RE.match(tool.name):
             raise ValueError(f"invalid tool name {tool.name!r}; use [a-zA-Z0-9_-]")
         if tool.name in self._tools:
@@ -135,7 +152,11 @@ class ToolRegistry:
         """Top-`limit` tools for an agent: `always` first, the rest by word overlap then priority."""
         words = set(_WORD_RE.findall(query.lower()))
         candidates = [t for t in self._tools.values() if agent in t.agents and self.available(t)]
-        pinned = [t for name in always if (t := self._tools.get(name)) is not None and t in candidates]
+        pinned: list[MavisTool] = []
+        for name in always:
+            t = self._tools.get(name)
+            if t is not None and t in candidates and t not in pinned:
+                pinned.append(t)
 
         def score(t: MavisTool) -> tuple[int, int]:
             vocab = set(_WORD_RE.findall(f"{t.name.replace('_', ' ')} {t.description}".lower()))
@@ -156,8 +177,11 @@ class ToolRegistry:
         await self._require_capability(tool, user_id)
         payload = args.model_dump(mode="json")
         if tool.effective_risk(args).needs_approval:
-            auto = tool.name not in NEVER_AUTO_APPROVE and await policy_rules.matches(
-                user_id, tool.name, payload
+            # Standing rules may waive approval for OUTWARD tools only; SPEND and DESTRUCTIVE always queue.
+            auto = (
+                tool.effective_risk(args) is RiskClass.OUTWARD
+                and tool.name not in NEVER_AUTO_APPROVE
+                and await policy_rules.matches(user_id, tool.name, payload)
             )
             if not auto:
                 preview = tool.render_preview(args, await tool_context(user_id))
@@ -176,15 +200,28 @@ class ToolRegistry:
 
     async def _run(self, tool: MavisTool, user_id: int, args: BaseModel, actor: str) -> str:
         token = current_user_id.set(user_id)
+        detail: dict[str, Any] = {"args": args.model_dump(mode="json")}
+        audited = tool.effective_risk(args) is not RiskClass.READ
         try:
             out = await tool.fn(user_id, args)
+        except (ApprovalRequired, ConnectionRequired):
+            raise
+        except Exception as exc:
+            log.warning("tool.failed", tool=tool.name, error_type=type(exc).__name__)
+            if audited:
+                await audit.record(
+                    user_id, actor=actor, action=tool.name, detail={**detail, "outcome": "error"}
+                )
+            if tool.untrusted_output:
+                # Third-party error text must never reach the model unwrapped.
+                return wrap_untrusted(truncate(f"Tool error: {exc}"), tool.name)
+            raise
         finally:
             current_user_id.reset(token)
         text = out if isinstance(out, str) else json.dumps(out, default=str, ensure_ascii=False)
         text = truncate(text)
-        if tool.effective_risk(args) is not RiskClass.READ:
-            detail = {"args": args.model_dump(mode="json")}
-            await audit.record(user_id, actor=actor, action=tool.name, detail=detail)
+        if audited:
+            await audit.record(user_id, actor=actor, action=tool.name, detail={**detail, "outcome": "ok"})
         return wrap_untrusted(text, tool.name) if tool.untrusted_output else text
 
     def _as_langchain(self, tool: MavisTool, user_id: int) -> BaseTool:
@@ -193,17 +230,24 @@ class ToolRegistry:
             try:
                 return await self.invoke(tool, user_id, args)
             except ApprovalRequired as req:
-                approval_id = await approvals.create(
-                    user_id=user_id,
-                    task_id=current_task_id.get(),
-                    tool=tool.name,
-                    arguments=req.arguments,
-                    preview=req.preview,
-                    expires_at=utcnow() + timedelta(hours=get_settings().approval_ttl_hours),
-                )
+                task_id = current_task_id.get()
+                async with _queue_lock():
+                    existing = await approvals.find_open(user_id, task_id, tool.name, req.arguments)
+                    if existing is not None:
+                        approval_id = existing.id
+                    else:
+                        approval_id = await approvals.create(
+                            user_id=user_id,
+                            task_id=task_id,
+                            tool=tool.name,
+                            arguments=req.arguments,
+                            preview=req.preview,
+                            expires_at=utcnow() + timedelta(hours=get_settings().approval_ttl_hours),
+                        )
                 log.info("tool.queued_for_approval", tool=tool.name, approval_id=approval_id)
+                shown = wrap_untrusted(truncate(req.preview, _PREVIEW_IN_RESULT_CHARS), "approval_preview")
                 return (
-                    f"QUEUED_FOR_APPROVAL #{approval_id}: {req.preview}\n"
+                    f"QUEUED_FOR_APPROVAL #{approval_id}: {shown}\n"
                     "This has NOT been done yet. Tell the user it is ready and waiting for their OK."
                 )
 
