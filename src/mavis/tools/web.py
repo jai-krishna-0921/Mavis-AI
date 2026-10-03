@@ -294,7 +294,7 @@ TOOLS = [
         name="web_extract",
         description="Read the main text of a web page by URL.",
         args_model=ExtractArgs, risk=RiskClass.READ, fn=web_extract, requires=Capability.WEB,
-        agents=frozenset({"research", "spawn"}),
+        agents=frozenset({"conversation", "research", "spawn"}),
         untrusted_output=True, priority=40,
     ),
 ]

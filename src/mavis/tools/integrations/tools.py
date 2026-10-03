@@ -7,6 +7,9 @@ exception into a {"type": "connect"} interrupt that ConnectFlow (Task 8) answers
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from pydantic import BaseModel
 
 from mavis.domain.errors import ActionFailed, ConnectionRequired, IntegrationError
@@ -14,6 +17,7 @@ from mavis.domain.integrations import ToolResult, UserRef
 from mavis.tools.integrations.actions import ACTIONS, CAPABILITY_PURPOSE, DISPLAY_NAMES, ActionSpec, localize
 from mavis.tools.integrations.base import IntegrationProvider, render_result
 from mavis.tools.integrations.connections import ConnectionCache
+from mavis.tools.integrations.mail_render import RENDERERS
 from mavis.tools.registry import MavisTool, ToolContext, ToolRegistry, contextual
 
 REVOKED_REASON = "access expired or was revoked"
@@ -50,8 +54,12 @@ async def gated(
     *,
     provider: IntegrationProvider | None = None,
     cache: ConnectionCache | None = None,
+    render: Callable[[Any], str] | None = None,
 ) -> str:
-    """Run one integration action. Raises ConnectionRequired, or ActionFailed when it did not happen."""
+    """Run one integration action. Raises ConnectionRequired, or ActionFailed when it did not happen.
+
+    `render` turns successful data into model-facing text (default: truncated JSON).
+    """
     provider, cache = _deps(provider, cache)
     name = DISPLAY_NAMES[ACTIONS[action].capability]
     try:
@@ -63,12 +71,14 @@ async def gated(
         ) from exc
     if not result.ok:
         raise ActionFailed(f"{action} failed: {result.error}", reason=str(result.error or f"{action} failed"))
+    if render is not None:
+        return render(result.data)
     return render_result(result)
 
 
 def _make_tool(spec: ActionSpec) -> MavisTool:
     async def fn(ctx: ToolContext, args: BaseModel) -> str:
-        return await gated(ctx, spec.name, localize(args, ctx.timezone))
+        return await gated(ctx, spec.name, localize(args, ctx.timezone), render=RENDERERS.get(spec.name))
 
     def preview(args: BaseModel, ctx: ToolContext) -> str:
         localized = localize(args, ctx.timezone)
