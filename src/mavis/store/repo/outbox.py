@@ -47,6 +47,11 @@ async def enqueue(session: AsyncSession, msg: Outbound) -> int:
     return row.id
 
 
+async def exists_with_key(session: AsyncSession, dedupe_key: str) -> bool:
+    return await session.scalar(
+        select(OutboxMessage.id).where(OutboxMessage.dedupe_key == dedupe_key)) is not None
+
+
 async def enqueue_now(msg: Outbound) -> int:
     async with Session() as s:
         outbox_id = await enqueue(s, msg)
