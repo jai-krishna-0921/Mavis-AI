@@ -95,8 +95,16 @@ class CalendarCreateArgs(BaseModel):
 class CalendarUpdateArgs(BaseModel):
     event_id: str
     summary: str | None = None
-    start: datetime | None = None
-    duration_minutes: int | None = Field(default=None, ge=5, le=1440)
+    start: datetime | None = Field(
+        default=None,
+        description="Required by the calendar provider even if the time is unchanged: pass the event's "
+                    "current start (from calendar_find or calendar_list) when not moving it",
+    )
+    duration_minutes: int | None = Field(
+        default=None, ge=5, le=1440,
+        description="Pass the event's current length when not changing it "
+                    "(the provider may reset it to 30 min)",
+    )
     attendees: list[str] | None = None
     description: str | None = None
 

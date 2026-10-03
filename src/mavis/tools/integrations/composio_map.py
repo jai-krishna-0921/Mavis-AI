@@ -41,7 +41,10 @@ def _compose(a: Any) -> dict[str, Any]:
 
 
 def _events_list(a: Any) -> dict[str, Any]:
+    # calendarId is REQUIRED by the live GOOGLECALENDAR_EVENTS_LIST schema (no default): without it
+    # every call fails with "Following fields are missing: {'calendarId'}".
     out: dict[str, Any] = {
+        "calendarId": "primary",
         "timeMin": a.time_min.isoformat(), "timeMax": a.time_max.isoformat(),
         "maxResults": a.max_results, "singleEvents": True, "orderBy": "startTime",
     }
@@ -61,6 +64,10 @@ def _create_event(a: Any) -> dict[str, Any]:
 
 
 def _update_event(a: Any) -> dict[str, Any]:
+    # The live GOOGLECALENDAR_UPDATE_EVENT schema REQUIRES start_datetime (and event_id) even when the
+    # time does not change; its schema also defaults unsent fields (duration 30 min; not confirmed live
+    # whether an update applies them). We never invent a time here: without `start` the provider
+    # rejects the call, so the tool's `start` field tells the model to pass the event's current start.
     out: dict[str, Any] = {"event_id": a.event_id}
     if a.summary is not None:
         out["summary"] = a.summary
