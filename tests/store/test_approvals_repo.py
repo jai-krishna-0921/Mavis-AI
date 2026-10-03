@@ -68,6 +68,11 @@ async def test_policy_rule_matches_case_insensitive_substring(user):
     assert not await policy_rules.matches(user.id, "mail_send", {"attendees": ["jawahar"]})
 
 
+async def test_policy_rule_matches_non_ascii(user):
+    await policy_rules.add(user.id, tool="send_note", field="text", contains="Jos\u00e9", description="ok")
+    assert await policy_rules.matches(user.id, "send_note", {"text": "hola JOS\u00c9"})
+
+
 async def test_audit_record(user):
     await audit.record(user.id, actor="user", action="approval.ok", detail={"approval_id": 1})
     rows = await audit.recent(user.id, limit=5)
