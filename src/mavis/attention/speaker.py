@@ -23,7 +23,7 @@ from mavis.domain.decisions import NotifyIntent
 from mavis.domain.messages import Button
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.email_triage import SECURITY_INTENT
-from mavis.policy.pings import PingPolicy
+from mavis.policy.pings import SECURITY_BYPASS_PREFIX, PingPolicy
 from mavis.timers.service import WakeupService
 from mavis.tools.integrations.normalize import to_datetime
 
@@ -188,7 +188,8 @@ class Speaker:
         ask = decision.verdict is Verdict.ASK
         urgency = decision.urgency if ask else min(decision.urgency, MAX_NOTIFY_URGENCY)
         sec = not ask and is_security_obs(obs)  # security notices bypass the daily budget (capped 2/day)
-        verdict = await self._policy.check(user, urgency, key, timeutil.now(), bypass_budget=sec)
+        # "Was this you?" asks share that capped bypass and its counter (final review I2)
+        verdict = await self._policy.check(user, urgency, key, timeutil.now(), bypass_budget=ask or sec)
         if not verdict.allow:
             if verdict.reason == "duplicate":
                 return SENT
@@ -205,8 +206,15 @@ class Speaker:
             return DROPPED
         executor = self._executor_of()
         if ask:
+            bypass = [f"{SECURITY_BYPASS_PREFIX}{key}"] if verdict.budget_bypass else []
             await executor.deliver(
-                user, ask_text(obs, user.timezone), key, decision.urgency, buttons=ask_buttons(obs.id)
+                user,
+                ask_text(obs, user.timezone),
+                key,
+                decision.urgency,
+                extra_keys=bypass,
+                buttons=ask_buttons(obs.id),
+                tainted=True,  # names a payee from the email: a reply must not teach it as trusted fact
             )
             log.info("attention.spoke", obs_id=obs.id, verdict="ask", urgency=decision.urgency)
             return SENT

@@ -5,6 +5,7 @@ sanitized summaries but still derive from third-party subjects, so they are wrap
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import timedelta
 from typing import Any
@@ -28,6 +29,7 @@ EMAIL_INTENT = re.compile(
 )
 NOTABLE = frozenset({"ask", "notify", "brief", "forwarded"})
 ROUTINE = frozenset({"log", "dropped"})
+SEARCH_TIMEOUT_S = 0.4  # inside the context provider's own budget, so the counts still render
 MAX_LINES = 8
 VERDICT_LABEL = {
     "ask": "you asked them about it",
@@ -96,7 +98,10 @@ class Digest:
         user = await users.get(user_id)
         rows = await repo.recent(user_id, timeutil.now() - timedelta(hours=hours), limit=60)
         try:
-            ids = await self._index.search(user_id, text, k=3, min_score=0.5)
+            # its own short budget: a slow embed or Qdrant must not cancel the database-only counts
+            ids = await asyncio.wait_for(
+                self._index.search(user_id, text, k=3, min_score=0.5), SEARCH_TIMEOUT_S
+            )
         except Exception as exc:  # noqa: BLE001 - semantic lookup is optional
             log.warning("attention.digest_search_failed", error=type(exc).__name__)
             ids = []

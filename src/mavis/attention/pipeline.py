@@ -63,6 +63,30 @@ def bulk_markers(payload: dict) -> list[str]:
     return out
 
 
+HEURISTIC_MAX_URGENCY = 4
+
+
+def cap_heuristic(d: AttentionDecision) -> AttentionDecision:
+    """The keyword fallback runs exactly when the model misbehaves: it may notify, never ask "was this
+    you?" and never reach urgency 5 (spec 5.4)."""
+    if d.verdict is Verdict.ASK:
+        return replace(d, verdict=Verdict.NOTIFY, urgency=HEURISTIC_MAX_URGENCY)
+    return replace(d, urgency=min(d.urgency, HEURISTIC_MAX_URGENCY))
+
+
+def localize_understanding(u: EmailUnderstanding, tz: str) -> EmailUnderstanding:
+    """Model datetimes without an offset are the user's wall-clock time: make every one aware UTC before
+    policy, anomaly scoring or text use them (a naive deadline crashed the policy; a naive occurred_at
+    read as UTC shifted the odd-hour signal, the hour baseline and the ask text)."""
+    update: dict[str, Any] = {}
+    if u.deadline is not None:
+        update["deadline"] = timeutil.to_utc(u.deadline, tz)
+    if u.money is not None and u.money.occurred_at is not None:
+        money = u.money.model_copy(update={"occurred_at": timeutil.to_utc(u.money.occurred_at, tz)})
+        update["money"] = money
+    return u.model_copy(update=update) if update else u
+
+
 def local_day_start(now: datetime, tz: str) -> datetime:
     local = timeutil.to_local(now, tz)
     return local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
@@ -132,6 +156,7 @@ class AttentionPipeline:
         self, user: Any, obs: Any, payload: dict, u: EmailUnderstanding, method: str
     ) -> AttentionDecision:
         s = get_settings()
+        u = localize_understanding(u, user.timezone)
         now = timeutil.now()
         received = timeutil.ensure_utc(obs.received_at)
         address = str(payload.get("from_address", "")).lower()
@@ -168,6 +193,8 @@ class AttentionPipeline:
             ),
             s,
         )
+        if method == "heuristic":
+            decision = cap_heuristic(decision)
         speak = (
             decision.verdict in SPEAKS and obs.origin == repo.ORIGIN_LIVE and now - received <= SPEAK_WINDOW
         )

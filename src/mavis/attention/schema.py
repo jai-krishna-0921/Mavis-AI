@@ -151,13 +151,27 @@ def parse_amount(value: Any) -> float | None:
     return number if math.isfinite(number) and 0 < number <= 1e11 else None
 
 
-def parse_when(value: Any) -> datetime | None:
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_when(value: Any, *, date_only_end: bool = False) -> datetime | None:
+    """ISO-8601 from the model. The result may be naive: a value without an offset is wall-clock time in
+    the user's zone and is localized by the pipeline (localize_understanding), never read as UTC. A bare
+    date is the end of that day when `date_only_end` (a due date), else unknown (None)."""
     if isinstance(value, datetime):
         return value
     if not isinstance(value, str) or not value.strip():
         return None
+    text = value.strip()
+    if _DATE_ONLY.match(text):
+        if not date_only_end:
+            return None
+        try:
+            return datetime.fromisoformat(text).replace(hour=23, minute=59, second=59)
+        except ValueError:
+            return None
     try:
-        return datetime.fromisoformat(value.strip())
+        return datetime.fromisoformat(text)
     except ValueError:
         return None
 
@@ -242,7 +256,7 @@ class EmailUnderstanding(BaseModel):
     @field_validator("deadline", mode="before")
     @classmethod
     def _deadline(cls, v: Any) -> datetime | None:
-        return parse_when(v)
+        return parse_when(v, date_only_end=True)
 
     @field_validator("needs_user", mode="before")
     @classmethod

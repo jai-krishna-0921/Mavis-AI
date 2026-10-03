@@ -14,7 +14,7 @@ import structlog
 from sqlalchemy.exc import NoResultFound
 
 from mavis.attention.learning import Thresholds
-from mavis.attention.pipeline import AttentionPipeline
+from mavis.attention.pipeline import DEFERRED_STALE, AttentionPipeline
 from mavis.attention.sanitize import clean, sender_domain
 from mavis.attention.scheduling import schedule_once
 from mavis.attention.schema import Verdict
@@ -57,6 +57,9 @@ BACKFILL_QUERY = BACKFILL_TEMPLATE.format(days=BACKFILL_DAYS)
 DRAIN_REASON, BACKFILL_REASON = "drain", "backfill"
 DEAD_LABELS = frozenset({"SPAM", "TRASH"})
 DRAIN_BACKOFF_MAX = timedelta(minutes=15)
+REDELIVER_MAX = 3  # re-send attempts for a queued ping before it is given up (it stays in the brief)
+BACKFILL_PAGE = 50  # the mail.search maximum
+EXPIRED = "expired"
 
 
 def label_dropped(p: dict) -> bool:
@@ -121,9 +124,28 @@ class Intake:
             await self._forward(event)  # first: a retry forwards again and the reasoner dedupes by event id
             await self._pipeline.finalize_cheap(user, obs, p, Verdict.FORWARDED)
             return
-        if await self._may_understand(user.id) and await self._pipeline.process(user, obs):
+        if await self._may_understand(user.id) and await self._process_safely(user, obs):
             return
         await self._ensure_drain(user.id)
+
+    async def _process_safely(self, user: Any, obs: Any) -> bool:
+        """process(), but an unexpected error in one row never escapes to the bus (redelivery would only
+        repeat the LLM call and crash again). LLMError still propagates: it means a compose failed."""
+        try:
+            return await self._pipeline.process(user, obs)
+        except LLMError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad row must never block the queue
+            await self._row_failed(obs.id, exc)
+            return False
+
+    async def _row_failed(self, obs_id: int, exc: Exception) -> None:
+        """Log it; once the row has used its attempts, close it as unreadable so the queue moves on."""
+        log.warning("attention.process_failed", obs_id=obs_id, error=type(exc).__name__)
+        fresh = await repo.get(obs_id)
+        if fresh is not None and fresh.status == repo.PENDING:
+            if fresh.attempts >= get_settings().attention_max_attempts:
+                await repo.finish(obs_id, method="error", verdict="log", summary="(could not be read)")
 
     async def ingest(self, user_id: int, p: dict, origin: str) -> tuple[Any, bool]:
         payload = {k: p.get(k) for k in PENDING_KEYS}
@@ -167,12 +189,23 @@ class Intake:
         """Re-send queued pings. False when a compose failed: the row stays queued for the next drain."""
         if llm.unavailable_s() > 0:  # a notify needs the composer: do not spend the attempt now
             return True
-        for obs in await repo.undelivered(user.id, before=timeutil.now() - REDELIVER_AFTER):
+        now = timeutil.now()
+        for obs in await repo.undelivered(user.id, before=now - REDELIVER_AFTER):
+            facts = dict(obs.facts or {})
+            tries = int(facts.get("resends") or 0)
+            if tries >= REDELIVER_MAX or now - timeutil.ensure_utc(obs.received_at) > DEFERRED_STALE:
+                await repo.set_fields(obs.id, delivery=EXPIRED)  # still in the brief and the evening wrap
+                log.info("attention.redeliver_given_up", obs_id=obs.id, tries=tries)
+                continue
+            facts["resends"] = tries + 1
+            await repo.set_fields(obs.id, facts=facts)
             try:
                 await self._pipeline.deliver_queued(user, obs)
             except LLMError as exc:
                 log.warning("attention.redeliver_failed", obs_id=obs.id, error=type(exc).__name__)
                 return False
+            except Exception as exc:  # noqa: BLE001 - one bad row must not block the others
+                log.warning("attention.redeliver_failed", obs_id=obs.id, error=type(exc).__name__)
         return True
 
     async def drain(self, user_id: int, reason: str = "") -> int:
@@ -183,18 +216,25 @@ class Intake:
         except NoResultFound:
             return 0
         processed, failed, remaining = 0, False, 0
+        skip: set[int] = set()  # rows that raised this round: the rest of the queue still moves
         try:
             failed = not await self._redeliver(user)
             while await self._may_understand(user_id) and not await self._user_active(user_id):
-                batch = await repo.pending(user_id, limit=1)
+                batch = [o for o in await repo.pending(user_id, limit=len(skip) + 1) if o.id not in skip]
                 if not batch:
                     break
+                obs = batch[0]
                 try:
-                    if not await self._pipeline.process(user, batch[0]):
-                        break
+                    ok = await self._pipeline.process(user, obs)
                 except LLMError as exc:  # decided and stored, but the notify compose failed: still queued
-                    log.warning("attention.speak_failed", obs_id=batch[0].id, error=type(exc).__name__)
+                    log.warning("attention.speak_failed", obs_id=obs.id, error=type(exc).__name__)
                     failed = True
+                    break
+                except Exception as exc:  # noqa: BLE001 - one bad row must never block the queue
+                    await self._row_failed(obs.id, exc)
+                    skip.add(obs.id)
+                    continue
+                if not ok:
                     break
                 processed += 1
         finally:
@@ -230,28 +270,45 @@ class Intake:
         # never reach past retention: a purged observation must not be re-created from old mail
         days = max(1, min(BACKFILL_DAYS, s.attention_retention_days))
         cutoff = timeutil.now() - timedelta(days=days)
-        res = await self._provider.execute(
-            UserRef(user_id=user_id),
-            "mail.search",
-            {"query": BACKFILL_TEMPLATE.format(days=days), "max_results": s.attention_backfill_max},
-        )
-        if not res.ok:
-            log.warning("attention.backfill_failed", user_id=user_id, error=str(res.error)[:120])
-            return 0
-        created = 0
-        for raw in extract_messages(res.data):
-            event = email_event(user_id, raw, source="backfill")
-            if event is None or event.payload.get("from_me"):
-                continue
-            received = to_datetime(event.payload.get("received_at"))
-            if received is not None and received < cutoff:
-                continue
-            obs, new = await self.ingest(user_id, event.payload, repo.ORIGIN_BACKFILL)
-            if not new:
-                continue
-            created += 1
-            if label_dropped(event.payload):
-                await self._pipeline.finalize_cheap(user, obs, event.payload, Verdict.DROPPED)
+        total, fetched, created = max(1, s.attention_backfill_max), 0, 0
+        before: int | None = None
+        # page backwards by time until `days` or `total` messages, whichever comes first; queueing costs no
+        # LLM call (the drain understands them within the per-poll budget)
+        for _ in range(-(-total // BACKFILL_PAGE)):
+            want = min(BACKFILL_PAGE, total - fetched)
+            query = BACKFILL_TEMPLATE.format(days=days) + (f" before:{before}" if before else "")
+            res = await self._provider.execute(
+                UserRef(user_id=user_id), "mail.search", {"query": query, "max_results": want}
+            )
+            if not res.ok:
+                log.warning("attention.backfill_failed", user_id=user_id, error=str(res.error)[:120])
+                if fetched == 0:
+                    return 0  # nothing queued: backfilled_at stays unset and heal retries
+                break
+            raws = extract_messages(res.data)
+            fetched += len(raws)
+            oldest: datetime | None = None
+            for raw in raws:
+                event = email_event(user_id, raw, source="backfill")
+                if event is None:
+                    continue
+                received = to_datetime(event.payload.get("received_at"))
+                if received is not None:
+                    oldest = received if oldest is None else min(oldest, received)
+                if event.payload.get("from_me") or (received is not None and received < cutoff):
+                    continue
+                obs, new = await self.ingest(user_id, event.payload, repo.ORIGIN_BACKFILL)
+                if not new:
+                    continue
+                created += 1
+                if label_dropped(event.payload):
+                    await self._pipeline.finalize_cheap(user, obs, event.payload, Verdict.DROPPED)
+            if len(raws) < want or fetched >= total or oldest is None or oldest < cutoff:
+                break
+            stamp = int(oldest.timestamp())
+            if before is not None and stamp >= before:
+                break  # no progress: the provider ignored the bound
+            before = stamp
         await self._thresholds.patch(user_id, backfilled_at=timeutil.now().isoformat())
         await self._ensure_drain(user_id, at=timeutil.now())
         log.info("attention.backfill", user_id=user_id, queued=created)

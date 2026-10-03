@@ -148,7 +148,10 @@ def _urgency(
     # Spec 8.4: urgency 5 (quiet hours bypass) only from deterministic facts, an established sender,
     # never a lookalike, at most once per local day.
     risky = (
-        debit and i.anomaly.score >= ESCALATE_SCORE and len(i.anomaly.codes) >= ESCALATE_MIN_REASONS
+        debit
+        and i.anomaly.score >= ESCALATE_SCORE
+        and len(i.anomaly.codes) >= ESCALATE_MIN_REASONS
+        and i.sender_authenticated  # a spoof of an established bank address must not wake the user
     ) or (
         i.understanding.kind is EmailKind.SECURITY
         and bool(flags & URGENT_SECURITY)

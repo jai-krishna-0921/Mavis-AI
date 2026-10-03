@@ -17,6 +17,11 @@ ALL = "*"
 ESTABLISHED_COUNT = 3
 ESTABLISHED_AGE = timedelta(days=7)
 SCOPES = ("counterparty", "method", "all")
+ADDRESS_MAX = 200  # attention_senders.address column length (an attacker chooses the From address)
+
+
+def _address(address: str) -> str:
+    return str(address or "").lower()[:ADDRESS_MAX]
 
 
 @dataclass(frozen=True)
@@ -72,7 +77,7 @@ class Baselines:
         async with Session() as s:
             row = await s.scalar(
                 select(AttentionSender).where(
-                    AttentionSender.user_id == user_id, AttentionSender.address == address.lower()
+                    AttentionSender.user_id == user_id, AttentionSender.address == _address(address)
                 )
             )
         return SenderStats(row.count, row.first_seen, row.last_seen) if row else SenderStats()
@@ -89,7 +94,7 @@ class Baselines:
         return {r.domain for r in rows if r.domain and now - r.first_seen >= ESTABLISHED_AGE}
 
     async def touch_sender(self, user_id: int, address: str, domain: str, at: datetime) -> None:
-        address = address.lower()
+        address = _address(address)
         if not address:
             return
         for _ in range(2):  # one retry if a concurrent first insert wins the unique constraint
@@ -104,7 +109,7 @@ class Baselines:
                         AttentionSender(
                             user_id=user_id,
                             address=address,
-                            domain=domain,
+                            domain=domain[:120],
                             count=1,
                             first_seen=at,
                             last_seen=at,

@@ -95,3 +95,21 @@ async def test_context_renders_counts_lines_feedback_and_hits(user, clock, index
     assert "visaoffice" in out and "<untrusted" in out
     assert out.index("<untrusted") > out.index("Emails seen")
     assert "Never read out links" in out
+
+
+async def test_slow_search_does_not_drop_the_digest(user, clock, index, monkeypatch):
+    import asyncio
+
+    from mavis.attention import digest as digest_mod
+
+    clock.set(NOON)
+    await add(user.id, "l1", verdict="log", summary="account update from x: hi")
+
+    async def slow(*args, **kwargs):
+        await asyncio.sleep(5)
+        return []
+
+    monkeypatch.setattr(index, "search", slow)
+    monkeypatch.setattr(digest_mod, "SEARCH_TIMEOUT_S", 0.01)
+    text = await Digest(index).context(user.id, "any gmail updates?")
+    assert text.startswith(digest_mod.HEADER)

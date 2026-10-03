@@ -492,6 +492,7 @@ async def test_one_urgent_ask_per_day_even_when_concurrent(user, stack, clock):
 
 async def test_deferred_urgent_ask_does_not_use_up_the_day(user, stack, settings, monkeypatch, clock):
     monkeypatch.setattr(settings, "ping_daily_budget", 0)
+    await use_up_bypasses(user, clock)  # the capped over-budget bypass is gone too: the ask must wait
     obs = await queued_ask(user.id, "u-d", clock)
     assert await stack.pipeline.deliver_queued(user, obs) == "deferred"
     assert "urgent_day" not in await stack.thresholds.load(user.id)
@@ -719,3 +720,201 @@ async def test_baseline_cap_counts_by_the_mail_day(user, stack, fake_llm, clock)
             )
         )
     assert (await Baselines().snapshot(user.id, "INR", "exampleshop", "card")).counterparty.count == 4
+
+
+# --- final review fixes -----------------------------------------------------------------------------
+
+
+async def use_up_bypasses(user, clock) -> None:
+    from mavis.policy.pings import SECURITY_BYPASS_PREFIX, PingPolicy
+
+    for i in range(2):
+        await PingPolicy().record(
+            user, f"other:{i}", 4, clock.t, extra_keys=[f"{SECURITY_BYPASS_PREFIX}x{i}"]
+        )
+
+
+async def test_date_only_deadline_does_not_crash(user, stack, fake_llm):
+    raw = {"kind": "deadline_or_bill", "needs_user": True, "deadline": "2026-10-05"}
+    fake_llm.push_structured(EmailUnderstanding.model_validate(raw))
+    await stack.intake.on_email(email(user.id, "bill-d", sender="Power <bills@examplepower.in>"))
+    obs = await only(user.id)
+    assert obs.status == "done" and obs.method == "llm"
+    assert obs.facts["deadline"] == "2026-10-05T18:29:59+00:00"  # end of that day, user-local (IST)
+
+
+def test_bare_date_occurred_at_is_unknown_not_midnight():
+    m = Money.model_validate({"amount": "500", "occurred_at": "2026-10-05"})
+    assert m.occurred_at is None
+
+
+async def test_a_raising_row_does_not_block_the_next_email(user, stack, fake_llm, monkeypatch, clock):
+    real = stack.pipeline.finalize
+
+    async def finalize(user_, obs, payload, u, method):
+        if obs.message_id == "bad":
+            raise RuntimeError("boom")
+        return await real(user_, obs, payload, u, method)
+
+    monkeypatch.setattr(stack.pipeline, "finalize", finalize)
+    fake_llm.push_structured(ACCOUNT)
+    await stack.intake.on_email(email(user.id, "bad", subject="Bad"))  # must not raise to the bus
+    fake_llm.push_structured(ACCOUNT)
+    await stack.intake.on_email(email(user.id, "good", subject="Good"))
+    assert (await repo.get((await repo.pending(user.id))[0].id)).message_id == "bad"
+    clock.advance(minutes=3)
+    fake_llm.push_structured(ACCOUNT)  # the bad row's second attempt: it raises again and is closed
+    await stack.intake.drain(user.id)
+    rows = await by_mid(user.id)
+    assert rows["good"].method == "llm"
+    assert (rows["bad"].status, rows["bad"].method, rows["bad"].verdict) == ("done", "error", "log")
+    assert await repo.pending_count(user.id) == 0
+
+
+async def test_a_raising_row_is_skipped_in_the_drain(user, stack, fake_llm, monkeypatch, clock):
+    monkeypatch.setattr(llm, "unavailable_s", lambda: 5.0)
+    await stack.intake.on_email(email(user.id, "bad", subject="Bad"))
+    await stack.intake.on_email(email(user.id, "good", subject="Good"))
+    monkeypatch.setattr(llm, "unavailable_s", lambda: 0.0)
+    real = stack.pipeline.finalize
+
+    async def finalize(user_, obs, payload, u, method):
+        if obs.message_id == "bad":
+            raise RuntimeError("boom")
+        return await real(user_, obs, payload, u, method)
+
+    monkeypatch.setattr(stack.pipeline, "finalize", finalize)
+    fake_llm.push_structured(ACCOUNT)
+    fake_llm.push_structured(ACCOUNT)
+    assert await stack.intake.drain(user.id) == 1
+    assert (await by_mid(user.id))["good"].method == "llm"
+    [bad] = await repo.pending(user.id)
+    assert bad.message_id == "bad" and bad.attempts == 1
+    assert len(await drains(stack, user.id)) == 1
+
+
+async def test_naive_occurred_at_is_user_local(user, stack, fake_llm):
+    raw = {
+        "kind": "money_movement",
+        "money": {
+            "amount": "48,000",
+            "currency": "Rs.",
+            "direction": "debit",
+            "counterparty": "Ramesh",
+            "method": "upi",
+            "occurred_at": "2026-09-26T20:10:00",  # 8:10pm IST, as a bank alert writes it
+        },
+    }
+    fake_llm.push_structured(EmailUnderstanding.model_validate(raw))
+    await stack.intake.on_email(email(user.id, "upi", sender=f"Bank <{BANK}>", subject="Debit alert"))
+    obs = await only(user.id)
+    assert obs.facts["money"]["local_hour"] == 20
+    assert obs.facts["money"]["occurred_at"] == "2026-09-26T14:40:00+00:00"
+    assert "odd_hour" not in obs.facts["codes"]
+    assert obs.verdict == "ask"
+    text = (await outbox_texts())[0]
+    assert "20:10" in text and "01:40" not in text
+
+
+async def test_asks_share_the_capped_budget_bypass(user, stack, settings, monkeypatch, clock):
+    monkeypatch.setattr(settings, "ping_daily_budget", 0)
+    asks = [await queued_ask(user.id, f"cap{i}", clock, urgency=4) for i in range(3)]
+    results = [await stack.pipeline.deliver_queued(user, a) for a in asks]
+    assert results == ["sent", "sent", "deferred"]  # at most 2 over-budget pings a day, shared
+
+
+async def test_asks_and_security_notices_share_one_counter(user, stack, settings, monkeypatch, clock):
+    monkeypatch.setattr(settings, "ping_daily_budget", 0)
+    await use_up_bypasses(user, clock)
+    assert await stack.pipeline.deliver_queued(user, await queued_ask(user.id, "late", clock, urgency=4)) == (
+        "deferred"
+    )
+
+
+async def test_heuristic_never_asks_or_reaches_urgency_five(
+    user, stack, fake_llm, settings, monkeypatch, clock
+):
+    monkeypatch.setattr(settings, "attention_max_attempts", 1)
+    await establish(stack, user.id, ACCOUNTS, clock)
+    prior, _ = await repo.insert_pending(
+        user.id,
+        "prior",
+        thread_id="",
+        origin=repo.ORIGIN_LIVE,
+        sender_domain="example.com",
+        sender_name="",
+        received_at=clock.t - timedelta(days=5),
+        payload={},
+    )
+    await repo.finish(prior.id, kind="security", verdict="brief", facts={"authenticated": True})
+    fake_llm.push_error(LLMError("bad output"), structured=True)
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["Your password was changed."]))
+    await stack.intake.on_email(
+        authed(user.id, "pw", f"Accounts <{ACCOUNTS}>", subject="Your password was changed")
+    )
+    obs = (await by_mid(user.id))["pw"]
+    assert obs.method == "heuristic" and obs.kind == "security"
+    assert (obs.verdict, obs.urgency) == ("notify", 4)
+    assert "urgent_day" not in await stack.thresholds.load(user.id)
+
+
+async def test_long_sender_address_is_truncated(user, stack, clock):
+    address = "a" * 240 + "@example.com"
+    await stack.baselines.touch_sender(user.id, address, "example.com", clock.t)
+    await stack.baselines.touch_sender(user.id, address.upper(), "example.com", clock.t)
+    assert (await stack.baselines.sender(user.id, address)).count == 2
+
+
+async def test_stale_or_retried_queued_ping_is_given_up(user, stack, fake_llm, clock):
+    old = await queued_notify(user.id, "q-old", clock)
+    await repo.set_fields(old.id, received_at=clock.t - timedelta(hours=25))
+    tried = await queued_notify(user.id, "q-tried", clock)
+    await repo.set_fields(tried.id, facts={"codes": [], "resends": 3})
+    clock.advance(minutes=3)
+    await stack.intake.drain(user.id)  # an unexpected compose call would fail inside FakeLLM
+    assert (await repo.get(old.id)).delivery == "expired"
+    assert (await repo.get(tried.id)).delivery == "expired"
+    assert await outbox_texts() == []
+
+
+async def test_resends_are_counted_until_the_cap(user, stack, fake_llm, clock):
+    q = await queued_notify(user.id, "q-count", clock)
+    for _ in range(3):
+        clock.advance(minutes=3)
+        fake_llm.push_error(LLMError("compose down"), structured=True)
+        await stack.intake.drain(user.id)
+    assert (await repo.get(q.id)).facts["resends"] == 3
+    clock.advance(minutes=3)
+    await stack.intake.drain(user.id)
+    assert (await repo.get(q.id)).delivery == "expired"
+
+
+async def test_deferred_attention_ping_is_released_when_user_is_awake(user, stack, clock):
+    from mavis.attention.scheduling import schedule_once
+
+    clock.set(clock.t.replace(hour=19, minute=30))  # 01:00 IST, quiet hours
+    morning = clock.t + timedelta(hours=6)
+    await schedule_once(stack.init.wakeups, user.id, WakeupKind.SYSTEM_ATTENTION_SPEAK, "1", morning)
+    assert await stack.init.executor.release_deferred(user) == 1
+    [w] = await stack.init.wakeups.pending(user.id, WakeupKind.SYSTEM_ATTENTION_SPEAK)
+    assert w.due_at < clock.t + timedelta(minutes=1)
+
+
+async def test_backfill_pages_back_until_the_cap(user, stack, fake_llm, provider, clock, monkeypatch):
+    calls: list[dict] = []
+
+    async def execute(user_ref, action, args):
+        calls.append(args)
+        page = len(calls) - 1
+        start = clock.t - timedelta(hours=1 + page * 50)
+        msgs = [
+            raw_email(f"pg{page}-{i}", sender="Shop <orders@exampleshop.com>", at=start - timedelta(hours=i))
+            for i in range(args["max_results"])
+        ]
+        return ToolResult(ok=True, data={"messages": msgs})
+
+    monkeypatch.setattr(provider, "execute", execute)
+    assert await stack.intake.backfill(user.id) == 120
+    assert [c["max_results"] for c in calls] == [50, 50, 20]
+    assert "before:" not in calls[0]["query"] and "before:" in calls[1]["query"]
+    assert fake_llm.structured_calls == []  # queueing costs no LLM call; the drain holds the budget
