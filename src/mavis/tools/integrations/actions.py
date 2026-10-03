@@ -276,16 +276,27 @@ class TaskAddArgs(BaseModel):
 
 
 class TaskCompleteArgs(BaseModel):
-    task_id: str = Field(min_length=1)
-    title: str = Field(min_length=1, description="The task's title exactly as tasks_list shows it")
+    task_id: str = Field(min_length=1, description="Task id from tasks_list")
 
 
 class TaskUpdateArgs(BaseModel):
-    task_id: str = Field(min_length=1)
-    title: str = Field(min_length=1, description="The current title, or a new one")
+    task_id: str = Field(min_length=1, description="Task id from tasks_list")
+    title: str | None = Field(default=None, min_length=1, max_length=1024,
+                              description="A new title; leave empty to keep the current one")
+    notes: str | None = Field(default=None, max_length=8192)
+    due: date | None = None
+    done: bool | None = Field(default=None,
+                              description="True marks it done, False reopens it; empty keeps it as is")
+
+
+class TaskPatchArgs(BaseModel):
+    """Internal: the full PATCH_TASK body. Built by tasks.complete/update from the task as Google has it."""
+
+    task_id: str
+    title: str = Field(min_length=1)
+    status: Literal["needsAction", "completed"]
     notes: str | None = None
     due: date | None = None
-    done: bool = False
 
 
 class TaskDeleteArgs(BaseModel):
@@ -304,6 +315,35 @@ class DriveUploadFileArgs(BaseModel):
     name: str
     mime: str
     folder_id: str = ""
+
+
+CellValue = str | int | float | bool
+
+
+class DocAppendArgs(BaseModel):
+    document_id: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=20000, description="Plain text added at the end of the doc")
+
+
+class DocInsertArgs(BaseModel):
+    """Internal: text at a document index (docs.append finds the end first)."""
+
+    document_id: str
+    text: str
+    index: int = Field(ge=1)
+
+
+class SheetAppendArgs(BaseModel):
+    spreadsheet_id: str = Field(min_length=1)
+    range: str = Field(default="Sheet1", description="Sheet name (or table range); the row goes at the end")
+    values: list[CellValue] = Field(min_length=1, max_length=50, description="One row of cells")
+
+
+class SheetUpdateArgs(BaseModel):
+    spreadsheet_id: str = Field(min_length=1)
+    sheet_name: str = Field(min_length=1)
+    start_cell: str = Field(pattern=r"^[A-Za-z]{1,3}[1-9][0-9]{0,6}$", description="Top-left cell, e.g. 'B2'")
+    values: list[list[CellValue]] = Field(min_length=1, max_length=200, description="Rows of cells")
 
 
 # --- helpers --------------------------------------------------------------------------------------
@@ -409,12 +449,20 @@ def _preview_task(args: TaskAddArgs, tz: str) -> str:
 
 
 def _preview_task_done(args: TaskCompleteArgs, tz: str) -> str:
-    return f"✅ Mark done: {args.title}"
+    return "✅ Mark a task done"  # the prepare step appends the task's real title
 
 
 def _preview_task_update(args: TaskUpdateArgs, tz: str) -> str:
-    due = f", due {args.due:%a %d %b}" if args.due else ""
-    return f"✅ Update task: {args.title}{due}{' (done)' if args.done else ''}"
+    lines = ["✅ Update a task"]  # the prepare step appends the task's real title
+    if args.title is not None:
+        lines.append(f"New title: {args.title}")
+    if args.notes is not None:
+        lines.append(f"Notes: {args.notes[:400]}")
+    if args.due is not None:
+        lines.append(f"Due: {args.due:%a %d %b}")
+    if args.done is not None:
+        lines.append("Mark it done" if args.done else "Mark it not done")
+    return "\n".join(lines)
 
 
 def _preview_task_delete(args: TaskDeleteArgs, tz: str) -> str:
@@ -424,6 +472,22 @@ def _preview_task_delete(args: TaskDeleteArgs, tz: str) -> str:
 def _preview_upload(args: DriveUploadArgs, tz: str) -> str:
     where = f"folder {args.folder_id}" if args.folder_id else "My Drive"
     return f"⬆️ Upload file #{args.artifact_id} from this task to {where}"
+
+
+def _preview_append(args: DocAppendArgs, tz: str) -> str:
+    return f"📄 Add to the end of doc {args.document_id}:\n{args.text[:400]}"
+
+
+def _preview_row(args: SheetAppendArgs, tz: str) -> str:
+    row = " | ".join(map(str, args.values))
+    return f"📊 Add a row to sheet {args.spreadsheet_id} ({args.range}):\n{row}"
+
+
+def _preview_cells(args: SheetUpdateArgs, tz: str) -> str:
+    cols = max(len(r) for r in args.values)
+    head = "\n".join(" | ".join(map(str, r)) for r in args.values[:5])
+    return (f"📊 Write {len(args.values)} x {cols} cells at {args.sheet_name}!{args.start_cell.upper()} "
+            f"in sheet {args.spreadsheet_id}:\n{head}")
 
 
 def _preview_meet(args: NoArgs, tz: str) -> str:
@@ -551,7 +615,7 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("tasks.add", Capability.TASKS, "Add a task to the user's to-do list (Google Tasks).",
                TaskAddArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_task, taint_approve=True),
     ActionSpec("tasks.complete", Capability.TASKS,
-               "Mark a to-do task as done (task_id and title from tasks_list).",
+               "Mark a to-do task as done (task_id from tasks_list).",
                TaskCompleteArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_task_done, taint_approve=True),
     ActionSpec("tasks.update", Capability.TASKS, "Change a to-do task's title, notes or due date.",
                TaskUpdateArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_task_update,
@@ -561,6 +625,16 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("drive.upload", Capability.DRIVE,
                "Upload a file this task produced (deck, report, spreadsheet) to the user's Google Drive.",
                DriveUploadArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_upload, taint_approve=True),
+    ActionSpec("docs.append", Capability.DOCS,
+               "Add text to the end of an existing Google Doc. The user approves first when the doc is "
+               "shared or not theirs.",
+               DocAppendArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_append, taint_approve=True),
+    ActionSpec("sheets.append_row", Capability.SHEETS,
+               "Add one row at the end of a Google Sheet (for example an expense in a budget sheet).",
+               SheetAppendArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_row, taint_approve=True),
+    ActionSpec("sheets.update_range", Capability.SHEETS,
+               "Write cells into a Google Sheet starting at a cell, overwriting what is there.",
+               SheetUpdateArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_cells, taint_approve=True),
     ActionSpec("meet.create", Capability.MEET, "Create a standalone Google Meet link.",
                NoArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_meet, taint_approve=True),
     # internal: file metadata and permissions (risk escalation, allowlist), downloads, task lookup, profile
@@ -572,6 +646,10 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("tasks.get", Capability.TASKS, "One task by id.", TaskRefArgs, RiskClass.READ, _INTERNAL),
     ActionSpec("drive.upload_file", Capability.DRIVE, "Upload a staged local file.", DriveUploadFileArgs,
                RiskClass.WRITE_SELF, _INTERNAL),
+    ActionSpec("docs.insert_text", Capability.DOCS, "Insert text at an index.", DocInsertArgs,
+               RiskClass.WRITE_SELF, _INTERNAL),
+    ActionSpec("tasks.patch", Capability.TASKS, "Write a task's title, status, notes and due date.",
+               TaskPatchArgs, RiskClass.WRITE_SELF, _INTERNAL),
     ActionSpec("mail.profile", Capability.GMAIL, "The user's own email address.", NoArgs, RiskClass.READ,
                _INTERNAL),
 )

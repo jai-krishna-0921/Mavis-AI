@@ -7,7 +7,7 @@ from datetime import date
 
 import pytest
 
-from mavis.domain.errors import ApprovalRequired
+from mavis.domain.errors import ActionFailed, ApprovalRequired
 from mavis.domain.integrations import ConnectionState, ToolResult
 from mavis.domain.policy import Capability, RiskClass
 from mavis.tools.integrations import actions as a
@@ -15,8 +15,9 @@ from mavis.tools.integrations import workspace_guard
 from mavis.tools.integrations.actions import ACTIONS, WORKSPACE_CAPABILITIES
 from mavis.tools.integrations.composio_map import COMPOSIO_ACTIONS
 from mavis.tools.integrations.tools import register_integration_tools
+from mavis.tools.integrations.workspace_guard import TASK_UNKNOWN, prepare_task
 from mavis.tools.integrations.workspace_render import render_meet
-from mavis.tools.integrations.workspace_tools import creating
+from mavis.tools.integrations.workspace_tools import creating, tasks_complete, tasks_update
 from mavis.tools.registry import TaintPolicy, ToolContext, ToolRegistry, ToolRun, current_run
 
 
@@ -43,12 +44,16 @@ def test_write_translations_golden():
         "tasklist_id": "@default", "title": "Pay rent", "status": "needsAction",
         "due": "2026-10-05T00:00:00.000Z",
     }
-    assert tr("tasks.complete", a.TaskCompleteArgs(task_id="t1", title="Pay rent")) == {
+    assert tr("tasks.patch", a.TaskPatchArgs(task_id="t1", title="Pay rent", status="completed")) == {
         "tasklist_id": "@default", "task_id": "t1", "title": "Pay rent", "status": "completed",
     }
-    assert tr("tasks.update", a.TaskUpdateArgs(task_id="t1", title="Pay rent", notes="")) == {
+    assert tr("tasks.patch", a.TaskPatchArgs(task_id="t1", title="Pay rent", status="needsAction", notes="",
+                                             due=date(2026, 10, 5))) == {
         "tasklist_id": "@default", "task_id": "t1", "title": "Pay rent", "status": "needsAction", "notes": "",
+        "due": "2026-10-05T00:00:00.000Z",
     }
+    # complete and update read the real task first (workspace_tools), so they have no direct mapping
+    assert "tasks.complete" not in COMPOSIO_ACTIONS and "tasks.update" not in COMPOSIO_ACTIONS
     assert tr("tasks.delete", a.TaskDeleteArgs(task_id="t1")) == {"tasklist_id": "@default", "task_id": "t1"}
     assert tr("meet.create", a.NoArgs()) == {}
 
@@ -126,3 +131,84 @@ def test_render_meet_returns_only_a_google_meet_link():
     )
     other = render_meet({"response_data": {"meetingUri": "https://evil.example/x"}})
     assert other.startswith("Created the Meet")
+
+
+# --- tasks.complete / tasks.update: the real title comes from tasks.get, never from the model ----------
+
+
+@pytest.fixture
+def gtasks(provider, cache, monkeypatch, user):
+    from mavis.tools.integrations import tools as tools_mod
+
+    provider.set_state(user.id, Capability.TASKS, ConnectionState.ACTIVE)
+    monkeypatch.setattr(tools_mod, "_deps", lambda p, c: (provider, cache))
+    provider.results["tasks.get"] = ToolResult(ok=True, data={"response_data": {
+        "id": "t1", "title": "Pay rent", "status": "needsAction"}})
+    return provider
+
+
+def patched(provider) -> dict:
+    calls = [e[2] for e in provider.executed if e[1] == "tasks.patch"]
+    assert len(calls) == 1
+    return calls[0]
+
+
+def test_task_args_carry_no_model_title_for_completion():
+    assert "title" not in a.TaskCompleteArgs.model_fields
+    assert a.TaskUpdateArgs(task_id="t1").done is None and a.TaskUpdateArgs(task_id="t1").title is None
+
+
+async def test_complete_patches_with_the_verified_title(gtasks, user):
+    out = await tasks_complete(ToolContext(user_id=user.id), a.TaskCompleteArgs(task_id="t1"))
+    assert patched(gtasks) == {"task_id": "t1", "title": "Pay rent", "status": "completed", "notes": None,
+                               "due": None}
+    assert out.startswith("Done.")
+
+
+async def test_editing_a_completed_task_does_not_reopen_it(gtasks, user):
+    gtasks.results["tasks.get"] = ToolResult(ok=True, data={"title": "Pay rent", "status": "completed"})
+    await tasks_update(ToolContext(user_id=user.id), a.TaskUpdateArgs(task_id="t1", notes="paid by UPI"))
+    assert patched(gtasks) == {"task_id": "t1", "title": "Pay rent", "status": "completed",
+                               "notes": "paid by UPI", "due": None}
+
+
+async def test_update_can_rename_and_reopen(gtasks, user):
+    await tasks_update(ToolContext(user_id=user.id),
+                       a.TaskUpdateArgs(task_id="t1", title="Pay rent (Oct)", done=False))
+    assert patched(gtasks)["title"] == "Pay rent (Oct)" and patched(gtasks)["status"] == "needsAction"
+
+
+async def test_failed_task_lookup_never_patches(gtasks, user):
+    gtasks.results["tasks.get"] = ToolResult(ok=False, error="Task not found")
+    with pytest.raises(ActionFailed):
+        await tasks_complete(ToolContext(user_id=user.id), a.TaskCompleteArgs(task_id="t1"))
+    gtasks.results["tasks.get"] = ToolResult(ok=True, data={"response_data": {"id": "t1"}})  # no title
+    with pytest.raises(ActionFailed):
+        await tasks_update(ToolContext(user_id=user.id), a.TaskUpdateArgs(task_id="t1", notes="x"))
+    assert "tasks.patch" not in [e[1] for e in gtasks.executed]
+
+
+async def test_prepare_task_notes_the_verified_title_or_refuses(gtasks, user):
+    ctx = ToolContext(user_id=user.id)
+    out = await prepare_task(ctx, a.TaskCompleteArgs(task_id="t1"))
+    assert out.note == "Task: Pay rent" and out.refusal is None and out.risk is None
+    gtasks.results["tasks.get"] = ToolResult(ok=False, error="Task not found")
+    refused = await prepare_task(ctx, a.TaskUpdateArgs(task_id="t9", notes="x"))
+    assert refused.refusal == TASK_UNKNOWN
+
+
+async def test_tainted_task_previews_show_the_real_title(workspace_on, gtasks, user):
+    registry = ToolRegistry()
+    register_integration_tools(registry)
+    token = current_run.set(ToolRun(tainted=True))
+    try:
+        with pytest.raises(ApprovalRequired) as done:
+            await registry.invoke(registry.get("tasks_complete"), user.id, a.TaskCompleteArgs(task_id="t1"))
+        with pytest.raises(ApprovalRequired) as edit:
+            await registry.invoke(registry.get("tasks_update"), user.id,
+                                  a.TaskUpdateArgs(task_id="t1", title="Rent", due=date(2026, 10, 9)))
+    finally:
+        current_run.reset(token)
+    assert done.value.preview == "✅ Mark a task done\nTask: Pay rent"
+    assert edit.value.preview == "✅ Update a task\nNew title: Rent\nDue: Fri 09 Oct\nTask: Pay rent"
+    assert "tasks.patch" not in [e[1] for e in gtasks.executed]

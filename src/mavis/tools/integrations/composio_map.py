@@ -172,16 +172,25 @@ def _task_add(a: Any) -> dict[str, Any]:
     return out
 
 
-def _task_update(a: Any) -> dict[str, Any]:
+def _task_patch(a: Any) -> dict[str, Any]:
     out: dict[str, Any] = {
-        "tasklist_id": TASKLIST, "task_id": a.task_id, "title": a.title,
-        "status": "completed" if a.done else "needsAction",
+        "tasklist_id": TASKLIST, "task_id": a.task_id, "title": a.title, "status": a.status,
     }
     if a.notes is not None:
         out["notes"] = a.notes
     if a.due is not None:
         out["due"] = _due(a.due)
     return out
+
+
+FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def input_option(values: list[Any]) -> str:
+    """RAW when any cell starts like a formula: text from a file or email must never become =IMAGE(...)."""
+    cells = [c for v in values for c in (v if isinstance(v, list) else [v])]
+    formula = any(isinstance(c, str) and c.startswith(FORMULA_PREFIXES) for c in cells)
+    return "RAW" if formula else "USER_ENTERED"
 
 
 COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
@@ -246,15 +255,30 @@ COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
     ),
     "sheets.create": SlugMapping("GOOGLESUPER_CREATE_GOOGLE_SHEET1", lambda a: {"title": a.title}),
     "tasks.add": SlugMapping("GOOGLESUPER_INSERT_TASK", _task_add),
-    "tasks.complete": SlugMapping(
-        "GOOGLESUPER_PATCH_TASK",
-        lambda a: {"tasklist_id": TASKLIST, "task_id": a.task_id, "title": a.title, "status": "completed"},
-    ),
-    "tasks.update": SlugMapping("GOOGLESUPER_PATCH_TASK", _task_update),
+    # tasks.complete and tasks.update have no mapping: workspace_tools reads the task (tasks.get) and
+    # sends its real title and status through tasks.patch (PATCH_TASK requires both)
+    "tasks.patch": SlugMapping("GOOGLESUPER_PATCH_TASK", _task_patch),
     "tasks.delete": SlugMapping(
         "GOOGLESUPER_DELETE_TASK", lambda a: {"tasklist_id": TASKLIST, "task_id": a.task_id}
     ),
     "meet.create": SlugMapping("GOOGLESUPER_CREATE_MEET", lambda a: {}),
+    # docs.append has no mapping: workspace_tools.docs_append finds the end index, then calls this
+    "docs.insert_text": SlugMapping(
+        "GOOGLESUPER_INSERT_TEXT_ACTION",
+        lambda a: {"document_id": a.document_id, "text_to_insert": a.text, "insertion_index": a.index},
+    ),
+    "sheets.append_row": SlugMapping(
+        "GOOGLESUPER_SPREADSHEETS_VALUES_APPEND",
+        lambda a: {"spreadsheetId": a.spreadsheet_id, "range": a.range,
+                   "valueInputOption": input_option(a.values), "insertDataOption": "INSERT_ROWS",
+                   "values": [list(a.values)]},
+    ),
+    "sheets.update_range": SlugMapping(
+        "GOOGLESUPER_BATCH_UPDATE",
+        lambda a: {"spreadsheet_id": a.spreadsheet_id, "sheet_name": a.sheet_name,
+                   "first_cell_location": a.start_cell.upper(), "values": [list(r) for r in a.values],
+                   "valueInputOption": input_option(a.values)},
+    ),
     # drive.upload has no mapping: workspace_tools.drive_upload resolves the artifact, then calls this
     "drive.upload_file": SlugMapping(
         "GOOGLESUPER_UPLOAD_FILE",

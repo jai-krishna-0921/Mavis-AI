@@ -29,6 +29,7 @@ def test_catalog_covers_spec_actions():
         "tasks.add", "tasks.complete", "tasks.update", "tasks.delete", "meet.create",
         "drive.upload", "drive.upload_file",
         "drive.meta", "drive.permissions", "drive.download", "tasks.get", "mail.profile",
+        "docs.append", "sheets.append_row", "sheets.update_range", "docs.insert_text", "tasks.patch",
     }
     assert set(ACTIONS) == expected
 

@@ -17,6 +17,9 @@ from mavis.tools.integrations.normalize import extract_list, pick
 TITLE_CHARS = 120
 CELL_CHARS = 80
 MAX_ROWS, MAX_COLS = 50, 20
+# Keys a create action may return its new id under (Drive file, Doc, Sheet, task). Shared with
+# workspace_guard.created_ids, so an id that is rendered is also recorded for the allowlist.
+ID_KEYS = ("id", "document_id", "documentId", "spreadsheet_id", "spreadsheetId")
 _BLANKS = re.compile(r"\n\s*\n\s*\n+")
 KINDS = {
     "application/vnd.google-apps.document": "Doc",
@@ -215,7 +218,7 @@ def render_created(data: Any) -> str:
     """Write results: just the ids the model needs next, never the whole resource."""
     if not isinstance(data, dict):
         return "Done."
-    found = {k: v for k in ("id", "document_id", "spreadsheet_id", "spreadsheetId", "name", "title")
+    found = {k: v for k in (*ID_KEYS, "name", "title")
              if isinstance(v := pick(data, k, f"response_data.{k}", f"data.{k}"), (str, int))}
     return "Done. " + json.dumps(found, ensure_ascii=False) if found else "Done."
 
@@ -241,10 +244,7 @@ RENDERERS = {
     "contacts.search": render_contacts,
     "meet.transcript": render_transcripts,
     "drive.move": render_created,
-    "drive.share": render_created,
     "docs.comment": render_created,
-    "tasks.complete": render_created,
-    "tasks.update": render_created,
     "tasks.delete": render_created,
     "meet.create": render_meet,
 }

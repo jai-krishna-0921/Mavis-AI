@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import date
 from pathlib import Path
 
 import httpcore
@@ -19,13 +20,39 @@ from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed
 from mavis.store.repo import tasks as tasks_repo
 from mavis.tools import web
-from mavis.tools.integrations.actions import DriveDownloadArgs, DriveUploadArgs, DriveUploadFileArgs, FileArgs
+from mavis.tools.integrations.actions import (
+    DocAppendArgs,
+    DocArgs,
+    DocInsertArgs,
+    DriveDownloadArgs,
+    DriveShareArgs,
+    DriveUploadArgs,
+    DriveUploadFileArgs,
+    FileArgs,
+    TaskCompleteArgs,
+    TaskPatchArgs,
+    TaskUpdateArgs,
+)
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connections import ConnectionCache
 from mavis.tools.integrations.normalize import pick
 from mavis.tools.integrations.tools import action_data
-from mavis.tools.integrations.workspace_guard import created_ids, record_created
-from mavis.tools.integrations.workspace_render import clip_body, kind_of, one_line, render_created
+from mavis.tools.integrations.workspace_guard import (
+    ESCALATIONS,
+    TASK_UNKNOWN,
+    VERIFIERS,
+    created_ids,
+    forget_file,
+    record_created,
+    task_facts,
+)
+from mavis.tools.integrations.workspace_render import (
+    clip_body,
+    doc_end_index,
+    kind_of,
+    one_line,
+    render_created,
+)
 from mavis.tools.registry import PrepareFn, ToolContext
 
 CustomFn = Callable[[ToolContext, BaseModel], Awaitable[str]]
@@ -129,6 +156,106 @@ async def _drive_upload(ctx: ToolContext, args: BaseModel) -> str:
     return await drive_upload(ctx, args)
 
 
+async def docs_append(
+    ctx: ToolContext,
+    args: DocAppendArgs,
+    *,
+    provider: IntegrationProvider | None = None,
+    cache: ConnectionCache | None = None,
+) -> str:
+    """UPDATE_DOCUMENT_MARKDOWN would replace the whole doc, so: read it, then insert before the final
+    newline (INSERT_TEXT_ACTION at the last endIndex - 1)."""
+    doc = await action_data(ctx, "docs.read", DocArgs(document_id=args.document_id), provider=provider,
+                            cache=cache)
+    index = doc_end_index(doc)
+    if index is None or index < 1:
+        raise ActionFailed("docs.append failed: could not find the end of the document",
+                           reason="could not find the end of the document")
+    text = args.text if args.text.startswith("\n") else "\n" + args.text
+    insert = DocInsertArgs(document_id=args.document_id, text=text, index=index)
+    await action_data(ctx, "docs.insert_text", insert, provider=provider, cache=cache)
+    return "Done. Added the text at the end of the document."
+
+
+async def _docs_append(ctx: ToolContext, args: BaseModel) -> str:
+    assert isinstance(args, DocAppendArgs)
+    return await docs_append(ctx, args)
+
+
+async def drive_share(
+    ctx: ToolContext,
+    args: DriveShareArgs,
+    *,
+    provider: IntegrationProvider | None = None,
+    cache: ConnectionCache | None = None,
+) -> str:
+    """Share, then forget the file's cached ownership facts: a later write in the same run must see that
+    someone else can now read it."""
+    try:
+        data = await action_data(ctx, "drive.share", args, provider=provider, cache=cache)
+    finally:
+        forget_file(ctx, args.file_id)
+    return render_created(data)
+
+
+async def _drive_share(ctx: ToolContext, args: BaseModel) -> str:
+    assert isinstance(args, DriveShareArgs)
+    return await drive_share(ctx, args)
+
+
+async def _patch_task(
+    ctx: ToolContext,
+    action: str,
+    task_id: str,
+    *,
+    title: str | None = None,
+    done: bool | None = None,
+    notes: str | None = None,
+    due: date | None = None,
+    provider: IntegrationProvider | None = None,
+    cache: ConnectionCache | None = None,
+) -> str:
+    """PATCH_TASK needs a title and a status, so read the task first and keep what the call does not change.
+    No verified task, no write."""
+    facts = await task_facts(ctx, task_id, provider=provider, cache=cache)
+    if facts is None:
+        raise ActionFailed(f"{action} failed: {TASK_UNKNOWN}", reason="that task could not be found")
+    status = facts.status if done is None else ("completed" if done else "needsAction")
+    patch = TaskPatchArgs(task_id=task_id, title=title or facts.title, status=status, notes=notes, due=due)
+    return render_created(await action_data(ctx, "tasks.patch", patch, provider=provider, cache=cache))
+
+
+async def tasks_complete(
+    ctx: ToolContext,
+    args: TaskCompleteArgs,
+    *,
+    provider: IntegrationProvider | None = None,
+    cache: ConnectionCache | None = None,
+) -> str:
+    return await _patch_task(ctx, "tasks.complete", args.task_id, done=True, provider=provider, cache=cache)
+
+
+async def tasks_update(
+    ctx: ToolContext,
+    args: TaskUpdateArgs,
+    *,
+    provider: IntegrationProvider | None = None,
+    cache: ConnectionCache | None = None,
+) -> str:
+    return await _patch_task(ctx, "tasks.update", args.task_id, title=args.title, done=args.done,
+                             notes=args.notes, due=args.due, provider=provider, cache=cache)
+
+
+async def _tasks_complete(ctx: ToolContext, args: BaseModel) -> str:
+    assert isinstance(args, TaskCompleteArgs)
+    return await tasks_complete(ctx, args)
+
+
+async def _tasks_update(ctx: ToolContext, args: BaseModel) -> str:
+    assert isinstance(args, TaskUpdateArgs)
+    return await tasks_update(ctx, args)
+
+
 def creating(
     action: str, *, provider: IntegrationProvider | None = None, cache: ConnectionCache | None = None
 ) -> CustomFn:
@@ -144,6 +271,8 @@ def creating(
 
 CREATES = ("drive.create_folder", "docs.create", "sheets.create", "tasks.add")
 CUSTOM_FNS: dict[str, CustomFn] = {
-    "drive.read": _drive_read, "drive.upload": _drive_upload, **{name: creating(name) for name in CREATES},
+    "drive.read": _drive_read, "drive.upload": _drive_upload, "docs.append": _docs_append,
+    "drive.share": _drive_share, "tasks.complete": _tasks_complete, "tasks.update": _tasks_update,
+    **{name: creating(name) for name in CREATES},
 }
-PREPARES: dict[str, PrepareFn] = {}
+PREPARES: dict[str, PrepareFn] = {**ESCALATIONS, **VERIFIERS}
