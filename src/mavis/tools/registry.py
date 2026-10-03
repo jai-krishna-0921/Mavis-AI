@@ -63,6 +63,11 @@ def _terms(text: str) -> set[str]:
 
 NEVER_AUTO_APPROVE = frozenset({"add_policy_rule", "forget"})
 _PREVIEW_IN_RESULT_CHARS = 500
+ALREADY_WAITING_RESULT = (
+    "ALREADY_AWAITING_APPROVAL #{id}: this same action is already waiting for the user's OK on an "
+    "earlier card. Nothing new was queued and it has NOT been done yet. Tell the user it's waiting on "
+    "that card; do not queue it again."
+)
 
 # Serialises "find open approval, else create" so identical parallel tool calls queue one approval.
 _queue_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
@@ -351,6 +356,13 @@ class ToolRegistry:
                 task_id = current_task_id.get()
                 async with _queue_lock():
                     existing = await approvals.find_open(user_id, task_id, tool.name, req.arguments)
+                    twin = None if existing is not None else next(iter(
+                        await approvals.waiting_equivalents(user_id, tool.name, req.arguments)), None)
+                    if twin is not None:
+                        # The same action already waits on the user (another task, or an earlier
+                        # turn): one card per action, never a second one to approve twice.
+                        log.info("tool.approval_already_waiting", tool=tool.name, approval_id=twin.id)
+                        return ALREADY_WAITING_RESULT.format(id=twin.id)
                     if existing is not None:
                         approval_id = existing.id
                     else:
