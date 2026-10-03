@@ -239,7 +239,8 @@ _SPECS: tuple[ActionSpec, ...] = (
                "short previews.",
                MailSearchArgs, RiskClass.READ, _a("inbox", "conversation"), priority=58),
     ActionSpec("mail.read", Capability.GMAIL,
-               "Read one email in full by message id (from mail_search): headers and body text.",
+               "Read one email in full by message id (from mail_search): headers and body text, for what "
+               "it says, its details or key points.",
                MailReadArgs, RiskClass.READ, _a("inbox", "conversation")),
     ActionSpec("mail.thread", Capability.GMAIL, "Read every message in an email thread.",
                MailThreadArgs, RiskClass.READ, _a("inbox")),
