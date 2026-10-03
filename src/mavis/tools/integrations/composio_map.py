@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -64,18 +64,19 @@ def _create_event(a: Any) -> dict[str, Any]:
 
 
 def _update_event(a: Any) -> dict[str, Any]:
-    # The live GOOGLECALENDAR_UPDATE_EVENT schema REQUIRES start_datetime (and event_id) even when the
-    # time does not change; its schema also defaults unsent fields (duration 30 min; not confirmed live
-    # whether an update applies them). We never invent a time here: without `start` the provider
-    # rejects the call, so the tool's `start` field tells the model to pass the event's current start.
-    out: dict[str, Any] = {"event_id": a.event_id}
+    """GOOGLECALENDAR_PATCH_EVENT: only the fields being changed are sent; the rest of the event stays.
+    (GOOGLECALENDAR_UPDATE_EVENT is a full PUT replacement: its live description says unspecified
+    fields "may be cleared or reset", and it requires start_datetime even for a rename. Composio has
+    no read-by-id slug to merge from, so a patch is the safe update.) A move sends start AND end:
+    CalendarUpdateArgs requires the duration with the start, so the end is never guessed."""
+    out: dict[str, Any] = {"calendar_id": "primary", "event_id": a.event_id}
     if a.summary is not None:
         out["summary"] = a.summary
-    if a.start is not None:
-        out["start_datetime"], out["timezone"] = _wall_and_tz(a.start)
-    if a.duration_minutes is not None:
-        out["event_duration_hour"] = a.duration_minutes // 60
-        out["event_duration_minutes"] = a.duration_minutes % 60
+    if a.start is not None and a.duration_minutes is not None:
+        out["start_time"] = a.start.isoformat(timespec="seconds")
+        out["end_time"] = (a.start + timedelta(minutes=a.duration_minutes)).isoformat(timespec="seconds")
+        if isinstance(a.start.tzinfo, ZoneInfo):
+            out["timezone"] = a.start.tzinfo.key
     if a.attendees is not None:
         out["attendees"] = list(a.attendees)
     if a.description is not None:
@@ -102,7 +103,7 @@ COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
         lambda a: {"time_min": a.time_min.isoformat(), "time_max": a.time_max.isoformat()},
     ),
     "calendar.create_event": SlugMapping("GOOGLECALENDAR_CREATE_EVENT", _create_event),
-    "calendar.update_event": SlugMapping("GOOGLECALENDAR_UPDATE_EVENT", _update_event),
+    "calendar.update_event": SlugMapping("GOOGLECALENDAR_PATCH_EVENT", _update_event),
     "slack.channels": SlugMapping("SLACK_LIST_ALL_CHANNELS", lambda a: {}),
     "slack.history": SlugMapping(
         "SLACK_FETCH_CONVERSATION_HISTORY", lambda a: {"channel": a.channel, "limit": a.limit}

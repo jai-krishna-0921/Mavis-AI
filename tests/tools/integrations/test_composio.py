@@ -224,3 +224,15 @@ async def test_initiated_attempt_is_not_reported_as_failed(provider):
         _acct("googlecalendar", "INITIATED", "2026-10-03T08:05:35Z", "ca_1"),
     ]}))
     assert (await provider.status(USER))["googlecalendar"] is not ConnectionState.FAILED
+
+
+@respx.mock
+async def test_calendar_update_goes_out_as_a_patch_without_resetting_fields(provider):
+    route = respx.post(f"{BASE}/tools/execute/GOOGLECALENDAR_PATCH_EVENT").mock(
+        return_value=httpx.Response(200, json={"successful": True, "data": {"id": "e1"}}))
+    put = respx.post(f"{BASE}/tools/execute/GOOGLECALENDAR_UPDATE_EVENT").mock(
+        return_value=httpx.Response(200, json={"successful": True, "data": {}}))
+    res = await provider.execute(USER, "calendar.update_event", {"event_id": "e1", "summary": "Renamed"})
+    assert res.ok and not put.called
+    sent = json.loads(route.calls.last.request.content)["arguments"]
+    assert sent == {"calendar_id": "primary", "event_id": "e1", "summary": "Renamed"}  # nothing else touched

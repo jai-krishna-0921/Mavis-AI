@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from mavis.domain.integrations import ToolResult
 from mavis.domain.policy import Capability, RiskClass
@@ -101,9 +101,16 @@ def test_calendar_update_is_always_outward():
         CalendarUpdateArgs(event_id="e1", attendees=[]),  # removes every guest
         CalendarUpdateArgs(event_id="e1", attendees=["a@example.com"]),
         CalendarUpdateArgs(event_id="e1", description="private notes"),
-        CalendarUpdateArgs(event_id="e1", start=START),
+        CalendarUpdateArgs(event_id="e1", start=START, duration_minutes=30),
     ]
     tool = _make_tool(spec)
     for args in cases:
         assert spec.risk_for(args) is RiskClass.OUTWARD
         assert tool.effective_risk(args).needs_approval
+
+
+def test_calendar_update_preview_shows_exact_times_and_that_the_rest_stays():
+    spec = ACTIONS["calendar.update_event"]
+    text = spec.preview(CalendarUpdateArgs(event_id="e1", start=START, duration_minutes=90), "UTC")
+    end = START + timedelta(minutes=90)
+    assert f"to {end:%H:%M}" in text and "everything else stays" in text.lower()
