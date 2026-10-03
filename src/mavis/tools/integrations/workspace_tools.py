@@ -87,6 +87,13 @@ def _artifact_file(raw: str) -> tuple[Path, int | None]:
     return path, path.stat().st_size
 
 
+def _upload_name(title: str, path: Path) -> str:
+    """The artifact title, with the file's own extension when the title has none."""
+    if not title:
+        return path.name
+    return title if Path(title).suffix else title + path.suffix
+
+
 async def drive_upload(
     ctx: ToolContext,
     args: DriveUploadArgs,
@@ -110,7 +117,7 @@ async def drive_upload(
     if size > UPLOAD_LIMIT:
         raise ActionFailed("drive.upload failed: Drive uploads are limited to 5 MB",
                            reason="the file is larger than 5 MB")
-    staged = DriveUploadFileArgs(path=str(path), name=artifact.title or path.name, mime=artifact.mime,
+    staged = DriveUploadFileArgs(path=str(path), name=_upload_name(artifact.title, path), mime=artifact.mime,
                                  folder_id=args.folder_id)
     data = await action_data(ctx, "drive.upload_file", staged, provider=provider, cache=cache)
     record_created(ctx.task_id, created_ids(data))
