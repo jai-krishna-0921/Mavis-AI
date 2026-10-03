@@ -25,11 +25,11 @@ from typing import Any
 
 import structlog
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from mavis.config import get_settings
-from mavis.domain.errors import ActionFailed, ApprovalRequired, ConnectionRequired
+from mavis.domain.errors import ActionFailed, ApprovalRequired, ConnectionRequired, NeedsUserDetail
 from mavis.domain.policy import Capability, RiskClass
 from mavis.policy.risk import truncate, wrap_untrusted
 from mavis.store.db import utcnow
@@ -281,7 +281,18 @@ class ToolRegistry:
         if approval is None:
             raise KeyError(f"approval {approval_id} not found")
         tool = self.get(approval.tool)
-        args = tool.args_model.model_validate(approval.arguments)
+        try:
+            args = tool.args_model.model_validate(approval.arguments)
+        except ValidationError as exc:
+            # A request saved under older rules (or edited into an invalid shape): fail it with a
+            # sentence the user can act on, never a validation dump.
+            causes = [e.get("ctx", {}).get("error") for e in exc.errors()]
+            user_text = next((c.user_text for c in causes if isinstance(c, NeedsUserDetail)),
+                             "Some details of this request are missing now, so I didn't do it. "
+                             "Ask me again?")
+            log.warning("tool.approved_args_invalid", tool=tool.name, approval_id=approval_id)
+            raise ActionFailed(f"Saved arguments are not valid: {exc.errors()[0].get('msg', '')}",
+                               reason=user_text) from None
         await self._require_capability(tool, approval.user_id)
         # The action runs on behalf of the task that held the approval (tools may read its taint).
         task_token = current_task_id.set(approval.task_id)

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, model_validator
 
+from mavis.domain.errors import NeedsUserDetail
 from mavis.domain.policy import Capability, RiskClass
 
 INTEGRATION_CAPABILITIES: tuple[Capability, ...] = (
@@ -114,11 +115,17 @@ class CalendarUpdateArgs(BaseModel):
     def _start_with_duration(self) -> CalendarUpdateArgs:
         # The provider takes a start and an end; an end is never guessed from a default length.
         if self.start is not None and self.duration_minutes is None:
-            raise ValueError("duration_minutes is required with start: pass the event's current length "
-                             "if it is not changing")
+            raise NeedsUserDetail(
+                "duration_minutes is required with start: pass the event's current length if it is "
+                "not changing",
+                "I need to know how long the event should be to move it. Tell me the length and I'll "
+                "set it up again.")
         if self.duration_minutes is not None and self.start is None:
-            raise ValueError("start is required with duration_minutes: pass the event's current start "
-                             "if it is not moving")
+            raise NeedsUserDetail(
+                "start is required with duration_minutes: pass the event's current start if it is "
+                "not moving",
+                "I need to know when the event starts to change its length. Tell me and I'll set it "
+                "up again.")
         return self
 
 
@@ -208,8 +215,11 @@ def _preview_update(args: CalendarUpdateArgs, tz: str) -> str:
         lines.append(f"Title: {args.summary}")
     if args.start and args.duration_minutes:
         lines.append(f"When: {_when(args.start, args.duration_minutes, tz)}")
-    if args.attendees is not None:
-        lines.append(f"Guests: {', '.join(args.attendees) or 'none'}")
+    if args.attendees:
+        lines.append(f"Guests: replaced with exactly {', '.join(args.attendees)} "
+                     "(anyone else is removed)")
+    elif args.attendees is not None:
+        lines.append("Guests: all removed (they get a cancellation)")
     if args.description is not None:
         lines.append(f"Notes: {args.description}")
     lines.append("Everything else stays as it is.")

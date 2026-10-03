@@ -44,6 +44,15 @@ class ActionFailed(MavisError):
         self.reason = reason or message
 
 
+class NeedsUserDetail(ValueError):
+    """Raised by an args model validator. `str(exc)` is for the model; `user_text` is what the user
+    sees if a saved (approved) request fails that rule at execution time."""
+
+    def __init__(self, message: str, user_text: str) -> None:
+        super().__init__(message)
+        self.user_text = user_text
+
+
 class BudgetExceeded(MavisError):
     """A task exceeded its step/token/time budget."""
 
