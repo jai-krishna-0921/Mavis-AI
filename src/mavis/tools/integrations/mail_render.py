@@ -82,7 +82,10 @@ def _one_line(text: str) -> str:
 def render_search(data: Any) -> str:
     msgs = extract_messages(data)
     if not msgs:
-        return "No emails matched."
+        # not evidence of absence: the model built this query, often from a paraphrase
+        return ("No emails were found with this query. That only means this exact query found nothing: try a "
+                "broader one (the sender's name or domain, one key word from the subject) before "
+                "concluding the email isn't there.")
     lines = [f"{len(msgs)} email(s). Call mail_read with a message_id to read one in full."]
     for raw in msgs:
         m = normalize_email(raw)

@@ -275,7 +275,7 @@ def test_render_search_lists_ids_and_previews() -> None:
     assert "message_id=m1 thread_id=t1 (unread)" in out
     assert "Subject: AI Builders Meetup this Thursday" in out and "Koramangala" in out
     assert "x" * 400 not in out  # MIME payload is not dumped
-    assert render_search({"messages": []}) == "No emails matched."
+    assert render_search({"messages": []}).startswith("No emails were found with this query.")
 
 
 def test_render_read_gives_body_and_truncates() -> None:
