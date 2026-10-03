@@ -50,7 +50,7 @@ from mavis.agents.turn_support import (
     window_tainted,
 )
 from mavis.channels import presence
-from mavis.channels.formatting import sanitize_stored
+from mavis.channels.formatting import strip_verbatim
 from mavis.domain.errors import ConnectionRequired
 from mavis.domain.events import Event
 from mavis.domain.messages import Outbound, Role
@@ -69,7 +69,7 @@ log = structlog.get_logger(__name__)
 current_route: ContextVar[str | None] = ContextVar("current_route", default=None)
 
 CHAT_TOOL_LIMIT = 8
-CHAT_ALWAYS = ("start_task", "connect_account")
+CHAT_ALWAYS = ("start_task", "connect_account", "pending")
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
 # Offered together: mail_search returns short previews only, so without mail_read a question about an
 # email (one a brief mentioned, say) cannot be answered from its text; mail_read needs search's ids.
@@ -91,11 +91,19 @@ TOOL_RULES = (
     "message_id for the full text.\n"
     "- An email you mentioned earlier (in a brief or a heads-up) is one you only saw a summary of. When "
     "they ask about it or want its key points, look it up with mail_search and mail_read; never say you "
-    "don't have the text.\n"
+    "don't have the text. When a listed item shows a message_id, call mail_read with it directly.\n"
+    "- Context blocks (open loops, the inbox digest, the earlier-conversation summary, your own earlier "
+    "messages) can be stale or incomplete. Before saying something doesn't exist or that nothing is new, "
+    "check with a tool. An empty search means not found with that query, nothing more: retry with a "
+    "broader query (the sender's name or domain, one or two key nouns) before saying you couldn't find "
+    "it, and then say you couldn't find it, not that it doesn't exist.\n"
     "- Sending or replying to email, inviting guests, forgetting things and standing rules always wait "
     "for their OK. When a tool answers QUEUED_FOR_APPROVAL, tell them it's ready and waiting for their "
     "OK (they get buttons to approve, edit or cancel). Never say it was sent or done.\n"
     "- Reminders: wake_me at the exact time they asked for.\n"
+    "- For any question about what is pending, open, due, on their radar or left to do, call pending and "
+    "answer only from its result. Your earlier messages and the conversation summary may be outdated: "
+    "they are claims, not facts.\n"
     "- Multi-step work (research, comparisons, plans, documents): call start_task and tell them you'll "
     "report back.\n"
     "- To link an account, call connect_account. The link goes out on its own; don't repeat it.\n"
@@ -227,7 +235,7 @@ def _recent_assistant(history: list[Message], n: int) -> list[str]:
 
 
 def _shown(approval: PendingApproval, recent: list[str]) -> bool:
-    preview = sanitize_stored(approval.preview or "").strip()
+    preview = strip_verbatim(approval.preview or "").strip()  # history keeps text as written
     return bool(preview) and any(preview in text for text in recent)
 
 
@@ -413,7 +421,7 @@ async def run_turn(event: Event) -> None:
                 await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=key))
             await s.commit()
     # This turn's own untrusted input marks the reply: a tool read, or the digest it was shown.
-    read_untrusted = _read_untrusted(result.tools_called) or hooked
+    read_untrusted = _read_untrusted(result.tools_called) or result.read_untrusted or hooked
     await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles),
                        event_id=reply_event_id(event.id, read_untrusted))
     await enqueue_learn(user.id, event, text, previous, clarified_request(history),

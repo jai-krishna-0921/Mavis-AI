@@ -21,7 +21,7 @@ async def test_composer_respects_send_false(user, clock, fake_memory, fake_llm):
     assert (await Composer(fake_memory).compose(user, "old news", 2)).send is False
 
 
-async def test_composer_prompt_forbids_dashes_and_uses_history(user, clock, fake_memory, fake_llm):
+async def test_composer_prompt_explains_typography_and_uses_history(user, clock, fake_memory, fake_llm):
     from mavis.domain.messages import Role
     from mavis.store.repo import messages
 
@@ -29,7 +29,7 @@ async def test_composer_prompt_forbids_dashes_and_uses_history(user, clock, fake
     fake_llm.push_structured(ComposedMessage(send=True, messages=["hi"]))
     await Composer(fake_memory).compose(user, "say hi", 2)
     call = fake_llm.structured_calls[-1]
-    assert "Never use em dashes or en dashes" in call["system"]
+    assert "colon after a label" in call["system"]
     assert "I have an interview Friday" in call["user"]
 
 
@@ -60,12 +60,16 @@ async def test_trusted_intent_is_unchanged(user, clock, fake_memory, fake_llm):
     assert "<untrusted" not in fake_llm.structured_calls[-1]["user"]
 
 
-async def test_composer_strips_dashes_from_output(user, clock, fake_memory, fake_llm):
+async def test_composer_leaves_typography_to_the_channel(user, clock, fake_memory, fake_llm):
+    from mavis.channels.formatting import to_plain
+
     fake_llm.push_structured(
         ComposedMessage(send=True, messages=["Interview at 3 — good luck – you got this"])
     )
     msg = await Composer(fake_memory).compose(user, "pep talk", 2)
-    assert "—" not in msg.messages[0] and "–" not in msg.messages[0]
+    assert msg.messages[0] == "Interview at 3 — good luck – you got this"
+    out = to_plain(msg.messages[0])
+    assert "—" not in out and "–" not in out
 
 
 async def test_composer_prompt_has_no_greeting_line_and_uses_profile_name(

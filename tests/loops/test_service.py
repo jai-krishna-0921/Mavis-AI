@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from mavis.domain import timeutil
-from mavis.domain.events import EventType
+from mavis.domain.events import EventType, Provenance, Trust
 from mavis.domain.loops import LoopKind, LoopStatus, LoopUpsert, WatchSpec
 from mavis.domain.memory import ExtractedEvent, Extraction, LoopDraft
 from mavis.loops.service import LoopService, loops_from_extraction
@@ -102,7 +102,7 @@ async def test_extraction_hook_creates_loops(user, recording_bus, clock):
         ],
         loops=[LoopDraft(kind="waiting_on", title="Referral from Jawahar", entities=["Jawahar"])],
     )
-    await loops_from_extraction(svc, user.id, extraction, "tg:update:7")
+    await loops_from_extraction(svc, user.id, extraction, _turn("tg:update:7"))
     loops = {loop.title: loop for loop in await svc.active(user.id)}
     assert set(loops) == {"Interview prep with Jawahar", "Referral from Jawahar"}
     assert loops["Interview prep with Jawahar"].due_at == DUE  # naive 10:00 interpreted as IST
@@ -115,29 +115,16 @@ def _one_loop_extraction() -> Extraction:
     return Extraction(loops=[LoopDraft(kind="commitment", title="Send the deck")])
 
 
-@pytest.mark.parametrize("source_ref", ["tg:update:9", "cli:7c1e", "chat:abc", "local:1"])
-async def test_extraction_hook_trusts_conversation_sources(user, recording_bus, clock, source_ref):
-    svc = LoopService(recording_bus)
-    await loops_from_extraction(svc, user.id, _one_loop_extraction(), source_ref)
-    assert [loop.title for loop in await svc.active(user.id)] == ["Send the deck"]
-
-
-@pytest.mark.parametrize("source_ref", ["gmail:msg-1", "web:https://x.test", "task:5", ""])
-async def test_extraction_hook_ignores_untrusted_sources(user, recording_bus, clock, source_ref):
-    svc = LoopService(recording_bus)
-    await loops_from_extraction(svc, user.id, _one_loop_extraction(), source_ref)
-    assert await svc.active(user.id) == []
-    assert recording_bus.take() == []
+def _turn(ref: str) -> Provenance:
+    return Provenance(source_ref=ref, trust=Trust.USER, conversation=True)
 
 
 async def test_real_conversation_turn_creates_loop(user, memory, recording_bus, clock, fake_llm):
-    """The source_ref a real turn hands to LEARN (the event id) passes the trust gate."""
-    from mavis.domain.events import Trust
-
+    """A real user turn handed to LEARN creates a trusted loop referencing its event id."""
     svc = LoopService(recording_bus)
 
-    async def hook(uid, extraction, source_ref):
-        await loops_from_extraction(svc, uid, extraction, source_ref)
+    async def hook(uid, extraction, prov):
+        await loops_from_extraction(svc, uid, extraction, prov)
 
     memory.on_extraction.append(hook)
     fake_llm.push_structured(_one_loop_extraction())
@@ -148,7 +135,7 @@ async def test_real_conversation_turn_creates_loop(user, memory, recording_bus, 
 async def test_learn_retry_yields_one_loop_and_one_created_event(user, recording_bus, clock):
     svc = LoopService(recording_bus)
     for _ in range(2):
-        await loops_from_extraction(svc, user.id, _one_loop_extraction(), "tg:update:5")
+        await loops_from_extraction(svc, user.id, _one_loop_extraction(), _turn("tg:update:5"))
     assert len(await svc.active(user.id)) == 1
     ids = [e.id for e in recording_bus.events]
     assert [i for i in ids if i.endswith(":created")] == [ids[0]]
@@ -177,23 +164,23 @@ async def test_close_emits_deterministic_id_and_is_idempotent(user, recording_bu
 
 async def test_hook_does_not_resurrect_recently_closed_loop(user, recording_bus, clock):
     svc = LoopService(recording_bus)
-    await loops_from_extraction(svc, user.id, _one_loop_extraction(), "tg:update:1")
+    await loops_from_extraction(svc, user.id, _one_loop_extraction(), _turn("tg:update:1"))
     [loop] = await svc.active(user.id)
     await svc.close(loop.id)
     again = Extraction(loops=[LoopDraft(kind="commitment", title="  send the DECK! ")])
-    await loops_from_extraction(svc, user.id, again, "tg:update:2")
+    await loops_from_extraction(svc, user.id, again, _turn("tg:update:2"))
     assert await svc.active(user.id) == []
     clock.advance(days=8)
-    await loops_from_extraction(svc, user.id, again, "tg:update:3")
+    await loops_from_extraction(svc, user.id, again, _turn("tg:update:3"))
     assert len(await svc.active(user.id)) == 1
 
 
 async def test_hook_truncates_long_title_and_skips_missing_user(user, recording_bus, clock):
     svc = LoopService(recording_bus)
     long = Extraction(loops=[LoopDraft(kind="goal", title="x" * 500)])
-    await loops_from_extraction(svc, user.id, long, "tg:update:1")
+    await loops_from_extraction(svc, user.id, long, _turn("tg:update:1"))
     assert len((await svc.active(user.id))[0].title) == 300
-    await loops_from_extraction(svc, 9999, long, "tg:update:2")
+    await loops_from_extraction(svc, 9999, long, _turn("tg:update:2"))
 
 
 async def test_upsert_cannot_touch_another_users_loop(user, recording_bus, clock):

@@ -30,7 +30,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed, ApprovalRequired, ConnectionRequired, NeedsUserDetail
+from mavis.domain.localtime import has_datetimes, localize_args
 from mavis.domain.policy import Capability, RiskClass
+from mavis.domain.tasks import ApprovalStatus
 from mavis.policy.risk import truncate, wrap_untrusted
 from mavis.store.db import utcnow
 from mavis.store.repo import approvals, audit, policy_rules, tasks
@@ -69,6 +71,12 @@ ALREADY_WAITING_RESULT = (
     "that card; do not queue it again."
 )
 
+UPDATED_WAITING_RESULT = (
+    "UPDATED_WAITING_APPROVAL #{id}: {shown}\nThe card already waiting for this was updated to this "
+    "version and shown to the user again. It has NOT been done yet. Tell the user the corrected version "
+    "is waiting for their OK; do not queue it again."
+)
+
 # Serialises "find open approval, else create" so identical parallel tool calls queue one approval.
 _queue_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
 
@@ -103,9 +111,14 @@ class ToolRun:
 
     tainted: bool = False
     untrusted_seen: bool = False  # an untrusted_output tool returned during the current step
+    untrusted_reads: int = 0  # every time third-party text reached the model in this run (never reset)
     queued_approvals: list[int] = field(default_factory=list)
     spawned: int = 0  # workers started in the current outermost model step (reset by react_loop)
     memo: dict[str, Any] = field(default_factory=dict)  # per-run cache for `prepare` lookups (file metadata)
+
+    def saw_untrusted(self) -> None:
+        self.untrusted_seen = True
+        self.untrusted_reads += 1
 
     def end_step(self) -> None:
         self.tainted = self.tainted or self.untrusted_seen
@@ -155,6 +168,13 @@ async def tool_context(user_id: int) -> ToolContext:
     return ToolContext(user_id=user_id, timezone=tz, task_id=current_task_id.get())
 
 
+async def _localized(args: BaseModel, user_id: int) -> BaseModel:
+    """Every datetime argument is the user's wall-clock time: attach the zone in code (domain.localtime)."""
+    if not has_datetimes(type(args)):
+        return args
+    return localize_args(args, (await tool_context(user_id)).timezone)
+
+
 def contextual(fn: Callable[[ToolContext, Any], Awaitable[str | dict | list]]) -> ToolFn:
     """Adapt an `async fn(ctx, args)` to the registry's `async fn(user_id, args)` signature."""
 
@@ -185,6 +205,17 @@ class MavisTool:
     # Async pre-step with network access (file metadata, allowlists), run by invoke() before the taint and
     # approval checks; never by execute_approved (the user already saw the preview and said yes).
     prepare: PrepareFn | None = None
+    # What makes two calls the SAME action (approval dedupe and supersede): the arguments that determine
+    # what the action does. Empty, or any of them empty in a call, means the whole canonical argument
+    # set is the identity.
+    identity: tuple[str, ...] = ()
+    # A coarser "same target" key (an invite: start + attendees; an email: to + subject). A new request
+    # with the same target but other content corrects the waiting card instead of queuing a second one.
+    # Empty, or any of them empty in a call, means no target matching.
+    target: tuple[str, ...] = ()
+    # The argument holding when the action takes effect (an event start). An approval whose action
+    # time has passed expires and can no longer be approved.
+    action_time: str | None = None
 
     def effective_risk(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn is not None else self.risk
@@ -248,6 +279,9 @@ class ToolRegistry:
     def get(self, name: str) -> MavisTool:
         return self._tools[name]
 
+    def find(self, name: str) -> MavisTool | None:
+        return self._tools.get(name)
+
     def names_for(self, agent: str) -> list[str]:
         return [t.name for t in self._tools.values() if agent in t.agents]
 
@@ -310,6 +344,7 @@ class ToolRegistry:
     async def invoke(self, tool: MavisTool, user_id: int, args: BaseModel) -> str:
         # Capability first: the user is asked to connect BEFORE being asked to approve.
         await self._require_capability(tool, user_id)
+        args = await _localized(args, user_id)  # wall-clock times get their zone here, for every tool
         payload = args.model_dump(mode="json")
         prepared = await self._prepared(tool, user_id, args)
         if prepared.refusal is not None:
@@ -357,6 +392,7 @@ class ToolRegistry:
             raise ActionFailed(f"Saved arguments are not valid: {exc.errors()[0].get('msg', '')}",
                                reason=user_text) from None
         await self._require_capability(tool, approval.user_id)
+        args = await _localized(args, approval.user_id)  # idempotent on stored, already zoned times
         # The action runs on behalf of the task that held the approval (tools may read its taint).
         task_token = current_task_id.set(approval.task_id)
         try:
@@ -406,7 +442,7 @@ class ToolRegistry:
             if tool.untrusted_output and not raise_errors:
                 # Third-party error text must never reach the model unwrapped.
                 if run is not None:
-                    run.untrusted_seen = True
+                    run.saw_untrusted()
                 return wrap_untrusted(truncate(f"Tool error: {exc}"), tool.name)
             raise
         finally:
@@ -418,7 +454,7 @@ class ToolRegistry:
         if not tool.untrusted_output:
             return text
         if run is not None:
-            run.untrusted_seen = True
+            run.saw_untrusted()
         return wrap_untrusted(text, tool.name)
 
     def _as_langchain(self, tool: MavisTool, user_id: int) -> BaseTool:
@@ -433,14 +469,30 @@ class ToolRegistry:
                     existing = await approvals.find_open(user_id, task_id, tool.name, req.arguments)
                     twin = None if existing is not None else next(iter(
                         await approvals.waiting_equivalents(user_id, tool.name, req.arguments,
-                                                            tainted=tainted)), None)
+                                                            identity=tool.identity, tainted=tainted)),
+                        None)
                     if twin is not None:
                         # The same action already waits on the user (another task, or an earlier
                         # turn): one card per action, never a second one to approve twice.
                         log.info("tool.approval_already_waiting", tool=tool.name, approval_id=twin.id)
                         return ALREADY_WAITING_RESULT.format(id=twin.id)
+                    corrected = None if existing is not None else next(iter(
+                        await approvals.waiting_same_target(user_id, tool.name, req.arguments,
+                                                            target=tool.target, tainted=tainted,
+                                                            statuses=[ApprovalStatus.PENDING])), None)
+                    if corrected is not None:
+                        # A corrected version of a card still waiting on a tap: update that card rather
+                        # than report a "duplicate" whose card shows the old content, or queue a second.
+                        if await approvals.update_args(corrected.id, req.arguments, req.preview):
+                            await audit.record(user_id, actor="agent", action="approval.updated",
+                                               detail={"approval_id": corrected.id, "tool": tool.name})
+                        else:  # lost a race with a tap: the card was not changed, so never say it was
+                            log.info("tool.approval_update_lost", tool=tool.name, approval_id=corrected.id)
+                            return ALREADY_WAITING_RESULT.format(id=corrected.id)
                     if existing is not None:
                         approval_id = existing.id
+                    elif corrected is not None:
+                        approval_id = corrected.id
                     else:
                         approval_id = await approvals.create(
                             user_id=user_id,
@@ -451,6 +503,14 @@ class ToolRegistry:
                             expires_at=utcnow() + timedelta(hours=get_settings().approval_ttl_hours),
                             tainted=tainted,
                         )
+                if corrected is not None:
+                    from mavis.policy import approvals as approval_flow  # lazy: policy imports registry
+
+                    await approval_flow.send_approval_prompt(user_id, {"approval_id": corrected.id})
+                    log.info("tool.approval_updated", tool=tool.name, approval_id=corrected.id)
+                    shown = wrap_untrusted(truncate(req.preview, _PREVIEW_IN_RESULT_CHARS),
+                                           "approval_preview")
+                    return UPDATED_WAITING_RESULT.format(id=corrected.id, shown=shown)
                 log.info("tool.queued_for_approval", tool=tool.name, approval_id=approval_id)
                 run = current_run.get()
                 if run is not None and approval_id not in run.queued_approvals:

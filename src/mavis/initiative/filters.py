@@ -5,12 +5,14 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import structlog
 
 from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType
 from mavis.domain.loops import Loop
+from mavis.domain.timefmt import due_label
 from mavis.memory import embeddings
 
 log = structlog.get_logger()
@@ -41,7 +43,8 @@ class FilterResult:
     extra: str = ""
 
 
-def summarize_event(event: Event) -> str:
+def summarize_event(event: Event, tz: str = "UTC", now: datetime | None = None) -> str:
+    """The event in one line. A loop's due time is rendered relative to `now` in the user's timezone."""
     p = event.payload
     match event.type:
         case EventType.EMAIL_RECEIVED:
@@ -58,10 +61,18 @@ def summarize_event(event: Event) -> str:
         case EventType.TASK_COMPLETED | EventType.TASK_PROGRESS:
             text = f"Task '{p.get('goal', '')}': {p.get('summary', '')}"
         case EventType.LOOP_CREATED | EventType.LOOP_UPDATED:
-            text = f"Open loop {p.get('kind', '')} '{p.get('title', '')}' due {p.get('due_at') or 'unknown'}"
+            text = f"Open loop {p.get('kind', '')} '{p.get('title', '')}' {_due(p.get('due_at'), tz, now)}"
         case _:
             text = f"{event.type.value}: {p.get('reason', '')}"
     return text[:MAX_SUMMARY]
+
+
+def _due(raw: object, tz: str, now: datetime | None) -> str:
+    try:
+        due = datetime.fromisoformat(str(raw)) if raw else None
+    except ValueError:
+        due = None
+    return due_label(due, now or timeutil.now(), tz)
 
 
 def watch_matches(loop: Loop, event: Event) -> bool:
@@ -92,8 +103,8 @@ class EventFilter:
             embed = _default_embed
         self._embed = embed
 
-    async def apply(self, event: Event, open_loops: list[Loop]) -> FilterResult:
-        summary = summarize_event(event)
+    async def apply(self, event: Event, open_loops: list[Loop], tz: str = "UTC") -> FilterResult:
+        summary = summarize_event(event, tz)
         if event.type not in EXTERNAL_TYPES:
             raw = event.payload.get("loop_id") or event.payload.get("id")
             try:

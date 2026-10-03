@@ -20,22 +20,22 @@ log = structlog.get_logger()
 EXPIRY_EVERY = timedelta(hours=1)
 
 
-def wakeup_event(w: Wakeup) -> Event:
+def wakeup_event(w: Wakeup, loop_trusted: bool = True) -> Event:
+    """`loop_trusted`: the linked loop's trust read at fire time. The wakeup fires untrusted when its own
+    flag says so (set when it came from third-party content) or its loop is untrusted now: least
+    trusted wins, so a loop tainted after scheduling, or marked untrusted by a migration, counts."""
+    untrusted = w.payload.get("untrusted") is True or not loop_trusted
+    payload = {**w.payload, "wakeup_id": w.id, "kind": w.kind.value, "reason": w.reason, "loop_id": w.loop_id}
+    if untrusted:
+        payload["untrusted"] = True  # deferred pings re-read it from the payload
     return Event(
         id=f"wakeup:{w.id}",
         user_id=w.user_id,
         type=EVENT_TYPE_FOR_KIND[w.kind],
         occurred_at=w.due_at,
         source="timer",
-        payload={
-            **w.payload,
-            "wakeup_id": w.id,
-            "kind": w.kind.value,
-            "reason": w.reason,
-            "loop_id": w.loop_id,
-        },
-        # set by the executor when the wakeup came from third-party content; deferred pings carry it too
-        trust=Trust.UNTRUSTED if w.payload.get("untrusted") is True else Trust.SYSTEM,
+        payload=payload,
+        trust=Trust.UNTRUSTED if untrusted else Trust.SYSTEM,
     )
 
 
@@ -47,7 +47,14 @@ class TimerRunner:
         self._last_expiry: datetime | None = None
 
     async def _publish(self, w: Wakeup) -> None:
-        await self._bus.publish(wakeup_event(w))
+        await self._bus.publish(wakeup_event(w, await self._loop_trusted(w)))
+
+    async def _loop_trusted(self, w: Wakeup) -> bool:
+        if w.loop_id is None:
+            return True
+        loops = self._loops or LoopService(self._bus)
+        loop = await loops.get(w.loop_id)
+        return loop is None or loop.trusted
 
     async def tick(self) -> int:
         if not await self._leader.acquire():

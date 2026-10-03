@@ -66,10 +66,10 @@ async def test_prefilters_skipped_when_watch_loop_matched(
     monkeypatch.setattr(hooks, "DECISION_POLICIES", [])
     ev = event(user)
 
-    async def no_match(e, loops):
+    async def no_match(e, loops, tz="UTC"):
         return FilterResult(drop=False, summary="s")
 
-    async def matched(e, loops):
+    async def matched(e, loops, tz="UTC"):
         loop = Loop(id=1, user_id=user.id, kind=LoopKind.WATCH, title="referral reply")
         return FilterResult(drop=False, summary="s", matched_loops=[loop])
 

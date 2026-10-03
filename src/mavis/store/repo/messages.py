@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
-from mavis.channels.formatting import sanitize_stored
+from mavis.channels.formatting import strip_verbatim
 from mavis.domain.messages import Role
 from mavis.store.db import Session, utcnow
 from mavis.store.models import Message, User
@@ -16,11 +16,10 @@ async def log(
 ) -> bool:
     """Append to the conversation log. Returns False if `event_id` was already logged (retry).
 
-    Assistant text is stored without em/en dashes: history is fed back to the model and would
-    otherwise teach it the very punctuation the channel strips.
+    Text is stored as written: typography is applied once, at the channel, never to history. Only the
+    verbatim render markers are dropped (they are a rendering hint, not content).
     """
-    if role is Role.ASSISTANT:
-        content = sanitize_stored(content)
+    content = strip_verbatim(content)
     now = utcnow()
     async with Session() as s:
         if event_id and await s.scalar(select(Message.id).where(Message.event_id == event_id)):

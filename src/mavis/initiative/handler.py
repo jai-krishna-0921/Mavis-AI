@@ -11,14 +11,13 @@ from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision, NotifyIntent
 from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Trust
-from mavis.domain.loops import Loop, LoopKind, LoopStatus
+from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative import hooks
 from mavis.initiative.executor import (
     DEFERRED_TTL,
     REMINDER_PREFIX,
     REMINDER_URGENCY,
-    UNTRUSTED_SOURCE_PREFIX,
     InitiativeExecutor,
 )
 from mavis.initiative.filters import EventFilter
@@ -32,7 +31,7 @@ from mavis.initiative.quiet import QuietTracker
 from mavis.initiative.reasoner import Reasoner
 from mavis.initiative.routines import Routines
 from mavis.initiative.untrusted import wrap_untrusted
-from mavis.loops.service import TRUSTED_SOURCE_PREFIXES, LoopService
+from mavis.loops.service import LoopService
 from mavis.policy.pings import normalize_dedupe_key
 from mavis.store.repo import decisions as decisions_repo
 from mavis.store.repo import users
@@ -124,7 +123,7 @@ class InitiativeHandler:
             return
 
         open_loops = await self._loops.active(user.id)
-        result = await self._filter.apply(event, open_loops)
+        result = await self._filter.apply(event, open_loops, user.timezone)
         if result.drop:
             log.info("initiative.dropped", event_id=event.id, reason=result.reason)
             return
@@ -232,9 +231,8 @@ class InitiativeHandler:
         if loop.due_at is not None:  # due date may have moved: re-plan derived signals
             derived = [WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED]
             await self._wakeups.cancel_where(loop.user_id, derived, loop_id=loop.id)
-            # last touched by third-party content: the re-planned signals fire as untrusted (capped at 4)
-            await schedule_default_signals(self._wakeups, loop,
-                                           untrusted=loop.source.startswith(UNTRUSTED_SOURCE_PREFIX))
+            # an untrusted loop's re-planned signals fire as untrusted (capped at 4)
+            await schedule_default_signals(self._wakeups, loop)
 
 
 def _quiet_after_turn(event: Event, decision: InitiativeDecision) -> InitiativeDecision:
@@ -245,7 +243,7 @@ def _quiet_after_turn(event: Event, decision: InitiativeDecision) -> InitiativeD
     can run late under LLM load.)"""
     if event.type is not EventType.LOOP_CREATED or (decision.notify is None and not decision.act):
         return decision
-    if not str(event.payload.get("source", "")).startswith(TRUSTED_SOURCE_PREFIXES):
+    if event.payload.get("origin") != LoopOrigin.CONVERSATION.value:
         return decision
     intent = decision.notify.intent[:80] if decision.notify else ""
     log.info("initiative.post_turn_suppressed", event_id=event.id, intent=intent, acts=len(decision.act))

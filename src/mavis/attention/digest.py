@@ -48,8 +48,11 @@ FEEDBACK_LABEL = {
 HEADER = "## What you've seen in their inbox (computed by you from their Gmail)"
 GUIDE = (
     "Use this to answer questions about email, updates or money. Never read out links, phone numbers or "
-    "addresses; suggest opening Gmail for details. If nothing notable is listed, say nothing new needs them."
+    "addresses; suggest opening Gmail for details. This lists only what was classified as needing them, "
+    "and routine mail exists too: to answer about a specific email, read it with mail_read (a listed "
+    "message_id works directly) or find it with mail_search before saying it is not there."
 )
+EMPTY = "No new emails were classified as needing them in this window."
 
 
 def wants_inbox(text: str) -> bool:
@@ -62,7 +65,9 @@ def _line(r: Any, tz: str) -> str:
     if r.feedback in FEEDBACK_LABEL:
         label += f"; {FEEDBACK_LABEL[r.feedback]}"
     asks = f" (asks: {r.action})" if r.action else ""
-    return f"- {when:%a %d %b %H:%M} {r.summary}{asks} [{label}]"
+    # the source id, so "read that one" is a mail_read call, not a search on a paraphrase
+    ref = f" message_id={r.message_id}" if getattr(r, "source", repo.SOURCE_MAIL) == repo.SOURCE_MAIL else ""
+    return f"- {when:%a %d %b %H:%M} {r.summary}{asks} [{label}]{ref}"
 
 
 def render_digest(rows: list[Any], hits: list[Any], pending: int, tz: str, hours: int) -> str:
@@ -83,7 +88,7 @@ def render_digest(rows: list[Any], hits: list[Any], pending: int, tz: str, hours
     )
     if pending:
         counts += f" Arrived but not read yet: {pending}."
-    body = wrap_untrusted("\n".join(lines), "inbox_digest") if lines else "(nothing notable)"
+    body = wrap_untrusted("\n".join(lines), "inbox_digest") if lines else EMPTY  # a fact, not a verdict
     return f"{HEADER}\n{counts}\n{body}\n{GUIDE}"
 
 

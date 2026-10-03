@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision, NotifyIntent
 from mavis.domain.events import Event, EventType, Trust
-from mavis.domain.loops import LoopKind, LoopUpsert
+from mavis.domain.loops import LoopKind, LoopOrigin, LoopUpsert
 from mavis.initiative.wiring import build_initiative
 
 
@@ -308,7 +308,7 @@ async def test_retry_reuses_the_persisted_decision(user, clock, recording_bus, f
 
 async def _chat_loop(init, user, recording_bus):
     data = LoopUpsert(kind=LoopKind.COMMITMENT, title="Interview with Jawahar", due_at=ist(28, 10, 0),
-                      importance=5, source="tg:update:5")
+                      importance=5, source="tg:update:5", trust=Trust.USER, origin=LoopOrigin.CONVERSATION)
     loop = await init.loops.upsert(user.id, data)
     [created] = recording_bus.take()
     return loop, created
@@ -373,7 +373,8 @@ async def test_loop_from_non_chat_source_may_ping(user, clock, recording_bus, fa
     init = build(recording_bus, fake_memory)
     clock.set(ist(27, 20, 0))
     await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Board review",
-                                                due_at=ist(28, 10, 0), importance=5, source="gmail:msg:1"))
+                                                due_at=ist(28, 10, 0), importance=5, source="gmail:msg:1",
+                                                origin=LoopOrigin.REASONER))
     [created] = recording_bus.take()
     calls = spy_notify(init, monkeypatch)
     fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="prep reminder")))
@@ -746,7 +747,7 @@ async def test_reschedule_email_cannot_produce_a_trusted_urgent_ping(user, clock
     clock.set(ist(27, 20, 0))
     due = ist(28, 15, 0)
     data = LoopUpsert(kind=LoopKind.COMMITMENT, title="Interview with Jawahar", due_at=due, importance=4,
-                      source="tg:update:1")
+                      source="tg:update:1", trust=Trust.USER)
     loop = await init.loops.upsert(user.id, data)
     recording_bus.take()
     email = Event(id="gmail:msg:resched", user_id=user.id, type=EventType.EMAIL_RECEIVED,
@@ -759,7 +760,7 @@ async def test_reschedule_email_cannot_produce_a_trusted_urgent_ping(user, clock
     await init.handler.handle(email)
     after = await init.loops.get(loop.id)
     assert after.due_at == due and after.importance == 4  # email cannot move or upgrade the loop
-    assert after.entities == ["HR"] and after.source.startswith("untrusted:")
+    assert after.entities == ["HR"] and not after.trusted  # the email's content taints the loop
     for event in recording_bus.take():
         await init.handler.handle(event)  # LOOP_UPDATED re-plans the derived signals
     [prep] = await init.wakeups.pending(user.id, WakeupKind.EVENT_STARTING)

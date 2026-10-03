@@ -7,6 +7,8 @@ exception into a {"type": "connect"} interrupt that ConnectFlow (Task 8) answers
 
 from __future__ import annotations
 
+import functools
+import inspect
 from collections.abc import Callable
 from typing import Any
 
@@ -14,6 +16,7 @@ from pydantic import BaseModel
 
 from mavis.domain.errors import ActionFailed, ConnectionRequired, IntegrationError
 from mavis.domain.integrations import ToolResult, UserRef
+from mavis.domain.localtime import provider_args
 from mavis.tools.integrations.actions import (
     ACTIONS,
     CAPABILITY_PURPOSE,
@@ -50,7 +53,7 @@ async def call_action(
 ) -> ToolResult:
     spec = ACTIONS[action]
     await cache.ensure(ctx.user_id, spec.capability, CAPABILITY_PURPOSE[spec.capability])
-    result = await provider.execute(UserRef(user_id=ctx.user_id), action, args.model_dump(mode="json"))
+    result = await provider.execute(UserRef(user_id=ctx.user_id), action, provider_args(args))
     if not result.ok and not await cache.is_active(ctx.user_id, spec.capability, fresh=True):
         raise ConnectionRequired(spec.capability, REVOKED_REASON, revoked=True)
     return result
@@ -108,7 +111,10 @@ def _make_tool(spec: ActionSpec) -> MavisTool:
         localized = localize(args, ctx.timezone)
         if custom is not None:
             return await custom(ctx, localized)
-        return await gated(ctx, spec.name, localized, render=render)
+        bound = render
+        if render is not None and "args" in inspect.signature(render).parameters:
+            bound = functools.partial(render, args=localized)  # renderers that echo the request
+        return await gated(ctx, spec.name, localized, render=bound)
 
     def preview(args: BaseModel, ctx: ToolContext) -> str:
         localized = localize(args, ctx.timezone)
@@ -132,6 +138,9 @@ def _make_tool(spec: ActionSpec) -> MavisTool:
         priority=spec.priority,
         on_taint=TaintPolicy.APPROVE if spec.taint_approve else TaintPolicy.ALLOW,
         prepare=workspace_tools.PREPARES.get(spec.name),
+        identity=spec.identity,
+        target=spec.target,
+        action_time=spec.action_time,
     )
 
 

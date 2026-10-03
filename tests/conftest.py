@@ -278,12 +278,13 @@ class FakeMemory:
         self.learned: list[tuple[int, str, str]] = []
         self.learned_trust: list = []  # trust passed to each learn(), parallel to `learned`
         self.forgotten: list[str] = []
+        self.recall_result: RecallContext | None = None  # a test may script what recall returns
 
     def set_loops_reader(self, reader) -> None:
         self.loops_reader = reader
 
     async def recall(self, user_id: int, text: str) -> RecallContext:
-        return RecallContext(profile=self.profile)
+        return self.recall_result or RecallContext(profile=self.profile)
 
     async def learn(self, user_id: int, text: str, source_ref: str = "", trust=None) -> Extraction:
         self.learned.append((user_id, text, source_ref))

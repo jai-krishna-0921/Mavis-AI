@@ -10,7 +10,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from mavis.channels.formatting import sanitize_line
 from mavis.config import get_settings
 
 _FENCE = re.compile(r"^\s*```")
@@ -19,15 +18,17 @@ PERSONA = """You are {agent}, a personal assistant who lives in {who}'s chat. \
 Think of yourself as a sharp, warm friend with a phone and a laptop who has their back.
 
 How you talk
-- Casual, warm, a little witty. Short chat bubbles, not essays. Separate bubbles with a blank line; \
-1 to 3 bubbles per reply, each under 400 characters unless you're delivering content they asked for.
+- Casual, warm, a little witty. Short chat bubbles, not essays, each under 400 characters unless you're \
+delivering content they asked for. A reply is one bubble: paragraphs and lists stay together in it. \
+Only when you really mean separate messages, put a line containing just --- between them (at most 3 bubbles).
 - Mirror their tone and energy. If they swear, you can swear back, lightly. If they're down, slow down \
 and be kind before being useful.
 - When a time or day is ambiguous, ask one clear question instead of guessing. Just after midnight, \
 "tomorrow" could mean two different days.
-- Formatting stays light. Never use em dashes or en dashes; use a comma, a period or a new sentence instead. \
-Short bubbles, an occasional **bold** word for emphasis, and simple "- " bullets only when you are actually \
-listing things. No headings, no tables.
+- Formatting stays light. Never use dashes as punctuation: put a colon after a label ("Tip: ..."), write \
+ranges with "to" ("3 to 4 PM"), and use a comma or a new sentence between clauses. Short bubbles, an \
+occasional **bold** word for emphasis, and simple "- " bullets only when you are actually listing things. \
+No headings, no tables.
 - Gently nudge them toward what they said they want. Celebrate wins, follow up on things that matter.
 
 What you never do
@@ -175,12 +176,15 @@ def system_prompt(
     return f"{prompt}\n\n{context.strip()}" if context.strip() else prompt
 
 
-def split_bubbles(text: str, max_bubbles: int = 3) -> list[str]:
-    """Split a reply on blank lines into at most `max_bubbles` chat bubbles (extras merge into the last).
+BUBBLE_BREAK = "---"  # a line holding only this is the model's explicit "new bubble" marker
 
-    Telegram-safe: a ``` code block is never cut across bubbles (an unclosed fence runs to the end),
-    and em or en dashes are rewritten outside code. Over-long bubbles are left to the channel's
-    own 4096-char splitter.
+
+def split_bubbles(text: str, max_bubbles: int = 3) -> list[str]:
+    """Split a reply into chat bubbles only where the model put an explicit BUBBLE_BREAK line, at most
+    `max_bubbles` (extras merge into the last). Paragraphs and lists stay in one bubble.
+
+    Text is not rewritten here: typography is applied once, at the channel. A ``` code block is never
+    cut (a marker inside one is content). Over-long bubbles are left to the channel's splitter.
     """
     parts: list[str] = []
     current: list[str] = []
@@ -189,14 +193,12 @@ def split_bubbles(text: str, max_bubbles: int = 3) -> list[str]:
         if _FENCE.match(line):
             in_fence = not in_fence
             current.append(line)
-        elif in_fence:
-            current.append(line)
-        elif not line.strip():
-            if current:
+        elif not in_fence and line.strip() == BUBBLE_BREAK:
+            if "\n".join(current).strip():
                 parts.append("\n".join(current).strip())
-                current = []
+            current = []
         else:
-            current.append(sanitize_line(line))
+            current.append(line)
     if current:
         parts.append("\n".join(current).strip())
     parts = [p for p in parts if p]

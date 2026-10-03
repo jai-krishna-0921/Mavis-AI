@@ -18,7 +18,7 @@ async def test_update_flows_to_exactly_one_reply(db, bus, channel, fake_llm) -> 
     from mavis.agents.simple_turn import run_turn
 
     register_event_handler(EventType.USER_MESSAGE, run_turn)
-    fake_llm.push_text("Hey Jai!\n\nWhat's up?")
+    fake_llm.push_text("Hey Jai!\n---\nWhat's up?")
     worker = asyncio.create_task(run_worker(bus, "test"))
     try:
         assert await ingest_update(_update(), bus) is True

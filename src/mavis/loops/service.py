@@ -13,8 +13,8 @@ from sqlalchemy.exc import NoResultFound
 
 from mavis.bus.base import EventBus
 from mavis.domain import timeutil
-from mavis.domain.events import Event, EventType, Trust
-from mavis.domain.loops import Loop, LoopKind, LoopStatus, LoopUpsert
+from mavis.domain.events import Event, EventType, Provenance, Trust
+from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.memory import Extraction
 from mavis.domain.messages import Role
 from mavis.store.repo import loops as repo
@@ -27,10 +27,6 @@ MIN_EVENT_IMPORTANCE = 3
 TITLE_MAX = 300
 REOPEN_GUARD = timedelta(days=7)
 FOLLOW_UP_MATCH = timedelta(minutes=2)  # follow-up logged, then the loop marked AWAITING right after
-# Loops are created only from conversation turns the user typed (spec 8.3). LEARN's source_ref is the
-# originating event id: "tg:update:N" (Telegram) or "cli:<uuid>" (`mavis chat`). Anything else
-# (email, web, task output) is untrusted data and never creates loops here.
-TRUSTED_SOURCE_PREFIXES = ("tg:", "chat:", "local:", "cli:")
 
 
 def _sort(loops: list[Loop]) -> list[Loop]:
@@ -145,7 +141,9 @@ class LoopService:
             occurred_at=timeutil.now(),
             source="agent",
             payload=loop.model_dump(mode="json"),
-            trust=Trust.SYSTEM,
+            # the event carries the loop's provenance: a loop derived from third-party content is
+            # reasoned about as untrusted (wrapped, no new work, capped urgency, untrusted wakeups)
+            trust=Trust.SYSTEM if loop.trusted else Trust.UNTRUSTED,
         )
         await self._bus.publish(event)
 
@@ -172,13 +170,24 @@ async def _upsert_unless_closed(service: LoopService, user_id: int, data: LoopUp
     await service.upsert(user_id, data)
 
 
+def extraction_trust(prov: Provenance) -> Trust:
+    """Only the user's own words, in a turn that saw no third-party content, are trusted."""
+    return Trust.USER if prov.trust is Trust.USER else Trust.UNTRUSTED
+
+
 async def loops_from_extraction(
-    service: LoopService, user_id: int, extraction: Extraction, source_ref: str
+    service: LoopService, user_id: int, extraction: Extraction, prov: Provenance
 ) -> None:
-    """MemoryService.on_extraction hook: turn extracted loops/events into open loops."""
-    if not source_ref.startswith(TRUSTED_SOURCE_PREFIXES):
-        log.info("loops.untrusted_source_skipped", source_ref=source_ref[:40])
+    """MemoryService.on_extraction hook: turn extracted loops/events into open loops.
+
+    Loops come only from conversation turns (spec 8.3); an ingested document (first sync, signals)
+    never creates one. A turn that saw untrusted content (a tainted reply, tool output) yields
+    untrusted loops, and that trust follows them everywhere (events, wakeups, briefs, recall)."""
+    if not prov.conversation:
+        log.info("loops.non_conversation_skipped", source_ref=prov.source_ref[:40])
         return
+    trust = extraction_trust(prov)
+    source_ref = prov.source_ref
     try:
         user = await users.get(user_id)
     except NoResultFound:
@@ -200,6 +209,8 @@ async def loops_from_extraction(
                 entities=draft.entities,
                 importance=draft.importance,
                 source=source_ref,
+                trust=trust,
+                origin=LoopOrigin.CONVERSATION,
             ),
         )
     for ev in extraction.events:
@@ -215,5 +226,7 @@ async def loops_from_extraction(
                 entities=ev.with_people,
                 importance=ev.importance,
                 source=source_ref,
+                trust=trust,
+                origin=LoopOrigin.CONVERSATION,
             ),
         )

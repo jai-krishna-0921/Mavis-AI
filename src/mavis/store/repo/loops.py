@@ -9,7 +9,8 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from mavis.domain import timeutil
-from mavis.domain.loops import Loop, LoopKind, LoopStatus, LoopUpsert, WatchSpec
+from mavis.domain.events import Trust
+from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus, LoopUpsert, WatchSpec, least_trusted
 from mavis.store.db import Session
 from mavis.store.models import LoopRow
 
@@ -31,7 +32,29 @@ def to_domain(r: LoopRow) -> Loop:
         watch=WatchSpec.model_validate(r.watch) if r.watch else None,
         source=r.source,
         version=r.version or 1,
+        trust=_trust(r.trust),
+        origin=_origin(r.origin),
     )
+
+
+def _trust(raw: str | None) -> Trust:
+    try:
+        return Trust(raw) if raw else Trust.UNTRUSTED
+    except ValueError:
+        return Trust.UNTRUSTED
+
+
+def _origin(raw: str | None) -> LoopOrigin:
+    try:
+        return LoopOrigin(raw) if raw else LoopOrigin.UNKNOWN
+    except ValueError:
+        return LoopOrigin.UNKNOWN
+
+
+def _content(loop: Loop) -> tuple:
+    """What a loop says (as opposed to where it is in its lifecycle): a write that changes this carries
+    its writer's trust into the loop."""
+    return loop.kind, loop.title, loop.due_at, loop.importance, tuple(loop.entities), loop.watch
 
 
 def _watch_json(data: LoopUpsert) -> dict | None:
@@ -51,6 +74,8 @@ async def insert(user_id: int, data: LoopUpsert) -> Loop:
             importance=data.importance,
             watch=_watch_json(data),
             source=data.source,
+            trust=data.trust.value,
+            origin=data.origin.value,
             created_at=now,
             updated_at=now,
         )
@@ -67,24 +92,27 @@ async def update(user_id: int, loop_id: int, data: LoopUpsert) -> tuple[Loop, bo
         if row is None or row.user_id != user_id:
             return None
         before = to_domain(row)
-        status = data.status.value
-        if row.status == LoopStatus.AWAITING_REPLY.value and data.status is LoopStatus.OPEN:
-            status = row.status  # OPEN is just the upsert default: an update must not reopen it silently
-        row.kind, row.title, row.status, row.importance = (
-            data.kind.value,
-            data.title,
-            status,
-            data.importance,
-        )
-        if data.due_at is not None:
+        given = data.model_fields_set  # partial update: what the writer did not set stays unchanged
+        if "kind" in given and data.kind is not None:
+            row.kind = data.kind.value
+        if "title" in given and data.title:
+            row.title = data.title
+        if "status" in given:
+            row.status = data.status.value
+        if "importance" in given:
+            row.importance = data.importance
+        if "due_at" in given and data.due_at is not None:
             row.due_at = timeutil.ensure_utc(data.due_at)
-        merged = list(row.entities or [])
-        merged += [e for e in data.entities if e.casefold() not in {m.casefold() for m in merged}]
-        row.entities = merged
-        if data.watch is not None:
+        if "entities" in given:
+            merged = list(row.entities or [])
+            merged += [e for e in data.entities if e.casefold() not in {m.casefold() for m in merged}]
+            row.entities = merged
+        if "watch" in given and data.watch is not None:
             row.watch = _watch_json(data)
         if data.source:
             row.source = data.source
+        if _content(to_domain(row)) != _content(before):  # status-only writes keep the loop's trust
+            row.trust = least_trusted(before.trust, data.trust).value
         changed = to_domain(row) != before
         if changed:
             row.updated_at = timeutil.now()
@@ -234,6 +262,21 @@ async def open_user_ids() -> list[int]:
             select(LoopRow.user_id).where(LoopRow.status.in_(_EXPIRY_STATUSES)).distinct()
         )
         return list(rows)
+
+
+async def list_live(user_id: int) -> list[Loop]:
+    """OPEN and AWAITING loops: everything still live."""
+    live = (LoopStatus.OPEN.value, LoopStatus.AWAITING_REPLY.value)
+    async with Session() as s:
+        rows = await s.scalars(select(LoopRow).where(LoopRow.user_id == user_id, LoopRow.status.in_(live)))
+        return [to_domain(r) for r in rows]
+
+
+async def list_done_since(user_id: int, since: datetime) -> list[Loop]:
+    async with Session() as s:
+        rows = await s.scalars(select(LoopRow).where(
+            LoopRow.user_id == user_id, LoopRow.status == LoopStatus.DONE.value, LoopRow.updated_at >= since))
+        return [to_domain(r) for r in rows]
 
 
 async def list_awaiting(user_id: int, since: datetime) -> list[tuple[Loop, datetime]]:
