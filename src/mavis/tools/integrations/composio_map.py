@@ -144,6 +144,45 @@ def _tasks_list(a: Any) -> dict[str, Any]:
     return out
 
 
+def _due(day: Any) -> str:
+    return f"{day.isoformat()}T00:00:00.000Z"  # Tasks keeps the date only
+
+
+def _folder(a: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {"folder_name": a.name}
+    if a.parent_id:
+        out["parent_id"] = a.parent_id
+    return out
+
+
+def _move(a: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {"file_id": a.file_id, "add_parents": a.to_folder_id}
+    if a.from_folder_id:
+        out["remove_parents"] = a.from_folder_id
+    return out
+
+
+def _task_add(a: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {"tasklist_id": TASKLIST, "title": a.title, "status": "needsAction"}
+    if a.notes:
+        out["notes"] = a.notes
+    if a.due is not None:
+        out["due"] = _due(a.due)
+    return out
+
+
+def _task_update(a: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "tasklist_id": TASKLIST, "task_id": a.task_id, "title": a.title,
+        "status": "completed" if a.done else "needsAction",
+    }
+    if a.notes is not None:
+        out["notes"] = a.notes
+    if a.due is not None:
+        out["due"] = _due(a.due)
+    return out
+
+
 COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
     "mail.search": SlugMapping(
         "GMAIL_FETCH_EMAILS", lambda a: {"query": a.query, "max_results": a.max_results}
@@ -192,6 +231,29 @@ COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
         "GOOGLESUPER_GET_TRANSCRIPTS_BY_CONFERENCE_RECORD_ID",
         lambda a: {"conferenceRecord_id": a.conference_record_id},
     ),
+    "drive.create_folder": SlugMapping("GOOGLESUPER_CREATE_FOLDER", _folder),
+    "drive.move": SlugMapping("GOOGLESUPER_MOVE_FILE", _move),
+    "drive.share": SlugMapping(
+        "GOOGLESUPER_ADD_FILE_SHARING_PREFERENCE",
+        lambda a: {"file_id": a.file_id, "role": a.role, "type": "user", "email_address": a.email},
+    ),
+    "docs.create": SlugMapping(
+        "GOOGLESUPER_CREATE_DOCUMENT_MARKDOWN", lambda a: {"title": a.title, "markdown_text": a.markdown}
+    ),
+    "docs.comment": SlugMapping(
+        "GOOGLESUPER_CREATE_COMMENT", lambda a: {"file_id": a.file_id, "content": a.content}
+    ),
+    "sheets.create": SlugMapping("GOOGLESUPER_CREATE_GOOGLE_SHEET1", lambda a: {"title": a.title}),
+    "tasks.add": SlugMapping("GOOGLESUPER_INSERT_TASK", _task_add),
+    "tasks.complete": SlugMapping(
+        "GOOGLESUPER_PATCH_TASK",
+        lambda a: {"tasklist_id": TASKLIST, "task_id": a.task_id, "title": a.title, "status": "completed"},
+    ),
+    "tasks.update": SlugMapping("GOOGLESUPER_PATCH_TASK", _task_update),
+    "tasks.delete": SlugMapping(
+        "GOOGLESUPER_DELETE_TASK", lambda a: {"tasklist_id": TASKLIST, "task_id": a.task_id}
+    ),
+    "meet.create": SlugMapping("GOOGLESUPER_CREATE_MEET", lambda a: {}),
     "drive.meta": SlugMapping("GOOGLESUPER_GET_FILE_METADATA", lambda a: {"fileId": a.file_id}),
     "drive.permissions": SlugMapping("GOOGLESUPER_LIST_PERMISSIONS", lambda a: {"fileId": a.file_id}),
     "drive.download": SlugMapping("GOOGLESUPER_DOWNLOAD_FILE", _download),

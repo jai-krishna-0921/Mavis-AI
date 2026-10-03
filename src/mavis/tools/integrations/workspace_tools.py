@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
+import httpcore
 import httpx
 from pydantic import BaseModel
 
@@ -19,7 +20,8 @@ from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connections import ConnectionCache
 from mavis.tools.integrations.normalize import pick
 from mavis.tools.integrations.tools import action_data
-from mavis.tools.integrations.workspace_render import clip_body, kind_of, one_line
+from mavis.tools.integrations.workspace_guard import created_ids, record_created
+from mavis.tools.integrations.workspace_render import clip_body, kind_of, one_line, render_created
 from mavis.tools.registry import PrepareFn, ToolContext
 
 CustomFn = Callable[[ToolContext, BaseModel], Awaitable[str]]
@@ -60,7 +62,8 @@ async def drive_read(
                            reason="the download returned no file")
     try:
         text = await (fetch or web.fetch_file)(url)
-    except (ValueError, httpx.HTTPError, TimeoutError) as exc:
+    except (ValueError, httpx.HTTPError, httpcore.NetworkError, httpcore.TimeoutException,
+            httpcore.ProtocolError, TimeoutError) as exc:
         raise ActionFailed(f"drive.read failed: could not fetch the file ({type(exc).__name__})",
                            reason="could not fetch the file") from None
     return f"{head}\n\n{clip_body(text) or '(empty)'}"
@@ -71,5 +74,19 @@ async def _drive_read(ctx: ToolContext, args: BaseModel) -> str:
     return await drive_read(ctx, args)
 
 
-CUSTOM_FNS: dict[str, CustomFn] = {"drive.read": _drive_read}
+def creating(
+    action: str, *, provider: IntegrationProvider | None = None, cache: ConnectionCache | None = None
+) -> CustomFn:
+    """A create action: run it, remember what this task made (allowlist source), return only the ids."""
+
+    async def fn(ctx: ToolContext, args: BaseModel) -> str:
+        data = await action_data(ctx, action, args, provider=provider, cache=cache)
+        record_created(ctx.task_id, created_ids(data))
+        return render_created(data)
+
+    return fn
+
+
+CREATES = ("drive.create_folder", "docs.create", "sheets.create", "tasks.add")
+CUSTOM_FNS: dict[str, CustomFn] = {"drive.read": _drive_read, **{name: creating(name) for name in CREATES}}
 PREPARES: dict[str, PrepareFn] = {}

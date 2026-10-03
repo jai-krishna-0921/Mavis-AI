@@ -57,6 +57,8 @@ def test_tool_sets_per_specialist():
         # Google Workspace reads (spec 2026-10-03 section 4.4); registered only when the flag is on
         "drive.search", "drive.list_recent", "drive.read", "docs.read", "sheets.find", "sheets.read",
         "tasks.list", "contacts.search", "meet.transcript",
+        # and the three chat writes (spec 4.3)
+        "docs.create", "tasks.add", "tasks.complete",
     }
 
 

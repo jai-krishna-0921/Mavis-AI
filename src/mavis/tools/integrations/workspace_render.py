@@ -220,6 +220,17 @@ def render_created(data: Any) -> str:
     return "Done. " + json.dumps(found, ensure_ascii=False) if found else "Done."
 
 
+MEET_PREFIX = "https://meet.google.com/"
+
+
+def render_meet(data: Any) -> str:
+    """The one link this module ever returns: the Meet the user just asked for, only if it is Google's."""
+    uri = pick(data, "response_data.meetingUri", "meetingUri", "data.response_data.meetingUri")
+    if isinstance(uri, str) and uri.startswith(MEET_PREFIX):
+        return f"Meet link: {uri}"
+    return "Created the Meet, but Google returned no link."
+
+
 RENDERERS = {
     "drive.search": render_files,
     "drive.list_recent": render_files,
@@ -229,4 +240,11 @@ RENDERERS = {
     "tasks.list": render_tasks,
     "contacts.search": render_contacts,
     "meet.transcript": render_transcripts,
+    "drive.move": render_created,
+    "drive.share": render_created,
+    "docs.comment": render_created,
+    "tasks.complete": render_created,
+    "tasks.update": render_created,
+    "tasks.delete": render_created,
+    "meet.create": render_meet,
 }
