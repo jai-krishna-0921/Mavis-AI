@@ -40,11 +40,13 @@ from mavis.tools.integrations.normalize import pick
 from mavis.tools.integrations.tools import action_data
 from mavis.tools.integrations.workspace_guard import (
     ESCALATIONS,
+    FILE_TARGETS,
     TASK_UNKNOWN,
     VERIFIERS,
     TaskFacts,
     created_ids,
     forget_file,
+    guarded,
     record_created,
     remember_task,
     task_facts,
@@ -301,4 +303,8 @@ CUSTOM_FNS: dict[str, CustomFn] = {
     "tasks.complete": _tasks_complete, "tasks.update": _tasks_update,
     **{name: creating(name) for name in CREATES},
 }
-PREPARES: dict[str, PrepareFn] = {**ESCALATIONS, **VERIFIERS}
+# Every file-changing or sharing action is allowlisted in tainted tasks (spec 4.3); three also escalate.
+PREPARES: dict[str, PrepareFn] = {
+    **VERIFIERS,
+    **{name: guarded(name, ESCALATIONS.get(name)) for name in FILE_TARGETS},
+}
