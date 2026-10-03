@@ -7,7 +7,6 @@ orchestrator's approval_gate performs the action.
 
 from __future__ import annotations
 
-import zlib
 from datetime import timedelta
 
 import structlog
@@ -46,7 +45,7 @@ async def send_approval_prompt(user_id: int, payload: dict) -> None:
         return
     text = f"Ready when you are. Want me to go ahead?\n\n{approval.preview}"
     await say(user_id, text, approval_buttons(approval.id),
-              dedupe_key=f"approval:{approval.id}:{zlib.crc32(approval.preview.encode())}")
+              dedupe_key=f"approval:{approval.id}:{int(utcnow().timestamp() * 1000)}")
     if await approvals.mark_prompted(approval.id):
         ttl = timedelta(hours=get_settings().approval_ttl_hours)
         now = utcnow()

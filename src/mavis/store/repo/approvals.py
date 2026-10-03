@@ -198,6 +198,39 @@ async def executed_for_task(task_id: int) -> list[PendingApproval]:
         return list(rows)
 
 
+async def fail_unstarted_for_task(task_id: int, note: str) -> int:
+    """Close approvals that can never run now: RESOLVING (decision never applied) and EXECUTED rows
+    that were claimed but never started. FAILED, with `note` as the result."""
+    async with Session() as s:
+        res = await s.execute(
+            update(PendingApproval)
+            .where(
+                PendingApproval.task_id == task_id,
+                (PendingApproval.status == ApprovalStatus.RESOLVING.value)
+                | ((PendingApproval.status == ApprovalStatus.EXECUTED.value)
+                   & PendingApproval.started_at.is_(None)
+                   & PendingApproval.resolved_at.is_(None)),
+            )
+            .values(status=ApprovalStatus.FAILED.value, result=note, resolved_at=utcnow())
+        )
+        await s.commit()
+        return res.rowcount or 0
+
+
+async def may_have_run_for_task(task_id: int) -> list[PendingApproval]:
+    """EXECUTED and started but never finished: the action may or may not have gone through."""
+    async with Session() as s:
+        rows = await s.scalars(
+            select(PendingApproval)
+            .where(PendingApproval.task_id == task_id,
+                   PendingApproval.status == ApprovalStatus.EXECUTED.value,
+                   PendingApproval.started_at.is_not(None),
+                   PendingApproval.resolved_at.is_(None))
+            .order_by(PendingApproval.id)
+        )
+        return list(rows)
+
+
 _REJECTABLE = [ApprovalStatus.PENDING.value, ApprovalStatus.AWAITING_EDIT.value]
 
 
