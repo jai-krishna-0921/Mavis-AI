@@ -335,15 +335,46 @@ async def test_loop_from_just_answered_turn_does_not_ping(user, clock, recording
     assert {WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED} <= kinds  # still tracked and scheduled
 
 
-async def test_loop_from_old_turn_may_ping(user, clock, recording_bus, fake_memory, fake_llm, monkeypatch):
+async def test_loop_from_chat_never_pings_at_creation_even_late(user, clock, recording_bus, fake_memory,
+                                                                 fake_llm, monkeypatch):
     from mavis.domain.messages import Role
     from mavis.store.repo import messages
 
     init = build(recording_bus, fake_memory)
     clock.set(ist(27, 20, 0))
     await messages.log(user.id, Role.USER, "interview with Jawahar tomorrow at 10")
-    clock.advance(minutes=30)  # e.g. the LEARN job ran late
+    clock.advance(minutes=30)  # e.g. the LEARN job ran late under LLM load
     loop, created = await _chat_loop(init, user, recording_bus)
+    calls = spy_notify(init, monkeypatch)
+    fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="prep reminder")))
+    await init.handler.handle(created)
+    assert calls == []
+
+
+async def test_suppression_is_persisted_so_a_late_retry_stays_quiet(user, clock, recording_bus, fake_memory,
+                                                                     fake_llm, monkeypatch):
+    from mavis.store.repo import decisions
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 20, 0))
+    loop, created = await _chat_loop(init, user, recording_bus)
+    calls = spy_notify(init, monkeypatch)
+    offer = NotifyIntent(urgency=4, intent="Offer a mock interview")
+    fake_llm.push_structured(InitiativeDecision(notify=offer))
+    await init.handler.handle(created)
+    assert (await decisions.get(created.id)).notify is None
+    clock.advance(minutes=15)
+    await init.handler.handle(created)  # redelivery: reuses the stored, already-quiet decision
+    assert calls == []
+
+
+async def test_loop_from_non_chat_source_may_ping(user, clock, recording_bus, fake_memory, fake_llm,
+                                                  monkeypatch):
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 20, 0))
+    await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Board review",
+                                                due_at=ist(28, 10, 0), importance=5, source="gmail:msg:1"))
+    [created] = recording_bus.take()
     calls = spy_notify(init, monkeypatch)
     fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="prep reminder")))
     await init.handler.handle(created)
