@@ -25,10 +25,15 @@ class WakeupService:
         payload: dict[str, Any] | None = None,
         dedupe_key: str | None = None,
         scale: bool = True,
+        reminder: bool = False,
     ) -> int:
+        """`reminder=True` marks a reminder the user asked for (the wake_me tool): it is delivered with
+        fixed text and never dropped for the ping budget. Only this flag can set it, not `payload`."""
         kind = WakeupKind(kind)
         if clash := RESERVED_PAYLOAD_KEYS & set(payload or {}):
             raise ValueError(f"wakeup payload may not set reserved keys: {sorted(clash)}")
+        if reminder:
+            payload = {**(payload or {}), "reminder": True}
         at = timeutil.ensure_utc(at)
         now = timeutil.now()
         if scale and at > now:

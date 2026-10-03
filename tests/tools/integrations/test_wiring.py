@@ -273,3 +273,30 @@ async def test_cancel_connection_checks_only_touches_that_pending(db, user, cloc
     await wiring.cancel_connection_checks(user.id, 5)
     assert await wiring.connection_checks_pending(user.id, 5) is False
     assert await wiring.connection_checks_pending(user.id, 6) is True
+
+
+async def test_task_completed_with_task_id_is_delivered_not_reasoned(user, monkeypatch):
+    from mavis.initiative import task_delivery
+
+    delivered, reasoned = [], []
+
+    class _Handler:
+        async def handle(self, event):
+            reasoned.append(event)
+
+    class _Current:
+        handler = _Handler()
+
+    async def _deliver(event):
+        delivered.append(event)
+
+    monkeypatch.setattr(task_delivery, "deliver_task_result", _deliver)
+    monkeypatch.setattr(initiative_wiring, "current", lambda: _Current())
+    event = Event(id="task:3:completed", user_id=user.id, type=EventType.TASK_COMPLETED,
+                  occurred_at=timeutil.now(), source="agent", trust=Trust.SYSTEM,
+                  payload={"task_id": 3, "messages": ["done"], "origin": "user"})
+    await wiring.dispatch_task_completed(event)
+    assert delivered == [event] and reasoned == []
+    other = event.model_copy(update={"id": "x", "payload": {"note": "n"}})
+    await wiring.dispatch_task_completed(other)
+    assert reasoned == [other] and delivered == [event]

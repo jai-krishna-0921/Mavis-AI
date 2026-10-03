@@ -125,7 +125,7 @@ async def wake_me(user_id: int, args: WakeMeArgs) -> str:
     key = f"remind:{user_id}:{at:%Y%m%d%H%M}:{hashlib.sha1(args.reason.encode()).hexdigest()[:8]}"
     wakeup_id = await timers_service.WakeupService().wake_me(
         user_id, at, f"Reminder the user asked for: {args.reason}", kind="agent",
-        payload={"reminder": True}, dedupe_key=key,
+        reminder=True, dedupe_key=key,
     )
     return f"Wakeup #{wakeup_id} set for {at.isoformat()}."
 
@@ -192,7 +192,8 @@ TOOLS = [
     MavisTool("what_do_you_know", "Recall what Mavis knows about the user or a person/topic.", KnowArgs,
               RiskClass.READ, what_do_you_know, frozenset({"conversation", "knowledge"}),
               priority=50),
-    MavisTool("add_policy_rule", "Save a standing rule so a kind of action no longer needs approval.",
+    MavisTool("add_policy_rule", "Save a standing rule so a kind of action no longer needs approval "
+              "(e.g. always allow invites to a person).",
               PolicyRuleArgs, RiskClass.OUTWARD, add_policy_rule, _CONV,
               preview=lambda a: f"Always allow {a.tool} when {a.field} contains “{a.contains}”",
               priority=20),

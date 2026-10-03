@@ -99,6 +99,7 @@ def _make_tool(spec: ActionSpec) -> MavisTool:
         preview_needs_ctx=True,
         untrusted_output=True,  # email bodies and event text are third-party content
         risk_fn=risk_fn,
+        priority=spec.priority,
     )
 
 

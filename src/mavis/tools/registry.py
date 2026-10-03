@@ -39,6 +39,28 @@ log = structlog.get_logger()
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _WORD_RE = re.compile(r"[a-z0-9]+")
+# Words that say nothing about which tool fits ("the", "user", "a"): ignored by select()'s overlap score.
+_STOPWORDS = frozenset(
+    "a an and are as at be by can do for from i in is it me my of on or s so the their them they this "
+    "to up us user we what when with you your".split()
+)
+_SUFFIXES = ("ings", "ing", "ers", "er", "ed", "es", "s")
+
+
+def _terms(text: str) -> set[str]:
+    """Crude stems for select()'s overlap score: "reminder" ~ "remind", "emails" ~ "email"."""
+    out = set()
+    for word in _WORD_RE.findall(text.lower()):
+        if word in _STOPWORDS:
+            continue
+        for suffix in _SUFFIXES:
+            if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+                word = word[: -len(suffix)]
+                break
+        out.add(word[:-1] if word.endswith("e") and len(word) > 3 else word)
+    return out
+
+
 NEVER_AUTO_APPROVE = frozenset({"add_policy_rule", "forget"})
 _PREVIEW_IN_RESULT_CHARS = 500
 
@@ -193,11 +215,15 @@ class ToolRegistry:
         ]
 
     def select(
-        self, agent: str, user_id: int, query: str, limit: int = 8, always: Iterable[str] = ()
+        self, agent: str, user_id: int, query: str, limit: int = 8, always: Iterable[str] = (),
+        exclude: Iterable[str] = (),
     ) -> list[BaseTool]:
-        """Top-`limit` tools for an agent: `always` first, the rest by word overlap then priority."""
-        words = set(_WORD_RE.findall(query.lower()))
-        candidates = [t for t in self._tools.values() if agent in t.agents and self.available(t)]
+        """Top-`limit` tools for an agent: `always` first, the rest by word overlap then priority.
+        `exclude` names are never offered, whatever their agents."""
+        words = _terms(query)
+        banned = set(exclude)
+        candidates = [t for t in self._tools.values()
+                      if agent in t.agents and self.available(t) and t.name not in banned]
         pinned: list[MavisTool] = []
         for name in always:
             t = self._tools.get(name)
@@ -205,7 +231,7 @@ class ToolRegistry:
                 pinned.append(t)
 
         def score(t: MavisTool) -> tuple[int, int]:
-            vocab = set(_WORD_RE.findall(f"{t.name.replace('_', ' ')} {t.description}".lower()))
+            vocab = _terms(f"{t.name.replace('_', ' ')} {t.description}")
             return (len(words & vocab), t.priority)
 
         rest = sorted((t for t in candidates if t not in pinned), key=score, reverse=True)
@@ -252,9 +278,14 @@ class ToolRegistry:
         tool = self.get(approval.tool)
         args = tool.args_model.model_validate(approval.arguments)
         await self._require_capability(tool, approval.user_id)
-        # raise_errors: a failed approved action must surface as an exception, never as a result
-        # string, so the caller records FAILED instead of EXECUTED.
-        return await self._run(tool, approval.user_id, args, actor="user_approved", raise_errors=True)
+        # The action runs on behalf of the task that held the approval (tools may read its taint).
+        task_token = current_task_id.set(approval.task_id)
+        try:
+            # raise_errors: a failed approved action must surface as an exception, never as a result
+            # string, so the caller records FAILED instead of EXECUTED.
+            return await self._run(tool, approval.user_id, args, actor="user_approved", raise_errors=True)
+        finally:
+            current_task_id.reset(task_token)
 
     async def _run(
         self,

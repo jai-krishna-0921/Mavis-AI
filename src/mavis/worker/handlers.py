@@ -1,19 +1,26 @@
-"""Default handler wiring for this phase. Later phases add their registrations here."""
+"""Default handler wiring for the worker roles (`mavis dev`, `mavis worker`, `mavis chat`).
+
+Order matters: the initiative engine first (it claims every non-chat event type), then integrations
+(replaces CONNECTION_CHANGED / TASK_COMPLETED, sets the tool registry's policy hooks, owns the connect
+interrupt), then Phase 4 (chat turns, approval buttons, task jobs, TASK_PROGRESS, system wakeups), then
+attention last (replaces EMAIL_RECEIVED, appends to TASK_COMPLETED).
+Every call re-registers everything and appends nothing twice.
+"""
 
 from __future__ import annotations
 
-from mavis.agents import simple_turn
+from mavis.agents.wiring import register as register_phase4
 from mavis.attention.wiring import register_attention
-from mavis.domain.events import EventType
 from mavis.initiative.wiring import wire_initiative
 from mavis.memory import jobs as memory_jobs
 from mavis.tools.integrations.wiring import register_integrations
-from mavis.worker.runner import register_event_handler
+from mavis.tools.registry import get_registry
 
 
 def register_default_handlers() -> None:
-    register_event_handler(EventType.USER_MESSAGE, simple_turn.run_turn)
     memory_jobs.register()
     wire_initiative()
-    register_integrations()  # after wire_initiative: replaces its CONNECTION_CHANGED/TASK_COMPLETED
+    # after wire_initiative: replaces its CONNECTION_CHANGED/TASK_COMPLETED handlers
+    register_integrations(get_registry())
+    register_phase4()
     register_attention()  # last: replaces EMAIL_RECEIVED, appends to TASK_COMPLETED

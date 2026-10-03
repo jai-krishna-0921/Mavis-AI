@@ -368,3 +368,66 @@ async def test_resolving_a_pending_cancels_its_checks(db, provider, cache, fake_
                payload={"capability": "gmail", "state": "ACTIVE"})
     await flow.on_connection_changed(ev)
     assert cancelled == [(1, pid)]
+
+
+async def test_connection_required_interrupts_and_resumes(db, user, provider, cache, fake_bus, rec, state,
+                                                          fake_llm, monkeypatch):
+    """Index Review Focus #4 (folded P5 Task 8): missing Gmail pauses the task at connect_gate,
+    ConnectFlow prompts, and the same run resumes and succeeds once the account is ACTIVE."""
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.types import Command
+
+    from mavis.agents import orchestrator_graph as og
+    from mavis.domain.decisions import ComposedMessage
+    from mavis.domain.integrations import ToolResult
+    from mavis.domain.plans import Plan, PlanStep
+    from mavis.domain.tasks import StepOutcome
+    from mavis.store.repo import tasks
+    from mavis.tools.integrations.actions import MailSearchArgs
+    from mavis.tools.integrations.tools import gated
+    from mavis.tools.registry import ToolContext
+
+    provider.results["mail.search"] = ToolResult(ok=True, data={"messages": [{"subject": "Hi"}]})
+    activated = []
+
+    async def on_active(user_id, cap):
+        activated.append((user_id, cap))
+
+    flow = make_flow(provider, cache, fake_bus, rec, state, on_active=on_active)
+
+    async def step(plan_step, user_id, context):
+        ctx = ToolContext(user_id=user_id, timezone="Asia/Kolkata")
+        return StepOutcome(ok=True, text=await gated(ctx, "mail.search", MailSearchArgs(), provider=provider,
+                                                     cache=cache))
+
+    monkeypatch.setattr(og, "run_step_agent", step)
+    fake_llm.push_structured(Plan(goal="inbox", steps=[
+        PlanStep(id="s1", agent="research", instruction="inbox")]))
+    tid = await tasks.create(user.id, goal="anything new in my inbox?")
+    graph = og.build_orchestrator().compile(checkpointer=InMemorySaver())
+    cfg = {"configurable": {"thread_id": f"task:{tid}"}}
+
+    first = await graph.ainvoke(og.initial_state(await tasks.get(tid)), cfg)
+    [intr] = first["__interrupt__"]
+    assert intr.value["type"] == "connect" and intr.value["capability"] == "gmail"
+    await flow.on_connect_interrupt(tid, user.id, intr.value)
+    assert rec.sent[-1].buttons[0][0].url == "https://connect.example/gmail"
+    assert "check and handle your email" in rec.sent[-1].text
+    pending_id = int(provider.links[0][2].split("p=")[1])
+
+    provider.set_state(user.id, Capability.GMAIL, ConnectionState.ACTIVE)  # user tapped and consented
+    await flow.check(pending_id)
+    [changed] = [e for e in fake_bus.events if e.type is EventType.CONNECTION_CHANGED]
+    await flow.on_connection_changed(changed)
+
+    resume = next(j for j in fake_bus.jobs if j.kind is JobKind.RESUME_TASK)
+    assert resume.payload == {"task_id": str(tid), "value": {"connected": True}}
+    assert [j.payload for j in fake_bus.jobs if j.kind is JobKind.FIRST_SYNC] == [{"capability": "gmail"}]
+    assert activated == [(user.id, Capability.GMAIL)]
+    assert (await connections.get_pending(pending_id)).status == PendingStatus.ACTIVE
+    assert not any("Connected ✓" in m.text for m in rec.sent)  # the resumed task speaks instead
+
+    # single-step plan: no critic call
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["One new email: Hi."]))
+    final = await graph.ainvoke(Command(resume=resume.payload["value"]), cfg)
+    assert final["results"]["s1"]["ok"] is True and "Hi" in final["results"]["s1"]["text"]
