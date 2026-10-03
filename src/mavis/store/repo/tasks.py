@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from sqlalchemy import func, select, update
 
 from mavis.domain.tasks import TaskKind, TaskOrigin, TaskStatus
@@ -20,11 +22,13 @@ async def create(
     origin: TaskOrigin = TaskOrigin.USER,
     notify_on_complete: bool = True,
     parent_id: int | None = None,
+    tainted: bool = False,
 ) -> int:
     async with Session() as s:
         t = Task(
             user_id=user_id, goal=goal, context=context, kind=kind.value, origin=origin.value,
             notify_on_complete=notify_on_complete, parent_id=parent_id, status=TaskStatus.QUEUED.value,
+            tainted=tainted,
         )
         s.add(t)
         await s.commit()
@@ -47,14 +51,38 @@ async def set_status(task_id: int, status: TaskStatus, **fields) -> None:
         await s.commit()
 
 
-async def claim(task_id: int, from_status: TaskStatus, to_status: TaskStatus) -> bool:
-    """Atomic compare-and-set on status. True only for the caller that won."""
-    values: dict = {"status": to_status.value}
+async def claim(
+    task_id: int,
+    from_status: TaskStatus | Iterable[TaskStatus],
+    to_status: TaskStatus,
+    **fields,
+) -> bool:
+    """Atomic compare-and-set on status. True only for the caller that won.
+
+    `from_status` may be one status or several. Extra `fields` (result_text, error, ...) are written in
+    the same UPDATE, so a terminal transition can never overwrite a concurrent CANCELLED.
+    """
+    froms = [from_status] if isinstance(from_status, TaskStatus) else list(from_status)
+    values: dict = {"status": to_status.value, **fields}
     if to_status is TaskStatus.RUNNING:
-        values["started_at"] = utcnow()
+        values.setdefault("started_at", utcnow())
+    if to_status in _TERMINAL:
+        values.setdefault("finished_at", utcnow())
     async with Session() as s:
         res = await s.execute(
-            update(Task).where(Task.id == task_id, Task.status == from_status.value).values(**values)
+            update(Task).where(Task.id == task_id, Task.status.in_([f.value for f in froms])).values(**values)
+        )
+        await s.commit()
+        return (res.rowcount or 0) == 1
+
+
+async def save_plan(task_id: int, plan: dict) -> bool:
+    """Store the plan unless the task already reached a terminal status."""
+    async with Session() as s:
+        res = await s.execute(
+            update(Task)
+            .where(Task.id == task_id, Task.status.not_in([x.value for x in _TERMINAL]))
+            .values(plan=plan)
         )
         await s.commit()
         return (res.rowcount or 0) == 1

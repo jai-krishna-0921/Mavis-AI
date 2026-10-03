@@ -25,6 +25,7 @@ def upgrade() -> None:
         sa.Column("context", sa.Text, nullable=False),
         sa.Column("status", sa.String(24), nullable=False),
         sa.Column("notify_on_complete", sa.Boolean, nullable=False),
+        sa.Column("tainted", sa.Boolean, nullable=False),
         sa.Column("plan", sa.JSON, nullable=True),
         sa.Column("result_text", sa.Text, nullable=True),
         sa.Column("error", sa.Text, nullable=True),

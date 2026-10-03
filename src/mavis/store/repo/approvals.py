@@ -92,11 +92,16 @@ async def unattached_for_user(user_id: int) -> list[PendingApproval]:
 
 
 async def attach(approval_ids: Iterable[int], task_id: int) -> None:
+    """Attach still-open approvals to a task (resolved ones stay where they are)."""
     ids = list(approval_ids)
     if not ids:
         return
     async with Session() as s:
-        await s.execute(update(PendingApproval).where(PendingApproval.id.in_(ids)).values(task_id=task_id))
+        await s.execute(
+            update(PendingApproval)
+            .where(PendingApproval.id.in_(ids), PendingApproval.status.in_(_OPEN))
+            .values(task_id=task_id)
+        )
         await s.commit()
 
 
@@ -113,24 +118,44 @@ async def claim(approval_id: int, from_statuses: Iterable[ApprovalStatus], to: A
         return (res.rowcount or 0) == 1
 
 
-async def set_status(approval_id: int, status: ApprovalStatus, result: str | None = None) -> None:
+async def set_status(
+    approval_id: int,
+    status: ApprovalStatus,
+    result: str | None = None,
+    *,
+    from_statuses: Iterable[ApprovalStatus] = OPEN_APPROVAL_STATUSES,
+) -> bool:
+    """Move an approval to `status` only while it is in one of `from_statuses` (default: open).
+
+    A resolved approval is never reopened or relabelled. The executor that claimed RESOLVING to
+    EXECUTED records its outcome with `from_statuses={ApprovalStatus.EXECUTED}`.
+    """
     values: dict = {"status": status.value}
     if result is not None:
         values["result"] = result
     if status in TERMINAL_APPROVAL_STATUSES:
         values["resolved_at"] = utcnow()
     async with Session() as s:
-        await s.execute(update(PendingApproval).where(PendingApproval.id == approval_id).values(**values))
+        res = await s.execute(
+            update(PendingApproval)
+            .where(PendingApproval.id == approval_id,
+                   PendingApproval.status.in_([x.value for x in from_statuses]))
+            .values(**values)
+        )
         await s.commit()
+        return (res.rowcount or 0) == 1
 
 
-async def update_args(approval_id: int, arguments: dict, preview: str) -> None:
+async def update_args(approval_id: int, arguments: dict, preview: str) -> bool:
+    """Replace the arguments and preview and go back to PENDING, only while the approval is open."""
     async with Session() as s:
-        await s.execute(
-            update(PendingApproval).where(PendingApproval.id == approval_id)
+        res = await s.execute(
+            update(PendingApproval)
+            .where(PendingApproval.id == approval_id, PendingApproval.status.in_(_OPEN))
             .values(arguments=arguments, preview=preview, status=ApprovalStatus.PENDING.value)
         )
         await s.commit()
+        return (res.rowcount or 0) == 1
 
 
 async def mark_prompted(approval_id: int) -> bool:
@@ -145,11 +170,16 @@ async def mark_prompted(approval_id: int) -> bool:
         return (res.rowcount or 0) == 1
 
 
+_REJECTABLE = [ApprovalStatus.PENDING.value, ApprovalStatus.AWAITING_EDIT.value]
+
+
 async def reject_open_for_task(task_id: int) -> int:
+    """Reject approvals still waiting on the user. RESOLVING rows already carry a decision that is
+    being applied, so they are left for the approval gate to finish."""
     async with Session() as s:
         res = await s.execute(
             update(PendingApproval)
-            .where(PendingApproval.task_id == task_id, PendingApproval.status.in_(_OPEN))
+            .where(PendingApproval.task_id == task_id, PendingApproval.status.in_(_REJECTABLE))
             .values(status=ApprovalStatus.REJECTED.value, resolved_at=utcnow())
         )
         await s.commit()

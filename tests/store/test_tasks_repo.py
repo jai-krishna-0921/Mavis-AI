@@ -50,3 +50,33 @@ async def test_set_status_done_sets_finished_at(user):
     await tasks.set_status(tid, TaskStatus.DONE, result_text="ok")
     t = await tasks.get(tid)
     assert t.finished_at is not None and t.result_text == "ok"
+
+
+async def test_tainted_flag_persists(user):
+    assert (await tasks.get(await tasks.create(user.id, goal="a"))).tainted is False
+    assert (await tasks.get(await tasks.create(user.id, goal="b", tainted=True))).tainted is True
+
+
+async def test_terminal_claim_never_overwrites_cancel(user):
+    tid = await tasks.create(user.id, goal="a")
+    await tasks.claim(tid, TaskStatus.QUEUED, TaskStatus.RUNNING)
+    assert await tasks.cancel(user.id, tid)
+    active = (TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL)
+    assert await tasks.claim(tid, active, TaskStatus.DONE, result_text="late") is False
+    t = await tasks.get(tid)
+    assert t.status == TaskStatus.CANCELLED and t.result_text is None
+
+
+async def test_terminal_claim_writes_fields(user):
+    tid = await tasks.create(user.id, goal="a")
+    assert await tasks.claim(tid, [TaskStatus.QUEUED, TaskStatus.RUNNING], TaskStatus.DONE, result_text="ok")
+    t = await tasks.get(tid)
+    assert t.status == TaskStatus.DONE and t.result_text == "ok" and t.finished_at is not None
+
+
+async def test_save_plan_skips_finished_tasks(user):
+    tid = await tasks.create(user.id, goal="a")
+    assert await tasks.save_plan(tid, {"steps": []}) is True
+    await tasks.cancel(user.id, tid)
+    assert await tasks.save_plan(tid, {"steps": [1]}) is False
+    assert (await tasks.get(tid)).plan == {"steps": []}
