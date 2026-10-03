@@ -25,75 +25,59 @@ _TAG = re.compile(r"<(/?)(b|i|code|pre|a)(?:\s[^>]*)?>")
 _HELD = re.compile("\x02(\\d+)\x02")
 
 
-# --- dash normalisation (phase A4) ------------------------------------------------------------------
+# --- dash normalisation (phase A4, fix round 1) -----------------------------------------------------
 #
-# Applied once, at the send boundary (the channel renderer), never to stored history, tool arguments or
-# verbatim spans. A dash is rewritten by what it means in context:
-#   "Label — text" / "Label - text" at a line or bullet start  ->  "Label: text"
-#   a range of numbers, times, days or months ("15:00–16:00")  ->  "15:00 to 16:00"
-#   any other dash between clauses                              ->  ", "
+# A safety net applied once, at the send boundary (the channel renderer); the persona asks for colons
+# and "to" instead of dashes. One simple rule, no word lists:
+#   - ASCII hyphen-minus (U+002D) is never touched.
+#   - Every other Unicode dash (category Pd) is normalised:
+#       between two digits with no or thin spacing      -> "-"   (15:00–16:00 -> 15:00-16:00)
+#       right after a **bold** label at a line/bullet start -> ":"
+#       at a line start -> a "- " bullet; at a line end -> dropped
+#       with a space on either side elsewhere             -> ", "
+#       unspaced elsewhere                                -> "-"
+#   - Quoted text ("...", '...', curly quotes), inline code, URLs and verbatim spans are untouched.
 
-# Every Unicode space separator (category Zs) other than the ASCII space: no-break, narrow no-break,
-# thin, em, ideographic... The model emits U+202F around times ("3\u202fPM").
-SPACE_SEPARATORS = "\u00a0\u1680" + "".join(chr(c) for c in range(0x2000, 0x200B)) + "\u202f\u205f\u3000"
-_TO_SPACE = str.maketrans(dict.fromkeys(SPACE_SEPARATORS, " "))
-# Hyphen lookalikes read as a plain hyphen-minus (the figure dash is the phone-number dash).
-_TO_HYPHEN = str.maketrans(dict.fromkeys("\u2010\u2011\u2012\u2212\ufe63\uff0d", "-"))
-_LONG = "[\u2013\u2014\u2015\ufe58]"  # en, em, horizontal bar, small em
-_DAYS = ("monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|"
-         "sat|sun")
-_MONTHS = ("january|february|march|april|june|july|august|september|october|november|december|jan|feb|"
-           "mar|apr|may|jun|jul|aug|sept|sep|oct|nov|dec")
-_AMPM = r"(?:\s?[ap]\.?m\.?)"
-_NUM = r"\d+(?:[:.]\d{2})?" + _AMPM + "?"
-_ATOM = rf"(?:{_NUM}|(?:{_DAYS}|{_MONTHS})\.?)"
-# unmistakably a time or a day
-_STRONG = rf"(?:\d{{1,2}}:\d{{2}}{_AMPM}?|\d{{1,2}}{_AMPM}|(?:{_DAYS}|{_MONTHS})\.?)"
-# a range atom is a whole token: not glued to a word, a hyphen chain, a path, or more digits
-_EDGE_L, _EDGE_R = r"(?<![\w\-/])(?<!\d[:.])", r"(?![\w\-/]|[:.]\d)"
-# en/em dash between any two range atoms, spaced or not
-_RANGE_LONG = re.compile(rf"{_EDGE_L}({_ATOM})[ \t]*{_LONG}[ \t]*({_ATOM}){_EDGE_R}", re.IGNORECASE)
-# a spaced hyphen between range atoms ("3 PM - 4 PM", "Mon - Fri")
-_RANGE_SPACED = re.compile(rf"{_EDGE_L}({_ATOM})[ \t]+-[ \t]+({_ATOM}){_EDGE_R}", re.IGNORECASE)
-# an unspaced hyphen: only when a side is unmistakably a time or day, or both are 1-2 digit numbers,
-# and never inside a chain like 2026-10-03 or 555-0132
-_RANGE_TIGHT = re.compile(
-    rf"{_EDGE_L}(?:({_STRONG})-({_ATOM})|({_ATOM})-({_STRONG})|(\d{{1,2}})-(\d{{1,2}})){_EDGE_R}",
-    re.IGNORECASE,
+# Every Unicode dash punctuation character (category Pd) except U+002D (checked against unicodedata).
+DASHES = ("\u058a\u05be\u1400\u1806\u2010\u2011\u2012\u2013\u2014\u2015\u2e17\u2e1a\u2e3a\u2e3b\u2e40"
+          "\u2e5d\u301c\u3030\u30a0\ufe31\ufe32\ufe58\ufe63\uff0d\U00010ead")
+_PD = f"[{DASHES}]"
+_SP = r"[^\S\n]"                 # any horizontal Unicode whitespace (U+00A0, U+202F, ... included)
+_THIN = "[\u2009\u200a\u202f]"   # thin, hair and narrow no-break space
+_DIGITS = re.compile(rf"(?<=\d)({_THIN}*){_PD}({_THIN}*)(?=\d)")
+_BOLD_LABEL = re.compile(
+    rf"^({_SP}*(?:[-*+•]{_SP}+|\d+[.)]{_SP}+)?(?:\*\*[^*\n]+\*\*|__[^_\n]+__)){_SP}*{_PD}{_SP}*"
 )
-# "Label — text": an optional indent and bullet, then a short capitalised label (or **bold** one)
-_LABEL = re.compile(
-    rf"^(?P<lead>[ \t]*(?:[-*+•][ \t]+|\d+[.)][ \t]+)?)"
-    rf"(?P<label>(?:\*\*[^*\n]{{1,48}}\*\*|__[^_\n]{{1,48}}__|[A-Z][^\s.!?:;,]*(?:[ \t][^\s.!?:;,]+){{0,4}}))"
-    rf"(?:[ \t]*{_LONG}[ \t]*|[ \t]+--?[ \t]+)(?=\S)"
-)
-_LEADING = re.compile(rf"^([ \t]*){_LONG}[ \t]*")
-_TRAILING = re.compile(rf"[ \t]*{_LONG}[ \t]*$")
-_CLAUSE = re.compile(rf"[ \t]*{_LONG}[ \t]*|(?<=\S)[ \t]+--?[ \t]+(?=\S)")
-_HOLD = re.compile(r"`[^`\n]+`|https?://[^\s<>`]+|\x02\d+\x02")
+_LEADING = re.compile(rf"^({_SP}*){_PD}{_SP}+")
+_TRAILING = re.compile(rf"{_SP}*{_PD}{_SP}*$")
+_SPACED = re.compile(rf"{_SP}+{_PD}{_SP}*|{_SP}*{_PD}{_SP}+")
+_QUOTED = r"\"[^\"\n]*\"|“[^”\n]*”|(?<!\w)'[^'\n]+'(?!\w)|(?<!\w)‘[^’\n]*’(?!\w)"
+_HOLD = re.compile(rf"`[^`\n]+`|https?://[^\s<>`]+|\x02\d+\x02|{_QUOTED}")
 
 
-def _range(m: re.Match[str]) -> str:
-    a, b = (g for g in m.groups() if g is not None)
-    return f"{a} to {b}"
+def _spaced(m: re.Match[str]) -> str:
+    before = m.string[:m.start()].rstrip()
+    after = m.string[m.end():]
+    if after[:1] in (",", ".", ";", ":", "!", "?"):
+        return ""  # "wait —, what": the punctuation that follows already separates
+    if before[-1:] in (",", ".", ";", ":", "!", "?"):
+        return " "  # "end. — next": keep the sentence's own punctuation
+    return ", "
 
 
 def _normalize_plain(line: str) -> str:
-    line = line.translate(_TO_SPACE).translate(_TO_HYPHEN)
-    line = _RANGE_LONG.sub(_range, line)
-    line = _RANGE_SPACED.sub(_range, line)
-    line = _RANGE_TIGHT.sub(_range, line)
-    line = _LABEL.sub(lambda m: f"{m['lead']}{m['label']}: ", line, count=1)
+    if not any(d in line for d in DASHES):
+        return line
+    line = _DIGITS.sub(r"\1-\2", line)
+    line = _BOLD_LABEL.sub(r"\1: ", line, count=1)
     line = _LEADING.sub(r"\1- ", line)
     line = _TRAILING.sub("", line)
-    line = _CLAUSE.sub(", ", line)
-    line = re.sub(r",(?:[ \t]*,)+", ",", line)
-    line = re.sub(r"([.!?:;]),", r"\1", line)
-    return re.sub(r"(\S)[ \t]{2,}", r"\1 ", line)
+    line = _SPACED.sub(_spaced, line)
+    return re.sub(_PD, "-", line)
 
 
 def normalize_line(line: str) -> str:
-    """Context-aware dash normalisation for one line; inline code, URLs and held spans are untouched."""
+    """Dash normalisation for one line; quoted text, inline code, URLs and held spans are untouched."""
     held: list[str] = []
 
     def hold(m: re.Match[str]) -> str:

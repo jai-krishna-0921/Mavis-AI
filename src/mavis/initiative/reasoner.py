@@ -41,7 +41,7 @@ offers, plans or activities that are not there, and never offer something the us
 - If the recent conversation shows the user just talked about this and got an answer, do not notify \
 about it now: track it and schedule a wakeup for later instead.
 - When a wakeup is about one of the listed loops, set its loop_id to that loop's id (the number in brackets).
-- Write ranges with "to" ("3 to 4 PM") and a colon after a label.
+- Never use dashes as punctuation: a colon after a label, "to" for ranges ("3 to 4 PM").
 - If nothing is worth doing, leave everything empty and set ignore_reason.
 
 Now (user's local time): {local_now}. Quiet hours: {quiet}.

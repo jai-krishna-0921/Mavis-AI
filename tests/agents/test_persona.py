@@ -23,7 +23,7 @@ async def test_prompt_style_and_capabilities(db) -> None:
     user, _ = await users.get_or_create_by_chat(4, "Jai")
     prompt = system_prompt(user, NOW)
     assert "—" not in prompt and "–" not in prompt
-    assert "Put a colon after a label" in prompt and "line containing just ---" in prompt
+    assert "Never use dashes as punctuation" in prompt and "line containing just ---" in prompt
     assert "No headings, no tables" in prompt
     assert "Working today:" in prompt and "coming soon" in prompt
     for item in ("remember", "Gmail", "/connect", "/connections", "/disconnect", "morning check-in",

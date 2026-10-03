@@ -97,7 +97,7 @@ async def test_bad_request_parse_error_falls_back_to_plain() -> None:
     bot.fail_html = True
     await TelegramChannel("token", bot=bot).send_text(5, "**hi** - there")
     assert bot.parse_modes == [None]
-    assert [c for c in bot.calls if c[0] == "message"][0][2] == "hi: there"  # a bold label (phase A4)
+    assert [c for c in bot.calls if c[0] == "message"][0][2] == "hi - there"
 
 
 async def test_other_bad_request_is_not_swallowed() -> None:
