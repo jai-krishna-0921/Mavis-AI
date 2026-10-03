@@ -11,6 +11,8 @@ from mavis.store.models import PolicyRule
 
 
 async def add(user_id: int, tool: str, field: str, contains: str, description: str) -> int:
+    if not contains.strip():
+        raise ValueError("a standing rule needs non-empty match text")
     async with Session() as s:
         r = PolicyRule(user_id=user_id, tool=tool, field=field, contains=contains, description=description)
         s.add(r)

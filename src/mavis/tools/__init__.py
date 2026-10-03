@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from mavis.tools.registry import ToolRegistry
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mavis.tools.registry import ToolRegistry
 
 
 def load_builtin_tools(registry: ToolRegistry) -> None:
