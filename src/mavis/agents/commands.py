@@ -46,11 +46,11 @@ _GOOGLE_WORDS = re.compile(
 
 def capability_from_text(text: str) -> Capability | None:
     if workspace_enabled():
-        if _GOOGLE_WORDS.search(text or ""):
-            return GOOGLE_ANCHOR
-        for pattern, capability in _KEYWORDS:
-            if pattern.search(text or ""):
-                return GOOGLE_ANCHOR if is_google(capability) else capability
+        for pattern, capability in _KEYWORDS:  # Slack and Notion first: "notion docs" is Notion
+            if not is_google(capability) and pattern.search(text or ""):
+                return capability
+        if _GOOGLE_WORDS.search(text or "") or any(p.search(text or "") for p, _ in _KEYWORDS):
+            return GOOGLE_ANCHOR  # only Google keywords are left (gmail, calendar...)
         return None
     for pattern, capability in _KEYWORDS:
         if pattern.search(text or ""):
