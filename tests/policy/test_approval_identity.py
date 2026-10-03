@@ -162,7 +162,7 @@ CASES = [  # tool, executed args, exact twin (formatting only), same target but 
      {"to": ["raj@x.io"], "subject": "Contract", "body": "Hi"}),
     ("calendar_update_event",
      {"event_id": "e1", "start": "2026-10-09T15:00:00+05:30", "duration_minutes": 30},
-     {"event_id": "e1", "start": "2026-10-09T09:30:00Z", "duration_minutes": 30},
+     {"event_id": " e1", "start": "2026-10-09T15:00:00+05:30", "duration_minutes": 30},
      {"event_id": "e1", "start": "2026-10-09T17:00:00+05:30", "duration_minutes": 30},
      {"event_id": "e2", "start": "2026-10-09T15:00:00+05:30", "duration_minutes": 30}),
     ("pay_bill", {"account": "A1", "amount": 50, "memo": "rent"}, {"account": "a1", "amount": 50},

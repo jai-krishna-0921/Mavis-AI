@@ -30,6 +30,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed, ApprovalRequired, ConnectionRequired, NeedsUserDetail
+from mavis.domain.localtime import has_datetimes, localize_args
 from mavis.domain.policy import Capability, RiskClass
 from mavis.domain.tasks import ApprovalStatus
 from mavis.policy.risk import truncate, wrap_untrusted
@@ -165,6 +166,13 @@ async def tool_context(user_id: int) -> ToolContext:
     except SQLAlchemyError:  # unknown user or no DB (unit tests): fall back to UTC
         tz = "UTC"
     return ToolContext(user_id=user_id, timezone=tz, task_id=current_task_id.get())
+
+
+async def _localized(args: BaseModel, user_id: int) -> BaseModel:
+    """Every datetime argument is the user's wall-clock time: attach the zone in code (domain.localtime)."""
+    if not has_datetimes(type(args)):
+        return args
+    return localize_args(args, (await tool_context(user_id)).timezone)
 
 
 def contextual(fn: Callable[[ToolContext, Any], Awaitable[str | dict | list]]) -> ToolFn:
@@ -336,6 +344,7 @@ class ToolRegistry:
     async def invoke(self, tool: MavisTool, user_id: int, args: BaseModel) -> str:
         # Capability first: the user is asked to connect BEFORE being asked to approve.
         await self._require_capability(tool, user_id)
+        args = await _localized(args, user_id)  # wall-clock times get their zone here, for every tool
         payload = args.model_dump(mode="json")
         prepared = await self._prepared(tool, user_id, args)
         if prepared.refusal is not None:
@@ -383,6 +392,7 @@ class ToolRegistry:
             raise ActionFailed(f"Saved arguments are not valid: {exc.errors()[0].get('msg', '')}",
                                reason=user_text) from None
         await self._require_capability(tool, approval.user_id)
+        args = await _localized(args, approval.user_id)  # idempotent on stored, already zoned times
         # The action runs on behalf of the task that held the approval (tools may read its taint).
         task_token = current_task_id.set(approval.task_id)
         try:

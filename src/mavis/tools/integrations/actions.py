@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from mavis.config import get_settings
 from mavis.domain.errors import NeedsUserDetail
+from mavis.domain.localtime import LocalTimes, localize_args, wall_clock
 from mavis.domain.policy import Capability, RiskClass
 
 INTEGRATION_CAPABILITIES: tuple[Capability, ...] = (
@@ -109,12 +110,12 @@ class MailReplyArgs(BaseModel):
     body: str
 
 
-class CalendarListArgs(BaseModel):
-    time_min: datetime
-    time_max: datetime
+class CalendarListArgs(LocalTimes):
+    time_min: datetime = Field(description=wall_clock("Window start"))
+    time_max: datetime = Field(description=wall_clock("Window end"))
     max_results: int = Field(default=20, ge=1, le=100)
     updated_min: datetime | None = Field(
-        default=None, description="Only events changed since (used by sync)"
+        default=None, description=wall_clock("Only events changed since (used by sync)")
     )
 
 
@@ -122,14 +123,14 @@ class CalendarFindArgs(BaseModel):
     query: str
 
 
-class CalendarSlotsArgs(BaseModel):
-    time_min: datetime
-    time_max: datetime
+class CalendarSlotsArgs(LocalTimes):
+    time_min: datetime = Field(description=wall_clock("Window start"))
+    time_max: datetime = Field(description=wall_clock("Window end"))
 
 
-class CalendarCreateArgs(BaseModel):
+class CalendarCreateArgs(LocalTimes):
     summary: str
-    start: datetime = Field(description="Start time; include the offset if known")
+    start: datetime = Field(description=wall_clock("Start time"))
     duration_minutes: int = Field(default=30, ge=5, le=1440)
     attendees: list[str] = Field(
         default_factory=list, description="Guest emails; adding guests sends invites"
@@ -137,15 +138,15 @@ class CalendarCreateArgs(BaseModel):
     description: str = ""
 
 
-class CalendarUpdateArgs(BaseModel):
+class CalendarUpdateArgs(LocalTimes):
     """Only the fields that change; everything else on the event stays as it is."""
 
     event_id: str
     summary: str | None = None
     start: datetime | None = Field(
         default=None,
-        description="New start time. Moving an event needs duration_minutes too (its current length "
-                    "if that is not changing)",
+        description=wall_clock("New start time. Moving an event needs duration_minutes too (its current "
+                               "length if that is not changing)"),
     )
     duration_minutes: int | None = Field(
         default=None, ge=5, le=1440,
@@ -245,9 +246,10 @@ class SheetsReadArgs(BaseModel):
     range: str = Field(default="", description="A1 range like 'Sheet1!A1:F50'; empty reads the first sheet")
 
 
-class TasksListArgs(BaseModel):
+class TasksListArgs(LocalTimes):
     due_before: datetime | None = Field(
-        default=None, description="Only tasks due before this time (now = overdue, end of today = due today)"
+        default=None,
+        description=wall_clock("Only tasks due before this time (now = overdue, end of today = due today)"),
     )
     show_completed: bool = False
     max_results: int = Field(default=50, ge=1, le=100)
@@ -378,14 +380,8 @@ class SheetUpdateArgs(BaseModel):
 
 
 def localize(args: BaseModel, timezone: str) -> BaseModel:
-    """Models often emit naive datetimes ('2026-10-05T10:00'). Interpret those in the user's timezone."""
-    tz = ZoneInfo(timezone)
-    updates = {
-        name: value.replace(tzinfo=tz)
-        for name in type(args).model_fields
-        if isinstance(value := getattr(args, name), datetime) and value.tzinfo is None
-    }
-    return args.model_copy(update=updates) if updates else args
+    """The single wall-clock rule (domain.localtime.localize_args); kept under this name for callers."""
+    return localize_args(args, timezone)
 
 
 def _when(start: datetime, minutes: int, tz: str) -> str:

@@ -12,6 +12,7 @@ from mavis import bus
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.events import Trust
+from mavis.domain.localtime import LocalTimes, wall_clock
 from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.policy import RiskClass
 from mavis.domain.tasks import ApprovalStatus
@@ -51,16 +52,16 @@ class ForgetArgs(BaseModel):
     needle: str = Field(min_length=2, max_length=200, description="Word or phrase to delete")
 
 
-class WakeMeArgs(BaseModel):
-    at: datetime = Field(description="Future ISO-8601 time. Without an offset it is the user's local time.")
+class WakeMeArgs(LocalTimes):
+    at: datetime = Field(description=wall_clock("When to fire, in the future"))
     reason: str = Field(min_length=2, max_length=300, description="What to do or check when it fires")
 
 
-class TrackLoopArgs(BaseModel):
+class TrackLoopArgs(LocalTimes):
     kind: LoopKind
     title: str = Field(min_length=2, max_length=200)
     due_at: datetime | None = Field(
-        default=None, description="Optional deadline, ISO-8601; no offset means the user's local time"
+        default=None, description=wall_clock("Optional deadline")
     )
     entities: list[str] = Field(default_factory=list, description="Names of people or things involved")
     importance: int = Field(default=3, ge=1, le=5, description="1 (minor) to 5 (critical)")
@@ -252,8 +253,8 @@ TOOLS = [
     MavisTool("forget", "Delete memories matching a word or phrase (asks the user first).", ForgetArgs,
               RiskClass.DESTRUCTIVE, forget, _CONV,
               preview=lambda a: f"Forget everything I know matching “{a.needle}”", priority=30),
-    MavisTool("wake_me", "Schedule a reminder at a specific FUTURE time. Use ISO-8601; "
-              "a time without an offset is the user's local time.",
+    MavisTool("wake_me", "Schedule a reminder at a specific FUTURE time, given as the user said it "
+              "(local wall-clock ISO 8601, no offset).",
               WakeMeArgs, RiskClass.WRITE_SELF, wake_me, _CONV, priority=65,
               preview=_preview_wake, preview_needs_ctx=True, on_taint=TaintPolicy.APPROVE),
     MavisTool("track_loop", "Track an open loop: commitment, waiting-on, goal, concern, routine or watch.",
