@@ -263,3 +263,42 @@ async def test_repeated_connection_events_fan_out_and_retire_once(
             source="integrations", payload={"capability": "drive", "state": "ACTIVE", "pending_id": 0},
         ))
     assert provider.retired == [1]
+
+
+def _legacy_only_disconnect(provider, legacy: set[str]):
+    """The provider has no googlesuper row: a Google disconnect raises NoSuchConnection; legacy aliases
+    in `legacy` exist and are removed."""
+    from mavis.domain.errors import NoSuchConnection
+
+    async def disconnect(user, toolkit):
+        if toolkit in legacy:
+            legacy.discard(toolkit)
+            provider.disconnected.append((user.user_id, toolkit))
+            return
+        raise NoSuchConnection(f"there is no {toolkit} connection to remove.")
+
+    provider.disconnect = disconnect
+
+
+async def test_disconnect_google_legacy_only_removes_the_legacy_accounts(
+    db, workspace_on, provider, cache, fake_bus, rec, state
+):
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    provider.set_state(1, Capability.CALENDAR, ConnectionState.ACTIVE)
+    await state.update(1, {"synced": {"gmail": "x", "googlecalendar": "x", "slack": "x"}})
+    _legacy_only_disconnect(provider, {"gmail-legacy", "calendar-legacy"})
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    await run_command(msg("/disconnect gmail"), flow)
+    assert sorted(t for _, t in provider.disconnected) == ["calendar-legacy", "gmail-legacy"]
+    assert (await state.get(1))["synced"] == {"slack": "x"}
+    assert rec.sent[-1].text == "Disconnected Google. I can't see it anymore."
+
+
+async def test_disconnect_google_with_no_connection_at_all_says_so(
+    db, workspace_on, provider, cache, fake_bus, rec, state
+):
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)  # cache says Gmail; provider has none
+    _legacy_only_disconnect(provider, set())
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    await run_command(msg("/disconnect gmail"), flow)
+    assert rec.sent[-1].text == "There's no Google connection to remove."

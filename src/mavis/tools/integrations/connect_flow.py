@@ -551,6 +551,19 @@ class ConnectFlow:
         name = display_name(capability)
         try:
             await self.provider.disconnect(UserRef(user_id=user_id), capability.value)
+        except NoSuchConnection:
+            if not (workspace_enabled() and is_google(capability)):
+                await self.send(user_id, f"There's no {name} connection to remove.")
+                return
+            try:
+                removed = await self._disconnect_legacy_accounts(user_id)
+            except IntegrationError as exc:
+                log.warning("connect.disconnect_failed", capability="legacy", error=str(exc))
+                await self.send(user_id, f"I couldn't disconnect {name} just now. Mind trying again in a bit?")
+                return
+            if not removed:
+                await self.send(user_id, f"There's no {name} connection to remove.")
+                return
         except IntegrationError as exc:
             log.warning("connect.disconnect_failed", capability=capability.value, error=str(exc))
             await self.send(user_id, f"I couldn't disconnect {name} just now. Mind trying again in a bit?")
@@ -565,6 +578,17 @@ class ConnectFlow:
         if polling != st.get("polling", {}):
             await self.state.update(user_id, {"polling": polling})
         await self.send(user_id, f"Disconnected {name}. I can't see it anymore.")
+
+    async def _disconnect_legacy_accounts(self, user_id: int) -> int:
+        """No googlesuper account: remove the old Gmail and Calendar accounts instead. Returns how many."""
+        removed = 0
+        for alias in ("gmail-legacy", "calendar-legacy"):
+            try:
+                await self.provider.disconnect(UserRef(user_id=user_id), alias)
+            except NoSuchConnection:
+                continue
+            removed += 1
+        return removed
 
     async def disconnect_legacy(self, user_id: int, alias: str) -> None:
         """/disconnect gmail-legacy or calendar-legacy: remove an old pre-Workspace account only."""
