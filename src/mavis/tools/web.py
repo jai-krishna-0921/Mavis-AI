@@ -63,7 +63,7 @@ async def tavily_search(query: str, max_results: int) -> list[dict]:
         for r in data.get("results", [])
     ]
     if data.get("answer"):
-        rows.insert(0, {"title": "Summary", "url": "", "snippet": data["answer"]})
+        rows.insert(0, {"title": "Summary", "url": "", "snippet": str(data["answer"])[:500]})
     return rows
 
 
@@ -73,7 +73,12 @@ async def ddg_search(query: str, max_results: int) -> list[dict]:
     def _run() -> list[dict]:
         return list(DDGS().text(query, max_results=max_results))
 
-    rows = await asyncio.to_thread(_run)
+    try:
+        rows = await asyncio.to_thread(_run)
+    except Exception as exc:  # noqa: BLE001 - ddgs raises when there are no results
+        if "no results" in str(exc).lower():
+            return []
+        raise
     return [
         {"title": r.get("title", ""), "url": r.get("href", ""), "snippet": (r.get("body") or "")[:500]}
         for r in rows
@@ -172,11 +177,50 @@ class _PinnedBackend(httpcore.AnyIOBackend):
         raise last or httpcore.ConnectError(f"cannot connect to {host}")
 
 
+class _AsyncResponseStream(httpx.AsyncByteStream):
+    def __init__(self, httpcore_stream) -> None:
+        self._stream = httpcore_stream
+
+    async def __aiter__(self):
+        async for part in self._stream:
+            yield part
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+
+
+class _PinnedTransport(httpx.AsyncBaseTransport):
+    """httpx transport over a public-API httpcore pool that uses the pinned backend."""
+
+    def __init__(self) -> None:
+        self._pool = httpcore.AsyncConnectionPool(
+            network_backend=_PinnedBackend(), max_connections=10, retries=0
+        )
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        req = httpcore.Request(
+            method=request.method,
+            url=httpcore.URL(
+                scheme=request.url.raw_scheme, host=request.url.raw_host,
+                port=request.url.port, target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,
+            extensions=request.extensions,
+        )
+        resp = await self._pool.handle_async_request(req)
+        return httpx.Response(
+            status_code=resp.status, headers=resp.headers,
+            stream=_AsyncResponseStream(resp.stream), extensions=resp.extensions,
+        )
+
+    async def aclose(self) -> None:
+        await self._pool.aclose()
+
+
 def _pinned_client() -> httpx.AsyncClient:
-    transport = httpx.AsyncHTTPTransport()
-    transport._pool._network_backend = _PinnedBackend()  # noqa: SLF001 - httpx exposes no hook for this
     return httpx.AsyncClient(
-        transport=transport, timeout=_FETCH_TIMEOUT_S, follow_redirects=False, trust_env=False
+        transport=_PinnedTransport(), timeout=_FETCH_TIMEOUT_S, follow_redirects=False, trust_env=False
     )
 
 

@@ -173,3 +173,37 @@ def test_tools_are_read_only_and_untrusted():
     assert all(t.untrusted_output for t in web.TOOLS)
     assert all(t.risk.value == "read" for t in web.TOOLS)
     assert "conversation" in by_name["web_search"].agents
+
+
+def test_pinned_client_uses_pinned_backend_via_public_api():
+    client = web._pinned_client()
+    pool = client._transport._pool
+    assert isinstance(pool, httpcore.AsyncConnectionPool)
+    assert isinstance(pool._network_backend, web._PinnedBackend)
+
+
+async def test_pinned_transport_refuses_private_host(monkeypatch):
+    monkeypatch.setattr(web.socket, "getaddrinfo", lambda h, p, *a: [(2, 1, 6, "", ("127.0.0.1", p))])
+    async with web._pinned_client() as client:
+        with pytest.raises(ValueError):
+            await client.get("http://rebind.example.com/")
+
+
+async def test_ddg_no_results_exception_returns_empty(monkeypatch):
+    import ddgs
+    from ddgs.exceptions import DDGSException
+
+    class _D:
+        def text(self, *a, **k):
+            raise DDGSException("No results found.")
+
+    monkeypatch.setattr(ddgs, "DDGS", _D)
+    assert await web.ddg_search("zzz", 3) == []
+
+
+@respx.mock
+async def test_tavily_answer_truncated(tavily_key):
+    respx.post("https://api.tavily.com/search").mock(
+        return_value=httpx.Response(200, json={"answer": "x" * 900, "results": []}))
+    rows = await web.tavily_search("q", 3)
+    assert len(rows[0]["snippet"]) == 500
