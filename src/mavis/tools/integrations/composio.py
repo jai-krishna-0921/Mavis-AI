@@ -98,9 +98,17 @@ def _abandoned(item: dict[str, Any]) -> bool:
     return any(r in reason for r in _ABANDONED_REASONS)
 
 
+def _googlesuper_failed(statuses: dict[str, str]) -> bool:
+    """A googlesuper account exists but lost its authorization (EXPIRED, FAILED, INACTIVE)."""
+    status = statuses.get(GOOGLESUPER)
+    return status is not None and _STATE_MAP.get(status) is ConnectionState.FAILED
+
+
 def _pick_toolkit(statuses: dict[str, str], legacy: str) -> str:
-    """googlesuper when ACTIVE, else the legacy toolkit when ACTIVE, else googlesuper (to report it)."""
-    if statuses.get(GOOGLESUPER) == "ACTIVE":
+    """googlesuper when ACTIVE; the legacy toolkit when ACTIVE and googlesuper never authorized (absent or
+    still connecting); else googlesuper. A failed googlesuper is never hidden behind a legacy account:
+    the legacy triggers were retired at the upgrade, so the user must reconnect Google."""
+    if statuses.get(GOOGLESUPER) == "ACTIVE" or _googlesuper_failed(statuses):
         return GOOGLESUPER
     return legacy if statuses.get(legacy) == "ACTIVE" else GOOGLESUPER
 
@@ -239,7 +247,9 @@ class ComposioProvider:
             google = _STATE_MAP.get(str(accounts[GOOGLESUPER].get("status")), ConnectionState.NONE)
         for capability in GOOGLE_CAPABILITIES:
             legacy = states.get(capability.value) if capability in LEGACY_TOOLKITS else None
-            if google is ConnectionState.ACTIVE or legacy in (None, ConnectionState.NONE):
+            # legacy fallback only while googlesuper never authorized; a FAILED one fails all eight
+            shared = google in (ConnectionState.ACTIVE, ConnectionState.FAILED)
+            if shared or legacy in (None, ConnectionState.NONE):
                 states[capability.value] = google  # one Google account: all eight share its state
             else:
                 states[capability.value] = legacy  # Gmail/Calendar keep working on the old connection

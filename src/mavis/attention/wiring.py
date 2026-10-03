@@ -151,11 +151,11 @@ def get_retention() -> Retention:
 @lru_cache
 def get_workspace() -> WorkspaceIntake:
     from mavis.tools.integrations import get_connection_cache, get_provider
-    from mavis.tools.integrations.wiring import wakeup_schedule
+    from mavis.tools.integrations.wiring import reconnect_prompt, wakeup_schedule
 
     return WorkspaceIntake(provider=get_provider(), executor_of=_executor,
                            loops=initiative_wiring.current().loops, schedule=wakeup_schedule,
-                           cache=get_connection_cache(), policy=PingPolicy())
+                           cache=get_connection_cache(), policy=PingPolicy(), on_auth_failed=reconnect_prompt)
 
 
 ATTENTION_GETTERS = (

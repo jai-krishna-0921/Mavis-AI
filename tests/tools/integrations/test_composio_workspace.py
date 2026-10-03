@@ -212,3 +212,25 @@ async def test_disconnect_drops_route_cache_after_delete(ws):
     respx.delete(f"{BASE}/connected_accounts/ca_g").mock(return_value=httpx.Response(200, json={}))
     await ws.disconnect(USER, "google")
     assert USER.provider_id not in ws._routes
+
+
+@respx.mock
+async def test_legacy_active_but_googlesuper_expired_marks_every_google_capability_failed(ws):
+    # legacy triggers were retired at the upgrade: reporting Gmail ACTIVE would hide that intake stopped
+    _accounts(_acct("googlesuper", "EXPIRED", "ca_g"), _acct("gmail", "ACTIVE", "ca_l"),
+              _acct("googlecalendar", "ACTIVE", "ca_c"))
+    states = await ws.status(USER)
+    assert {states[c] for c in GOOGLE} == {ConnectionState.FAILED}
+
+
+@respx.mock
+async def test_execute_does_not_fall_back_to_legacy_when_googlesuper_expired(ws):
+    _accounts(_acct("googlesuper", "EXPIRED", "ca_g"), _acct("gmail", "ACTIVE", "ca_l"))
+    legacy = respx.post(f"{BASE}/tools/execute/GMAIL_FETCH_EMAILS").mock(
+        return_value=httpx.Response(200, json={"successful": True, "data": {}})
+    )
+    google = respx.post(f"{BASE}/tools/execute/GOOGLESUPER_FETCH_EMAILS").mock(
+        return_value=httpx.Response(200, json={"successful": False, "error": "expired"})
+    )
+    res = await ws.execute(USER, "mail.search", {})
+    assert not legacy.called and google.called and not res.ok
