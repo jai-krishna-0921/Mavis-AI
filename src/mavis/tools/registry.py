@@ -185,6 +185,13 @@ class MavisTool:
     # Async pre-step with network access (file metadata, allowlists), run by invoke() before the taint and
     # approval checks; never by execute_approved (the user already saw the preview and said yes).
     prepare: PrepareFn | None = None
+    # What makes two calls the same action, for approval dedupe and supersede: the argument names
+    # that identify it (an invite: start + attendees; an email: to + subject). Empty, or any of them
+    # empty in a call, means the whole canonical argument set is the identity.
+    identity: tuple[str, ...] = ()
+    # The argument holding when the action takes effect (an event start). An approval whose action
+    # time has passed expires and can no longer be approved.
+    action_time: str | None = None
 
     def effective_risk(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn is not None else self.risk
@@ -247,6 +254,9 @@ class ToolRegistry:
 
     def get(self, name: str) -> MavisTool:
         return self._tools[name]
+
+    def find(self, name: str) -> MavisTool | None:
+        return self._tools.get(name)
 
     def names_for(self, agent: str) -> list[str]:
         return [t.name for t in self._tools.values() if agent in t.agents]
@@ -433,7 +443,8 @@ class ToolRegistry:
                     existing = await approvals.find_open(user_id, task_id, tool.name, req.arguments)
                     twin = None if existing is not None else next(iter(
                         await approvals.waiting_equivalents(user_id, tool.name, req.arguments,
-                                                            tainted=tainted)), None)
+                                                            identity=tool.identity, tainted=tainted)),
+                        None)
                     if twin is not None:
                         # The same action already waits on the user (another task, or an earlier
                         # turn): one card per action, never a second one to approve twice.

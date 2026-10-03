@@ -541,6 +541,8 @@ class ActionSpec:
     preview: Callable[[BaseModel, str], str] | None = None  # (args, timezone) -> text
     priority: int = 50  # registry.select tie-break when a chat message shares no words with any tool
     taint_approve: bool = False  # after untrusted output in the run, queue for approval (Workspace spec 4.3)
+    identity: tuple[str, ...] = ()  # see MavisTool.identity
+    action_time: str | None = None  # see MavisTool.action_time
 
     def risk_for(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn else self.risk
@@ -564,7 +566,8 @@ _SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("mail.draft", Capability.GMAIL, "Create a Gmail draft (not sent).",
                MailComposeArgs, RiskClass.WRITE_SELF, _a("inbox", "conversation"), preview=_preview_draft),
     ActionSpec("mail.send", Capability.GMAIL, "Send an email. The user is asked to approve first.",
-               MailComposeArgs, RiskClass.OUTWARD, _a("inbox", "conversation"), preview=_preview_mail),
+               MailComposeArgs, RiskClass.OUTWARD, _a("inbox", "conversation"), preview=_preview_mail,
+               identity=("to", "subject")),
     ActionSpec("mail.reply", Capability.GMAIL,
                "Reply on an existing thread. The user is asked to approve first.",
                MailReplyArgs, RiskClass.OUTWARD, _a("inbox", "conversation"), preview=_preview_reply),
@@ -577,11 +580,13 @@ _SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("calendar.create_event", Capability.CALENDAR,
                "Create a calendar event or meeting. With guests, invites are sent after the user approves.",
                CalendarCreateArgs, RiskClass.WRITE_SELF, _a("calendar", "conversation"),
-               risk_fn=_attendee_risk, preview=_preview_create),
+               risk_fn=_attendee_risk, preview=_preview_create,
+               identity=("start", "attendees"), action_time="start"),
     ActionSpec("calendar.update_event", Capability.CALENDAR,
                "Change an event. The user is asked to approve first (guests may be notified).",
                CalendarUpdateArgs, RiskClass.WRITE_SELF, _a("calendar"),
-               risk_fn=_update_risk, preview=_preview_update),
+               risk_fn=_update_risk, preview=_preview_update,
+               identity=("event_id", "start"), action_time="start"),
     ActionSpec("slack.channels", Capability.SLACK, "List Slack channels.",
                SlackChannelsArgs, RiskClass.READ, _a("comms")),
     ActionSpec("slack.history", Capability.SLACK, "Recent messages in a Slack channel.",

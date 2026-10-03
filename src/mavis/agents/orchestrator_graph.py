@@ -88,6 +88,8 @@ APPROVAL_TEXT = {
     "expired": "That one expired, so I left it.",
     "failed": "Tried, but it failed: {reason}",
     "superseded": "That one was a duplicate of something already handled, so I closed it.",
+    "past": ("That was for {when}, which has already passed, so I didn't do it. "
+             "Ask me again with a new time if you still want it."),
 }
 NOTHING_TO_APPROVE_TEXT = "Nothing left to approve there."
 
@@ -441,13 +443,19 @@ async def notify_revise_failed(user_id: int, approval_id: int, attempt: int) -> 
         log.warning("approval.revise_notice_failed", approval_id=approval_id, error=_err(exc))
 
 
-async def _supersede_duplicates(decided: Any) -> None:
+async def _supersede_duplicates(decided: Any, *, executed: bool) -> None:
     try:
         from mavis.policy import approvals as approval_flow  # lazy: policy.approvals imports the runner
 
-        await approval_flow.supersede_duplicates(decided)
+        await approval_flow.supersede_duplicates(decided, executed=executed)
     except Exception as exc:  # noqa: BLE001 - the decided action already stands
         log.warning("approval.supersede_failed", approval_id=decided.id, error=_err(exc))
+
+
+async def _passed_action_time(approval: Any) -> str | None:
+    from mavis.policy import approvals as approval_flow  # lazy: policy.approvals imports the runner
+
+    return await approval_flow.passed_action_time(approval)
 
 
 def _first_result_line(result: str) -> str:
@@ -469,6 +477,18 @@ async def approval_gate(state: OrchestratorState) -> Command:
     if not isinstance(answer, dict) or answer.get("approval_id") != pending.id:
         return Command(goto="approval_gate")
     decision = answer.get("decision")
+    passed = await _passed_action_time(pending) if decision in ("ok", "past") else None
+    if passed is not None or decision == "past":
+        # approving an action whose own time has gone is refused, whichever path approved it
+        when = passed or "a time that has passed"
+        if not await approvals.set_status(pending.id, ApprovalStatus.EXPIRED,
+                                          result=f"action time passed ({when})",
+                                          from_statuses={ApprovalStatus.RESOLVING}):
+            return Command(goto="approval_gate")
+        return Command(goto="approval_gate", update={
+            "action_results": [f"Not done, its time ({when}) had already passed: {pending.preview}"],
+            "approval_outcomes": [{"status": "past", "preview": pending.preview, "detail": when}],
+        })
     if decision == "ok":
         # At most once (preflight F20): only the caller that moves RESOLVING -> EXECUTED runs the tool.
         # A crash after this point loses the confirmation, never duplicates the action.
@@ -495,7 +515,7 @@ async def approval_gate(state: OrchestratorState) -> Command:
                 "approval_outcomes": [{"status": "failed", "preview": pending.preview, "detail": reason}],
             })
         await approvals.set_status(pending.id, ApprovalStatus.EXECUTED, result=result, from_statuses=claimed)
-        await _supersede_duplicates(pending)
+        await _supersede_duplicates(pending, executed=True)
         return Command(goto="approval_gate", update={
             "action_results": [f"Done: {pending.preview}\nResult: {_clip_result(result)}"],
             "approval_outcomes": [{"status": "executed", "preview": pending.preview,
@@ -524,7 +544,7 @@ async def approval_gate(state: OrchestratorState) -> Command:
     if not await approvals.set_status(pending.id, status):
         return Command(goto="approval_gate")  # already resolved elsewhere; don't report a stale outcome
     if status is ApprovalStatus.REJECTED:
-        await _supersede_duplicates(pending)
+        await _supersede_duplicates(pending, executed=False)
     return Command(goto="approval_gate", update={
         "action_results": [f"{status.value.title()}: {pending.preview}"],
         "approval_outcomes": [{"status": status.value, "preview": pending.preview, "detail": ""}],
@@ -542,6 +562,8 @@ def _approval_messages(outcomes: list[dict]) -> list[str]:
             texts.append(f"{APPROVAL_TEXT['executed']}\n{detail}" if detail else APPROVAL_TEXT["executed"])
         elif status == "failed":
             texts.append(APPROVAL_TEXT["failed"].format(reason=sanitize_line(detail) or "unknown error"))
+        elif status == "past":
+            texts.append(APPROVAL_TEXT["past"].format(when=detail or "a time that has passed"))
         elif status in APPROVAL_TEXT:
             texts.append(APPROVAL_TEXT[status])
     if not texts:

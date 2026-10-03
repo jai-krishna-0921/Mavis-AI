@@ -8,7 +8,7 @@ orchestrator's approval_gate performs the action.
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import uuid4
 
@@ -18,12 +18,13 @@ from pydantic import BaseModel
 from mavis import bus
 from mavis.channels.formatting import sanitize_line
 from mavis.config import get_settings
+from mavis.domain import timeutil
 from mavis.domain.events import Event, Job, JobKind
 from mavis.domain.messages import TAINT_SUFFIX, Button, Outbound, Role
 from mavis.domain.tasks import ApprovalStatus, TaskStatus
 from mavis.llm import models as llm
 from mavis.store.db import Session, utcnow
-from mavis.store.repo import approvals, audit, messages, outbox, tasks
+from mavis.store.repo import approvals, audit, messages, outbox, tasks, users
 from mavis.timers import service as timers_service
 
 log = structlog.get_logger()
@@ -60,6 +61,52 @@ async def _task_tainted(approval) -> bool:
     return bool(task is not None and task.tainted)
 
 
+PAST_ACTION_TEXT = ("That was for {when}, which has already passed, so I didn't do it. "
+                    "Ask me again with a new time if you still want it.")
+
+
+def _declared(tool_name: str):
+    """The tool's own declaration (identity, action time); None for a tool no longer registered."""
+    from mavis.tools.registry import get_registry  # lazy: the registry imports the approvals repo
+
+    return get_registry().find(tool_name)
+
+
+def identity_of(tool_name: str) -> tuple[str, ...]:
+    tool = _declared(tool_name)
+    return tool.identity if tool is not None else ()
+
+
+def action_time(approval, timezone: str) -> datetime | None:
+    """When the approved action takes effect, from the argument its tool declares (a naive value is
+    read in the user's timezone, as the tool itself reads it). None when it declares none."""
+    tool = _declared(approval.tool)
+    field = tool.action_time if tool is not None else None
+    raw = (approval.arguments or {}).get(field) if field else None
+    if isinstance(raw, datetime):
+        at = raw
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            at = datetime.fromisoformat(raw.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return timeutil.to_utc(at, timezone) if at.tzinfo is None else at.astimezone(UTC)
+
+
+async def passed_action_time(approval) -> str | None:
+    """The action's own time as the user reads it, if that time has already passed; else None."""
+    try:
+        timezone = (await users.get(approval.user_id)).timezone
+    except Exception:  # noqa: BLE001 - no user, no timezone: treat naive times as UTC
+        timezone = "UTC"
+    at = action_time(approval, timezone)
+    if at is None or at > utcnow():
+        return None
+    return f"{timeutil.to_local(at, timezone):%a %d %b %H:%M}"
+
+
 async def send_approval_prompt(user_id: int, payload: dict) -> None:
     approval = await approvals.get(int(payload["approval_id"]))
     if approval is None or approval.status != ApprovalStatus.PENDING:
@@ -77,6 +124,11 @@ async def send_approval_prompt(user_id: int, payload: dict) -> None:
                               dedupe_key=f"approval:{approval.id}:remind")
         await wakeups.wake_me(user_id, now + ttl, f"approval:{approval.id}", kind="system_approval_expire",
                               scale=False, dedupe_key=f"approval:{approval.id}:expire")
+        timezone = (await users.get(user_id)).timezone
+        at = action_time(approval, timezone)
+        if at is not None and now < at < now + ttl:  # the action's own time comes first: expire then
+            await wakeups.wake_me(user_id, at, f"approval:{approval.id}", kind="system_approval_expire",
+                                  scale=False, dedupe_key=f"approval:{approval.id}:action_time")
 
 
 # --- decisions ------------------------------------------------------------------------
@@ -125,10 +177,15 @@ def approval_id_from_reason(reason: str) -> int | None:
 async def _resume(approval, decision: str, instructions: str = "") -> None:
     """Hand a recorded decision (approval already RESOLVING) to the task, or close a taskless row."""
     if approval.task_id is None:
-        final = {"no": ApprovalStatus.REJECTED, "expired": ApprovalStatus.EXPIRED}.get(
-            decision, ApprovalStatus.FAILED)
+        final = {"no": ApprovalStatus.REJECTED, "expired": ApprovalStatus.EXPIRED,
+                 "past": ApprovalStatus.EXPIRED}.get(decision, ApprovalStatus.FAILED)
         await approvals.set_status(approval.id, final, "no task to resume",
                                    from_statuses={ApprovalStatus.RESOLVING})
+        if decision == "past":
+            when = await passed_action_time(approval) or "a time that has passed"
+            text = PAST_ACTION_TEXT.format(when=when) + "\n\n" + _preview_lines(approval)
+            await say(approval.user_id, text, dedupe_key=f"approval:{approval.id}:past",
+                      tainted=bool(approval.tainted))
         if final == ApprovalStatus.FAILED:
             await say(approval.user_id, "I lost track of what that was for, so I didn't do it. "
                       "Ask me again if you still want it.", dedupe_key=f"approval:{approval.id}:no_task")
@@ -145,14 +202,17 @@ async def _resume(approval, decision: str, instructions: str = "") -> None:
 SUPERSEDED_NOTE = "superseded by approval #{id}"
 
 
-async def supersede_duplicates(decided) -> int:
+async def supersede_duplicates(decided, *, executed: bool) -> int:
     """`decided` was just executed or rejected: close this user's other cards for the same action
-    (same tool, equivalent arguments) so no stale duplicate stays approvable. A task waiting on that
-    card gets a "superseded" decision (its gate closes it without running anything); any other
-    duplicate (its task has not reached the gate yet, or there is no task) is closed in place."""
+    (same tool, same declared identity) so no stale duplicate stays approvable. Once an action has
+    executed, every open twin is evidence of an action already done, whatever its taint; a rejection
+    closes only twins of the same taint. A task waiting on that card gets a "superseded" decision (its
+    gate closes it without running anything); any other duplicate (its task has not reached the gate
+    yet, or there is no task) is closed in place."""
     n = 0
-    for dup in await approvals.waiting_equivalents(decided.user_id, decided.tool, decided.arguments or {},
-                                                   tainted=bool(decided.tainted), exclude_id=decided.id):
+    for dup in await approvals.waiting_equivalents(
+            decided.user_id, decided.tool, decided.arguments or {}, identity=identity_of(decided.tool),
+            tainted=None if executed else bool(decided.tainted), exclude_id=decided.id):
         note = SUPERSEDED_NOTE.format(id=decided.id)
         task = await tasks.get(dup.task_id) if dup.task_id is not None else None
         nxt = await approvals.next_open(task.id) if task is not None else None
@@ -259,6 +319,9 @@ async def remind(user_id: int, approval_id: int) -> None:
     approval = await approvals.get(approval_id)
     if approval is None or approval.user_id != user_id or approval.status != ApprovalStatus.PENDING:
         return
+    if await passed_action_time(approval) is not None:  # nothing to remind about: it can only expire
+        await expire(user_id, approval_id)
+        return
     text = f"Still want me to go ahead with this? It expires in about 2 hours.\n\n{approval.preview}"
     await say(user_id, text, approval_buttons(approval_id), dedupe_key=f"approval:{approval_id}:remind",
               tainted=await _task_tainted(approval))
@@ -269,7 +332,7 @@ async def expire(user_id: int, approval_id: int) -> None:
     if approval is None or approval.user_id != user_id:
         return
     if await approvals.claim(approval_id, _OPENABLE, ApprovalStatus.RESOLVING):
-        await _resume(approval, "expired")
+        await _resume(approval, "past" if await passed_action_time(approval) else "expired")
 
 
 async def on_remind_wakeup(user_id: int, reason: str) -> None:
@@ -334,6 +397,17 @@ async def _sweep_after_stop(user_id: int | None) -> int:
     return n
 
 
+async def _sweep_past_action_time(user_id: int | None) -> int:
+    """PENDING approvals whose action's own time has passed (an event that already started). Cards the
+    user is editing are left alone (they may be giving a new time); the gate refuses them anyway."""
+    n = 0
+    for ap in await approvals.pending_rows(user_id):
+        if await passed_action_time(ap) is not None:
+            await expire(ap.user_id, ap.id)
+            n += 1
+    return n
+
+
 async def _sweep_overdue(user_id: int | None) -> int:
     n = 0
     for ap in await approvals.overdue_open(utcnow(), user_id):
@@ -357,6 +431,7 @@ async def sweep(user_id: int | None = None, *, skip: frozenset[str] = frozenset(
         # first: a task stuck RUNNING or QUEUED without a job holds up the approvals behind it
         "tasks": lambda: orchestrator.recover_tasks(user_id),
         "expired": lambda: _sweep_overdue(user_id),
+        "past": lambda: _sweep_past_action_time(user_id),
         "stuck": lambda: _sweep_stuck_resolving(utcnow() - STALE_AFTER, user_id),
         "may_have_run": lambda: _sweep_may_have_run(user_id),
         "ran_after_stop": lambda: _sweep_after_stop(user_id),
