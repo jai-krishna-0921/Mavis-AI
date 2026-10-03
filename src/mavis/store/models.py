@@ -273,3 +273,15 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(120))
     detail: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class InitiativeDecisionRow(Base):
+    """The reasoner's decision for one event, kept so a retry re-applies it instead of asking again."""
+
+    __tablename__ = "initiative_decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(200), unique=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    decision: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(index=True)

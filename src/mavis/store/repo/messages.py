@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
+from mavis.channels.formatting import sanitize_stored
 from mavis.domain.messages import Role
 from mavis.store.db import Session, utcnow
 from mavis.store.models import Message, User
@@ -13,7 +14,13 @@ from mavis.store.models import Message, User
 async def log(
     user_id: int, role: Role, content: str, proactive: bool = False, event_id: str | None = None
 ) -> bool:
-    """Append to the conversation log. Returns False if `event_id` was already logged (retry)."""
+    """Append to the conversation log. Returns False if `event_id` was already logged (retry).
+
+    Assistant text is stored without em/en dashes: history is fed back to the model and would
+    otherwise teach it the very punctuation the channel strips.
+    """
+    if role is Role.ASSISTANT:
+        content = sanitize_stored(content)
     now = utcnow()
     async with Session() as s:
         if event_id and await s.scalar(select(Message.id).where(Message.event_id == event_id)):

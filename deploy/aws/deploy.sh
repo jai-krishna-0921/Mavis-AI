@@ -93,11 +93,16 @@ rm -f .deploy.rc
 trap '\$C up -d worker timer >/dev/null 2>&1; echo "\${RC:-1}" > .deploy.rc' EXIT
 \$C stop worker timer >/dev/null 2>&1 || true
 RC=1
-\$C build \\
-  && \$C up -d --wait --wait-timeout 300 postgres redis qdrant neo4j \\
-  && \$C run --rm migrate \\
-  && \$C up -d --wait --wait-timeout 300 \\
-  && RC=0
+# keep the running image so a failed migration can roll back to it
+docker image tag mavis:prod mavis:prev >/dev/null 2>&1 || true
+\$C build || exit 1
+\$C up -d --wait --wait-timeout 300 postgres redis qdrant neo4j || exit 1
+if ! \$C run --rm migrate; then
+  echo "migration failed; rolling back to the previous image"
+  docker image tag mavis:prev mavis:prod >/dev/null 2>&1 || true
+  exit 1
+fi
+\$C up -d --wait --wait-timeout 300 && RC=0
 REMOTE
 ssh_box "cd $MAVIS_REMOTE_DIR && rm -f .deploy.rc && setsid nohup bash .deploy-remote.sh > .deploy.log 2>&1 < /dev/null &"
 for _ in $(seq 1 240); do

@@ -17,6 +17,7 @@ class LoopKind(StrEnum):
 
 class LoopStatus(StrEnum):
     OPEN = "OPEN"
+    AWAITING_REPLY = "AWAITING"  # follow-up sent, waiting for the user's answer (closes on reply or 24h)
     DONE = "DONE"
     EXPIRED = "EXPIRED"
     DROPPED = "DROPPED"
