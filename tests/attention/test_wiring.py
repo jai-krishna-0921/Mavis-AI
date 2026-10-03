@@ -56,7 +56,6 @@ async def test_disabled_keeps_the_legacy_email_path(settings, recording_bus, fak
 def _snapshot() -> dict:
     """Every registry the worker wiring touches, as comparable values."""
     from mavis.agents import context_hooks as ch
-    from mavis.tools.integrations import wiring as integrations_wiring
 
     return {
         "events": {t: list(fns) for t, fns in runner._event_handlers.items() if fns},
@@ -70,13 +69,10 @@ def _snapshot() -> dict:
         "brief": [s.name for s in routines.brief_sources()],
         "morning": list(routines._morning_hooks),
         "context": list(ch.CONTEXT_PROVIDERS),
-        "first_sync_owners": set(integrations_wiring.FIRST_SYNC_NOTICE_OWNERS),
     }
 
 
 def _reset_registries() -> None:
-    from mavis.tools.integrations import wiring as integrations_wiring
-
     runner.clear_handlers()
     for hook_list in (hooks.PREFILTERS, hooks.ENRICHERS, hooks.DECISION_POLICIES):
         hook_list.clear()
@@ -85,18 +81,17 @@ def _reset_registries() -> None:
     buttons.BUTTON_HANDLERS.clear()
     system.SYSTEM_WAKEUP_HANDLERS.clear()
     context_hooks.clear_context_providers()
-    integrations_wiring.FIRST_SYNC_NOTICE_OWNERS.clear()
 
 
 async def test_disabled_restores_the_pre_attention_wiring_exactly(settings, db, bus, memory, monkeypatch):
     """ATTENTION_ENABLED=false gives the same registries as a worker built without the attention layer."""
     from mavis.worker import handlers
 
-    monkeypatch.setattr(handlers, "register_attention", lambda: None)
-    handlers.register_default_handlers()
+    with monkeypatch.context() as m:  # only the stub is undone, not the settings fixture's patches
+        m.setattr(handlers, "register_attention", lambda: None)
+        handlers.register_default_handlers()
     legacy = _snapshot()
     _reset_registries()
-    monkeypatch.undo()
     monkeypatch.setattr(settings, "attention_enabled", False)
     handlers.register_default_handlers()
     assert _snapshot() == legacy
@@ -118,20 +113,21 @@ async def test_default_handlers_wire_attention_without_duplicates(settings, db, 
         integrations_wiring.dispatch_task_completed,
         get_intake().on_task_completed,
     ]
-    assert set(buttons.BUTTON_HANDLERS) == {"conn:", "at:"}
+    assert {"conn:", "at:"} <= set(buttons.BUTTON_HANDLERS)  # Phase 4 adds "ap:"
     # calendar stays, the live-search inbox source is replaced: no duplicate inbox lines
     assert [s.name for s in routines.brief_sources()] == ["calendar", "attention"]
-    assert first["first_sync_owners"] == {"gmail"}
     assert context_hooks.CONTEXT_PROVIDERS == [get_digest().context]
 
 
-async def test_first_sync_gmail_notice_belongs_to_the_first_look(settings, db, user, monkeypatch):
+async def test_gmail_first_sync_message_stays_with_attention_on(settings, db, bus, memory, user, monkeypatch):
+    """Spec 13: Phase 5's immediate first-sync message stays; the first look only adds to it when notable."""
     from datetime import UTC, datetime
 
     from mavis.domain.events import Event, Trust
-    from mavis.domain.policy import Capability
     from mavis.tools.integrations import wiring as integrations_wiring
+    from mavis.worker.handlers import register_default_handlers
 
+    register_default_handlers()
     seen = []
 
     class Exec:
@@ -140,22 +136,17 @@ async def test_first_sync_gmail_notice_belongs_to_the_first_look(settings, db, u
             return True
 
     monkeypatch.setattr(initiative_wiring, "_current", SimpleNamespace(executor=Exec()))
-    integrations_wiring.own_first_sync_notice(Capability.GMAIL)
-
-    def ev(cap: str) -> Event:
-        return Event(
-            id=f"first_sync:{user.id}:{cap}",
-            user_id=user.id,
-            type=EventType.TASK_COMPLETED,
-            occurred_at=datetime(2026, 10, 3, tzinfo=UTC),
-            source="integrations",
-            trust=Trust.UNTRUSTED,
-            payload={"kind": "first_sync", "capability": cap, "noticed": ["x"]},
-        )
-
-    await integrations_wiring.dispatch_task_completed(ev("gmail"))
-    await integrations_wiring.dispatch_task_completed(ev("calendar"))
-    assert seen == [f"first_sync:{user.id}:calendar"]
+    event = Event(
+        id=f"first_sync:{user.id}:gmail",
+        user_id=user.id,
+        type=EventType.TASK_COMPLETED,
+        occurred_at=datetime(2026, 10, 3, tzinfo=UTC),
+        source="integrations",
+        trust=Trust.UNTRUSTED,
+        payload={"kind": "first_sync", "capability": "gmail", "noticed": ["x"]},
+    )
+    await integrations_wiring.dispatch_task_completed(event)
+    assert seen == [f"first_sync:{user.id}:gmail"]
 
 
 async def test_index_shares_memory_client_and_embedder(settings, db, bus, memory):
@@ -183,12 +174,13 @@ async def test_startup_smoke_sqlite_inprocess_bus(settings, db, bus, memory, use
 
     from mavis.domain.wakeups import WakeupKind
     from mavis.store.repo import attention as repo
+    from mavis.store.repo import users
     from mavis.timers.service import WakeupService
     from mavis.worker.handlers import register_default_handlers
-    from tests.attention.helpers import email
-    from tests.e2e.test_interview_followup import running
+    from tests.attention.helpers import email, running
 
     clock.set(datetime(2026, 10, 3, 6, 0, tzinfo=UTC))  # 11:30 IST
+    await users.update_state(user.id, {"polling": {"gmail": True}})
     register_default_handlers()
     await runner.run_startup_hooks()
     wakeups = WakeupService()
@@ -206,3 +198,55 @@ async def test_startup_smoke_sqlite_inprocess_bus(settings, db, bus, memory, use
     await runner.run_startup_hooks()  # a restart re-arms nothing twice
     assert len(await wakeups.pending(user.id, WakeupKind.SYSTEM_EVENING_WRAP)) == 1
     assert len(await wakeups.pending(user.id, WakeupKind.SYSTEM_ATTENTION_RETENTION)) == 1
+
+
+async def test_daily_chains_only_for_watched_users(settings, db, bus, memory, user, clock):
+    from datetime import UTC, datetime
+
+    from mavis.domain.wakeups import WakeupKind
+    from mavis.store.repo import attention as repo
+    from mavis.timers.service import WakeupService
+    from mavis.worker.handlers import register_default_handlers
+
+    clock.set(datetime(2026, 10, 3, 6, 0, tzinfo=UTC))
+    register_default_handlers()
+    wakeups = WakeupService()
+    await attention_wiring.heal_all()
+    await attention_wiring.morning_maintenance(user.id)
+    assert await wakeups.pending(user.id, WakeupKind.SYSTEM_EVENING_WRAP) == []
+    assert await wakeups.pending(user.id, WakeupKind.SYSTEM_ATTENTION_RETENTION) == []
+    # observations alone (Gmail since disconnected) still need retention
+    await repo.insert_pending(
+        user.id,
+        "m1",
+        thread_id="",
+        origin=repo.ORIGIN_LIVE,
+        sender_domain="x.in",
+        sender_name="",
+        received_at=clock.t,
+        payload={},
+    )
+    await attention_wiring.morning_maintenance(user.id)
+    assert len(await wakeups.pending(user.id, WakeupKind.SYSTEM_ATTENTION_RETENTION)) == 1
+    assert len(await wakeups.pending(user.id, WakeupKind.SYSTEM_EVENING_WRAP)) == 1
+
+
+async def test_morning_maintenance_steps_are_isolated(settings, db, bus, memory, user, clock, monkeypatch):
+    from datetime import UTC, datetime
+
+    from mavis.domain.wakeups import WakeupKind
+    from mavis.store.repo import users
+    from mavis.timers.service import WakeupService
+    from mavis.worker.handlers import register_default_handlers
+
+    clock.set(datetime(2026, 10, 3, 6, 0, tzinfo=UTC))
+    register_default_handlers()
+    await users.update_state(user.id, {"polling": {"gmail": True}})
+
+    async def boom(*a, **kw):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(attention_wiring.get_intake(), "heal", boom)
+    monkeypatch.setattr(attention_wiring.get_evening(), "ensure", boom)
+    await attention_wiring.morning_maintenance(user.id)  # never raises
+    assert len(await WakeupService().pending(user.id, WakeupKind.SYSTEM_ATTENTION_RETENTION)) == 1
