@@ -152,7 +152,7 @@ async def supersede_duplicates(decided) -> int:
     duplicate (its task has not reached the gate yet, or there is no task) is closed in place."""
     n = 0
     for dup in await approvals.waiting_equivalents(decided.user_id, decided.tool, decided.arguments or {},
-                                                   exclude_id=decided.id):
+                                                   tainted=bool(decided.tainted), exclude_id=decided.id):
         note = SUPERSEDED_NOTE.format(id=decided.id)
         task = await tasks.get(dup.task_id) if dup.task_id is not None else None
         nxt = await approvals.next_open(task.id) if task is not None else None

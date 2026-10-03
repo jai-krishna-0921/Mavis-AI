@@ -23,12 +23,13 @@ _OPEN = [s.value for s in OPEN_APPROVAL_STATUSES]
 
 
 async def create(
-    user_id: int, task_id: int | None, tool: str, arguments: dict, preview: str, expires_at: datetime
+    user_id: int, task_id: int | None, tool: str, arguments: dict, preview: str, expires_at: datetime,
+    *, tainted: bool = False,
 ) -> int:
     async with Session() as s:
         a = PendingApproval(
             user_id=user_id, task_id=task_id, tool=tool, arguments=arguments, preview=preview,
-            expires_at=expires_at, status=ApprovalStatus.PENDING.value,
+            expires_at=expires_at, status=ApprovalStatus.PENDING.value, tainted=tainted,
         )
         s.add(a)
         await s.commit()
@@ -80,10 +81,12 @@ def equivalent(tool: str, a: dict, b: dict) -> bool:
     return equivalence_key(tool, a) == equivalence_key(tool, b)
 
 
-async def waiting_equivalents(user_id: int, tool: str, arguments: dict, *,
+async def waiting_equivalents(user_id: int, tool: str, arguments: dict, *, tainted: bool,
                               exclude_id: int | None = None) -> list[PendingApproval]:
     """This user's approvals still waiting on them (PENDING / AWAITING_EDIT) for the same tool and
-    equivalent arguments, in any task, oldest first."""
+    equivalent arguments, in any task, oldest first, with the same taint: a request from a clean run
+    is never merged into a card a tainted run queued (its text may be attacker-shaped), nor the
+    reverse."""
     want = equivalence_key(tool, arguments)
     async with Session() as s:
         rows = await s.scalars(
@@ -92,7 +95,8 @@ async def waiting_equivalents(user_id: int, tool: str, arguments: dict, *,
                    PendingApproval.status.in_(_WAITING))
             .order_by(PendingApproval.id)
         )
-        return [r for r in rows if r.id != exclude_id and equivalence_key(tool, r.arguments or {}) == want]
+        return [r for r in rows if r.id != exclude_id and bool(r.tainted) == tainted
+                and equivalence_key(tool, r.arguments or {}) == want]
 
 
 async def find_open(user_id: int, task_id: int | None, tool: str, arguments: dict) -> PendingApproval | None:

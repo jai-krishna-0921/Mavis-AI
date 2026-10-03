@@ -33,7 +33,7 @@ from mavis.domain.errors import ActionFailed, ApprovalRequired, ConnectionRequir
 from mavis.domain.policy import Capability, RiskClass
 from mavis.policy.risk import truncate, wrap_untrusted
 from mavis.store.db import utcnow
-from mavis.store.repo import approvals, audit, policy_rules
+from mavis.store.repo import approvals, audit, policy_rules, tasks
 
 log = structlog.get_logger()
 
@@ -117,6 +117,18 @@ current_run: ContextVar[ToolRun | None] = ContextVar("current_run", default=None
 def _run_tainted() -> bool:
     run = current_run.get()
     return run is not None and run.tainted
+
+
+async def _queue_tainted(task_id: int | None) -> bool:
+    """Is a request being queued for approval third-party shaped? The run saw untrusted output (this
+    step or earlier), or it runs for a tainted task."""
+    run = current_run.get()
+    if run is not None and (run.tainted or run.untrusted_seen):
+        return True
+    if task_id is None:
+        return False
+    task = await tasks.get(task_id)
+    return bool(task is not None and task.tainted)
 
 
 ToolFn = Callable[[int, Any], Awaitable[str | dict | list]]
@@ -365,10 +377,12 @@ class ToolRegistry:
                 return await self.invoke(tool, user_id, args)
             except ApprovalRequired as req:
                 task_id = current_task_id.get()
+                tainted = await _queue_tainted(task_id)
                 async with _queue_lock():
                     existing = await approvals.find_open(user_id, task_id, tool.name, req.arguments)
                     twin = None if existing is not None else next(iter(
-                        await approvals.waiting_equivalents(user_id, tool.name, req.arguments)), None)
+                        await approvals.waiting_equivalents(user_id, tool.name, req.arguments,
+                                                            tainted=tainted)), None)
                     if twin is not None:
                         # The same action already waits on the user (another task, or an earlier
                         # turn): one card per action, never a second one to approve twice.
@@ -384,6 +398,7 @@ class ToolRegistry:
                             arguments=req.arguments,
                             preview=req.preview,
                             expires_at=utcnow() + timedelta(hours=get_settings().approval_ttl_hours),
+                            tainted=tainted,
                         )
                 log.info("tool.queued_for_approval", tool=tool.name, approval_id=approval_id)
                 run = current_run.get()
