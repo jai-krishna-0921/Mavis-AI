@@ -271,3 +271,34 @@ async def test_wakeup_from_untrusted_event_fires_untrusted(user, clock, recordin
     reasoner_prompt = fake_llm.structured_calls[1]["user"]
     assert "<untrusted" in reasoner_prompt
     assert await outbox.texts_with_dedupe_prefix("invoice:") == ["Pay it at (check it directly)"]
+
+
+# F5 ----------------------------------------------------------------------------------------------
+
+async def test_retry_reuses_the_persisted_decision(user, clock, recording_bus, fake_memory, fake_llm,
+                                                   monkeypatch):
+    import pytest
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 14, 0))
+    email = Event(id="gmail:msg:sec", user_id=user.id, type=EventType.EMAIL_RECEIVED,
+                  occurred_at=timeutil.now(), source="composio", trust=Trust.UNTRUSTED,
+                  payload={"from": "no-reply@accounts.example", "subject": "Security alert", "snippet": "x"})
+    fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=4, intent="was that you?",
+                                                                    dedupe_key="sec")))
+    real_apply = init.executor.apply
+    attempts = {"n": 0}
+
+    async def flaky(*a, **k):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("db blip after side effects")
+        return await real_apply(*a, **k)
+
+    monkeypatch.setattr(init.executor, "apply", flaky)
+    calls = spy_notify(init, monkeypatch)
+    with pytest.raises(RuntimeError):
+        await init.handler.handle(email)
+    await init.handler.handle(email)  # the retry: the fake LLM has nothing left, so a re-ask would fail
+    assert len(fake_llm.structured_calls) == 1
+    assert [c["intent"].intent for c in calls] == ["was that you?"]
