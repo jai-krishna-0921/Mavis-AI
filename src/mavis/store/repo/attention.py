@@ -262,22 +262,29 @@ async def set_pref_point(pref_id: int, point_id: str) -> None:
         await s.commit()
 
 
-async def purge_before(cutoff: datetime) -> list[str]:
-    """Delete observations created before `cutoff`; return their Qdrant point ids for deletion."""
+async def purge_before(cutoff: datetime, user_id: int | None = None) -> list[str]:
+    """Delete observations created before `cutoff` (one user's, or everyone's); return their Qdrant point
+    ids for deletion."""
+    q = select(_Obs.id, _Obs.point_id).where(_Obs.created_at < cutoff)
+    if user_id is not None:
+        q = q.where(_Obs.user_id == user_id)
     async with Session() as s:
-        rows = (await s.execute(select(_Obs.id, _Obs.point_id).where(_Obs.created_at < cutoff))).all()
+        rows = (await s.execute(q)).all()
         if rows:
             await s.execute(delete(_Obs).where(_Obs.id.in_([r.id for r in rows])))
             await s.commit()
     return [r.point_id for r in rows if r.point_id]
 
 
-async def expire_pending(cutoff: datetime) -> int:
+async def expire_pending(cutoff: datetime, user_id: int | None = None) -> int:
     """Pending rows older than `cutoff` are closed unread: the snippet is dropped, nothing is sent."""
+    where = [_Obs.status == PENDING, _Obs.created_at < cutoff]
+    if user_id is not None:
+        where.append(_Obs.user_id == user_id)
     async with Session() as s:
         res = await s.execute(
             update(_Obs)
-            .where(_Obs.status == PENDING, _Obs.created_at < cutoff)
+            .where(*where)
             .values(
                 status=DONE,
                 verdict="log",
