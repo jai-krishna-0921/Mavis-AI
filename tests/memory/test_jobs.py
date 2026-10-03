@@ -96,3 +96,47 @@ async def test_handle_learn_is_idempotent_per_source_ref(memory, user, fake_llm,
     await jobs.handle_learn(job)
     assert calls == ["tg:77"]
     assert len(fake_llm.structured_calls) == 1
+
+
+# --- hotfix3 RC1: background LLM failures are dropped, never retried ---------------------------
+import pytest  # noqa: E402
+from structlog.testing import capture_logs  # noqa: E402
+
+from mavis.bus.base import run_handler  # noqa: E402
+from mavis.domain.errors import LLMError  # noqa: E402
+
+
+async def test_learn_llm_failure_is_dropped_not_retried(memory, user, monkeypatch):
+    calls = []
+
+    async def busy_learn(*a, **k):
+        calls.append(1)
+        raise LLMError("timed out waiting for an LLM slot")
+
+    monkeypatch.setattr(memory, "learn", busy_learn)
+    job = Job(id="learn:tg:9", user_id=user.id, kind=JobKind.LEARN,
+              payload={"text": "hello", "source_ref": "tg:9"})
+    with capture_logs() as logs:
+        await run_handler(jobs.handle_learn, job, what="jobs", ref=job.id)  # acked: no raise
+    assert calls == [1]  # no inline retries
+    assert [e["event"] for e in logs].count("memory.learn_dropped_llm_busy") == 1
+
+
+async def test_learn_non_llm_failure_still_raises(memory, user, monkeypatch):
+    async def broken(*a, **k):
+        raise RuntimeError("graph down")
+
+    monkeypatch.setattr(memory, "learn", broken)
+    job = Job(id="learn:tg:10", user_id=user.id, kind=JobKind.LEARN, payload={"text": "x"})
+    with pytest.raises(RuntimeError):
+        await jobs.handle_learn(job)
+
+
+async def test_consolidate_llm_failure_is_dropped(memory, user, monkeypatch):
+    async def busy(uid, mem):
+        raise LLMError("LLM deadline exceeded")
+
+    monkeypatch.setattr(jobs, "consolidate", busy)
+    with capture_logs() as logs:
+        await jobs.handle_consolidate(Job(id="c1", user_id=user.id, kind=JobKind.CONSOLIDATE))
+    assert any(e["event"] == "memory.consolidate_dropped_llm_busy" for e in logs)

@@ -84,7 +84,8 @@ async def consolidate(user_id: int, memory: MemoryService) -> dict:
         fact_lines = wrap_untrusted("\n".join(f"- {f}" for f in facts), source="memory")
         prompt = f"Current card:\n{card.render() or '(empty)'}\n\nFacts:\n{fact_lines}"
         try:
-            draft = await llm.structured(ProfileDraft, _SYSTEM, prompt, llm.Tier.SMART, priority="background")
+            draft = await llm.structured(ProfileDraft, _SYSTEM, prompt, llm.Tier.SMART,
+                                         priority="best_effort")
         except LLMError as exc:
             log.warning("memory.consolidate_failed", user_id=user_id, error=type(exc).__name__)
         else:

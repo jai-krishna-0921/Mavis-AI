@@ -31,7 +31,7 @@ async def maybe_summarize(user_id: int) -> bool:
     try:
         text = await llm.complete(
             [SystemMessage(_SYSTEM), HumanMessage(prompt)], llm.Tier.FAST, 0.2,
-            name="memory:summarize", priority="background",
+            name="memory:summarize", priority="best_effort",
         )
     except Exception as exc:  # noqa: BLE001 - summarising is best-effort
         log.warning("memory.summarize_failed", error=str(exc), user_id=user_id)
