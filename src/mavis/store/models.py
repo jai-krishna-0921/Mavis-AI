@@ -255,6 +255,8 @@ class PendingApproval(Base):
     # resolved_at means "may have run" (crash mid-execution); EXECUTED without started_at means
     # "claimed, never run".
     started_at: Mapped[datetime | None]
+    # Set when a decision moves the row to RESOLVING; the sweep uses it to spot a lost resume.
+    resolving_at: Mapped[datetime | None]
     resolved_at: Mapped[datetime | None]
 
 
