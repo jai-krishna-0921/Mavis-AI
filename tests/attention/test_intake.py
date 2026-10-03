@@ -737,6 +737,7 @@ async def use_up_bypasses(user, clock) -> None:
 async def test_date_only_deadline_does_not_crash(user, stack, fake_llm):
     raw = {"kind": "deadline_or_bill", "needs_user": True, "deadline": "2026-10-05"}
     fake_llm.push_structured(EmailUnderstanding.model_validate(raw))
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["Your power bill is due on the 5th."]))
     await stack.intake.on_email(email(user.id, "bill-d", sender="Power <bills@examplepower.in>"))
     obs = await only(user.id)
     assert obs.status == "done" and obs.method == "llm"
@@ -748,7 +749,10 @@ def test_bare_date_occurred_at_is_unknown_not_midnight():
     assert m.occurred_at is None
 
 
-async def test_a_raising_row_does_not_block_the_next_email(user, stack, fake_llm, monkeypatch, clock):
+async def test_a_raising_row_does_not_block_the_next_email(
+    user, stack, fake_llm, monkeypatch, clock, settings
+):
+    monkeypatch.setattr(settings, "attention_strict_errors", False)
     real = stack.pipeline.finalize
 
     async def finalize(user_, obs, payload, u, method):
@@ -771,7 +775,8 @@ async def test_a_raising_row_does_not_block_the_next_email(user, stack, fake_llm
     assert await repo.pending_count(user.id) == 0
 
 
-async def test_a_raising_row_is_skipped_in_the_drain(user, stack, fake_llm, monkeypatch, clock):
+async def test_a_raising_row_is_skipped_in_the_drain(user, stack, fake_llm, monkeypatch, clock, settings):
+    monkeypatch.setattr(settings, "attention_strict_errors", False)
     monkeypatch.setattr(llm, "unavailable_s", lambda: 5.0)
     await stack.intake.on_email(email(user.id, "bad", subject="Bad"))
     await stack.intake.on_email(email(user.id, "good", subject="Good"))
@@ -918,3 +923,93 @@ async def test_backfill_pages_back_until_the_cap(user, stack, fake_llm, provider
     assert [c["max_results"] for c in calls] == [50, 50, 20]
     assert "before:" not in calls[0]["query"] and "before:" in calls[1]["query"]
     assert fake_llm.structured_calls == []  # queueing costs no LLM call; the drain holds the budget
+
+
+async def _break_finalize(stack, monkeypatch, fake_llm, user, settings, mid, **kw):
+    """A row whose normal and heuristic finalize both raise, so it is closed by hand after 2 attempts."""
+    monkeypatch.setattr(settings, "attention_strict_errors", False)
+
+    async def finalize(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(stack.pipeline, "finalize", finalize)
+    fake_llm.push_structured(ACCOUNT)
+    await stack.intake.on_email(email(user.id, mid, **kw))
+    return fake_llm
+
+
+async def test_unreadable_security_mail_reaches_the_morning_brief(
+    user, stack, fake_llm, settings, monkeypatch, clock
+):
+    from mavis.attention.rhythm import AttentionBrief
+
+    await _break_finalize(
+        stack,
+        monkeypatch,
+        fake_llm,
+        user,
+        settings,
+        "sec",
+        subject="Security alert: new sign-in to your account",
+    )
+    clock.advance(minutes=3)
+    fake_llm.push_structured(ACCOUNT)
+    await stack.intake.drain(user.id)
+    obs = await only(user.id)
+    assert (obs.status, obs.method, obs.verdict, obs.kind) == ("done", "error", "brief", "security")
+    items = await AttentionBrief().items(user.id, clock.t - timedelta(days=1), clock.t)
+    assert any("sign-in" in i.text.lower() for i in items)
+
+
+async def test_unreadable_plain_mail_still_closes_as_log(user, stack, fake_llm, settings, monkeypatch, clock):
+    await _break_finalize(stack, monkeypatch, fake_llm, user, settings, "hi", subject="Hello there")
+    clock.advance(minutes=3)
+    fake_llm.push_structured(ACCOUNT)
+    await stack.intake.drain(user.id)
+    obs = await only(user.id)
+    assert (obs.method, obs.verdict) == ("error", "log")
+
+
+async def test_unreadable_mail_uses_the_capped_heuristic_decision(
+    user, stack, fake_llm, settings, monkeypatch, clock
+):
+    monkeypatch.setattr(settings, "attention_strict_errors", False)
+    real = stack.pipeline.finalize
+
+    async def finalize(user_, obs, payload, u, method):
+        if method == "llm":
+            raise RuntimeError("boom")
+        return await real(user_, obs, payload, u, method)
+
+    monkeypatch.setattr(stack.pipeline, "finalize", finalize)
+    fake_llm.push_structured(ACCOUNT)
+    fake_llm.push_structured(ACCOUNT)
+    await stack.intake.on_email(email(user.id, "sec2", subject="Security alert: password changed"))
+    clock.advance(minutes=3)
+    await stack.intake.drain(user.id)
+    obs = await only(user.id)
+    assert obs.method == "heuristic" and obs.verdict in ("brief", "notify")
+    assert (obs.urgency or 0) <= 4
+
+
+async def test_catch_all_logs_traceback_with_obs_id(user, stack, fake_llm, settings, monkeypatch, clock):
+    await _break_finalize(stack, monkeypatch, fake_llm, user, settings, "tb")
+    clock.advance(minutes=3)
+    fake_llm.push_structured(ACCOUNT)
+    with capture_logs() as logs:
+        await stack.intake.drain(user.id)
+    [ev] = [e for e in logs if e["event"] == "attention.process_failed"]
+    assert ev["obs_id"] == (await only(user.id)).id
+    assert isinstance(ev["exc_info"], RuntimeError)
+
+
+async def test_strict_mode_surfaces_test_double_failures(user, stack, fake_llm, settings, monkeypatch):
+    assert settings.attention_strict_errors is True  # tests/conftest.py sets it
+
+    async def finalize(*a, **k):
+        raise AssertionError("unexpected call")
+
+    monkeypatch.setattr(stack.pipeline, "finalize", finalize)
+    fake_llm.push_structured(ACCOUNT)
+    with pytest.raises(AssertionError):
+        await stack.intake.on_email(email(user.id, "strict", subject="Hi"))
