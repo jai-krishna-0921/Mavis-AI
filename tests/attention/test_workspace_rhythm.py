@@ -110,7 +110,7 @@ async def test_brief_sources_hear_about_delivery_only_when_the_brief_went_out(us
 async def test_evening_wrap_adds_overdue_tasks_and_waiting_comments(user, clock):
     clock.set(EVENING)
     await row(user.id, "tasks:t2:overdue", source="tasks", kind="task_overdue", title="Renew passport",
-              at=EVENING - timedelta(hours=3))
+              at=EVENING - timedelta(hours=3), object_id="t2", overdue_days=1)
     await row(user.id, "docs:d1:c1", source="docs", kind="comment", verdict="notify", title="Launch plan",
               owned_by_me=True, at=EVENING - timedelta(hours=5))
     await row(user.id, "docs:d2:c1", source="docs", kind="comment", verdict="brief", title="Old plan",
@@ -127,6 +127,32 @@ async def test_evening_wrap_adds_overdue_tasks_and_waiting_comments(user, clock)
     assert "Old plan" not in sent.intent.intent  # comments older than 3 days are left out
     assert "Muted plan" not in sent.intent.intent  # a muted (log) comment never comes back
 
+
+
+async def test_evening_wrap_skips_old_overdue_tasks_so_a_quiet_day_stays_quiet(user, clock):
+    # poll_tasks writes a TASK_OVERDUE row every day; a task overdue for days is not news tonight
+    clock.set(EVENING)
+    await row(user.id, "tasks:t5:overdue", source="tasks", kind="task_overdue", title="File taxes",
+              at=EVENING - timedelta(hours=3), object_id="t5", overdue_days=5)
+    assert await workspace_evening(user.id, EVENING - timedelta(hours=12)) == []
+    register_evening_source(workspace_evening)
+    ex = Exec()
+    assert await EveningWrap(lambda: ex, WakeupService())._send(user.id) is False
+
+
+async def test_evening_wrap_skips_kept_or_asked_tasks(user, clock):
+    from mavis.store.repo import users
+
+    clock.set(EVENING)
+    start = EVENING - timedelta(hours=12)
+    await row(user.id, "tasks:t6:overdue", source="tasks", kind="task_overdue", title="Kept one",
+              at=EVENING - timedelta(hours=3), object_id="t6", overdue_days=1)
+    await row(user.id, "tasks:t7:overdue", source="tasks", kind="task_overdue", title="Asked one",
+              at=EVENING - timedelta(hours=3), object_id="t7", overdue_days=1)
+    [kept] = [r for r in await repo.signals(user.id, start, sources=("tasks",)) if r.summary == "Kept one"]
+    await repo.set_fields(kept.id, feedback="keep")
+    await users.update_state(user.id, {"workspace": {"asked": ["t7"]}})
+    assert await workspace_evening(user.id, start) == []
 
 async def test_evening_wrap_without_sources_still_skips_a_quiet_day(user, clock):
     clock.set(EVENING)
