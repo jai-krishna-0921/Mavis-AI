@@ -16,7 +16,7 @@ import structlog
 from pydantic import BaseModel
 
 from mavis import bus
-from mavis.channels.formatting import sanitize_line
+from mavis.channels.formatting import verbatim
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.events import Event, Job, JobKind
@@ -111,7 +111,8 @@ async def send_approval_prompt(user_id: int, payload: dict) -> None:
     approval = await approvals.get(int(payload["approval_id"]))
     if approval is None or approval.status != ApprovalStatus.PENDING:
         return
-    text = f"Ready when you are. Want me to go ahead?\n\n{approval.preview}"
+    # the card shows the preview verbatim: what the user approves is exactly what the action does
+    text = f"Ready when you are. Want me to go ahead?\n\n{verbatim(approval.preview)}"
     await say(user_id, text, approval_buttons(approval.id),
               dedupe_key=f"approval:{approval.id}:{int(utcnow().timestamp() * 1000)}",
               tainted=await _task_tainted(approval))
@@ -291,7 +292,7 @@ async def _which_one(approval) -> str | None:
     editing = [a for a in waiting if a.status == ApprovalStatus.AWAITING_EDIT]
     if len(editing) == 1 and editing[0].id == approval.id:
         return None
-    lines = [f"{i}. {sanitize_line(a.preview.splitlines()[0] if a.preview else a.tool)[:120]}"
+    lines = [f"{i}. {verbatim((a.preview.splitlines()[0] if a.preview else a.tool)[:120])}"
              for i, a in enumerate(waiting, 1)]
     return ("I have more than one thing waiting on you, so which one do you mean? "
             "Tap the buttons on the one you want.\n" + "\n".join(lines))
@@ -322,7 +323,8 @@ async def remind(user_id: int, approval_id: int) -> None:
     if await passed_action_time(approval) is not None:  # nothing to remind about: it can only expire
         await expire(user_id, approval_id)
         return
-    text = f"Still want me to go ahead with this? It expires in about 2 hours.\n\n{approval.preview}"
+    text = ("Still want me to go ahead with this? It expires in about 2 hours.\n\n"
+            f"{verbatim(approval.preview)}")
     await say(user_id, text, approval_buttons(approval_id), dedupe_key=f"approval:{approval_id}:remind",
               tainted=await _task_tainted(approval))
 
@@ -353,7 +355,7 @@ async def on_expire_wakeup(user_id: int, reason: str) -> None:
 
 
 def _preview_lines(approval) -> str:
-    return "\n".join(sanitize_line(line) for line in (approval.preview or "").splitlines())
+    return verbatim(approval.preview or "")
 
 
 async def _sweep_stuck_resolving(cutoff, user_id: int | None) -> int:

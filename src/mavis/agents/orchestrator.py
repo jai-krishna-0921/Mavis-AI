@@ -19,7 +19,7 @@ from mavis import bus
 from mavis.agents import checkpointing, interrupts
 from mavis.agents.orchestrator_graph import build_orchestrator, initial_state
 from mavis.agents.task_dispatch import enqueue_run
-from mavis.channels.formatting import sanitize_line
+from mavis.channels.formatting import verbatim
 from mavis.config import get_settings
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.tasks import TaskKind, TaskStatus
@@ -162,7 +162,7 @@ async def _close_approvals(task_id: int, user_id: int) -> None:
         await approval_flow.say(
             user_id,
             "One thing to check: this may have gone through before the task failed.\n"
-            + "\n".join(sanitize_line(line) for line in ap.preview.splitlines()),
+            + verbatim(ap.preview),
             dedupe_key=f"approval:{ap.id}:may_have_run",
         )
 
@@ -179,7 +179,7 @@ async def _report_executed_after_stop(task_id: int, user_id: int) -> None:
         await approval_flow.say(
             user_id,
             "Heads up: this went through before the task stopped.\n"
-            + "\n".join(sanitize_line(line) for line in ap.preview.splitlines()),
+            + verbatim(ap.preview),
             dedupe_key=f"approval:{ap.id}:ran_after_stop",
         )
 

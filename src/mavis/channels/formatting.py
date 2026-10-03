@@ -22,26 +22,90 @@ _SLOT = re.compile("\x00(\\d+)\x00")
 _URL = re.compile(r"https?://[^\s<>`]+")
 _KEEP = re.compile("\x01(\\d+)\x01")
 _TAG = re.compile(r"<(/?)(b|i|code|pre|a)(?:\s[^>]*)?>")
+_HELD = re.compile("\x02(\\d+)\x02")
 
 
-_DASH = "[\u2014\u2013\u2015\u2012]"  # em, en, horizontal bar, figure dash
+# --- dash normalisation (phase A4) ------------------------------------------------------------------
+#
+# Applied once, at the send boundary (the channel renderer), never to stored history, tool arguments or
+# verbatim spans. A dash is rewritten by what it means in context:
+#   "Label — text" / "Label - text" at a line or bullet start  ->  "Label: text"
+#   a range of numbers, times, days or months ("15:00–16:00")  ->  "15:00 to 16:00"
+#   any other dash between clauses                              ->  ", "
+
+# Every Unicode space separator (category Zs) other than the ASCII space: no-break, narrow no-break,
+# thin, em, ideographic... The model emits U+202F around times ("3\u202fPM").
+SPACE_SEPARATORS = "\u00a0\u1680" + "".join(chr(c) for c in range(0x2000, 0x200B)) + "\u202f\u205f\u3000"
+_TO_SPACE = str.maketrans(dict.fromkeys(SPACE_SEPARATORS, " "))
+# Hyphen lookalikes read as a plain hyphen-minus (the figure dash is the phone-number dash).
+_TO_HYPHEN = str.maketrans(dict.fromkeys("\u2010\u2011\u2012\u2212\ufe63\uff0d", "-"))
+_LONG = "[\u2013\u2014\u2015\ufe58]"  # en, em, horizontal bar, small em
+_DAYS = ("monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|"
+         "sat|sun")
+_MONTHS = ("january|february|march|april|june|july|august|september|october|november|december|jan|feb|"
+           "mar|apr|may|jun|jul|aug|sept|sep|oct|nov|dec")
+_AMPM = r"(?:\s?[ap]\.?m\.?)"
+_NUM = r"\d+(?:[:.]\d{2})?" + _AMPM + "?"
+_ATOM = rf"(?:{_NUM}|(?:{_DAYS}|{_MONTHS})\.?)"
+# unmistakably a time or a day
+_STRONG = rf"(?:\d{{1,2}}:\d{{2}}{_AMPM}?|\d{{1,2}}{_AMPM}|(?:{_DAYS}|{_MONTHS})\.?)"
+# a range atom is a whole token: not glued to a word, a hyphen chain, a path, or more digits
+_EDGE_L, _EDGE_R = r"(?<![\w\-/])(?<!\d[:.])", r"(?![\w\-/]|[:.]\d)"
+# en/em dash between any two range atoms, spaced or not
+_RANGE_LONG = re.compile(rf"{_EDGE_L}({_ATOM})[ \t]*{_LONG}[ \t]*({_ATOM}){_EDGE_R}", re.IGNORECASE)
+# a spaced hyphen between range atoms ("3 PM - 4 PM", "Mon - Fri")
+_RANGE_SPACED = re.compile(rf"{_EDGE_L}({_ATOM})[ \t]+-[ \t]+({_ATOM}){_EDGE_R}", re.IGNORECASE)
+# an unspaced hyphen: only when a side is unmistakably a time or day, or both are 1-2 digit numbers,
+# and never inside a chain like 2026-10-03 or 555-0132
+_RANGE_TIGHT = re.compile(
+    rf"{_EDGE_L}(?:({_STRONG})-({_ATOM})|({_ATOM})-({_STRONG})|(\d{{1,2}})-(\d{{1,2}})){_EDGE_R}",
+    re.IGNORECASE,
+)
+# "Label — text": an optional indent and bullet, then a short capitalised label (or **bold** one)
+_LABEL = re.compile(
+    rf"^(?P<lead>[ \t]*(?:[-*+•][ \t]+|\d+[.)][ \t]+)?)"
+    rf"(?P<label>(?:\*\*[^*\n]{{1,48}}\*\*|__[^_\n]{{1,48}}__|[A-Z][^\s.!?:;,]*(?:[ \t][^\s.!?:;,]+){{0,4}}))"
+    rf"(?:[ \t]*{_LONG}[ \t]*|[ \t]+--?[ \t]+)(?=\S)"
+)
+_LEADING = re.compile(rf"^([ \t]*){_LONG}[ \t]*")
+_TRAILING = re.compile(rf"[ \t]*{_LONG}[ \t]*$")
+_CLAUSE = re.compile(rf"[ \t]*{_LONG}[ \t]*|(?<=\S)[ \t]+--?[ \t]+(?=\S)")
+_HOLD = re.compile(r"`[^`\n]+`|https?://[^\s<>`]+|\x02\d+\x02")
 
 
-def sanitize_typography(text: str) -> str:
-    """Remove em and en dashes (and their lookalikes): they read as machine-written in chat."""
-    text = text.replace("\u2212", "-")  # minus sign: a plain hyphen-minus reads the same
-    text = re.sub(r"(?<=\S)[ \t]+--[ \t]+(?=\S)", " \u2014 ", text)  # " -- " used as a separator
-    text = re.sub(r"(?<=\d)[ \t]*[\u2013\u2012][ \t]*(?=\d)", "-", text)
-    text = re.sub(rf"(?m)^([ \t]*){_DASH}[ \t]*", r"\1", text)
-    text = re.sub(rf"[ \t]*{_DASH}[ \t]*$", "", text, flags=re.M)
-    text = re.sub(rf"[ \t]*{_DASH}[ \t]*", ", ", text)
-    text = re.sub(r",(?:[ \t]*,)+", ",", text)
-    text = re.sub(r"([.!?:;]),", r"\1", text)
-    return re.sub(r",[ \t]{2,}", ", ", text)
+def _range(m: re.Match[str]) -> str:
+    a, b = (g for g in m.groups() if g is not None)
+    return f"{a} to {b}"
 
 
-def sanitize_stored(text: str) -> str:
-    """Typography fixes for text kept in history (fenced blocks and inline code are left alone)."""
+def _normalize_plain(line: str) -> str:
+    line = line.translate(_TO_SPACE).translate(_TO_HYPHEN)
+    line = _RANGE_LONG.sub(_range, line)
+    line = _RANGE_SPACED.sub(_range, line)
+    line = _RANGE_TIGHT.sub(_range, line)
+    line = _LABEL.sub(lambda m: f"{m['lead']}{m['label']}: ", line, count=1)
+    line = _LEADING.sub(r"\1- ", line)
+    line = _TRAILING.sub("", line)
+    line = _CLAUSE.sub(", ", line)
+    line = re.sub(r",(?:[ \t]*,)+", ",", line)
+    line = re.sub(r"([.!?:;]),", r"\1", line)
+    return re.sub(r"(\S)[ \t]{2,}", r"\1 ", line)
+
+
+def normalize_line(line: str) -> str:
+    """Context-aware dash normalisation for one line; inline code, URLs and held spans are untouched."""
+    held: list[str] = []
+
+    def hold(m: re.Match[str]) -> str:
+        held.append(m.group(0))
+        return f"\x01{len(held) - 1}\x01"
+
+    out = _normalize_plain(_HOLD.sub(hold, line.replace("\x01", "")))
+    return _KEEP.sub(lambda m: held[int(m.group(1))], out)
+
+
+def normalize_dashes(text: str) -> str:
+    """normalize_line over a message, leaving ``` fenced blocks alone."""
     out: list[str] = []
     fenced = False
     for line in text.split("\n"):
@@ -49,20 +113,43 @@ def sanitize_stored(text: str) -> str:
             fenced = not fenced
             out.append(line)
             continue
-        out.append(line if fenced else sanitize_line(line))
+        out.append(line if fenced else normalize_line(line))
     return "\n".join(out)
 
 
-def sanitize_line(line: str) -> str:
-    """Typography fixes (no em or en dashes) that leave inline code spans untouched."""
+# --- verbatim spans ---------------------------------------------------------------------------------
+#
+# Text that must reach the user exactly as it is (an approval preview, which must equal the action;
+# quoted third-party text) is wrapped in these markers by the code that inserts it. The renderer
+# escapes it but never rewrites or parses it; history stores the text without the markers.
+
+VERBATIM_OPEN, VERBATIM_CLOSE = "\x0e", "\x0f"
+_VERBATIM = re.compile("\x0e(.*?)(?:\x0f|$)", re.DOTALL)
+
+
+def verbatim(text: str) -> str:
+    clean = str(text).replace(VERBATIM_OPEN, "").replace(VERBATIM_CLOSE, "")
+    return f"{VERBATIM_OPEN}{clean}{VERBATIM_CLOSE}" if clean else ""
+
+
+def strip_verbatim(text: str) -> str:
+    return text.replace(VERBATIM_OPEN, "").replace(VERBATIM_CLOSE, "")
+
+
+def _hold_verbatim(md: str) -> tuple[str, list[str]]:
+    """Replace each verbatim span with per-line placeholders (line structure is kept), so markdown
+    and dash rules never see its text."""
     spans: list[str] = []
 
     def hold(m: re.Match[str]) -> str:
-        spans.append(m.group(0))
-        return f"\x01{len(spans) - 1}\x01"
+        parts = []
+        for piece in m.group(1).split("\n"):
+            spans.append(piece)
+            parts.append(f"\x02{len(spans) - 1}\x02" if piece else "")
+        return "\n".join(parts)
 
-    out = sanitize_typography(_CODE.sub(hold, line.replace("\x01", "")))
-    return _KEEP.sub(lambda m: spans[int(m.group(1))], out)
+    held = _VERBATIM.sub(hold, md.replace("\x02", ""))
+    return held.replace(VERBATIM_CLOSE, ""), spans
 
 
 def _strip_inline(text: str) -> str:
@@ -117,10 +204,12 @@ def _balanced(markup: str) -> bool:
 
 
 def _render(md: str, *, as_html: bool) -> str:
+    """The send boundary: verbatim spans held aside, dashes normalised once, markdown rendered."""
     inline: Callable[[str], str] = _html_inline if as_html else _strip_inline
+    md, spans = _hold_verbatim(md.replace("\r\n", "\n"))
     out: list[str] = []
     code: list[str] | None = None
-    for raw in md.replace("\r\n", "\n").split("\n"):
+    for raw in md.split("\n"):
         if code is not None and not _FENCE.match(raw):
             code.append(raw)
             continue
@@ -131,7 +220,7 @@ def _render(md: str, *, as_html: bool) -> str:
                 out.append(_fenced(code, as_html))
                 code = None
             continue
-        line = sanitize_line(raw)
+        line = normalize_line(raw)
         if _HR.match(line) or (_TABLE_SEP.match(line) and "|" in line):
             continue
         if m := _HEADING.match(line):
@@ -146,7 +235,13 @@ def _render(md: str, *, as_html: bool) -> str:
             out.append(inline(line))
     if code is not None:
         out.append(_fenced(code, as_html))
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+    def restore(m: re.Match[str]) -> str:
+        span = spans[int(m.group(1))]
+        return html.escape(span, quote=False) if as_html else span
+
+    return _HELD.sub(restore, text)
 
 
 def _fenced(lines: list[str], as_html: bool) -> str:

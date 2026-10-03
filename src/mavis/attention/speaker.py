@@ -18,6 +18,7 @@ from mavis.attention.policy import LOOKALIKE, NOTIFY_SECURITY
 from mavis.attention.sanitize import REMOVED, clean, domain_label
 from mavis.attention.scheduling import schedule_once
 from mavis.attention.schema import FLAG_LABELS, METHOD_LABELS, AttentionDecision, EmailKind, Verdict
+from mavis.channels.formatting import verbatim
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import NotifyIntent
@@ -196,7 +197,7 @@ def notify_text(obs: Any) -> list[str]:
                 "and secure the account.")
     else:
         summary = clean(str(obs.summary or ""), 200)
-        first = f"Heads up about an email: {summary}." if summary else (
+        first = f"Heads up about an email: {verbatim(summary)}." if summary else (
             f"Heads up: an email from {domain_label(obs.sender_domain)} looks worth a look.")
         tail = "Open Gmail directly for the details."
     if LOOKALIKE in codes or "lookalike_domain" in codes:

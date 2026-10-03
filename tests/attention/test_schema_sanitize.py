@@ -50,8 +50,9 @@ def test_clean_removes_links_phones_domains():
         "mail a@b.example <b>now</b>\n\u2014ok"
     )
     out = clean(text, 200)
-    for bad in ("98765", "https", "evil-bank.com", "a@b.example", "<", ">", "\u2014", "\n"):
+    for bad in ("98765", "https", "evil-bank.com", "a@b.example", "<", ">", "\n"):
         assert bad not in out
+    assert "\u2014ok" in out  # third-party punctuation is kept (typography is the channel's, phase A4)
     assert "[removed]" in out
     assert len(clean("word " * 100, 30)) <= 30
 

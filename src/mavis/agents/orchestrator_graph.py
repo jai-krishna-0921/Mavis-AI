@@ -35,7 +35,7 @@ from mavis.agents import persona
 from mavis.agents.spawn import spawn_agent
 from mavis.agents.specialists import SPECIALISTS, get_specialist
 from mavis.agents.specialists.base import current_deliverable, run_specialist
-from mavis.channels.formatting import sanitize_line
+from mavis.channels.formatting import verbatim
 from mavis.config import get_settings
 from mavis.domain.decisions import ComposedMessage
 from mavis.domain.errors import ActionFailed, BudgetExceeded, ConnectionRequired, LLMError
@@ -462,7 +462,7 @@ def _first_result_line(result: str) -> str:
     for line in result.splitlines():
         line = line.strip()
         if line and not line.startswith(("<untrusted", "</untrusted")):
-            return sanitize_line(line[:200])
+            return verbatim(line[:200])  # tool output: shown as it came back
     return ""
 
 
@@ -561,7 +561,7 @@ def _approval_messages(outcomes: list[dict]) -> list[str]:
         if status == "executed":
             texts.append(f"{APPROVAL_TEXT['executed']}\n{detail}" if detail else APPROVAL_TEXT["executed"])
         elif status == "failed":
-            texts.append(APPROVAL_TEXT["failed"].format(reason=sanitize_line(detail) or "unknown error"))
+            texts.append(APPROVAL_TEXT["failed"].format(reason=verbatim(detail) or "unknown error"))
         elif status == "past":
             texts.append(APPROVAL_TEXT["past"].format(when=detail or "a time that has passed"))
         elif status in APPROVAL_TEXT:

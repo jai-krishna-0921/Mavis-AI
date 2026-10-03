@@ -50,7 +50,7 @@ from mavis.agents.turn_support import (
     window_tainted,
 )
 from mavis.channels import presence
-from mavis.channels.formatting import sanitize_stored
+from mavis.channels.formatting import strip_verbatim
 from mavis.domain.errors import ConnectionRequired
 from mavis.domain.events import Event
 from mavis.domain.messages import Outbound, Role
@@ -227,7 +227,7 @@ def _recent_assistant(history: list[Message], n: int) -> list[str]:
 
 
 def _shown(approval: PendingApproval, recent: list[str]) -> bool:
-    preview = sanitize_stored(approval.preview or "").strip()
+    preview = strip_verbatim(approval.preview or "").strip()  # history keeps text as written
     return bool(preview) and any(preview in text for text in recent)
 
 
