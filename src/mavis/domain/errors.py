@@ -17,6 +17,10 @@ class ConnectionRequired(MavisError):
         self.capability = capability
         self.reason = reason
         self.revoked = revoked
+        # Filled by agents.react.react_loop when a tool raises this mid-run, so the caller can still
+        # report what did happen (e.g. "reminder set, now connect Gmail") and attach queued approvals.
+        self.partial_messages: list = []  # ToolMessages of the interrupted step, in call order
+        self.queued_approvals: list[int] = []  # pending_approvals ids queued earlier in the run
 
 
 class ApprovalRequired(MavisError):
@@ -25,6 +29,19 @@ class ApprovalRequired(MavisError):
         self.action = action
         self.preview = preview
         self.arguments = arguments
+
+
+class ActionFailed(MavisError):
+    """A tool ran but its action did not happen (provider refused or was unreachable).
+
+    `str(exc)` is the sentence for the model; `reason` is the short cause safe to show the user.
+    The registry turns it back into a tool result for model-driven calls and lets it propagate from
+    `execute_approved`, so an approved action that failed is never recorded as executed.
+    """
+
+    def __init__(self, message: str, reason: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason or message
 
 
 class BudgetExceeded(MavisError):

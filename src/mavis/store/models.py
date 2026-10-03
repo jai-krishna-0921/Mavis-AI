@@ -287,6 +287,86 @@ class AttentionPref(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
+class Task(Base):
+    __tablename__ = "tasks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"))
+    kind: Mapped[str] = mapped_column(String(16), default="task")
+    origin: Mapped[str] = mapped_column(String(16), default="user")
+    goal: Mapped[str] = mapped_column(Text)
+    context: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
+    notify_on_complete: Mapped[bool] = mapped_column(default=True)
+    # True when created from a turn that saw untrusted tool output; every step loop then runs tainted.
+    tainted: Mapped[bool] = mapped_column(default=False)
+    plan: Mapped[dict | None] = mapped_column(JSON)
+    result_text: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    started_at: Mapped[datetime | None]
+    finished_at: Mapped[datetime | None]
+
+
+class Artifact(Base):
+    __tablename__ = "artifacts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    path: Mapped[str] = mapped_column(Text)
+    mime: Mapped[str] = mapped_column(String(120))
+    title: Mapped[str] = mapped_column(String(200), default="")
+    size: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class PendingApproval(Base):
+    __tablename__ = "pending_approvals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), index=True)
+    tool: Mapped[str] = mapped_column(String(64))
+    arguments: Mapped[dict] = mapped_column(JSON)
+    preview: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    result: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    expires_at: Mapped[datetime]
+    prompted_at: Mapped[datetime | None]
+    # Execution marker: set right before an approved tool runs. EXECUTED with started_at but no
+    # resolved_at means "may have run" (crash mid-execution); EXECUTED without started_at means
+    # "claimed, never run".
+    started_at: Mapped[datetime | None]
+    resolved_at: Mapped[datetime | None]
+
+
+class PolicyRule(Base):
+    __tablename__ = "policy_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    tool: Mapped[str] = mapped_column(String(64))
+    field: Mapped[str] = mapped_column(String(64))
+    contains: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(index=True)
+    actor: Mapped[str] = mapped_column(String(32))
+    action: Mapped[str] = mapped_column(String(120))
+    detail: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
 class InitiativeDecisionRow(Base):
     """The reasoner's decision for one event, kept so a retry re-applies it instead of asking again."""
 

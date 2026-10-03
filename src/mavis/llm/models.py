@@ -12,7 +12,7 @@ import json
 import re
 import time
 import weakref
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from enum import StrEnum
 from functools import lru_cache
 from typing import Any, Literal
@@ -21,7 +21,7 @@ import httpx
 import openai
 import structlog
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ValidationError
 
@@ -403,23 +403,27 @@ def _prefer_secondary(tier: Tier, priority: Priority) -> bool:
     return priority == "interactive" and _secondary_ready(tier) and _ollama.unavailable_s() > 0
 
 
-async def complete(
+async def _invoke_chain(
     messages: list[BaseMessage],
-    tier: Tier = Tier.FAST,
-    temperature: float = 0.6,
-    name: str = "complete",
-    priority: Priority = "interactive",
-    fallback: bool | None = None,
-) -> str:
-    """Plain-text completion. Falls back to another model only on model-specific errors, and once to
-    the secondary provider when Ollama is saturated or unreachable. Raises LLMError on failure."""
+    tier: Tier,
+    temperature: float,
+    name: str,
+    priority: Priority,
+    fallback: bool | None,
+    prepare: Callable[[BaseChatModel], Any],
+) -> Any:
+    """Shared model chain for complete() and invoke_tools(): one runnable per model, built by
+    `prepare(chat_model)` (identity, or `.bind_tools(...)`), each attempt under `_call` (limiter,
+    deadline, Ollama cooldown/backoff). Falls back to another model only on model-specific errors,
+    and once to the secondary provider when Ollama is saturated or unreachable. Raises LLMError."""
     chain = _chain(tier, _use_fallback(priority, fallback))
+    cfg = run_config(name)
     out = None
     tried_secondary = False
 
     async def via_secondary() -> Any:
-        llm = _model_for(tier, temperature, None, secondary=True)
-        return await _call(lambda: llm.ainvoke(messages, config=run_config(name)), priority,
+        runnable = prepare(_model_for(tier, temperature, None, secondary=True))
+        return await _call(lambda: runnable.ainvoke(messages, config=cfg), priority,
                            _deadline_for(tier, priority), secondary=True)
 
     if _prefer_secondary(tier, priority):
@@ -432,8 +436,8 @@ async def complete(
         deadline = _deadline_for(tier, priority)
         for i, model in enumerate(chain):
             try:
-                llm = _model_for(tier, temperature, model)
-                out = await _call(lambda m=llm: m.ainvoke(messages, config=run_config(name)), priority,
+                runnable = prepare(_model_for(tier, temperature, model))
+                out = await _call(lambda r=runnable: r.ainvoke(messages, config=cfg), priority,
                                   deadline, may_fail_over=_secondary_ready(tier) and not tried_secondary)
                 break
             except Exception as exc:  # noqa: BLE001
@@ -450,10 +454,47 @@ async def complete(
                         raise LLMError(f"{tier.value} model call failed: {type(exc2).__name__}") from exc2
                 raise LLMError(f"{tier.value} model call failed: {type(exc).__name__}") from exc
     assert out is not None
+    return out
+
+
+async def complete(
+    messages: list[BaseMessage],
+    tier: Tier = Tier.FAST,
+    temperature: float = 0.6,
+    name: str = "complete",
+    priority: Priority = "interactive",
+    fallback: bool | None = None,
+) -> str:
+    """Plain-text completion. Falls back to another model only on model-specific errors, and once to
+    the secondary provider when Ollama is saturated or unreachable. Raises LLMError on failure."""
+    out = await _invoke_chain(messages, tier, temperature, name, priority, fallback, lambda m: m)
     text = _text_of(out.content).strip()
     if not text:
         raise LLMError(f"{tier.value} model returned empty content")
     return text
+
+
+async def invoke_tools(
+    messages: list[BaseMessage],
+    tools: Sequence[Any],
+    tier: Tier = Tier.FAST,
+    temperature: float = 0.3,
+    name: str = "tools",
+    priority: Priority = "interactive",
+    fallback: bool | None = None,
+) -> AIMessage:
+    """One tool-calling turn: the model with `tools` bound, through the same chain as complete()
+    (limiter, deadline, cooldown/backoff, secondary provider). This is the ONLY way to make a
+    tool-calling LLM call. Empty content is fine when the model asked for tools (valid or not);
+    otherwise it raises LLMError like complete()."""
+    bound = list(tools)
+    out = await _invoke_chain(messages, tier, temperature, name, priority, fallback,
+                              lambda m: m.bind_tools(bound) if bound else m)
+    if not isinstance(out, AIMessage):
+        raise LLMError(f"{tier.value} model returned {type(out).__name__}, not an AIMessage")
+    if not (out.tool_calls or out.invalid_tool_calls) and not _text_of(out.content).strip():
+        raise LLMError(f"{tier.value} model returned empty content")
+    return out
 
 
 def _messages(system: str, user: str | list[BaseMessage]) -> list[BaseMessage]:

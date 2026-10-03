@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from mavis.config import get_settings
 from mavis.store import models  # noqa: F401  (registers tables)
 from mavis.store.db import Base
+from mavis.store.migrate import include_object
 
 config = context.config
 if config.config_file_name is not None:
@@ -25,13 +26,15 @@ def _url() -> str:
 
 
 def run_migrations_offline() -> None:
-    context.configure(url=_url(), target_metadata=target_metadata, literal_binds=True, render_as_batch=True)
+    context.configure(url=_url(), target_metadata=target_metadata, literal_binds=True, render_as_batch=True,
+                      include_object=include_object)
     with context.begin_transaction():
         context.run_migrations()
 
 
 def _run_sync(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, render_as_batch=True)
+    context.configure(connection=connection, target_metadata=target_metadata, render_as_batch=True,
+                      include_object=include_object)
     with context.begin_transaction():
         context.run_migrations()
 

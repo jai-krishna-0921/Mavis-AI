@@ -49,12 +49,12 @@ def sanitize_stored(text: str) -> str:
             fenced = not fenced
             out.append(line)
             continue
-        out.append(line if fenced else _sanitize_line(line))
+        out.append(line if fenced else sanitize_line(line))
     return "\n".join(out)
 
 
-def _sanitize_line(line: str) -> str:
-    """Typography fixes that leave inline code spans untouched."""
+def sanitize_line(line: str) -> str:
+    """Typography fixes (no em or en dashes) that leave inline code spans untouched."""
     spans: list[str] = []
 
     def hold(m: re.Match[str]) -> str:
@@ -131,7 +131,7 @@ def _render(md: str, *, as_html: bool) -> str:
                 out.append(_fenced(code, as_html))
                 code = None
             continue
-        line = _sanitize_line(raw)
+        line = sanitize_line(raw)
         if _HR.match(line) or (_TABLE_SEP.match(line) and "|" in line):
             continue
         if m := _HEADING.match(line):
