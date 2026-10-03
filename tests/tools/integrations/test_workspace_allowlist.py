@@ -340,13 +340,13 @@ async def test_any_move_into_a_shared_or_foreign_folder_is_outward(google, user)
     perms(google, SHARED)
     out = await run_prepare("drive.move", move(FOLDER), None, user.id, tainted=False)
     assert out.refusal is None and out.risk is RiskClass.OUTWARD
-    assert out.note.startswith("Move into folder: Team folder (")
+    assert out.note.splitlines()[-1].startswith("Move into folder: Team folder (")
     perms(google, THEIRS)
     out = await run_prepare("drive.move", move(FOLDER), None, user.id, tainted=False)
     assert out.risk is RiskClass.OUTWARD
     google.results["drive.permissions"] = ToolResult(ok=False, error="Composio answered 403 for POST /x")
     out = await run_prepare("drive.move", move(FOLDER), None, user.id, tainted=False)
-    assert out.risk is RiskClass.OUTWARD and out.note == workspace_guard.FOLDER_UNKNOWN_NOTE
+    assert out.risk is RiskClass.OUTWARD and out.note.splitlines()[-1] == workspace_guard.FOLDER_UNKNOWN_NOTE
     perms(google, MINE)
     out = await run_prepare("drive.move", move(FOLDER), None, user.id, tainted=False)
     assert out.refusal is None and out.risk is None
@@ -420,3 +420,19 @@ async def test_tainted_upload_or_folder_needs_an_allowed_destination(google, use
     perms(google, SHARED)
     workspace_guard.record_created(tid, ["folder-made-here"])
     assert (await run_prepare(action, build("folder-made-here"), tid, user.id)).refusal is None
+
+
+@pytest.mark.parametrize(("action", "args"), [
+    ("drive.share", share(DECK)),
+    ("docs.comment", a.DocCommentArgs(file_id=DECK, content="ok")),
+    ("drive.move", move(FOLDER)),
+])
+async def test_share_comment_and_move_previews_name_the_verified_file(google, user, action, args):
+    named(google, "Q3 Deck")
+    perms(google, MINE)
+    out = await run_prepare(action, args, None, user.id, tainted=False)
+    assert out.refusal is None
+    assert out.note.splitlines()[0].startswith("File: Q3 Deck (")
+    google.results["drive.meta"] = ToolResult(ok=False, error="Composio answered 403 for POST /x")
+    out = await run_prepare(action, args, None, user.id, tainted=False)
+    assert out.note.splitlines()[0] == workspace_guard.NAME_UNCHECKED_NOTE

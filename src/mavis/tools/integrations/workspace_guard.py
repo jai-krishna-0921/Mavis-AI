@@ -43,6 +43,7 @@ STATE_KEY = "workspace"  # users.state["workspace"]: email, contacts, cursors, m
 OVERWRITE_LIMIT = 20
 UNKNOWN_NOTE = "I couldn't check who can see this file, so I'm asking first."
 FOLDER_UNKNOWN_NOTE = "I couldn't check who can see the destination folder, so I'm asking first."
+NAME_UNCHECKED_NOTE = "File: the name could not be checked."
 TASK_UNKNOWN = "I couldn't find that task in Google Tasks, so I haven't changed anything."
 _CELL = re.compile(r"^([A-Za-z]{1,3})([1-9][0-9]*)$")
 
@@ -272,10 +273,29 @@ def destination_step(field: str, label: str) -> PrepareFn:
     return prepare
 
 
-prepare_move = destination_step("to_folder_id", "Move into folder")
+async def file_note(ctx: ToolContext, file_id: str) -> str:
+    """The approval preview's line for the file itself: its verified name, type, owner and sharing, so the
+    user never approves a raw id. A failed lookup says so (never a name taken from the model)."""
+    meta = await file_meta(ctx, file_id)
+    return _note(meta) if meta is not None else NAME_UNCHECKED_NOTE
+
+
+async def prepare_named_file(ctx: ToolContext, args: Any) -> Prepared:
+    """drive.share and docs.comment are OUTWARD already: the step only names the file in the preview."""
+    return Prepared(note=await file_note(ctx, args.file_id))
+
+
+_move_destination = destination_step("to_folder_id", "Move into folder")
+
+
+async def prepare_move(ctx: ToolContext, args: Any) -> Prepared:
+    folder = await _move_destination(ctx, args)
+    return Prepared(risk=folder.risk, note=f"{await file_note(ctx, args.file_id)}\n{folder.note}")
 
 
 ESCALATIONS: dict[str, PrepareFn] = {
+    "drive.share": prepare_named_file,
+    "docs.comment": prepare_named_file,
     "drive.move": prepare_move,
     "drive.upload": destination_step("folder_id", "Upload into folder"),
     "drive.create_folder": destination_step("parent_id", "Create inside folder"),
