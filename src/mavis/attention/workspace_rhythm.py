@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from mavis.attention.rhythm import _plural
+from mavis.attention.rhythm import WAITING, _plural
 from mavis.attention.workspace import WorkspaceIntake
 from mavis.attention.workspace_signals import SignalKind
 from mavis.domain import timeutil
@@ -86,6 +86,7 @@ async def workspace_evening(user_id: int, start: datetime) -> list[str]:
     recent = await repo.signals(user_id, timeutil.now() - timedelta(days=COMMENT_DAYS), sources=("docs",),
                                 kinds=(SignalKind.COMMENT.value,))
     lines = [f"Overdue task: {r.summary}" for r in overdue[:MAX_LINES]]
-    waiting = [r for r in recent if (r.facts or {}).get("owned_by_me") and r.feedback is None]
+    waiting = [r for r in recent
+               if (r.facts or {}).get("owned_by_me") and r.verdict in WAITING and r.feedback is None]
     lines += [f"Comment waiting on your doc: {r.summary}" for r in waiting[:MAX_FILES]]
     return lines
