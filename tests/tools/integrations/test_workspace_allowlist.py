@@ -377,3 +377,46 @@ async def test_a_missing_parent_does_not_trust_the_child_goal(google, user, monk
 
     monkeypatch.setattr(workspace_guard.tasks_repo, "get", gone)
     assert (await run_prepare("drive.share", share(DECK), child, user.id)).refusal == REFUSAL
+
+
+DESTINATION_WRITES = [
+    ("drive.upload", lambda folder: a.DriveUploadArgs(artifact_id=1, folder_id=folder), "Upload into folder"),
+    ("drive.create_folder", lambda folder: a.FolderCreateArgs(name="Notes", parent_id=folder),
+     "Create inside folder"),
+]
+
+
+@pytest.mark.parametrize(("action", "build", "label"), DESTINATION_WRITES)
+async def test_any_upload_or_folder_into_a_shared_or_foreign_folder_is_outward(google, user, action, build,
+                                                                              label):
+    named(google, "Team folder")
+    perms(google, SHARED)
+    out = await run_prepare(action, build(FOLDER), None, user.id, tainted=False)
+    assert out.refusal is None and out.risk is RiskClass.OUTWARD
+    assert out.note.startswith(f"{label}: Team folder (")
+    perms(google, THEIRS)
+    assert (await run_prepare(action, build(FOLDER), None, user.id, tainted=False)).risk is RiskClass.OUTWARD
+    google.results["drive.permissions"] = ToolResult(ok=False, error="Composio answered 403 for POST /x")
+    out = await run_prepare(action, build(FOLDER), None, user.id, tainted=False)
+    assert out.risk is RiskClass.OUTWARD and out.note == workspace_guard.FOLDER_UNKNOWN_NOTE
+    perms(google, MINE)
+    out = await run_prepare(action, build(FOLDER), None, user.id, tainted=False)
+    assert out.refusal is None and out.risk is None
+    out = await run_prepare(action, build(""), None, user.id, tainted=False)  # My Drive root
+    assert out.refusal is None and out.risk is None
+
+
+@pytest.mark.parametrize(("action", "build", "label"), DESTINATION_WRITES)
+async def test_tainted_upload_or_folder_needs_an_allowed_destination(google, user, action, build, label):
+    tid = await tasks.create(user.id, goal="write up the report")
+    named(google, "Team folder")
+    perms(google, SHARED)
+    assert (await run_prepare(action, build(FOLDER), tid, user.id)).refusal == REFUSAL
+    google.results["drive.permissions"] = ToolResult(ok=False, error="Composio answered 403 for POST /x")
+    assert (await run_prepare(action, build(FOLDER), tid, user.id)).refusal == REFUSAL
+    perms(google, MINE)
+    assert (await run_prepare(action, build(FOLDER), tid, user.id)).refusal is None
+    assert (await run_prepare(action, build(""), tid, user.id)).refusal is None
+    perms(google, SHARED)
+    workspace_guard.record_created(tid, ["folder-made-here"])
+    assert (await run_prepare(action, build("folder-made-here"), tid, user.id)).refusal is None
