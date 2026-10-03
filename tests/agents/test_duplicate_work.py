@@ -105,18 +105,18 @@ def test_equivalent_args_ignore_free_text_and_formatting() -> None:
     a = _invite()
     b = _invite(summary="  interview:   JANE ", description="See you then!")
     b["start"] = "2026-10-09T09:30:00Z"  # same instant
-    assert approvals.equivalent(a, b)
+    assert approvals.equivalent("calendar_create_event", a, b)
     c = _invite()
     c["attendees"] = ["bob@example.com"]
-    assert not approvals.equivalent(a, c)
+    assert not approvals.equivalent("calendar_create_event", a, c)
     d = _invite()
     d["start"] = "2026-10-10T15:00:00+05:30"
-    assert not approvals.equivalent(a, d)
+    assert not approvals.equivalent("calendar_create_event", a, d)
 
 
 def test_text_only_args_compare_in_full() -> None:
-    assert not approvals.equivalent({"text": "hi"}, {"text": "bye"})
-    assert approvals.equivalent({"text": "hi"}, {"text": "hi"})
+    assert not approvals.equivalent("send_note", {"text": "hi"}, {"text": "bye"})
+    assert approvals.equivalent("send_note", {"text": "hi"}, {"text": " HI "})
 
 
 async def test_queue_reuses_an_equivalent_pending_approval_from_another_task(user, note_tool) -> None:
@@ -226,3 +226,52 @@ async def test_superseded_decision_closes_the_approval_without_running_it(
     row = await approvals.get(pending.id)
     assert row.status == ApprovalStatus.REJECTED and "superseded" in (row.result or "")
     assert (await tasks.get(tid)).status == TaskStatus.DONE
+
+
+# --- review round 2 (I1): free text is ignored only where key fields identify the action ------------
+
+
+def test_slack_messages_with_different_text_are_different_actions() -> None:
+    a = {"channel": "#team", "text": "Standup moved to 11"}
+    b = {"channel": "#team", "text": "Lunch is on me today"}
+    assert not approvals.equivalent("slack_send", a, b)
+    assert approvals.equivalent("slack_send", a, {"channel": "#team", "text": "  standup moved to 11 "})
+
+
+def test_replies_with_different_bodies_are_different_actions() -> None:
+    a = {"thread_id": "t1", "to": "raj@example.com", "body": "Yes, Monday works."}
+    b = {"thread_id": "t1", "to": "raj@example.com", "body": "Sorry, I can't make it."}
+    assert not approvals.equivalent("mail_reply", a, b)
+    page = {"parent_id": "p1", "title": "Notes"}
+    assert not approvals.equivalent("notion_create_page", {**page, "content": "a"}, {**page, "content": "b"})
+
+
+def test_calendar_twin_with_a_reworded_description_is_one_action() -> None:
+    assert approvals.equivalent("calendar_create_event", _invite(description="Looking forward"),
+                                _invite(description="Excited to meet you!"))
+    mail = {"to": ["raj@example.com"], "subject": "Interview", "cc": []}
+    assert approvals.equivalent("mail_send", {**mail, "body": "Hi Raj"}, {**mail, "body": "Hello Raj,"})
+
+
+async def test_queue_keeps_two_slack_messages_to_one_channel(user, fresh_registry) -> None:
+    from pydantic import BaseModel
+
+    from mavis.domain.policy import RiskClass
+    from mavis.tools.registry import MavisTool
+
+    class SlackArgs(BaseModel):
+        channel: str
+        text: str
+
+    async def _send(user_id, args):
+        return "sent"
+
+    fresh_registry.register(MavisTool("slack_send", "Post a Slack message.", SlackArgs, RiskClass.OUTWARD,
+                                      _send, agents=frozenset({"conversation"})))
+    other = await tasks.create(user.id, goal="earlier task")
+    await approvals.create(user.id, other, "slack_send", {"channel": "#team", "text": "Standup moved"},
+                           "Slack", utcnow() + timedelta(hours=48))
+    [lc] = fresh_registry.for_agent("conversation", user.id)
+    out = await lc.ainvoke({"channel": "#team", "text": "Lunch is on me"})
+    assert out.startswith("QUEUED_FOR_APPROVAL #")
+    assert len(await approvals.open_for_user(user.id)) == 2
