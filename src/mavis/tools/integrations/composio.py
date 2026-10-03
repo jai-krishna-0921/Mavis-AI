@@ -60,6 +60,13 @@ _STATE_MAP = {
 }
 
 
+def _pick_toolkit(statuses: dict[str, str], legacy: str) -> str:
+    """googlesuper when ACTIVE, else the legacy toolkit when ACTIVE, else googlesuper (to report it)."""
+    if statuses.get(GOOGLESUPER) == "ACTIVE":
+        return GOOGLESUPER
+    return legacy if statuses.get(legacy) == "ACTIVE" else GOOGLESUPER
+
+
 class ComposioProvider:
     def __init__(
         self,
@@ -204,11 +211,7 @@ class ComposioProvider:
             return toolkit_of_slug(legacy_slug)
         if capability not in LEGACY_TOOLKITS:
             return GOOGLESUPER
-        statuses = await self._route_statuses(user)
-        if statuses.get(GOOGLESUPER) == "ACTIVE":
-            return GOOGLESUPER
-        legacy = LEGACY_TOOLKITS[capability]
-        return legacy if statuses.get(legacy) == "ACTIVE" else GOOGLESUPER
+        return _pick_toolkit(await self._route_statuses(user), LEGACY_TOOLKITS[capability])
 
     async def connect_link(self, user: UserRef, toolkit: str, callback_url: str) -> str:
         toolkit = (toolkit or "").strip().lower()
@@ -229,16 +232,19 @@ class ComposioProvider:
         return url
 
     async def disconnect(self, user: UserRef, toolkit: str) -> None:
-        name = (toolkit or "").strip().lower()
+        name = original = (toolkit or "").strip().lower()
         if self._workspace and name in _GOOGLE_NAMES:
             name = GOOGLESUPER  # every Google capability drops at once; legacy accounts stay
         elif self._workspace and name in LEGACY_ALIASES:
             name = LEGACY_ALIASES[name]
-        self._routes.pop(user.provider_id, None)
-        row = (await self._accounts(user)).get(name)
+        accounts = await self._accounts(user)
+        row = accounts.get(name)
+        if not row and name == GOOGLESUPER and original in LEGACY_TOOLKITS.values():
+            row = accounts.get(original)  # legacy-only user disconnecting "gmail" or "googlecalendar"
         if not row:
             raise IntegrationError(f"there is no {toolkit} connection to remove.")
         await self._request("DELETE", f"/connected_accounts/{row.get('id')}")
+        self._routes.pop(user.provider_id, None)  # after the DELETE, so no concurrent execute re-caches it
 
     # --- tools --------------------------------------------------------------------------------------
 
@@ -271,12 +277,18 @@ class ComposioProvider:
         if google_slug is None and legacy is None:
             raise IntegrationError(f"unknown trigger {trigger!r}")
         accounts = await self._accounts(user)
-        google = accounts.get(GOOGLESUPER)
-        if google_slug is not None and (legacy is None or (google and google.get("status") == "ACTIVE")):
-            slug, account = google_slug, google  # workspace-only triggers exist on googlesuper alone
+        self._remember(user, accounts)
+        if legacy is None:
+            if google_slug is None:
+                raise IntegrationError(f"unknown trigger {trigger!r}")
+            slug, toolkit = google_slug, GOOGLESUPER  # workspace-only triggers exist on googlesuper alone
+        elif google_slug is not None:
+            statuses = {k: str(v.get("status")) for k, v in accounts.items()}
+            toolkit = _pick_toolkit(statuses, toolkit_of_slug(legacy))
+            slug = google_slug if toolkit == GOOGLESUPER else legacy
         else:
-            assert legacy is not None
-            slug, account = legacy, accounts.get(toolkit_of_slug(legacy))
+            slug, toolkit = legacy, toolkit_of_slug(legacy)
+        account = accounts.get(toolkit)
         if not account or account.get("status") != "ACTIVE":
             raise IntegrationError(f"no ACTIVE {toolkit_of_slug(slug)} connection to attach {trigger} to.")
         answer = await self._request(
