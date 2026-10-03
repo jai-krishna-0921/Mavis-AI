@@ -71,6 +71,9 @@ current_route: ContextVar[str | None] = ContextVar("current_route", default=None
 CHAT_TOOL_LIMIT = 8
 CHAT_ALWAYS = ("start_task", "connect_account")
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
+# Offered together: mail_search returns short previews only, so without mail_read a question about an
+# email (one a brief mentioned, say) cannot be answered from its text; mail_read needs search's ids.
+CHAT_COMPANIONS = {"mail_search": "mail_read", "mail_read": "mail_search"}
 CHAT_MAX_STEPS = 6  # tool rounds (slice value), then she answers with what she has; CHAT_DEADLINE_S caps time
 CHAT_DEADLINE_S = 40.0  # after this, no more tool rounds: answer now
 CHAT_TOOL_TIMEOUT_S = 20.0  # per tool call (provider round trips), well inside the turn deadline
@@ -86,6 +89,9 @@ TOOL_RULES = (
     "what you remember. Don't call a tool for small talk.\n"
     "- For an email: mail_search first (it returns message ids), then mail_read with the right "
     "message_id for the full text.\n"
+    "- An email you mentioned earlier (in a brief or a heads-up) is one you only saw a summary of. When "
+    "they ask about it or want its key points, look it up with mail_search and mail_read; never say you "
+    "don't have the text.\n"
     "- Sending or replying to email, inviting guests, forgetting things and standing rules always wait "
     "for their OK. When a tool answers QUEUED_FOR_APPROVAL, tell them it's ready and waiting for their "
     "OK (they get buttons to approve, edit or cancel). Never say it was sent or done.\n"
@@ -104,11 +110,34 @@ def chat_tools(user_id: int, query: str = "") -> list[BaseTool]:
     try:
         from mavis.tools.registry import get_registry
 
-        return get_registry().select("conversation", user_id, query=query, limit=CHAT_TOOL_LIMIT,
-                                     always=CHAT_ALWAYS, exclude=CHAT_EXCLUDED)
+        registry = get_registry()
+        tools = registry.select("conversation", user_id, query=query, limit=CHAT_TOOL_LIMIT,
+                                always=CHAT_ALWAYS, exclude=CHAT_EXCLUDED)
+        return _with_companions(registry, user_id, tools)
     except Exception:  # noqa: BLE001 - tools are an extra; the turn must still answer
         log.warning("simple_turn.tools_unavailable", exc_info=True)
         return []
+
+
+def _with_companions(registry, user_id: int, tools: list[BaseTool]) -> list[BaseTool]:
+    """Swap the lowest-ranked optional tool for a missing companion (CHAT_COMPANIONS), keeping the limit."""
+    names = [t.name for t in tools]
+    for lead, companion in CHAT_COMPANIONS.items():
+        if lead not in names or companion in names or companion in CHAT_EXCLUDED:
+            continue
+        extra = registry.for_agent("conversation", user_id, names=[companion])
+        if not extra:
+            continue
+        if len(tools) < CHAT_TOOL_LIMIT:
+            tools.append(extra[0])
+        else:
+            keep = set(CHAT_ALWAYS) | set(CHAT_COMPANIONS)
+            drop = next((i for i in range(len(tools) - 1, -1, -1) if tools[i].name not in keep), None)
+            if drop is None:
+                continue
+            tools[drop] = extra[0]
+        names = [t.name for t in tools]
+    return tools
 
 
 async def handle_connect(user_id: int, text: str) -> str | None:

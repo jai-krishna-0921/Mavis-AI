@@ -27,6 +27,7 @@ class WakeupKind(StrEnum):
     SYSTEM_ATTENTION_BACKFILL = "system_attn_backfill"  # Phase 8
     SYSTEM_EVENING_WRAP = "system_evening_wrap"  # Phase 8
     SYSTEM_ATTENTION_RETENTION = "system_attn_retention"  # Phase 8 (kind column is 24 chars)
+    SYSTEM_LEARN = "system_learn"  # a LEARN job parked until after the chat grace window, or retried
 
 
 class WakeupStatus(StrEnum):
@@ -67,4 +68,5 @@ EVENT_TYPE_FOR_KIND: dict[WakeupKind, EventType] = {
     WakeupKind.SYSTEM_ATTENTION_BACKFILL: EventType.WAKEUP,
     WakeupKind.SYSTEM_EVENING_WRAP: EventType.WAKEUP,
     WakeupKind.SYSTEM_ATTENTION_RETENTION: EventType.WAKEUP,
+    WakeupKind.SYSTEM_LEARN: EventType.WAKEUP,
 }

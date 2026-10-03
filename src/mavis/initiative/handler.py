@@ -233,15 +233,18 @@ class InitiativeHandler:
 
 
 def _quiet_after_turn(event: Event, decision: InitiativeDecision) -> InitiativeDecision:
-    """A loop extracted from a chat turn never triggers a ping at creation: the user just talked about
-    it and got an answer. Tracking, default wakeups and the model's wakeups still apply; those do the
-    follow-through later. (No time window: LEARN can run late under LLM load.)"""
-    if event.type is not EventType.LOOP_CREATED or decision.notify is None:
+    """A loop extracted from a chat turn never triggers a ping or a task at creation: the user just
+    talked about it and the chat turn owns any action (it can start_task or queue the approval
+    itself; a second task from here duplicated work and approval cards). Tracking, default wakeups
+    and the model's wakeups still apply; those do the follow-through later. (No time window: LEARN
+    can run late under LLM load.)"""
+    if event.type is not EventType.LOOP_CREATED or (decision.notify is None and not decision.act):
         return decision
     if not str(event.payload.get("source", "")).startswith(TRUSTED_SOURCE_PREFIXES):
         return decision
-    log.info("initiative.post_turn_suppressed", event_id=event.id, intent=decision.notify.intent[:80])
-    return decision.model_copy(update={"notify": None, "ignore_reason": "just discussed in chat"})
+    intent = decision.notify.intent[:80] if decision.notify else ""
+    log.info("initiative.post_turn_suppressed", event_id=event.id, intent=intent, acts=len(decision.act))
+    return decision.model_copy(update={"notify": None, "act": [], "ignore_reason": "just discussed in chat"})
 
 
 def _cap_llm_urgency(decision: InitiativeDecision) -> InitiativeDecision:

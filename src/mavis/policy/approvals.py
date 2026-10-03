@@ -142,6 +142,33 @@ async def _resume(approval, decision: str, instructions: str = "") -> None:
     ))
 
 
+SUPERSEDED_NOTE = "superseded by approval #{id}"
+
+
+async def supersede_duplicates(decided) -> int:
+    """`decided` was just executed or rejected: close this user's other cards for the same action
+    (same tool, equivalent arguments) so no stale duplicate stays approvable. A task waiting on that
+    card gets a "superseded" decision (its gate closes it without running anything); any other
+    duplicate (its task has not reached the gate yet, or there is no task) is closed in place."""
+    n = 0
+    for dup in await approvals.waiting_equivalents(decided.user_id, decided.tool, decided.arguments or {},
+                                                   tainted=bool(decided.tainted), exclude_id=decided.id):
+        note = SUPERSEDED_NOTE.format(id=decided.id)
+        task = await tasks.get(dup.task_id) if dup.task_id is not None else None
+        nxt = await approvals.next_open(task.id) if task is not None else None
+        waiting_on_it = (task is not None and task.status == TaskStatus.AWAITING_APPROVAL
+                         and nxt is not None and nxt.id == dup.id)
+        if waiting_on_it:
+            if await approvals.claim(dup.id, _OPENABLE, ApprovalStatus.RESOLVING):
+                await _resume(dup, "superseded")
+                n += 1
+        elif await approvals.set_status(dup.id, ApprovalStatus.REJECTED, note, from_statuses=_OPENABLE):
+            n += 1
+    if n:
+        log.info("approval.duplicates_superseded", approval_id=decided.id, count=n)
+    return n
+
+
 async def handle_approval_button(event: Event) -> None:
     m = _BUTTON.match(str(event.payload.get("data", "")))
     if not m:

@@ -79,3 +79,72 @@ def test_triggers_cover_all_capabilities_and_map_to_slugs():
         assert MAVIS_TRIGGERS[cap]
         for trig in MAVIS_TRIGGERS[cap]:
             assert toolkit_of_slug(COMPOSIO_TRIGGERS[trig]) == cap.value
+
+
+# Live Composio schemas, fetched 2026-10-03 (hotfix3): the fields each slug REQUIRES. Updates use
+# GOOGLECALENDAR_PATCH_EVENT (patch semantics); GOOGLECALENDAR_UPDATE_EVENT is a full PUT replacement
+# whose description says unspecified fields "may be cleared or reset".
+LIVE_REQUIRED = {
+    "calendar.list": {"calendarId"},
+    "calendar.create_event": {"start_datetime"},
+    "calendar.update_event": {"calendar_id", "event_id"},
+}
+
+
+def test_calendar_list_golden_sends_primary_calendar():
+    from mavis.tools.integrations.actions import CalendarListArgs
+
+    t0 = datetime(2026, 10, 3, 0, 0, tzinfo=UTC)
+    t1 = datetime(2026, 10, 4, 0, 0, tzinfo=UTC)
+    out = COMPOSIO_ACTIONS["calendar.list"].translate(CalendarListArgs(time_min=t0, time_max=t1))
+    assert out == {
+        "calendarId": "primary", "timeMin": "2026-10-03T00:00:00+00:00",
+        "timeMax": "2026-10-04T00:00:00+00:00", "maxResults": 20, "singleEvents": True,
+        "orderBy": "startTime",
+    }
+
+
+def test_calendar_translators_send_every_live_required_field():
+    from mavis.tools.integrations.actions import CalendarListArgs, CalendarUpdateArgs
+
+    start = datetime(2026, 10, 5, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    samples = {
+        "calendar.list": CalendarListArgs(time_min=start, time_max=start),
+        "calendar.create_event": CalendarCreateArgs(summary="x", start=start),
+        "calendar.update_event": CalendarUpdateArgs(event_id="e1", start=start, duration_minutes=30),
+    }
+    for action, args in samples.items():
+        sent = set(COMPOSIO_ACTIONS[action].translate(args))
+        assert LIVE_REQUIRED[action] <= sent, (action, LIVE_REQUIRED[action] - sent)
+
+
+def test_calendar_update_is_a_patch_that_sends_only_what_changes():
+    from mavis.tools.integrations.actions import CalendarUpdateArgs
+
+    m = COMPOSIO_ACTIONS["calendar.update_event"]
+    assert m.slug == "GOOGLECALENDAR_PATCH_EVENT"
+    assert m.translate(CalendarUpdateArgs(event_id="e1", summary="Renamed")) == {
+        "calendar_id": "primary", "event_id": "e1", "summary": "Renamed"}
+
+
+def test_calendar_update_move_sends_start_and_end():
+    from mavis.tools.integrations.actions import CalendarUpdateArgs
+
+    start = datetime(2026, 10, 5, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    out = COMPOSIO_ACTIONS["calendar.update_event"].translate(
+        CalendarUpdateArgs(event_id="e1", start=start, duration_minutes=90))
+    assert out == {"calendar_id": "primary", "event_id": "e1", "start_time": "2026-10-05T10:00:00+05:30",
+                   "end_time": "2026-10-05T11:30:00+05:30", "timezone": "Asia/Kolkata"}
+
+
+def test_calendar_update_needs_start_and_duration_together():
+    import pytest
+    from pydantic import ValidationError
+
+    from mavis.tools.integrations.actions import CalendarUpdateArgs
+
+    start = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    with pytest.raises(ValidationError, match="current length"):
+        CalendarUpdateArgs(event_id="e1", start=start)
+    with pytest.raises(ValidationError, match="current start"):
+        CalendarUpdateArgs(event_id="e1", duration_minutes=45)

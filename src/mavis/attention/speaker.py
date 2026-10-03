@@ -1,7 +1,8 @@
 """How the attention layer speaks (spec attention section 9).
 
 Ask: deterministic text from computed facts plus Yes/No buttons; no LLM, no injection surface. Notify:
-composed through the existing executor with untrusted=True (capped at urgency 4, output scrubbed).
+composed through the existing executor with untrusted=True (capped at urgency 4, output scrubbed); if
+the LLM is unavailable, a deterministic notify_text goes out instead, so a notify is never lost to load.
 Both pre-check PingPolicy so attention owns its own deferral and keeps its buttons."""
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from mavis.attention.schema import FLAG_LABELS, METHOD_LABELS, AttentionDecision
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import NotifyIntent
+from mavis.domain.errors import LLMError
 from mavis.domain.messages import Button
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.email_triage import SECURITY_INTENT
@@ -179,6 +181,30 @@ def notify_intent(obs: Any, decision: AttentionDecision) -> str:
     return " ".join(parts)
 
 
+def notify_text(obs: Any) -> list[str]:
+    """Fixed wording for a notify when the composer's LLM is unavailable: computed facts and the
+    scrubbed summary only (the same text digests show), never raw email text."""
+    facts = obs.facts or {}
+    codes = facts.get("codes") or []
+    if obs.kind == EmailKind.SECURITY.value or is_security_obs(obs):
+        labels = [FLAG_LABELS[f] for f in facts.get("risk_flags") or [] if f in FLAG_LABELS]
+        first = (
+            f"Heads up: an email about your {domain_label(obs.sender_domain)} account reports "
+            f"{labels[0] if labels else 'a security change'}."
+        )
+        tail = ("If that wasn't you, open Gmail or the site directly (not the email's links) "
+                "and secure the account.")
+    else:
+        summary = clean(str(obs.summary or ""), 200)
+        first = f"Heads up about an email: {summary}." if summary else (
+            f"Heads up: an email from {domain_label(obs.sender_domain)} looks worth a look.")
+        tail = "Open Gmail directly for the details."
+    if LOOKALIKE in codes or "lookalike_domain" in codes:
+        tail = ("The sender imitates an address you normally get mail from, so don't open its links, "
+                "reply or call numbers from it. " + tail)
+    return [f"{first} {tail}"]
+
+
 class Speaker:
     def __init__(self, executor_of: Callable[[], Any], policy: PingPolicy, wakeups: WakeupService) -> None:
         self._executor_of, self._policy, self._wakeups = executor_of, policy, wakeups
@@ -225,6 +251,15 @@ class Speaker:
             security=sec,
         )
         buttons = mute_buttons(obs.id) if can_mute(obs) else None
-        sent = await executor.notify(user, intent, context=obs.summary, untrusted=True, buttons=buttons)
+        try:
+            sent = await executor.notify(user, intent, context=obs.summary, untrusted=True, buttons=buttons)
+        except LLMError as exc:
+            # The composer could not phrase it (LLM busy). The policy already allowed this ping, so
+            # send the fixed wording rather than lose it (prod: a security notice, obs 81).
+            log.warning("attention.notify_fallback_text", obs_id=obs.id, error=type(exc).__name__)
+            bypass = [f"{SECURITY_BYPASS_PREFIX}{key}"] if verdict.budget_bypass else []
+            await executor.deliver(user, notify_text(obs), key, intent.urgency, extra_keys=bypass,
+                                   buttons=buttons, tainted=True)
+            sent = True
         log.info("attention.spoke", obs_id=obs.id, verdict="notify", urgency=intent.urgency, sent=sent)
         return SENT if sent else DROPPED

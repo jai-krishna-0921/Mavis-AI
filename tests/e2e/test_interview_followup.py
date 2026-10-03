@@ -81,7 +81,12 @@ async def say_interview(user, bus, fake_llm, clock):
             id="tg:update:42", user_id=user.id, type=EventType.USER_MESSAGE, occurred_at=clock.t,
             source="telegram", payload={"text": "interview prep with Jawahar Monday 10am"},
             trust=Trust.USER))
-    return seen
+    # The turn's LEARN is parked until just after the LLM interactive grace window (hotfix3): let the
+    # timer fire its system_learn wakeup, then extraction creates the loop.
+    clock.advance(seconds=30)
+    async with running(bus) as later:
+        assert await wiring.current().timer.tick() == 1
+    return seen + later
 
 
 async def test_interview_prep_pep_talk_then_follow_up(user, world, clock, bus, fake_llm, channel):
