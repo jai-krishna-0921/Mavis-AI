@@ -20,7 +20,7 @@ import httpx
 import typer
 
 from mavis.domain.integrations import UserRef
-from mavis.domain.policy import Capability
+from mavis.domain.policy import Capability, RiskClass
 from mavis.tools.integrations.actions import (
     ACTIONS,
     CalendarCreateArgs,
@@ -137,6 +137,12 @@ async def list_triggers(client: httpx.AsyncClient, user: UserRef) -> int:
     return 0
 
 
+def executable(action: str) -> bool:
+    """--execute runs plain read actions only: never a write (even WRITE_SELF) or a risk_fn action."""
+    spec = ACTIONS.get(action)
+    return spec is not None and spec.risk is RiskClass.READ and spec.risk_fn is None
+
+
 class _Args:
     def __init__(self, connect: str | None, execute: str | None, user: int, triggers: bool) -> None:
         self.connect, self.execute, self.user, self.triggers = connect, execute, user, triggers
@@ -153,8 +159,8 @@ async def main(args: _Args) -> int:
         print(await provider.connect_link(user, args.connect, "http://localhost:8000/connect/callback"))
         return 0
     if args.execute:
-        if ACTIONS[args.execute].risk.needs_approval or ACTIONS[args.execute].risk_fn is not None:
-            print("refusing to execute an outward action from a script", file=sys.stderr)
+        if not executable(args.execute):
+            print("refusing to execute anything but a read action from a script", file=sys.stderr)
             return 2
         print(await provider.status(user))
         res = await provider.execute(user, args.execute, sample_args(args.execute).model_dump(mode="json"))
