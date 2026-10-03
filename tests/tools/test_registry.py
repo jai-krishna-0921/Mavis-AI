@@ -296,3 +296,52 @@ async def test_select_always_dedupes(user):
     reg = ToolRegistry()
     reg.register(_tool(name="p"))
     assert [t.name for t in reg.select("conversation", user.id, "x", always=("p", "p"))] == ["p"]
+
+
+async def _approval_for(user_id: int, tool: str) -> int:
+    from datetime import timedelta
+
+    from mavis.store.db import utcnow
+
+    return await approvals.create(user_id, None, tool, {"text": "hello"}, "Send: hello",
+                                  utcnow() + timedelta(hours=1))
+
+
+async def test_action_failed_is_a_wrapped_result_for_the_model(user):
+    from mavis.domain.errors import ActionFailed
+
+    async def _refused(user_id: int, args: TextArgs) -> str:
+        raise ActionFailed("mail.send failed: quota exceeded", reason="quota exceeded")
+
+    reg = ToolRegistry()
+    tool = _tool(name="send_it", risk=RiskClass.WRITE_SELF, fn=_refused, untrusted_output=True)
+    reg.register(tool)
+    out = await reg.invoke(tool, user.id, TextArgs(text="x"))
+    assert out == '<untrusted source="send_it">\nmail.send failed: quota exceeded\n</untrusted>'
+    assert (await audit.recent(user.id))[0].detail["outcome"] == "error"
+
+
+async def test_execute_approved_raises_action_failed(user):
+    from mavis.domain.errors import ActionFailed
+
+    async def _refused(user_id: int, args: TextArgs) -> str:
+        raise ActionFailed("mail.send failed: quota exceeded", reason="quota exceeded")
+
+    reg = ToolRegistry()
+    reg.register(_tool(name="send_note", risk=RiskClass.OUTWARD, fn=_refused, untrusted_output=True))
+    aid = await _approval_for(user.id, "send_note")
+    with pytest.raises(ActionFailed) as exc:
+        await reg.execute_approved(aid)
+    assert exc.value.reason == "quota exceeded"
+    assert (await audit.recent(user.id))[0].detail["outcome"] == "error"
+
+
+async def test_execute_approved_raises_untrusted_tool_errors(user):
+    async def _boom(user_id: int, args: TextArgs) -> str:
+        raise RuntimeError("socket closed")
+
+    reg = ToolRegistry()
+    reg.register(_tool(name="send_note", risk=RiskClass.OUTWARD, fn=_boom, untrusted_output=True))
+    aid = await _approval_for(user.id, "send_note")
+    with pytest.raises(RuntimeError):
+        await reg.execute_approved(aid)

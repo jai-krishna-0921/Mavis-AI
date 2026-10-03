@@ -1,6 +1,6 @@
 import pytest
 
-from mavis.domain.errors import ConnectionRequired, IntegrationError
+from mavis.domain.errors import ActionFailed, ConnectionRequired, IntegrationError
 from mavis.domain.integrations import ConnectionState, ToolResult
 from mavis.domain.policy import Capability, RiskClass
 from mavis.tools.integrations.actions import ACTIONS, MailSearchArgs
@@ -43,8 +43,10 @@ async def test_failed_execute_with_revoked_status_raises_revoked(provider, cache
 async def test_failed_execute_while_still_active_reports_failure(provider, cache):
     provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
     provider.results["mail.search"] = ToolResult(ok=False, error="quota exceeded")
-    out = await gated(CTX, "mail.search", MailSearchArgs(), provider=provider, cache=cache)
-    assert out == "mail.search failed: quota exceeded"
+    with pytest.raises(ActionFailed) as exc:
+        await gated(CTX, "mail.search", MailSearchArgs(), provider=provider, cache=cache)
+    assert str(exc.value) == "mail.search failed: quota exceeded"
+    assert exc.value.reason == "quota exceeded"
 
 
 async def test_integration_error_returns_sentence(cache):
@@ -54,8 +56,10 @@ async def test_integration_error_returns_sentence(cache):
 
     down = Down()
     dcache = ConnectionCache(down, ttl_s=60)
-    out = await gated(CTX, "mail.search", MailSearchArgs(), provider=down, cache=dcache)
-    assert out.startswith("Gmail is unreachable right now")
+    with pytest.raises(ActionFailed) as exc:
+        await gated(CTX, "mail.search", MailSearchArgs(), provider=down, cache=dcache)
+    assert str(exc.value).startswith("Gmail is unreachable right now")
+    assert exc.value.reason == "Gmail is unreachable right now"
 
 
 def test_register_integration_tools():
@@ -99,3 +103,16 @@ def test_load_builtin_tools_registers_integration_tools():
     load_builtin_tools(registry)
     assert "mail_send" in registry.names_for("conversation")
     assert "calendar_create_event" in registry.names_for("conversation")
+
+
+async def test_model_driven_failure_returns_friendly_wrapped_text(provider, cache, monkeypatch):
+    from mavis.tools.integrations import tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_deps", lambda p, c: (provider, cache))
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    provider.results["mail.search"] = ToolResult(ok=False, error="quota exceeded")
+    registry = ToolRegistry()
+    register_integration_tools(registry)
+    tool = registry.get("mail_search")
+    out = await registry.invoke(tool, 1, MailSearchArgs(query="x"))
+    assert out == '<untrusted source="mail_search">\nmail.search failed: quota exceeded\n</untrusted>'

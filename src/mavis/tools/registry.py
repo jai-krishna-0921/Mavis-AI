@@ -29,7 +29,7 @@ from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
 from mavis.config import get_settings
-from mavis.domain.errors import ApprovalRequired, ConnectionRequired
+from mavis.domain.errors import ActionFailed, ApprovalRequired, ConnectionRequired
 from mavis.domain.policy import Capability, RiskClass
 from mavis.policy.risk import truncate, wrap_untrusted
 from mavis.store.db import utcnow
@@ -252,10 +252,19 @@ class ToolRegistry:
         tool = self.get(approval.tool)
         args = tool.args_model.model_validate(approval.arguments)
         await self._require_capability(tool, approval.user_id)
-        return await self._run(tool, approval.user_id, args, actor="user_approved")
+        # raise_errors: a failed approved action must surface as an exception, never as a result
+        # string, so the caller records FAILED instead of EXECUTED.
+        return await self._run(tool, approval.user_id, args, actor="user_approved", raise_errors=True)
 
     async def _run(
-        self, tool: MavisTool, user_id: int, args: BaseModel, actor: str, fn: ToolFn | None = None
+        self,
+        tool: MavisTool,
+        user_id: int,
+        args: BaseModel,
+        actor: str,
+        fn: ToolFn | None = None,
+        *,
+        raise_errors: bool = False,
     ) -> str:
         token = current_user_id.set(user_id)
         detail: dict[str, Any] = {"args": args.model_dump(mode="json")}
@@ -263,17 +272,28 @@ class ToolRegistry:
             detail["tainted"] = True
         audited = tool.effective_risk(args) is not RiskClass.READ
         run = current_run.get()
+        failed = False
         try:
             out = await (fn or tool.fn)(user_id, args)
         except (ApprovalRequired, ConnectionRequired):
             raise
+        except ActionFailed as exc:
+            log.warning("tool.action_failed", tool=tool.name)
+            if audited:
+                await audit.record(
+                    user_id, actor=actor, action=tool.name, detail={**detail, "outcome": "error"}
+                )
+            if raise_errors:
+                raise
+            out = str(exc)  # the model gets the sentence as the tool result (wrapped below if untrusted)
+            failed = True
         except Exception as exc:
             log.warning("tool.failed", tool=tool.name, error_type=type(exc).__name__)
             if audited:
                 await audit.record(
                     user_id, actor=actor, action=tool.name, detail={**detail, "outcome": "error"}
                 )
-            if tool.untrusted_output:
+            if tool.untrusted_output and not raise_errors:
                 # Third-party error text must never reach the model unwrapped.
                 if run is not None:
                     run.untrusted_seen = True
@@ -283,7 +303,7 @@ class ToolRegistry:
             current_user_id.reset(token)
         text = out if isinstance(out, str) else json.dumps(out, default=str, ensure_ascii=False)
         text = truncate(text)
-        if audited:
+        if audited and not failed:
             await audit.record(user_id, actor=actor, action=tool.name, detail={**detail, "outcome": "ok"})
         if not tool.untrusted_output:
             return text

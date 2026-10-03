@@ -38,7 +38,7 @@ from mavis.agents.specialists.base import current_deliverable, run_specialist
 from mavis.channels.formatting import sanitize_line
 from mavis.config import get_settings
 from mavis.domain.decisions import ComposedMessage
-from mavis.domain.errors import BudgetExceeded, ConnectionRequired, LLMError
+from mavis.domain.errors import ActionFailed, BudgetExceeded, ConnectionRequired, LLMError
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.plans import CriticVerdict, Plan, PlanStep
 from mavis.domain.tasks import ApprovalStatus, StepOutcome, TaskKind, TaskStatus
@@ -92,6 +92,20 @@ NOTHING_TO_APPROVE_TEXT = "Nothing left to approve there."
 
 # Set by run_step for the duration of one step; run_step_agent reads it when not told explicitly.
 step_tainted: ContextVar[bool] = ContextVar("step_tainted", default=False)
+
+
+def _err(exc: BaseException) -> str:
+    """Type plus the first line of the message, short, for logs (the structlog processor masks tokens)."""
+    first = (str(exc).splitlines() or [""])[0]
+    return f"{type(exc).__name__}: {first}"[:200]
+
+
+def _clip_result(result: str, limit: int = 500) -> str:
+    """Shorten a tool result without cutting off the closing tag of a wrapped (untrusted) result."""
+    lines = result.split("\n")
+    if len(lines) >= 2 and lines[0].startswith("<untrusted") and lines[-1] == "</untrusted>":
+        return "\n".join([lines[0], "\n".join(lines[1:-1])[:limit], lines[-1]])
+    return result[:limit]
 
 
 def merge_dicts(left: dict | None, right: dict | None) -> dict:
@@ -312,7 +326,7 @@ async def run_step(inp: StepInput) -> dict:
         outcome = StepOutcome(ok=False, error=f"model error: {exc}")
     except Exception as exc:  # noqa: BLE001 - one broken step must not sink the whole task
         log.warning("orchestrator.step_crashed", task_id=inp["task_id"], step=step.id,
-                    error_type=type(exc).__name__)
+                    error_type=type(exc).__name__, error=_err(exc))
         outcome = StepOutcome(ok=False, error=f"step failed ({type(exc).__name__})")
     finally:
         current_task_id.reset(token)
@@ -388,8 +402,11 @@ async def connect_gate(state: OrchestratorState) -> Command:
         update["results"] = {sid: {**results.get(sid, {}), "round": -1} for sid in step_ids}
         update["todo"] = sorted(set(state.get("todo", [])) | set(step_ids))
         return Command(goto="schedule", update=update)
+    # Describe the skipped work by instruction: the responder must not see internal step ids.
+    instructions = {s["id"]: s["instruction"] for s in (state.get("plan") or {}).get("steps", [])}
+    skipped = "; ".join(instructions.get(sid, "one part of the work") for sid in step_ids)
     update["action_results"] = [
-        f"The user chose not to connect {cap} right now; skipped: {', '.join(step_ids)}"
+        f"The user chose not to connect {cap} right now, so this was skipped: {skipped}"
     ]
     # Steps that depended on the skipped ones were held back; let them run without that input.
     return Command(goto="schedule", update=update)
@@ -420,7 +437,7 @@ async def notify_revise_failed(user_id: int, approval_id: int, attempt: int) -> 
         await approval_flow.say(user_id, REVISE_FAILED_TEXT,
                                 dedupe_key=f"approval:{approval_id}:revise_failed:{attempt}")
     except Exception as exc:  # noqa: BLE001 - the re-prompt still follows
-        log.warning("approval.revise_notice_failed", approval_id=approval_id, error_type=type(exc).__name__)
+        log.warning("approval.revise_notice_failed", approval_id=approval_id, error=_err(exc))
 
 
 def _first_result_line(result: str) -> str:
@@ -448,20 +465,28 @@ async def approval_gate(state: OrchestratorState) -> Command:
         if not await approvals.claim(pending.id, {ApprovalStatus.RESOLVING}, ApprovalStatus.EXECUTED):
             return Command(goto="approval_gate")
         claimed = {ApprovalStatus.EXECUTED}
+        # Execution marker for the restart sweep: claimed-but-never-run vs may-have-run.
+        await approvals.mark_started(pending.id)
         try:
             result = await get_registry().execute_approved(pending.id)
         except Exception as exc:  # noqa: BLE001 - report, don't crash the task
-            reason = (str(exc).splitlines() or [type(exc).__name__])[0][:150] or type(exc).__name__
+            if isinstance(exc, ActionFailed):
+                reason = exc.reason
+            else:
+                reason = (str(exc).splitlines() or [""])[0] or type(exc).__name__
+            reason = reason[:150]
             await approvals.set_status(pending.id, ApprovalStatus.FAILED, result=str(exc)[:500],
                                        from_statuses=claimed)
-            log.warning("approval.execute_failed", approval_id=pending.id, error_type=type(exc).__name__)
+            log.warning("approval.execute_failed", approval_id=pending.id, tool=pending.tool, error=_err(exc))
             return Command(goto="approval_gate", update={
-                "action_results": [f"Failed: {pending.preview} ({type(exc).__name__})"],
+                "action_results": [
+                    f"Failed: {pending.preview}\nReason: {wrap_untrusted(reason, pending.tool)}"
+                ],
                 "approval_outcomes": [{"status": "failed", "preview": pending.preview, "detail": reason}],
             })
         await approvals.set_status(pending.id, ApprovalStatus.EXECUTED, result=result, from_statuses=claimed)
         return Command(goto="approval_gate", update={
-            "action_results": [f"Done: {pending.preview}\nResult: {result[:500]}"],
+            "action_results": [f"Done: {pending.preview}\nResult: {_clip_result(result)}"],
             "approval_outcomes": [{"status": "executed", "preview": pending.preview,
                                    "detail": _first_result_line(result)}],
         })
@@ -469,14 +494,15 @@ async def approval_gate(state: OrchestratorState) -> Command:
         try:
             await revise_approval(pending, str(answer.get("instructions", "")))
         except Exception as exc:  # noqa: BLE001 - an edit must never strand the approval (F21)
-            log.warning("approval.revise_failed", approval_id=pending.id, error_type=type(exc).__name__)
+            log.warning("approval.revise_failed", approval_id=pending.id, error=_err(exc))
             await approvals.update_args(pending.id, pending.arguments, pending.preview)
             attempt = state.get("revise_failures", {}).get(str(pending.id), 0) + 1
             await notify_revise_failed(pending.user_id, pending.id, attempt)
             return Command(goto="approval_gate", update={"revise_failures": {str(pending.id): attempt}})
         return Command(goto="approval_gate")
     status = ApprovalStatus.EXPIRED if decision == "expired" else ApprovalStatus.REJECTED
-    await approvals.set_status(pending.id, status)
+    if not await approvals.set_status(pending.id, status):
+        return Command(goto="approval_gate")  # already resolved elsewhere; don't report a stale outcome
     return Command(goto="approval_gate", update={
         "action_results": [f"{status.value.title()}: {pending.preview}"],
         "approval_outcomes": [{"status": status.value, "preview": pending.preview, "detail": ""}],

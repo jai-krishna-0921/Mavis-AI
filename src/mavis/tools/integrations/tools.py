@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from mavis.domain.errors import ConnectionRequired, IntegrationError
+from mavis.domain.errors import ActionFailed, ConnectionRequired, IntegrationError
 from mavis.domain.integrations import ToolResult, UserRef
 from mavis.tools.integrations.actions import ACTIONS, CAPABILITY_PURPOSE, DISPLAY_NAMES, ActionSpec, localize
 from mavis.tools.integrations.base import IntegrationProvider, render_result
@@ -51,17 +51,18 @@ async def gated(
     provider: IntegrationProvider | None = None,
     cache: ConnectionCache | None = None,
 ) -> str:
+    """Run one integration action. Raises ConnectionRequired, or ActionFailed when it did not happen."""
     provider, cache = _deps(provider, cache)
     name = DISPLAY_NAMES[ACTIONS[action].capability]
     try:
         result = await call_action(ctx, action, args, provider=provider, cache=cache)
     except IntegrationError as exc:
-        return (
-            f"{name} is unreachable right now ({exc}). "
-            "Tell the user and offer to try again later."
-        )
+        raise ActionFailed(
+            f"{name} is unreachable right now ({exc}). Tell the user and offer to try again later.",
+            reason=f"{name} is unreachable right now",
+        ) from exc
     if not result.ok:
-        return f"{action} failed: {result.error}"
+        raise ActionFailed(f"{action} failed: {result.error}", reason=str(result.error or f"{action} failed"))
     return render_result(result)
 
 
