@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import func, select, update
 
@@ -37,6 +38,55 @@ async def create(
 def args_hash(arguments: dict) -> str:
     canon = json.dumps(arguments, sort_keys=True, default=str, ensure_ascii=False)
     return hashlib.sha256(canon.encode()).hexdigest()
+
+
+# Free text a model rewords on every attempt; it does not change WHICH action this is.
+_FREE_TEXT_KEYS = frozenset({"description", "body", "content", "text", "notes", "message"})
+_WAITING = [ApprovalStatus.PENDING.value, ApprovalStatus.AWAITING_EDIT.value]
+
+
+def _canon(value: Any) -> Any:
+    if isinstance(value, str):
+        try:  # one instant written two ways ("...+05:30" / "...Z") is the same start time
+            parsed = datetime.fromisoformat(value.strip())
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None and "T" in value:
+            return parsed.astimezone(UTC).isoformat()
+        return " ".join(value.split()).casefold()
+    if isinstance(value, dict):
+        return {k: _canon(v) for k, v in value.items() if v not in (None, "", [], {})}
+    if isinstance(value, list):
+        return sorted((_canon(v) for v in value), key=lambda v: json.dumps(v, sort_keys=True, default=str))
+    return value
+
+
+def equivalence_key(arguments: dict) -> str:
+    """Canonical form of an action's arguments for duplicate detection: free-text fields dropped,
+    whitespace and case folded, lists sorted, ISO datetimes in UTC. A tool whose arguments are all
+    free text (a note, a Slack message) is compared on everything instead."""
+    canon = _canon(arguments or {})
+    keyed = {k: v for k, v in canon.items() if k not in _FREE_TEXT_KEYS}
+    return json.dumps(keyed or canon, sort_keys=True, default=str, ensure_ascii=False)
+
+
+def equivalent(a: dict, b: dict) -> bool:
+    return equivalence_key(a) == equivalence_key(b)
+
+
+async def waiting_equivalents(user_id: int, tool: str, arguments: dict, *,
+                              exclude_id: int | None = None) -> list[PendingApproval]:
+    """This user's approvals still waiting on them (PENDING / AWAITING_EDIT) for the same tool and
+    equivalent arguments, in any task, oldest first."""
+    want = equivalence_key(arguments)
+    async with Session() as s:
+        rows = await s.scalars(
+            select(PendingApproval)
+            .where(PendingApproval.user_id == user_id, PendingApproval.tool == tool,
+                   PendingApproval.status.in_(_WAITING))
+            .order_by(PendingApproval.id)
+        )
+        return [r for r in rows if r.id != exclude_id and equivalence_key(r.arguments or {}) == want]
 
 
 async def find_open(user_id: int, task_id: int | None, tool: str, arguments: dict) -> PendingApproval | None:

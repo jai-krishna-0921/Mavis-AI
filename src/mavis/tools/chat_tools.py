@@ -28,6 +28,8 @@ class TurnInfo:
 current_turn: ContextVar[TurnInfo | None] = ContextVar("current_turn", default=None)
 
 START_TASK_RESULT = "Started background task #{id}. Tell the user you're on it and will report back."
+TASK_EXISTS_RESULT = ("Task #{id} is already working on this, so no new task was started. Tell the user "
+                      "it's already in progress and you'll report back.")
 CONNECT_RESULT = "Sent them the connect link and buttons. Don't repeat the link."
 
 
@@ -56,7 +58,8 @@ async def _approved_from_tainted_task() -> bool:
 
 
 async def start_task(user_id: int, args: StartTaskArgs) -> str:
-    from mavis.agents.task_dispatch import dispatch_task_requests  # lazy: agents import the registry
+    # lazy: agents import the registry
+    from mavis.agents.task_dispatch import dispatch_task_requests, find_duplicate
 
     # After third-party content this tool needs the user's approval first (on_taint=APPROVE); once
     # approved, the task is still tainted for every step it runs. The user saw and approved the goal,
@@ -69,6 +72,8 @@ async def start_task(user_id: int, args: StartTaskArgs) -> str:
     if turn is not None:
         ref = f"turn:{turn.event_id}:start:{turn.starts}"
         turn.starts += 1
+    if (dup := await find_duplicate(user_id, args.goal, ref)) is not None:
+        return TASK_EXISTS_RESULT.format(id=dup)
     tainted = _tainted() or await _approved_from_tainted_task()
     # The approval preview shows only the goal, so after third-party content the unseen `context`
     # (free text the model chose) is dropped rather than smuggled into the task.

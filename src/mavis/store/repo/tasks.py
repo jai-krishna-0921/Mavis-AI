@@ -175,6 +175,17 @@ async def active_for_user(user_id: int) -> list[Task]:
         return list(rows)
 
 
+async def find_active_duplicate(user_id: int, goal: str) -> Task | None:
+    """A non-terminal planned task whose goal is the same thing said differently (token Jaccard >= 0.8
+    or subset, the loop dedupe rule), so one request never runs as two tasks."""
+    from mavis.store.repo.loops import similar_titles  # same rule as loop dedupe
+
+    for task in await active_for_user(user_id):
+        if task.kind == TaskKind.TASK.value and similar_titles(task.goal, goal):
+            return task
+    return None
+
+
 async def cancel(user_id: int, task_id: int) -> bool:
     async with Session() as s:
         res = await s.execute(
