@@ -446,3 +446,18 @@ def note_tool(fresh_registry):
         )
     )
     return calls
+
+
+@pytest.fixture(autouse=True)
+def _reset_attention():
+    """Attention singletons, chat context providers and its system wakeups must not leak between tests."""
+    yield
+    from mavis.agents import context_hooks
+    from mavis.attention import wiring as attention_wiring
+    from mavis.timers import system
+    for getter in attention_wiring.ATTENTION_GETTERS:
+        getter.cache_clear()
+    attention_wiring._private_clients.clear()  # in-memory clients only; nothing on disk to release
+    context_hooks.clear_context_providers()
+    for kind in attention_wiring.SYSTEM_KINDS:
+        system.SYSTEM_WAKEUP_HANDLERS.pop(kind.value, None)

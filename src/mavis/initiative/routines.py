@@ -59,6 +59,11 @@ def clear_brief_sources() -> None:
     _sources.clear()
 
 
+def unregister_brief_source(name: str) -> None:
+    """Drop a source by name (the attention layer replaces Phase 5's live-search inbox source)."""
+    _sources[:] = [s for s in _sources if getattr(s, "name", None) != name]
+
+
 def brief_sources() -> list[BriefSource]:
     return list(_sources)
 

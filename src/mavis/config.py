@@ -104,6 +104,25 @@ class Settings(BaseSettings):
     morning_checkin_time: str = "08:30"  # default local time for the morning check-in routine
     timer_interval_s: float = 5.0  # how often the timer role claims due wakeups
 
+    # --- attention layer (spec 2026-10-03) ------------------------------------
+    attention_enabled: bool = True  # false: the Phase 5 email path is used unchanged
+    attention_understand_per_window: int = 4  # LLM understanding attempts per user per window
+    attention_window_s: int = 120  # matches the 2 min Gmail poll interval
+    attention_max_attempts: int = 2  # LLM attempts per email before the heuristic fallback
+    attention_currency: str = "INR"  # the user's currency, used when an email states none
+    # cold start: with no history, a debit at or above this amount (per currency) is notable
+    attention_large_amounts: dict[str, float] = {"INR": 10000.0, "USD": 150.0, "EUR": 150.0, "GBP": 120.0}
+    attention_ask_threshold: float = 0.6
+    attention_notify_threshold: float = 0.7
+    attention_brief_threshold: float = 0.35
+    attention_pref_similarity: float = 0.8
+    attention_allow_urgent: bool = True  # deterministic high-risk asks may use urgency 5 (spec 8.4)
+    attention_retention_days: int = 90
+    attention_backfill_max: int = 120  # messages, paged 50 at a time, within 14 days
+    attention_digest_hours: int = 24
+    attention_evening_enabled: bool = True
+    attention_evening_time: str = "20:30"
+
     # --- admin ----------------------------------------------------------------
     admin_user: str = "admin"
     admin_password: str = ""

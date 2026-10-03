@@ -17,7 +17,7 @@ import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
 
-from mavis.agents import clarify, commands, persona
+from mavis.agents import clarify, commands, context_hooks, persona
 from mavis.agents.react import react_loop
 from mavis.bus import get_bus
 from mavis.channels import presence
@@ -26,6 +26,7 @@ from mavis.domain.events import Event, Job, JobKind, Trust
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.policy import RiskClass
 from mavis.initiative import wiring
+from mavis.initiative.executor import TAINT_SUFFIX
 from mavis.llm import models as llm
 from mavis.memory.service import get_memory
 from mavis.policy.risk import UNTRUSTED_NOTE
@@ -69,8 +70,12 @@ def _to_langchain(history: list[Message]) -> list[BaseMessage]:
     return [HumanMessage(m.content) if m.role == Role.USER.value else AIMessage(m.content) for m in history]
 
 
-async def build_context(user_id: int, text: str, hint: str = "") -> str:
-    """Hint + rolling summary + recalled memory for the system prompt. Never raises."""
+async def build_context_ex(user_id: int, text: str, hint: str = "") -> tuple[str, bool]:
+    """Hint + rolling summary + recalled memory + hook context for the system prompt. Never raises.
+
+    The bool is True when hook context (the inbox digest, ...) was included. That block is derived from
+    third-party content, so the turn must be treated as tainted for learning, like a tool read.
+    """
     parts = [hint] if hint else []
     try:
         memory = get_memory()
@@ -80,12 +85,19 @@ async def build_context(user_id: int, text: str, hint: str = "") -> str:
         parts.append(recall.render())
     except Exception:
         log.warning("simple_turn.recall_failed", exc_info=True)
-    return "\n\n".join(p for p in parts if p.strip())
+    extra = await context_hooks.gather_context(user_id, text)  # never raises
+    if extra.strip():
+        parts.append(extra)
+    return "\n\n".join(p for p in parts if p.strip()), bool(extra.strip())
+
+
+async def build_context(user_id: int, text: str, hint: str = "") -> str:
+    return (await build_context_ex(user_id, text, hint))[0]
 
 
 # A reply written after the model read untrusted tool output (an email, a web page) is logged with this
-# event_id suffix (no schema change). Learn text that includes it is learned at untrusted trust.
-TAINT_SUFFIX = ":tainted"
+# event_id suffix (TAINT_SUFFIX, no schema change; proactive messages composed from third-party content
+# carry it too, see executor.deliver). Learn text that includes it is learned at untrusted trust.
 
 
 def _reply_event_id(event_id: str, tainted: bool) -> str:
@@ -308,8 +320,8 @@ async def run_turn(event: Event) -> None:
         hint = RESTART_HINT if recent_assistant else START_HINT
     previous_reply = previous
     async with presence.typing(user.telegram_chat_id):  # refreshed until the reply is queued
-        context, connections, card_name = await asyncio.gather(
-            build_context(user.id, text, hint), connection_states(user.id), _known_name(user.id)
+        (context, hooked), connections, card_name = await asyncio.gather(
+            build_context_ex(user.id, text, hint), connection_states(user.id), _known_name(user.id)
         )
         now = utcnow()
         known_name = user.name or card_name
@@ -339,13 +351,14 @@ async def run_turn(event: Event) -> None:
             await messages.log(user.id, Role.ASSISTANT, "\n\n".join(connect_texts),
                                event_id=f"reply:{event.id}")
             await enqueue_learn(user.id, event, text, previous_reply, _clarified_request(history),
-                                tainted=_previous_tainted(history))
+                                tainted=hooked or _previous_tainted(history))
             await _initiative_hook("quiet.after_assistant_message",
                                    lambda i: i.quiet.after_assistant_message(user.id, connect_texts[-1]))
             return
         if result.tools_called:
             log.info("simple_turn.tools", tools=result.tools_called, steps=result.steps,
                      tainted=result.tainted, wrapped_up=result.wrapped_up)
+        tainted = result.tainted or hooked  # the digest is untrusted content the model read
         reply = result.text or WRAP_UP_FALLBACK
         bubbles = persona.split_bubbles(reply) or [reply]
 
@@ -355,8 +368,8 @@ async def run_turn(event: Event) -> None:
                 await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=key))
             await s.commit()
     await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles),
-                       event_id=_reply_event_id(event.id, result.tainted))
+                       event_id=_reply_event_id(event.id, tainted))
     await enqueue_learn(user.id, event, text, previous_reply, _clarified_request(history),
-                        tainted=result.tainted or _previous_tainted(history))
+                        tainted=tainted or _previous_tainted(history))
     await _initiative_hook("quiet.after_assistant_message",
                            lambda i: i.quiet.after_assistant_message(user.id, bubbles[-1]))

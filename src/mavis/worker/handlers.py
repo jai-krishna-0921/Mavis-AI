@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mavis.agents import simple_turn
+from mavis.attention.wiring import register_attention
 from mavis.domain.events import EventType
 from mavis.initiative.wiring import wire_initiative
 from mavis.memory import jobs as memory_jobs
@@ -15,3 +16,4 @@ def register_default_handlers() -> None:
     memory_jobs.register()
     wire_initiative()
     register_integrations()  # after wire_initiative: replaces its CONNECTION_CHANGED/TASK_COMPLETED
+    register_attention()  # last: replaces EMAIL_RECEIVED, appends to TASK_COMPLETED
