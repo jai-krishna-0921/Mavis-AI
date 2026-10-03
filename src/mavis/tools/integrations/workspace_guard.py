@@ -42,6 +42,7 @@ _created: OrderedDict[int, set[str]] = OrderedDict()
 STATE_KEY = "workspace"  # users.state["workspace"]: email, contacts, cursors, muted (shared with attention)
 OVERWRITE_LIMIT = 20
 UNKNOWN_NOTE = "I couldn't check who can see this file, so I'm asking first."
+FOLDER_UNKNOWN_NOTE = "I couldn't check who can see the destination folder, so I'm asking first."
 TASK_UNKNOWN = "I couldn't find that task in Google Tasks, so I haven't changed anything."
 _CELL = re.compile(r"^([A-Za-z]{1,3})([1-9][0-9]*)$")
 
@@ -216,19 +217,24 @@ async def filled_cells(ctx: ToolContext, args: SheetUpdateArgs) -> int | None:
 # --- prepare steps -------------------------------------------------------------------------------------
 
 
-def _note(meta: FileMeta) -> str:
+def _note(meta: FileMeta, label: str = "File") -> str:
     whose = "yours" if meta.owned_by_me else "owned by someone else"
     who = "shared with others" if meta.shared_with_others else "only you have access"
-    return f"File: {one_line(meta.name or meta.file_id, 80)} ({kind_of(meta.mime)}), {whose}, {who}"
+    return f"{label}: {one_line(meta.name or meta.file_id, 80)} ({kind_of(meta.mime)}), {whose}, {who}"
 
 
-def escalation(meta: FileMeta | None) -> Prepared:
+def private_to_user(meta: FileMeta | None) -> bool:
+    """The user owns it and nobody else can see it; unknown is not private."""
+    return meta is not None and meta.owned_by_me and not meta.shared_with_others
+
+
+def escalation(meta: FileMeta | None, *, label: str = "File", unknown: str = UNKNOWN_NOTE) -> Prepared:
     """Spec 4.1: someone else's file, or a file anyone else can see, is OUTWARD; unknown is OUTWARD."""
     if meta is None:
-        return Prepared(risk=RiskClass.OUTWARD, note=UNKNOWN_NOTE)
-    if not meta.owned_by_me or meta.shared_with_others:
-        return Prepared(risk=RiskClass.OUTWARD, note=_note(meta))
-    return Prepared(note=_note(meta))
+        return Prepared(risk=RiskClass.OUTWARD, note=unknown)
+    if not private_to_user(meta):
+        return Prepared(risk=RiskClass.OUTWARD, note=_note(meta, label))
+    return Prepared(note=_note(meta, label))
 
 
 async def prepare_doc_write(ctx: ToolContext, args: Any) -> Prepared:
@@ -248,7 +254,14 @@ async def prepare_cells(ctx: ToolContext, args: Any) -> Prepared:
     return base
 
 
+async def prepare_move(ctx: ToolContext, args: Any) -> Prepared:
+    """A moved file inherits the folder's sharing: a shared or foreign destination is a share."""
+    folder = await file_meta(ctx, args.to_folder_id)
+    return escalation(folder, label="Move into folder", unknown=FOLDER_UNKNOWN_NOTE)
+
+
 ESCALATIONS: dict[str, PrepareFn] = {
+    "drive.move": prepare_move,
     "docs.append": prepare_doc_write,
     "sheets.append_row": prepare_row,
     "sheets.update_range": prepare_cells,
@@ -325,7 +338,13 @@ FILE_TARGETS: dict[str, str] = {
     "sheets.append_row": "spreadsheet_id",
     "sheets.update_range": "spreadsheet_id",
     "tasks.delete": "task_id",
+    "tasks.complete": "task_id",
+    "tasks.update": "task_id",
 }
+# A second target some actions have: the folder a file is moved into (moving there can share it).
+DESTINATIONS: dict[str, str] = {"drive.move": "to_folder_id"}
+TASK_ACTIONS = frozenset({"tasks.delete", "tasks.complete", "tasks.update"})
+MIN_TITLE = 4
 MAX_PARENT_HOPS = 5
 _LONG_ID = re.compile(r"[A-Za-z0-9_-]{16,}")  # Drive file ids (25+ chars, also inside /d/<id>/ links)
 REFUSAL = ("Refused: this task has read third-party content, so it may only change files or tasks the user "
@@ -362,21 +381,34 @@ async def tainted_scope(ctx: ToolContext) -> Scope | None:
             break
         task = parent
         created |= created_by(task.id)
-    goal = task.goal if task.origin == TaskOrigin.USER and not task.tainted else ""
+    # Only a goal the walk proved is the root counts: a missing parent or a chain longer than
+    # MAX_PARENT_HOPS leaves `task` mid-chain, and a mid-chain goal is model text, so fail closed.
+    at_root = task.parent_id is None
+    goal = task.goal if at_root and task.origin == TaskOrigin.USER and not task.tainted else ""
     return Scope(goal, frozenset(created))
 
 
 async def target_title(ctx: ToolContext, action: str, target: str) -> str:
-    """The real title of the target, looked up (never taken from the model's arguments); "" on failure."""
-    if action == "tasks.delete":
+    """The real title of the target, looked up (never taken from the model's arguments), but only when it
+    is the user's own: Google Tasks always are; a file must be owned by the user, since anyone can share a
+    file named like the user's words. "" on failure or unknown ownership."""
+    if action in TASK_ACTIONS:
         facts = await task_facts(ctx, target)
         return facts.title if facts is not None else ""
     meta = await file_meta(ctx, target)
-    return meta.name if meta is not None else ""
+    return meta.name if meta is not None and meta.owned_by_me else ""
 
 
 def _norm(text: str) -> str:
     return " ".join(text.split()).casefold()
+
+
+def names(goal: str, title: str) -> bool:
+    """The goal names `title` as a whole phrase ("note" is not named by "notebook")."""
+    title = _norm(title)
+    if len(title) < MIN_TITLE:
+        return False
+    return re.search(rf"(?<!\w){re.escape(title)}(?!\w)", _norm(goal)) is not None
 
 
 async def allowed(ctx: ToolContext, action: str, target: str, scope: Scope) -> bool:
@@ -384,16 +416,27 @@ async def allowed(ctx: ToolContext, action: str, target: str, scope: Scope) -> b
         return True
     if not scope.goal:
         return False
-    title = _norm(await target_title(ctx, action, target))
-    return len(title) >= 3 and title in _norm(scope.goal)
+    return names(scope.goal, await target_title(ctx, action, target))
 
 
-async def _refused(ctx: ToolContext, action: str, target: str) -> bool:
-    """True when a tainted task may not touch `target`. Any error while checking refuses (amendment A6):
-    an unknown scope must never fall through to an approval prompt the user might wave through."""
+async def destination_allowed(ctx: ToolContext, folder_id: str, scope: Scope) -> bool:
+    """A move's destination: named by id, made by the task, or a folder only the user can see."""
+    if folder_id in scope.created or folder_id in ids_in(scope.goal):
+        return True
+    return private_to_user(await file_meta(ctx, folder_id))
+
+
+async def _refused(ctx: ToolContext, action: str, args: Any) -> bool:
+    """True when a tainted task may not touch the action's target (or destination). Any error while
+    checking refuses (amendment A6): an unknown scope must never fall through to an approval prompt."""
     try:
         scope = await tainted_scope(ctx)
-        return scope is not None and not await allowed(ctx, action, target, scope)
+        if scope is None:
+            return False
+        if not await allowed(ctx, action, str(getattr(args, FILE_TARGETS[action])), scope):
+            return True
+        dest = DESTINATIONS.get(action)
+        return dest is not None and not await destination_allowed(ctx, str(getattr(args, dest)), scope)
     except Exception as exc:  # noqa: BLE001 - fail closed
         log.warning("workspace.allowlist_check_failed", action=action, error_type=type(exc).__name__)
         return True
@@ -401,10 +444,11 @@ async def _refused(ctx: ToolContext, action: str, target: str) -> bool:
 
 def guarded(action: str, inner: PrepareFn | None) -> PrepareFn:
     """Allowlist first (a refusal never reaches approval), then the action's own escalation, if any."""
-    field_name = FILE_TARGETS[action]
+    if action not in FILE_TARGETS:
+        raise KeyError(f"{action} has no target field in FILE_TARGETS")
 
     async def prepare(ctx: ToolContext, args: Any) -> Prepared:
-        if await _refused(ctx, action, str(getattr(args, field_name))):
+        if await _refused(ctx, action, args):
             log.warning("workspace.allowlist_refused", action=action)
             return Prepared(refusal=REFUSAL)
         return await inner(ctx, args) if inner is not None else Prepared()
