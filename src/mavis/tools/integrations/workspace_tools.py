@@ -39,6 +39,7 @@ from mavis.tools.integrations.connections import ConnectionCache
 from mavis.tools.integrations.normalize import pick
 from mavis.tools.integrations.tools import action_data
 from mavis.tools.integrations.workspace_guard import (
+    DESTINATIONS,
     ESCALATIONS,
     FILE_TARGETS,
     TASK_UNKNOWN,
@@ -303,10 +304,10 @@ CUSTOM_FNS: dict[str, CustomFn] = {
     "tasks.complete": _tasks_complete, "tasks.update": _tasks_update,
     **{name: creating(name) for name in CREATES},
 }
-# Every file-changing or sharing action is allowlisted in tainted tasks (spec 4.3), then runs its own
-# escalation or verification step, if it has one.
+# Every file-changing or sharing action, and every write into a folder, is allowlisted in tainted tasks
+# (spec 4.3), then runs its own escalation or verification step, if it has one.
 _STEPS: dict[str, PrepareFn] = {**ESCALATIONS, **VERIFIERS}
 PREPARES: dict[str, PrepareFn] = {
     **_STEPS,
-    **{name: guarded(name, _STEPS.get(name)) for name in FILE_TARGETS},
+    **{name: guarded(name, _STEPS.get(name)) for name in (*FILE_TARGETS, *DESTINATIONS)},
 }

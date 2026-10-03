@@ -259,14 +259,26 @@ async def prepare_cells(ctx: ToolContext, args: Any) -> Prepared:
     return base
 
 
-async def prepare_move(ctx: ToolContext, args: Any) -> Prepared:
-    """A moved file inherits the folder's sharing: a shared or foreign destination is a share."""
-    folder = await file_meta(ctx, args.to_folder_id)
-    return escalation(folder, label="Move into folder", unknown=FOLDER_UNKNOWN_NOTE)
+def destination_step(field: str, label: str) -> PrepareFn:
+    """A file moved, uploaded or created inside a folder inherits the folder's sharing: a shared or
+    foreign destination is a share (OUTWARD). An empty destination is My Drive's root: private."""
+
+    async def prepare(ctx: ToolContext, args: Any) -> Prepared:
+        folder_id = str(getattr(args, field) or "")
+        if not folder_id:
+            return Prepared()
+        return escalation(await file_meta(ctx, folder_id), label=label, unknown=FOLDER_UNKNOWN_NOTE)
+
+    return prepare
+
+
+prepare_move = destination_step("to_folder_id", "Move into folder")
 
 
 ESCALATIONS: dict[str, PrepareFn] = {
     "drive.move": prepare_move,
+    "drive.upload": destination_step("folder_id", "Upload into folder"),
+    "drive.create_folder": destination_step("parent_id", "Create inside folder"),
     "docs.append": prepare_doc_write,
     "sheets.append_row": prepare_row,
     "sheets.update_range": prepare_cells,
@@ -346,8 +358,10 @@ FILE_TARGETS: dict[str, str] = {
     "tasks.complete": "task_id",
     "tasks.update": "task_id",
 }
-# A second target some actions have: the folder a file is moved into (moving there can share it).
-DESTINATIONS: dict[str, str] = {"drive.move": "to_folder_id"}
+# The folder a file lands in (moved, uploaded or created there inherits its sharing). Empty is My Drive.
+DESTINATIONS: dict[str, str] = {
+    "drive.move": "to_folder_id", "drive.upload": "folder_id", "drive.create_folder": "parent_id",
+}
 TASK_ACTIONS = frozenset({"tasks.delete", "tasks.complete", "tasks.update"})
 MIN_TITLE = 4
 MAX_PARENT_HOPS = 5
@@ -425,7 +439,7 @@ async def allowed(ctx: ToolContext, action: str, target: str, scope: Scope) -> b
 
 
 async def destination_allowed(ctx: ToolContext, folder_id: str, scope: Scope) -> bool:
-    """A move's destination: named by id, made by the task, or a folder only the user can see."""
+    """A destination folder: named by id, made by the task, or a folder only the user can see."""
     if folder_id in scope.created or folder_id in ids_in(scope.goal):
         return True
     return private_to_user(await file_meta(ctx, folder_id))
@@ -438,10 +452,12 @@ async def _refused(ctx: ToolContext, action: str, args: Any) -> bool:
         scope = await tainted_scope(ctx)
         if scope is None:
             return False
-        if not await allowed(ctx, action, str(getattr(args, FILE_TARGETS[action])), scope):
+        target = FILE_TARGETS.get(action)
+        if target is not None and not await allowed(ctx, action, str(getattr(args, target)), scope):
             return True
         dest = DESTINATIONS.get(action)
-        return dest is not None and not await destination_allowed(ctx, str(getattr(args, dest)), scope)
+        folder_id = str(getattr(args, dest) or "") if dest is not None else ""
+        return bool(folder_id) and not await destination_allowed(ctx, folder_id, scope)
     except Exception as exc:  # noqa: BLE001 - fail closed
         log.warning("workspace.allowlist_check_failed", action=action, error_type=type(exc).__name__)
         return True
@@ -449,8 +465,8 @@ async def _refused(ctx: ToolContext, action: str, args: Any) -> bool:
 
 def guarded(action: str, inner: PrepareFn | None) -> PrepareFn:
     """Allowlist first (a refusal never reaches approval), then the action's own escalation, if any."""
-    if action not in FILE_TARGETS:
-        raise KeyError(f"{action} has no target field in FILE_TARGETS")
+    if action not in FILE_TARGETS and action not in DESTINATIONS:
+        raise KeyError(f"{action} has no target field in FILE_TARGETS or DESTINATIONS")
 
     async def prepare(ctx: ToolContext, args: Any) -> Prepared:
         if await _refused(ctx, action, args):
