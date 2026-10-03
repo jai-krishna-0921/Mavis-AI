@@ -18,7 +18,7 @@ from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.composer import Composer
 from mavis.initiative.quiet import QuietTracker
 from mavis.loops.service import LoopService
-from mavis.policy.pings import PingPolicy, in_quiet_hours, loop_ping_key
+from mavis.policy.pings import SECURITY_BYPASS_PREFIX, PingPolicy, in_quiet_hours, loop_ping_key
 from mavis.store.db import Session
 from mavis.store.repo import messages, outbox
 from mavis.store.repo.loops import title_tokens
@@ -30,6 +30,7 @@ MAX_UNTRUSTED_URGENCY = 4  # only a trusted origin may bypass quiet hours (urgen
 DELAY_NOTE_AFTER = timedelta(minutes=30)
 RELEASE_DELAY = timedelta(seconds=20)  # let the user's reply go out first
 DEFERRED_TTL = timedelta(hours=12)  # a deferred ping with no better bound goes stale after this
+SECURITY_DEFER_GRACE = timedelta(hours=2)
 MERGE_WINDOW = timedelta(minutes=30)  # a model wakeup this close to one already set for the loop merges
 LOOP_WAKEUP_KINDS = (WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED, WakeupKind.AGENT)
 
@@ -167,6 +168,10 @@ class InitiativeExecutor:
             if verdict.defer_until is not None:
                 due = original_due or timeutil.now()
                 valid_until = (origin or {}).get("valid_until") or (due + DEFERRED_TTL).isoformat()
+                if intent.security:  # a capped security notice waits for the morning: still valid then
+                    floor = timeutil.ensure_utc(verdict.defer_until) + SECURITY_DEFER_GRACE
+                    current = timeutil.ensure_utc(datetime.fromisoformat(valid_until))
+                    valid_until = max(current, floor).isoformat()
                 await self._wakeups.wake_me(
                     user.id, verdict.defer_until, f"deferred: {intent.intent[:80]}", _loop_id(origin),
                     kind=WakeupKind.DEFERRED,
@@ -176,6 +181,8 @@ class InitiativeExecutor:
                     dedupe_key=f"deferred:{intent.dedupe_key}" if intent.dedupe_key else None,
                 )
             return False
+        if verdict.budget_bypass:  # counts toward the daily cap on over-budget security notices
+            extra = [*extra, f"{SECURITY_BYPASS_PREFIX}{intent.dedupe_key or timeutil.now().isoformat()}"]
         if intent.dedupe_key and await self._recover_partial(user, intent):
             await self._follow_up_sent(origin)
             return False
