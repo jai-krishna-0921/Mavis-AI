@@ -1,8 +1,8 @@
 """Run / resume orchestrator tasks as durable LangGraph threads (thread_id = task:{id}).
 
 Status changes after the graph starts all go through `tasks.claim`, so a cancel that landed while
-the graph ran is never overwritten. One task runs at a time (`task_max_concurrency`); a finished
-task kicks the next queued one.
+the graph ran is never overwritten. One planned task runs at a time (`task_max_concurrency`); a
+finished task kicks the next queued one. APPROVAL tasks are exempt from the limit.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from mavis.agents.task_dispatch import enqueue_run
 from mavis.channels.formatting import sanitize_line
 from mavis.config import get_settings
 from mavis.domain.events import Event, EventType, Trust
-from mavis.domain.tasks import TaskStatus
+from mavis.domain.tasks import TaskKind, TaskStatus
 from mavis.llm.tracing import callbacks
 from mavis.policy import approvals as approval_flow
 from mavis.store.db import utcnow
@@ -83,7 +83,10 @@ async def run_task(task_id: int) -> None:
     # The per-user lock makes check-then-claim atomic for concurrent RUN_TASK jobs in this process.
     async with _user_locks.setdefault(task.user_id, asyncio.Lock()):
         await _reap_stale(task.user_id)
-        if await tasks.running_count(task.user_id) >= get_settings().task_max_concurrency:
+        # An APPROVAL task only shows a prompt and waits (no LLM work before its interrupt), so it never
+        # waits for the task slot: a chat "send this email" prompt appears even while research runs.
+        if (task.kind != TaskKind.APPROVAL
+                and await tasks.running_count(task.user_id) >= get_settings().task_max_concurrency):
             log.info("task.deferred_concurrency", task_id=task_id)
             return
         if not await tasks.claim(task_id, TaskStatus.QUEUED, TaskStatus.RUNNING):
@@ -194,6 +197,8 @@ async def _progress_after(task_id: int, user_id: int, delay_s: float) -> None:
 
 
 async def _kick_next_queued(user_id: int) -> None:
+    for ap_task in await tasks.queued_approval_tasks(user_id):  # never slot-bound (left over from before)
+        await enqueue_run(ap_task.id, user_id)
     nxt = await tasks.next_queued(user_id)
     if nxt is not None and await tasks.running_count(user_id) < get_settings().task_max_concurrency:
         await enqueue_run(nxt.id, user_id)
