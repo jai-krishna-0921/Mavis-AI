@@ -342,3 +342,27 @@ async def test_retry_with_unknown_taint_assumes_tainted(db, channel, fake_llm, m
     assert simple_turn.is_tainted((await messages.recent(user.id))[-1])
     [learn] = [j for j in jobs if j.kind is JobKind.LEARN]
     assert learn.payload["trust"] == "untrusted"
+
+
+async def test_digest_turn_is_tainted_and_small_talk_is_not(db, channel, fake_llm, memory, bus, monkeypatch):
+    from mavis.agents import context_hooks
+
+    async def inbox(user_id, text):
+        return "## What you've seen in their inbox\n<untrusted>x</untrusted>" if "gmail" in text else ""
+
+    context_hooks.clear_context_providers()
+    context_hooks.register_context_provider(inbox)
+    try:
+        user, _ = await users.get_or_create_by_chat(77, "Jai")
+        jobs = await _jobs(bus, monkeypatch)
+        fake_llm.push_text("Nothing new.")
+        await run_turn(msg_event(user.id, "any gmail updates?", "e1"))
+        fake_llm.push_text("Hey!")
+        await run_turn(msg_event(user.id, "how are you", "e2"))
+        fake_llm.push_text("Good.")
+        await run_turn(msg_event(user.id, "cool", "e3"))
+    finally:
+        context_hooks.clear_context_providers()
+    learns = [j for j in jobs if j.kind is JobKind.LEARN]
+    assert [j.payload["trust"] for j in learns] == ["untrusted", "untrusted", "user"]
+    assert len(fake_llm.calls) == 3  # one model call per turn, no extra tool rounds
