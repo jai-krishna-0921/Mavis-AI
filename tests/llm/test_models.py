@@ -683,3 +683,101 @@ async def test_invoke_tools_uses_secondary_provider_with_tools_bound(bindable, m
     out = await models.invoke_tools([HumanMessage("hi")], ["t"])
     assert out.tool_calls[0]["id"] == "c1"
     assert log == [f"bind:{s.model_fast}:1", s.model_fast, "bind:secondary:1", "secondary"]
+
+
+# --- hotfix3 RC1: best_effort yields to interactive/background; FAST reasoning effort -----------
+
+
+async def test_best_effort_fails_fast_while_interactive_waits(monkeypatch) -> None:
+    monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", 0.0)
+    lim = models._Limiter(1)
+    await lim.acquire("best_effort", 1)  # a LEARN call holds the slot
+    fg = asyncio.create_task(lim.acquire("interactive", 5))
+    await asyncio.sleep(0)
+    t0 = asyncio.get_running_loop().time()
+    with pytest.raises(LLMError, match="interactive"):
+        await lim.acquire("best_effort", 5)
+    assert asyncio.get_running_loop().time() - t0 < 0.5
+    lim.release()
+    await asyncio.wait_for(fg, 1)
+
+
+async def test_best_effort_fails_fast_right_after_interactive_use(monkeypatch) -> None:
+    monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", 20.0)
+    lim = models._Limiter(1)
+    await lim.acquire("interactive", 1)
+    lim.release()
+    with pytest.raises(LLMError, match="interactive"):
+        await lim.acquire("best_effort", 5)  # slot is free, but a chat just used it
+
+
+async def test_best_effort_runs_once_grace_passed(monkeypatch) -> None:
+    monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", 0.01)
+    lim = models._Limiter(1)
+    await lim.acquire("interactive", 1)
+    lim.release()
+    await asyncio.sleep(0.02)
+    await asyncio.wait_for(lim.acquire("best_effort", 1), 1)
+
+
+async def test_background_task_work_still_queues_after_chat(monkeypatch) -> None:
+    monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", 20.0)
+    lim = models._Limiter(1)
+    await lim.acquire("interactive", 1)
+    lim.release()
+    await asyncio.wait_for(lim.acquire("background", 1), 1)  # task runs are not failed fast
+
+
+async def test_queued_best_effort_waiter_is_failed_when_interactive_arrives(monkeypatch) -> None:
+    monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", 20.0)
+    monkeypatch.setattr(models, "BACKGROUND_AGING_S", 0.0)  # best_effort never ages ahead of anyone
+    lim = models._Limiter(1)
+    await lim.acquire("best_effort", 1)  # holder, no recent chat
+    bg = asyncio.create_task(lim.acquire("best_effort", 5))
+    await asyncio.sleep(0.01)  # bg queued for a while
+    fg = asyncio.create_task(lim.acquire("interactive", 5))
+    await asyncio.sleep(0)
+    with pytest.raises(LLMError):
+        await asyncio.wait_for(bg, 1)  # failed as soon as the chat queued, not after the holder
+    lim.release()
+    await asyncio.wait_for(fg, 1)
+
+
+async def test_best_effort_timeout_is_not_retried(chain) -> None:
+    log, scripts, s = chain
+    scripts[s.model_fast] = [_timeout(), _timeout()]
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("learn")], priority="best_effort")
+    assert log == [s.model_fast]  # one attempt: no same-model retry after the cooldown
+
+
+async def test_best_effort_does_not_wait_out_a_429_backoff(chain) -> None:
+    log, scripts, s = chain
+    models._ollama.note_rate_limit(None)
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("learn")], priority="best_effort")
+    assert log == []
+
+
+async def test_memory_calls_are_best_effort() -> None:
+    import inspect
+
+    from mavis.memory import consolidate, extractor, summaries
+
+    for mod in (extractor, summaries, consolidate):
+        assert 'priority="best_effort"' in inspect.getsource(mod), mod.__name__
+
+
+def test_fast_tier_gets_reasoning_effort(settings) -> None:
+    models._build.cache_clear()
+    assert settings.llm_reasoning_effort_fast == "low"
+    assert models.chat_model(Tier.FAST).reasoning_effort == "low"
+    assert models.chat_model(Tier.SMART).reasoning_effort is None
+
+
+def test_empty_reasoning_effort_is_not_sent(settings) -> None:
+    models._build.cache_clear()
+    settings.llm_reasoning_effort_fast = ""
+    assert models.chat_model(Tier.FAST).reasoning_effort is None
+    settings.llm_reasoning_effort_fast = "medium"
+    assert models.chat_model(Tier.FAST).reasoning_effort == "medium"  # cache key includes it

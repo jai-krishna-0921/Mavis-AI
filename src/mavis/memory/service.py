@@ -124,7 +124,7 @@ class MemoryService:
     async def learn(
         self, user_id: int, text: str, source_ref: str = "", trust: Trust = Trust.USER
     ) -> Extraction:
-        """Extract and persist. LLMError from extraction propagates so the LEARN job retries.
+        """Extract and persist. LLMError from extraction propagates; the LEARN job drops it (best effort).
 
         Idempotent on retry: graph writes are MERGEs, vector ids are uuid5 of the text.
         """
