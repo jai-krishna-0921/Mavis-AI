@@ -148,3 +148,28 @@ async def test_non_transient_error_skips_inline_retries(monkeypatch) -> None:
     await bus.wait_idle()
     task.cancel()
     assert slept == [] and calls == InProcessBus.MAX_ATTEMPTS  # normal bus retry path only
+
+
+async def test_inline_retry_waits_out_llm_backoff(monkeypatch) -> None:
+    from mavis.bus import base
+    from mavis.domain.errors import LLMError
+    from mavis.llm import models
+
+    slept: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        slept.append(s)
+
+    monkeypatch.setattr(base, "_sleep", fake_sleep)
+    monkeypatch.setattr(base, "INLINE_RETRY_DELAYS_S", (2,))
+    models._ollama.note_rate_limit(None)  # 5s global backoff
+    calls = 0
+
+    async def flaky() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise LLMError("429")
+
+    await base.run_with_inline_retries(flaky, what="job", ref="x")
+    assert calls == 2 and 4 < slept[0] <= 5  # waited for the backoff, not the 2s default

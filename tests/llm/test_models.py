@@ -50,7 +50,7 @@ async def test_structured_accepts_message_list(settings, scripted) -> None:
 async def test_complete_returns_text_and_wraps_errors(settings, scripted) -> None:
     scripted.push_text("  hello  ")
     assert await models.complete([SystemMessage("s"), HumanMessage("h")]) == "hello"
-    scripted.push_error(TimeoutError())
+    scripted.push_error(ValueError("boom"))
     with pytest.raises(LLMError):
         await models.complete([HumanMessage("h")])
     scripted.push_text("   ")
@@ -101,6 +101,11 @@ def _http_429() -> Exception:
                                  response=httpx.Response(429, request=req), body=None)
 
 
+def _http_500() -> Exception:
+    req = httpx.Request("POST", "http://x")
+    return openai.InternalServerError("boom", response=httpx.Response(500, request=req), body=None)
+
+
 @pytest.fixture
 def chain(settings, monkeypatch):
     """Patch chat_model(tier, temperature, model=None) with scripted per-model chats."""
@@ -114,15 +119,16 @@ def chain(settings, monkeypatch):
     async def no_sleep(_s):
         return None
 
+    settings.llm_timeout_cooldown_s = 0.05
     monkeypatch.setattr(models, "chat_model", fake)
     monkeypatch.setattr(models, "_sleep", no_sleep)
     models._limiters.clear()
     return log, scripts, settings
 
 
-async def test_complete_falls_back_on_timeout(chain) -> None:
+async def test_complete_falls_back_on_5xx(chain) -> None:
     log, scripts, s = chain
-    scripts[s.model_fast] = [_timeout()]
+    scripts[s.model_fast] = [_http_500()]
     assert await models.complete([HumanMessage("hi")]) == "from gemma4:31b"
     assert log == [s.model_fast, "gemma4:31b"]
 
@@ -130,7 +136,7 @@ async def test_complete_falls_back_on_timeout(chain) -> None:
 async def test_complete_all_models_fail_raises_llm_error(chain) -> None:
     log, scripts, s = chain
     for name in (s.model_fast, *s.model_fast_fallbacks):
-        scripts[name] = [_timeout()]
+        scripts[name] = [_http_500()]
     with pytest.raises(LLMError):
         await models.complete([HumanMessage("hi")])
     assert log == [s.model_fast, *s.model_fast_fallbacks]
@@ -144,7 +150,7 @@ async def test_complete_does_not_fall_back_on_non_retriable(chain) -> None:
     assert log == [s.model_fast]
 
 
-async def test_structured_falls_back_on_timeout(chain) -> None:
+async def test_structured_falls_back_on_5xx(chain) -> None:
     log, scripts, s = chain
 
     class _Struct(_Chat):
@@ -165,7 +171,7 @@ async def test_structured_falls_back_on_timeout(chain) -> None:
         return _Struct(name, log, scripts.setdefault(name, []))
 
     models.chat_model = fake  # restored by monkeypatch teardown in `chain`
-    scripts[s.model_fast] = [_timeout()]
+    scripts[s.model_fast] = [_http_500()]
     assert await models.structured(Sample, "sys", "u") == Sample(name="ok", n=1)
     assert log == [s.model_fast, "gemma4:31b"]
 
@@ -177,11 +183,12 @@ async def test_429_retried_on_same_model_then_succeeds(chain) -> None:
     assert log == [s.model_fast] * 3
 
 
-async def test_429_exhausted_moves_to_next_model(chain) -> None:
+async def test_429_never_falls_back_to_another_ollama_model(chain) -> None:
     log, scripts, s = chain
-    scripts[s.model_fast] = [_http_429() for _ in range(4)]
-    assert await models.complete([HumanMessage("hi")]) == "from gemma4:31b"
-    assert log == [s.model_fast] * 4 + ["gemma4:31b"]
+    scripts[s.model_fast] = [_http_429() for _ in range(20)]
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("hi")])
+    assert set(log) == {s.model_fast}
 
 
 async def test_limiter_caps_concurrency_at_one(chain, monkeypatch) -> None:
@@ -331,11 +338,11 @@ async def test_retry_after_header_is_capped(chain, monkeypatch) -> None:
     req = httpx.Request("POST", "http://x")
     err = openai.RateLimitError(
         "too many concurrent requests",
-        response=httpx.Response(429, request=req, headers={"retry-after": "18"}), body=None,
+        response=httpx.Response(429, request=req, headers={"retry-after": "99"}), body=None,
     )
     scripts[s.model_fast] = [err]
     assert await models.complete([HumanMessage("hi")]) == f"from {s.model_fast}"
-    assert slept == [models.RETRY_AFTER_CAP_S]
+    assert len(slept) == 1 and 29 < slept[0] <= models.RETRY_AFTER_CAP_S
 
 
 async def test_structured_moves_to_next_model_when_tool_and_json_modes_both_fail(chain) -> None:
@@ -398,7 +405,7 @@ async def test_slot_granted_then_cancel_is_passed_on() -> None:
 
 async def test_background_complete_makes_a_single_model_attempt(chain) -> None:
     log, scripts, s = chain
-    scripts[s.model_fast] = [_timeout()]
+    scripts[s.model_fast] = [_http_500()]
     with pytest.raises(LLMError):
         await models.complete([HumanMessage("learn")], priority="background")
     assert log == [s.model_fast]  # no walk down the fallback chain
@@ -414,7 +421,7 @@ async def test_background_structured_makes_a_single_model_attempt(chain, monkeyp
             class R:
                 async def ainvoke(self, messages, config=None):
                     outer.log.append(outer.name)
-                    raise _timeout()
+                    raise _http_500()
 
             return R()
 
@@ -429,14 +436,181 @@ async def test_background_structured_makes_a_single_model_attempt(chain, monkeyp
 
 async def test_background_can_opt_back_into_fallback(chain) -> None:
     log, scripts, s = chain
-    scripts[s.model_fast] = [_timeout()]
+    scripts[s.model_fast] = [_http_500()]
     out = await models.complete([HumanMessage("x")], priority="background", fallback=True)
     assert out == "from gemma4:31b" and log == [s.model_fast, "gemma4:31b"]
 
 
 async def test_interactive_can_disable_fallback(chain) -> None:
     log, scripts, s = chain
-    scripts[s.model_fast] = [_timeout()]
+    scripts[s.model_fast] = [_http_500()]
     with pytest.raises(LLMError):
         await models.complete([HumanMessage("x")], fallback=False)
     assert log == [s.model_fast]
+
+
+# --- hotfix: server occupancy, global backoff, no same-provider fallback, secondary provider -------
+
+
+async def test_timeout_holds_slot_for_cooldown_then_retries_same_model(chain) -> None:
+    log, scripts, s = chain
+    scripts[s.model_fast] = [_timeout()]
+    t0 = asyncio.get_running_loop().time()
+    assert await models.complete([HumanMessage("hi")]) == f"from {s.model_fast}"
+    # the abandoned request still occupies the account: the retry waited out the cooldown
+    assert asyncio.get_running_loop().time() - t0 >= 0.04
+    assert log == [s.model_fast, s.model_fast]  # no fallback to another Ollama model
+
+
+async def test_slot_stays_occupied_during_cooldown(chain) -> None:
+    log, scripts, s = chain
+    s.llm_timeout_cooldown_s = 0.2
+    scripts[s.model_fast] = [_timeout()]
+    task = asyncio.create_task(models.complete([HumanMessage("a")]))
+    await asyncio.sleep(0.05)
+    assert models._limiter()._free == 0  # held although the call itself already timed out
+    assert models._ollama.unavailable_s() > 0
+    assert await task == f"from {s.model_fast}"
+
+
+async def test_429_sets_global_backoff_increasing_and_reset_on_success(chain, monkeypatch) -> None:
+    log, scripts, s = chain
+    slept: list[float] = []
+
+    async def rec(sec):
+        slept.append(sec)
+
+    monkeypatch.setattr(models, "_sleep", rec)
+    scripts[s.model_fast] = [_http_429(), _http_429(), _http_429()]
+    assert await models.complete([HumanMessage("hi")], priority="background") == f"from {s.model_fast}"
+    # 5s, 10s, 20s steps (minus elapsed microseconds); first attempt has no wait
+    assert [round(x) for x in slept] == [5, 10, 20]
+    assert models._ollama.level == 0 and models._ollama.backoff_remaining() == 0  # reset on success
+
+
+def test_backoff_steps_cap_at_30() -> None:
+    st = models._OllamaState()
+    assert [st.note_rate_limit(None) for _ in range(6)] == [5, 10, 20, 30, 30, 30]
+    st.note_success()
+    assert st.note_rate_limit(None) == 5
+
+
+async def test_backoff_is_global_across_callers(chain, monkeypatch) -> None:
+    log, scripts, s = chain
+    slept: list[float] = []
+
+    async def rec(sec):
+        slept.append(sec)
+
+    monkeypatch.setattr(models, "_sleep", rec)
+    models._ollama.note_rate_limit(None)  # another caller just got a 429
+    await models.complete([HumanMessage("bg")], priority="background")
+    assert len(slept) == 1 and 4 < slept[0] <= 5  # a different call waits too
+
+
+async def test_interactive_fails_with_llm_error_when_backoff_outlasts_deadline(chain, monkeypatch) -> None:
+    log, scripts, s = chain
+    monkeypatch.setattr(models, "INTERACTIVE_DEADLINE_S", 1.0)
+    models._ollama.note_rate_limit(None)  # 5s backoff > 1s deadline
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("hi")])
+    assert log == []  # never even called Ollama
+
+
+async def test_timeout_does_not_fall_back_to_other_models(chain) -> None:
+    log, scripts, s = chain
+    scripts[s.model_fast] = [_timeout() for _ in range(10)]
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("hi")])
+    assert set(log) == {s.model_fast}
+
+
+class _Sec(_Chat):
+    def with_structured_output(self, schema, method=None):
+        outer = self
+
+        class R:
+            async def ainvoke(self, messages, config=None):
+                outer.log.append(outer.name)
+                if outer.script:
+                    raise outer.script.pop(0)
+                return schema(name="sec", n=7)
+
+        return R()
+
+
+@pytest.fixture
+def secondary(chain, monkeypatch):
+    log, scripts, s = chain
+    s.llm_secondary_base_url = "https://sec.example/v1"
+    s.llm_secondary_model_fast = "sec-fast"
+    s.llm_secondary_model_smart = "sec-smart"
+    sec_scripts: list = []
+    monkeypatch.setattr(
+        models, "secondary_chat_model",
+        lambda tier=Tier.FAST, temperature=0.6: _Sec("secondary", log, sec_scripts),
+    )
+    return log, scripts, s
+
+
+async def test_secondary_not_used_when_unconfigured(chain) -> None:
+    log, scripts, s = chain
+    assert not models._secondary_ready(Tier.FAST)
+
+
+@pytest.mark.parametrize("err", [_timeout, _http_429])
+async def test_complete_falls_back_once_to_secondary(secondary, err) -> None:
+    log, scripts, s = secondary
+    scripts[s.model_fast] = [err()]
+    assert await models.complete([HumanMessage("hi")]) == "from secondary"
+    assert log == [s.model_fast, "secondary"]
+
+
+async def test_connection_error_falls_back_to_secondary(secondary) -> None:
+    log, scripts, s = secondary
+    scripts[s.model_fast] = [openai.APIConnectionError(request=httpx.Request("POST", "http://x"))]
+    assert await models.complete([HumanMessage("hi")]) == "from secondary"
+
+
+async def test_secondary_failure_raises_llm_error(secondary, monkeypatch) -> None:
+    log, scripts, s = secondary
+    scripts[s.model_fast] = [_http_429()]
+    monkeypatch.setattr(models, "secondary_chat_model",
+                        lambda tier=Tier.FAST, temperature=0.6: _Chat("secondary", log, [_http_429()]))
+    with pytest.raises(LLMError):
+        await models.complete([HumanMessage("hi")])
+    assert log == [s.model_fast, "secondary"]
+
+
+async def test_interactive_goes_straight_to_secondary_during_cooldown(secondary) -> None:
+    log, scripts, s = secondary
+    models._ollama.note_rate_limit(None)
+    assert await models.complete([HumanMessage("hi")]) == "from secondary"
+    assert log == ["secondary"]
+
+
+async def test_background_waits_for_ollama_not_secondary_during_backoff(secondary, monkeypatch) -> None:
+    log, scripts, s = secondary
+    models._ollama.note_rate_limit(None)
+    assert await models.complete([HumanMessage("bg")], priority="background") == f"from {s.model_fast}"
+    assert log == [s.model_fast]
+
+
+async def test_structured_falls_back_to_secondary(secondary, monkeypatch) -> None:
+    log, scripts, s = secondary
+
+    class _Primary(_Sec):
+        pass
+
+    prim_script = [_http_429()]
+    monkeypatch.setattr(
+        models, "chat_model",
+        lambda tier=Tier.FAST, temperature=0.6, model=None: _Primary(model or s.model_fast, log, prim_script),
+    )
+    assert await models.structured(Sample, "sys", "u") == Sample(name="sec", n=7)
+    assert log == [s.model_fast, "secondary"]
+
+
+async def test_secondary_has_its_own_limiter(secondary) -> None:
+    models._limiter()._free = 0  # Ollama slot held (cooldown)
+    assert models._limiter(secondary=True)._free == 2
