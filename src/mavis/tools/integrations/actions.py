@@ -218,9 +218,10 @@ def _a(*names: str) -> frozenset[str]:
 
 _SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("mail.search", Capability.GMAIL,
-               "Search the user's Gmail. Returns senders, subjects, snippets.",
+               "Search the user's Gmail. Returns message ids, senders, subjects, dates and short previews.",
                MailSearchArgs, RiskClass.READ, _a("inbox", "conversation")),
-    ActionSpec("mail.read", Capability.GMAIL, "Read one email in full by message id.",
+    ActionSpec("mail.read", Capability.GMAIL,
+               "Read one email in full by message id (from mail_search): headers and body text.",
                MailReadArgs, RiskClass.READ, _a("inbox", "conversation")),
     ActionSpec("mail.thread", Capability.GMAIL, "Read every message in an email thread.",
                MailThreadArgs, RiskClass.READ, _a("inbox")),
