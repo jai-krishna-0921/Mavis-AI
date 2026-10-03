@@ -19,8 +19,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
 from mavis.domain.errors import ActionFailed
 from mavis.domain.policy import RiskClass
+from mavis.domain.tasks import TaskOrigin
+from mavis.store.repo import tasks as tasks_repo
 from mavis.store.repo import users
 from mavis.tools.integrations.actions import FileArgs, NoArgs, SheetsReadArgs, SheetUpdateArgs, TaskRefArgs
 from mavis.tools.integrations.base import IntegrationProvider
@@ -29,6 +33,8 @@ from mavis.tools.integrations.normalize import extract_list, pick
 from mavis.tools.integrations.tools import action_data
 from mavis.tools.integrations.workspace_render import ID_KEYS, has_value_ranges, kind_of, one_line, sheet_rows
 from mavis.tools.registry import Prepared, PrepareFn, ToolContext, current_run
+
+log = structlog.get_logger()
 
 MAX_TRACKED_TASKS = 200
 _created: OrderedDict[int, set[str]] = OrderedDict()
@@ -308,3 +314,99 @@ async def prepare_task(ctx: ToolContext, args: Any) -> Prepared:
 
 
 VERIFIERS: dict[str, PrepareFn] = {"tasks.complete": prepare_task, "tasks.update": prepare_task}
+
+
+# --- tainted-task allowlist (spec 4.3), mirroring web.py's web_extract URL allowlist ------------------------
+FILE_TARGETS: dict[str, str] = {
+    "drive.share": "file_id",
+    "drive.move": "file_id",
+    "docs.append": "document_id",
+    "docs.comment": "file_id",
+    "sheets.append_row": "spreadsheet_id",
+    "sheets.update_range": "spreadsheet_id",
+    "tasks.delete": "task_id",
+}
+MAX_PARENT_HOPS = 5
+_LONG_ID = re.compile(r"[A-Za-z0-9_-]{16,}")  # Drive file ids (25+ chars, also inside /d/<id>/ links)
+REFUSAL = ("Refused: this task has read third-party content, so it may only change files or tasks the user "
+           "named in their request, or ones this task created. Do not retry with a different target; tell "
+           "the user what you wanted to change and ask them.")
+
+
+@dataclass(frozen=True)
+class Scope:
+    goal: str  # the root goal when the user wrote it in an untainted turn, else ""
+    created: frozenset[str]
+
+
+def ids_in(text: str) -> set[str]:
+    return set(_LONG_ID.findall(text or ""))
+
+
+async def tainted_scope(ctx: ToolContext) -> Scope | None:
+    """Inside a tainted task: what it may touch. None when not in a task or the task is not tainted."""
+    if ctx.task_id is None:
+        return None
+    task = await tasks_repo.get(ctx.task_id)
+    if task is None:
+        return Scope("", frozenset())
+    run = current_run.get()
+    if not (task.tainted or (run is not None and run.tainted)):
+        return None
+    created = set(created_by(task.id))
+    for _ in range(MAX_PARENT_HOPS):
+        if task.parent_id is None:
+            break
+        parent = await tasks_repo.get(task.parent_id)
+        if parent is None:
+            break
+        task = parent
+        created |= created_by(task.id)
+    goal = task.goal if task.origin == TaskOrigin.USER and not task.tainted else ""
+    return Scope(goal, frozenset(created))
+
+
+async def target_title(ctx: ToolContext, action: str, target: str) -> str:
+    """The real title of the target, looked up (never taken from the model's arguments); "" on failure."""
+    if action == "tasks.delete":
+        facts = await task_facts(ctx, target)
+        return facts.title if facts is not None else ""
+    meta = await file_meta(ctx, target)
+    return meta.name if meta is not None else ""
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+async def allowed(ctx: ToolContext, action: str, target: str, scope: Scope) -> bool:
+    if target in scope.created or target in ids_in(scope.goal):
+        return True
+    if not scope.goal:
+        return False
+    title = _norm(await target_title(ctx, action, target))
+    return len(title) >= 3 and title in _norm(scope.goal)
+
+
+async def _refused(ctx: ToolContext, action: str, target: str) -> bool:
+    """True when a tainted task may not touch `target`. Any error while checking refuses (amendment A6):
+    an unknown scope must never fall through to an approval prompt the user might wave through."""
+    try:
+        scope = await tainted_scope(ctx)
+        return scope is not None and not await allowed(ctx, action, target, scope)
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        log.warning("workspace.allowlist_check_failed", action=action, error_type=type(exc).__name__)
+        return True
+
+
+def guarded(action: str, inner: PrepareFn | None) -> PrepareFn:
+    """Allowlist first (a refusal never reaches approval), then the action's own escalation, if any."""
+    field_name = FILE_TARGETS[action]
+
+    async def prepare(ctx: ToolContext, args: Any) -> Prepared:
+        if await _refused(ctx, action, str(getattr(args, field_name))):
+            log.warning("workspace.allowlist_refused", action=action)
+            return Prepared(refusal=REFUSAL)
+        return await inner(ctx, args) if inner is not None else Prepared()
+
+    return prepare
