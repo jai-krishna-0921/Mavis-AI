@@ -37,3 +37,28 @@ def test_workspace_flag_and_poll_interval_are_in_prod_compose():
     compose = (ROOT / "docker-compose.prod.yml").read_text()
     assert "GOOGLE_WORKSPACE_ENABLED: ${GOOGLE_WORKSPACE_ENABLED:-true}" in compose
     assert "WORKSPACE_POLL_MINUTES: ${WORKSPACE_POLL_MINUTES:-30}" in compose
+
+
+def test_verify_execute_runs_only_plain_read_actions():
+    from scripts.verify_composio import executable
+
+    for name, spec in ACTIONS.items():
+        assert executable(name) is (spec.risk is RiskClass.READ and spec.risk_fn is None), name
+    assert executable("drive.create_folder") is False  # WRITE_SELF never needs approval, still refused
+    assert executable("tasks.add") is False
+    assert executable("no.such_action") is False
+
+
+async def test_verify_execute_refuses_a_write_before_any_call(monkeypatch, capsys):
+    from scripts import verify_composio
+
+    monkeypatch.setenv("COMPOSIO_API_KEY", "ck_test")
+
+    async def boom(*a, **k):
+        raise AssertionError("must not reach the provider")
+
+    monkeypatch.setattr(verify_composio.ComposioProvider, "execute", boom)
+    monkeypatch.setattr(verify_composio.ComposioProvider, "status", boom)
+    args = verify_composio._Args(None, "drive.create_folder", 1, False)
+    assert await verify_composio.main(args) == 2
+    assert "read" in capsys.readouterr().err
