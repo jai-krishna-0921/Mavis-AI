@@ -268,3 +268,15 @@ async def test_dentist_phrasings_still_merge_in_service(user, recording_bus, clo
     b = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Dentist appointment at 4pm",
                                              due_at=DUE))
     assert a.id == b.id
+
+
+async def test_update_by_id_does_not_reopen_an_awaiting_loop(user, recording_bus, clock):
+    svc = LoopService(recording_bus)
+    loop = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Interview", due_at=DUE))
+    await svc.close(loop.id, LoopStatus.AWAITING_REPLY)
+    updated = await svc.upsert(user.id, LoopUpsert(id=loop.id, kind=LoopKind.COMMITMENT, title="Interview",
+                                                   entities=["Jawahar"]))
+    assert updated.status is LoopStatus.AWAITING_REPLY and updated.entities == ["Jawahar"]
+    done = await svc.upsert(user.id, LoopUpsert(id=loop.id, kind=LoopKind.COMMITMENT, title="Interview",
+                                                status=LoopStatus.DONE))
+    assert done.status is LoopStatus.DONE  # an explicit close still applies
