@@ -514,3 +514,37 @@ async def test_register_attention_leaves_workspace_out_when_the_flag_is_off(
     assert EventType.WORKSPACE_SIGNAL not in runner._event_handlers
     assert "ws:" not in buttons.BUTTON_HANDLERS
     assert WORKSPACE_POLL_KIND not in system.SYSTEM_WAKEUP_HANDLERS
+
+
+async def test_poll_auth_error_sends_the_reconnect_prompt(user, provider, ex, rec):
+    # legacy Gmail still ACTIVE, googlesuper EXPIRED: the poll fails with an auth error and the user
+    # gets the (daily-deduped) Google reconnect prompt instead of a silent log line
+    await baselined(user.id)
+    prompted: list = []
+
+    async def on_auth_failed(user_id, capability):
+        prompted.append((user_id, capability))
+        return True
+
+    provider.set_state(user.id, Capability.GMAIL, ConnectionState.ACTIVE)
+    provider.results["tasks.list"] = ToolResult(ok=False, error="Composio answered 401 for POST /tools")
+    ws = WorkspaceIntake(provider=provider, executor_of=lambda: ex, loops=Loops(), schedule=rec.schedule,
+                         clock=lambda: NOW, on_auth_failed=on_auth_failed)
+    assert await ws.poll_tasks(user.id) == 0
+    assert prompted == [(user.id, Capability.TASKS)]
+    provider.results["tasks.list"] = ToolResult(ok=False, error="Composio answered 500 for POST /tools")
+    await ws.poll_tasks(user.id)
+    assert len(prompted) == 1  # other errors only log
+
+
+def test_wired_intake_prompts_reconnect(monkeypatch):
+    from mavis.attention import wiring as attention_wiring
+    from mavis.attention.wiring import get_workspace
+    from mavis.tools.integrations.wiring import reconnect_prompt
+
+    monkeypatch.setattr(attention_wiring.initiative_wiring, "current", lambda: SimpleNamespace(loops=Loops()))
+    get_workspace.cache_clear()
+    try:
+        assert get_workspace().on_auth_failed is reconnect_prompt
+    finally:
+        get_workspace.cache_clear()

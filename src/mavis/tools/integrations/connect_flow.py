@@ -559,7 +559,8 @@ class ConnectFlow:
                 removed = await self._disconnect_legacy_accounts(user_id)
             except IntegrationError as exc:
                 log.warning("connect.disconnect_failed", capability="legacy", error=str(exc))
-                await self.send(user_id, f"I couldn't disconnect {name} just now. Mind trying again in a bit?")
+                await self.send(user_id, f"I couldn't disconnect {name} just now. "
+                                         "Mind trying again in a bit?")
                 return
             if not removed:
                 await self.send(user_id, f"There's no {name} connection to remove.")

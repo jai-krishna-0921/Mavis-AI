@@ -45,8 +45,9 @@ from mavis.initiative.untrusted import wrap_untrusted
 from mavis.policy.pings import PingPolicy
 from mavis.store.repo import attention as repo
 from mavis.store.repo import audit, users
+from mavis.tools.integrations.actions import ACTIONS
 from mavis.tools.integrations.base import IntegrationProvider
-from mavis.tools.integrations.connections import ConnectionCache
+from mavis.tools.integrations.connections import ConnectionCache, is_auth_error
 from mavis.tools.integrations.normalize import extract_list, pick, to_datetime
 from mavis.tools.integrations.poller import WORKSPACE_POLL_KIND
 from mavis.tools.integrations.workspace_guard import (
@@ -73,6 +74,7 @@ SENT, DEFERRED, DROPPED, NONE = "sent", "deferred", "dropped", "none"
 POLL_REASONS: dict[str, Capability] = {"tasks": Capability.TASKS, "drive": Capability.DRIVE}
 WORKSPACE_SOURCES = frozenset(SOURCE_OF.values())
 Schedule = Callable[[int, datetime, str, str], Awaitable[int]]
+OnAuthFailed = Callable[[int, Capability], Awaitable[object]]  # the daily-deduped reconnect prompt
 
 
 def _appended(items: Any, value: str) -> list[str]:
@@ -92,8 +94,10 @@ class WorkspaceIntake:
         clock: Callable[[], datetime] = timeutil.now,
         cache: ConnectionCache | None = None,
         policy: PingPolicy | None = None,
+        on_auth_failed: OnAuthFailed | None = None,
     ) -> None:
         self.provider, self.executor_of, self.loops = provider, executor_of, loops
+        self.on_auth_failed = on_auth_failed
         self.schedule, self.clock = schedule, clock
         self.cache = cache or ConnectionCache(provider)
         self.policy = policy or PingPolicy()
@@ -124,6 +128,12 @@ class WorkspaceIntake:
         res = await self.provider.execute(UserRef(user_id=user_id), action, args)
         if not res.ok:
             log.warning("workspace.provider_failed", action=action, error=(res.error or "")[:120])
+            if is_auth_error(res.error) and self.on_auth_failed is not None and action in ACTIONS:
+                try:
+                    await self.on_auth_failed(user_id, ACTIONS[action].capability)
+                except Exception as exc:  # noqa: BLE001 - a failed prompt must not break the poll chain
+                    log.warning("workspace.reconnect_prompt_failed", user_id=user_id,
+                                error=type(exc).__name__)
             return None
         return res.data
 
