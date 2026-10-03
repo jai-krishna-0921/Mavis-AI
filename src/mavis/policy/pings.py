@@ -73,8 +73,9 @@ def _day_key(dedupe_key: str, local_now: datetime) -> str:
 
 class PingPolicy:
     async def check(self, user, urgency: int, dedupe_key: str | None, now: datetime,
-                    extra_keys: Sequence[str] = ()) -> PolicyVerdict:
-        """`extra_keys` are further dedupe keys (e.g. one per loop and kind of ping): any seen one blocks."""
+                    extra_keys: Sequence[str] = (), bypass_budget: bool = False) -> PolicyVerdict:
+        """`extra_keys` are further dedupe keys (e.g. one per loop and kind of ping): any seen one blocks.
+        `bypass_budget` is for deterministic security notices: still deduped and quiet-hours deferred."""
         s = get_settings()
         local = timeutil.to_local(now, user.timezone)
         for key in _keys(dedupe_key, extra_keys):
@@ -86,7 +87,7 @@ class PingPolicy:
         ):
             defer = next_quiet_end(local, s.quiet_end).astimezone(UTC)
             return PolicyVerdict(allow=False, defer_until=defer, reason="quiet hours")
-        if await self.count_today(user, now) >= s.ping_daily_budget:
+        if not bypass_budget and await self.count_today(user, now) >= s.ping_daily_budget:
             if not urgent:  # a routine ping is stale by tomorrow: drop it rather than pile up a backlog
                 return PolicyVerdict(allow=False, reason="daily budget reached")
             tomorrow = (_local_midnight(local) + timedelta(days=1)).replace(hour=s.quiet_end)

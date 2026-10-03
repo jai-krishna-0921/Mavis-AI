@@ -16,7 +16,7 @@ from mavis.domain.wakeups import WakeupKind
 from mavis.initiative import hooks
 from mavis.initiative.executor import DEFERRED_TTL, InitiativeExecutor
 from mavis.initiative.filters import EventFilter
-from mavis.initiative.planner import fallback_decision, schedule_default_signals
+from mavis.initiative.planner import PREP_LEAD, fallback_decision, schedule_default_signals
 from mavis.initiative.quiet import QuietTracker
 from mavis.initiative.reasoner import Reasoner
 from mavis.initiative.routines import Routines
@@ -33,7 +33,7 @@ log = structlog.get_logger()
 MAX_WAKEUP_LATENESS = timedelta(hours=2)
 MAX_LLM_URGENCY = 4
 URGENT_URGENCY = 5
-IMMINENT = timedelta(minutes=15)
+IMMINENT = PREP_LEAD + timedelta(minutes=10)  # the default prep wakeup (60 min ahead) plus slack
 FOLLOW_UP_VALID_FOR = timedelta(hours=24)
 LIVE_STATUSES = (LoopStatus.OPEN, LoopStatus.AWAITING_REPLY)
 HANDLED_TYPES = tuple(t for t in EventType if t not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED))
@@ -209,14 +209,15 @@ def _quiet_after_turn(event: Event, decision: InitiativeDecision) -> InitiativeD
 def _cap_llm_urgency(decision: InitiativeDecision) -> InitiativeDecision:
     """The model tends to call every pre-event nudge a 5. Only deterministic rules may produce 5
     (it bypasses quiet hours), so a model-proposed urgency is capped at 4."""
-    if decision.notify is None or decision.notify.urgency <= MAX_LLM_URGENCY:
+    if decision.notify is None:
         return decision
-    notify = decision.notify.model_copy(update={"urgency": MAX_LLM_URGENCY})
+    notify = decision.notify.model_copy(update={"urgency": min(decision.notify.urgency, MAX_LLM_URGENCY),
+                                                "security": False})  # only code may mark security
     return decision.model_copy(update={"notify": notify})
 
 
 def _imminent_floor(event: Event, decision: InitiativeDecision, loops: list[Loop]) -> InitiativeDecision:
-    """Deterministic rule: a nudge about a commitment starting within 15 minutes is urgent."""
+    """Deterministic rule: the prep nudge for a commitment starting within the prep lead is urgent."""
     if event.type is not EventType.EVENT_STARTING or decision.notify is None:
         return decision
     loop_id = event.payload.get("loop_id")

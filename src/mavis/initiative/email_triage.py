@@ -121,10 +121,12 @@ class EmailTriage:
         if set(event.payload.get("labels") or []) & DEAD_LABELS:
             return decision
         if decision.notify is not None and decision.notify.urgency >= 4:
-            return decision
+            notify = decision.notify.model_copy(update={"security": True})
+            return decision.model_copy(update={"notify": notify})
         notify = NotifyIntent(
             urgency=4,
             intent=SECURITY_INTENT,
             dedupe_key=f"email:{event.user_id}:{event.payload.get('message_id', event.id)}",
+            security=True,
         )
         return decision.model_copy(update={"notify": notify, "ignore_reason": None})
