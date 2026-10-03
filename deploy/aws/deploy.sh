@@ -78,30 +78,37 @@ scp_box "$ENV_TMP" "$MAVIS_REMOTE_DIR/.env.new"
 ssh_box "chmod 600 $MAVIS_REMOTE_DIR/.env.new && mv $MAVIS_REMOTE_DIR/.env.new $MAVIS_REMOTE_DIR/.env"
 
 # --- build + start ---------------------------------------------------------------
-# A 2 GB box cannot build (uv sync + model download) next to the full stack: free the two biggest
-# app processes first. The api keeps answering; Telegram updates queue in Redis until the worker is back.
-STOPPED=0
-restart_on_fail() {
-  local rc=$?
-  if [[ "$rc" != 0 && "$STOPPED" == 1 ]]; then
-    log "deploy failed; restarting worker and timer"
-    compose_remote start worker timer || true
-  fi
-  rm -f "$ENV_TMP" "$ENV_TMP.n"
-}
-trap restart_on_fail EXIT
-log "stopping worker and timer to free memory for the build"
-compose_remote stop worker timer >/dev/null 2>&1 || true
-STOPPED=1
-log "building image on the box (first build takes several minutes)"
-compose_remote build
-log "starting data services"
-compose_remote up -d --wait --wait-timeout 300 postgres redis qdrant neo4j
-log "running migrations"
-compose_remote run --rm migrate
-log "starting app + caddy"
-compose_remote up -d --wait --wait-timeout 300
-STOPPED=0
+# A 2 GB box cannot build (uv sync + model download) next to the full stack, so the worker and timer
+# are stopped for the build. The whole stop/build/start sequence runs DETACHED on the box with its own
+# EXIT trap: if this laptop disconnects or this script is killed, the box still finishes and always
+# brings the worker and timer back (on the new image if the build succeeded, else on the old one).
+rm -f "$ENV_TMP" "$ENV_TMP.n"
+log "building and starting on the box (detached; first build takes several minutes)"
+ssh_box "cat > $MAVIS_REMOTE_DIR/.deploy-remote.sh" <<REMOTE
+#!/usr/bin/env bash
+set -uo pipefail
+cd $MAVIS_REMOTE_DIR
+C="docker compose -f $MAVIS_COMPOSE_FILE --profile prod"
+rm -f .deploy.rc
+trap '\$C up -d worker timer >/dev/null 2>&1; echo "\${RC:-1}" > .deploy.rc' EXIT
+\$C stop worker timer >/dev/null 2>&1 || true
+RC=1
+\$C build \\
+  && \$C up -d --wait --wait-timeout 300 postgres redis qdrant neo4j \\
+  && \$C run --rm migrate \\
+  && \$C up -d --wait --wait-timeout 300 \\
+  && RC=0
+REMOTE
+ssh_box "cd $MAVIS_REMOTE_DIR && rm -f .deploy.rc && setsid nohup bash .deploy-remote.sh > .deploy.log 2>&1 < /dev/null &"
+for _ in $(seq 1 240); do
+  sleep 10
+  rc="$(ssh_box "cat $MAVIS_REMOTE_DIR/.deploy.rc 2>/dev/null" || true)"
+  [[ -n "$rc" ]] && break
+done
+if [[ "${rc:-}" != 0 ]]; then
+  ssh_box "tail -n 40 $MAVIS_REMOTE_DIR/.deploy.log" || true
+  die "remote build/start failed or timed out (rc=${rc:-none}); worker and timer were restarted on the box"
+fi
 log "pruning dangling images and old build cache"
 ssh_box "docker image prune -f >/dev/null && docker builder prune -f --keep-storage 1GB >/dev/null"
 compose_remote ps
