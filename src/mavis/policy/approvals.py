@@ -81,6 +81,18 @@ INTERPRET_PROMPT = """The user was shown a pending action and asked to approve i
 - edit: they want changes; put the requested change in `instructions`
 - unrelated: the reply is about something else entirely"""
 
+EDIT_QUESTION = "Sure, what should I change?"
+
+# Plain one-word style answers need no model call to classify.
+_QUICK = {
+    **dict.fromkeys(("ok", "okay", "k", "yes", "yep", "yeah", "y", "sure", "send", "send it", "go ahead",
+                     "do it", "approve", "approved", "go", "ship it", "sounds good", "looks good"),
+                    "approve"),
+    **dict.fromkeys(("no", "nope", "n", "no thanks", "cancel", "cancel it", "dont", "don't", "don't send",
+                     "dont send", "stop", "never mind", "nevermind", "forget it"), "cancel"),
+}
+_QUICK_STRIP = re.compile(r"[\s.!,👍✅]+")
+
 # A decision in flight longer than this lost its resume job. It must exceed the bus claim idle time
 # (15 min), so the startup sweep never fails a row whose RESUME_TASK job is still queued or redelivered.
 STALE_AFTER = timedelta(minutes=20)
@@ -127,7 +139,7 @@ async def handle_approval_button(event: Event) -> None:
         return
     if action == "edit":
         if await approvals.claim(approval_id, {ApprovalStatus.PENDING}, ApprovalStatus.AWAITING_EDIT):
-            await say(event.user_id, "Sure, what should I change?")
+            await say(event.user_id, EDIT_QUESTION)
         return
     if not await approvals.claim(approval_id, _OPENABLE, ApprovalStatus.RESOLVING):
         # Already handled (double tap, Telegram retry, or an old prompt). Say so once.
@@ -141,7 +153,18 @@ async def handle_approval_button(event: Event) -> None:
     await _resume(approval, decision)
 
 
+def quick_decision(text: str) -> ApprovalReplyInterpretation | None:
+    """Classify plain answers such as "ok", "send it" or "cancel" without a model call (else None)."""
+    key = _QUICK_STRIP.sub(" ", (text or "").lower().replace("’", "'")).strip()
+    if not key and (text or "").strip() in ("👍", "✅"):
+        key = "ok"
+    decision = _QUICK.get(key)
+    return ApprovalReplyInterpretation(decision=decision) if decision else None
+
+
 async def interpret_reply(approval, text: str) -> ApprovalReplyInterpretation:
+    if (quick := quick_decision(text)) is not None:
+        return quick
     if approval.status == ApprovalStatus.AWAITING_EDIT:
         return ApprovalReplyInterpretation(decision="edit", instructions=text)
     return await llm.structured(
