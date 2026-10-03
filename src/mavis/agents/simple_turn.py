@@ -183,7 +183,7 @@ async def enqueue_learn(
 CHAT_TOOL_NAMES = (
     "mail_search", "mail_read",
     "calendar_list", "calendar_find", "calendar_free_slots",
-    "web_search", "web_extract",
+    "web_search",
     "what_do_you_know", "list_tasks",
 )
 CHAT_MAX_STEPS = 4  # tool rounds; then the model must answer with what it has
