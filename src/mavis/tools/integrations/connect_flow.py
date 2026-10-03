@@ -50,6 +50,13 @@ CHECK_DELAYS = (
     PENDING_TTL + timedelta(minutes=1),  # the last one is past the TTL, so the expiry is reachable
 )
 REUSE_WINDOW = timedelta(minutes=10)
+# Composio expires an unfinished connect link after about 10 minutes.
+LINK_LIFETIME = timedelta(minutes=10)
+# A task that needs a capability while a connect prompt for it is open (a link sent within this
+# window) joins that request instead of sending a new prompt: silently while the last link is still
+# alive, otherwise with the link sent again once (it is dead after LINK_LIFETIME).
+TASK_JOIN_WINDOW = timedelta(hours=2)
+LINK_SENT_KEY = "connect_link_sent"  # user state: {capability: iso time the last link went out}
 NOT_NOW_PREFIX = "conn:no:"
 START_PREFIX = "conn:start:"
 RETRY_PREFIX = "conn:retry:"
@@ -168,14 +175,19 @@ class ConnectFlow:
             return None
 
         now = self.clock()
-        recent = await connections.latest_open(user_id, capability)
-        if recent is not None and now - _aware(recent.created_at) < REUSE_WINDOW:
-            # A link went out moments ago: remember this run, hand the link over again, and make sure
-            # something is still watching for the sign-in to finish.
+        recent = await self._open_prompt(user_id, capability)
+        window = TASK_JOIN_WINDOW if task_id else REUSE_WINDOW
+        sent_at = await self._link_sent_at(user_id, capability, recent)
+        if recent is not None and sent_at is not None and now - sent_at < window:
+            # A link went out recently: remember this run, hand the link over again if needed, and
+            # make sure something is still watching for the sign-in to finish.
             if task_id:
-                await connections.create_pending(user_id, capability, reason, task_id, now=now)
+                # Dated like the pending it waits on: joining never extends the prompt's window, and
+                # that pending's decline / expiry closes this row too.
+                await connections.create_pending(user_id, capability, reason, task_id,
+                                                 now=_aware(recent.created_at))
             await self._ensure_checks(user_id, recent.id, now)
-            if task_id is None:
+            if task_id is None or now - sent_at >= LINK_LIFETIME:
                 await self._send_link(user_id, capability, recent.id, again=True)
             return recent.id
 
@@ -187,6 +199,32 @@ class ConnectFlow:
             return None
         await self._ensure_checks(user_id, pending_id, now)
         return pending_id
+
+    async def _open_prompt(self, user_id: int, capability: Capability):
+        """The newest open prompt: the first row of the newest date (joined rows share their prompt's
+        date, so this is the pending the link and its checks belong to)."""
+        rows = await connections.open_for(user_id, capability)
+        if not rows:
+            return None
+        newest = max(_aware(r.created_at) for r in rows)
+        return next(r for r in rows if _aware(r.created_at) == newest)
+
+    async def _link_sent_at(self, user_id: int, capability: Capability, recent) -> datetime | None:
+        """When the last link for this capability went out (falls back to the open pending's time)."""
+        if recent is None:
+            return None
+        raw = (await self.state.get(user_id)).get(LINK_SENT_KEY, {}).get(capability.value)
+        anchor = _aware(recent.created_at)
+        try:
+            sent = _aware(datetime.fromisoformat(raw)) if raw else anchor
+        except ValueError:
+            sent = anchor
+        return max(sent, anchor)
+
+    async def _note_link_sent(self, user_id: int, capability: Capability) -> None:
+        sent = dict((await self.state.get(user_id)).get(LINK_SENT_KEY, {}))
+        sent[capability.value] = self.clock().isoformat()
+        await self.state.update(user_id, {LINK_SENT_KEY: sent})
 
     async def _send_link(
         self, user_id: int, capability: Capability, pending_id: int, *, reason: str = "",
@@ -215,6 +253,7 @@ class ConnectFlow:
             [Button(label=f"Connect {name}", url=url)],
             [Button(label="Not now", data=f"{NOT_NOW_PREFIX}{pending_id}")],
         ])
+        await self._note_link_sent(user_id, capability)
         return True
 
     async def _close(self, user_id: int, pending_id: int, status: PendingStatus) -> None:
@@ -253,7 +292,11 @@ class ConnectFlow:
         declined = p.status == PendingStatus.DECLINED.value
         capability = Capability(p.capability)
         if not declined and self.clock() - _aware(p.created_at) > PENDING_TTL:
-            await self._close(p.user_id, pending_id, PendingStatus.EXPIRED)
+            # Every run that joined this prompt (rows dated like it) expires with it and is resumed.
+            for row in await self._joined(p):
+                await self._close(p.user_id, row.id, PendingStatus.EXPIRED)
+                if row.task_id:
+                    await self._resume(row.task_id, p.user_id, False, f"expired:{row.id}")
             return
         state = (await self.cache.status(p.user_id, fresh=True)).get(capability.value, ConnectionState.NONE)
         if state is ConnectionState.FAILED:
@@ -402,17 +445,31 @@ class ConnectFlow:
 
     # --- user controls ----------------------------------------------------------------------------
 
+    async def _joined(self, p) -> list:
+        """`p` plus every open row for the same user and capability dated no later than it (the runs
+        that joined its prompt)."""
+        rows = await connections.open_for(p.user_id, Capability(p.capability))
+        cutoff = _aware(p.created_at)
+        return [r for r in rows if r.id == p.id or _aware(r.created_at) <= cutoff]
+
     async def decline(self, user_id: int, pending_id: int) -> None:
         p = await connections.get_pending(pending_id)
         if p is None or p.user_id != user_id or p.status != PendingStatus.PENDING.value:
             return
-        await connections.resolve(pending_id, PendingStatus.DECLINED, now=self.clock())
+        # "Not now" answers the capability: every waiting run is told, not only the one on the button.
+        rows = await connections.open_for(user_id, Capability(p.capability))
+        resumed = False
+        for row in rows:
+            # resolve, not _close: the prompt's scheduled checks stay, so a sign-in finished after
+            # "Not now" is still found (check() accepts ACTIVE on a declined row).
+            await connections.resolve(row.id, PendingStatus.DECLINED, now=self.clock())
+            if row.task_id:
+                await self._resume(row.task_id, user_id, False, f"declined:{row.id}")
+                resumed = True
         not_now = dict((await self.state.get(user_id)).get("not_now", {}))
         not_now[p.capability] = self.clock().isoformat()
         await self.state.update(user_id, {"not_now": not_now})
-        if p.task_id:
-            await self._resume(p.task_id, user_id, False, f"declined:{pending_id}")
-        else:
+        if not resumed:
             await self.send(user_id, "No problem. Just say the word whenever.")
 
     async def on_button(self, event: Event, data: str) -> None:

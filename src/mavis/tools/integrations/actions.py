@@ -11,9 +11,10 @@ from datetime import date, datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from mavis.config import get_settings
+from mavis.domain.errors import NeedsUserDetail
 from mavis.domain.policy import Capability, RiskClass
 
 INTEGRATION_CAPABILITIES: tuple[Capability, ...] = (
@@ -137,12 +138,39 @@ class CalendarCreateArgs(BaseModel):
 
 
 class CalendarUpdateArgs(BaseModel):
+    """Only the fields that change; everything else on the event stays as it is."""
+
     event_id: str
     summary: str | None = None
-    start: datetime | None = None
-    duration_minutes: int | None = Field(default=None, ge=5, le=1440)
+    start: datetime | None = Field(
+        default=None,
+        description="New start time. Moving an event needs duration_minutes too (its current length "
+                    "if that is not changing)",
+    )
+    duration_minutes: int | None = Field(
+        default=None, ge=5, le=1440,
+        description="Length in minutes; goes with start (pass the event's current start to change only "
+                    "the length)",
+    )
     attendees: list[str] | None = None
     description: str | None = None
+
+    @model_validator(mode="after")
+    def _start_with_duration(self) -> CalendarUpdateArgs:
+        # The provider takes a start and an end; an end is never guessed from a default length.
+        if self.start is not None and self.duration_minutes is None:
+            raise NeedsUserDetail(
+                "duration_minutes is required with start: pass the event's current length if it is "
+                "not changing",
+                "I need to know how long the event should be to move it. Tell me the length and I'll "
+                "set it up again.")
+        if self.duration_minutes is not None and self.start is None:
+            raise NeedsUserDetail(
+                "start is required with duration_minutes: pass the event's current start if it is "
+                "not moving",
+                "I need to know when the event starts to change its length. Tell me and I'll set it "
+                "up again.")
+        return self
 
 
 class SlackChannelsArgs(BaseModel):
@@ -402,12 +430,16 @@ def _preview_update(args: CalendarUpdateArgs, tz: str) -> str:
     lines = [f"📅 Update event {args.event_id}"]
     if args.summary:
         lines.append(f"Title: {args.summary}")
-    if args.start:
-        lines.append(f"When: {_when(args.start, args.duration_minutes or 30, tz)}")
-    if args.attendees is not None:
-        lines.append(f"Guests: {', '.join(args.attendees) or 'none'}")
+    if args.start and args.duration_minutes:
+        lines.append(f"When: {_when(args.start, args.duration_minutes, tz)}")
+    if args.attendees:
+        lines.append(f"Guests: replaced with exactly {', '.join(args.attendees)} "
+                     "(anyone else is removed)")
+    elif args.attendees is not None:
+        lines.append("Guests: all removed (they get a cancellation)")
     if args.description is not None:
         lines.append(f"Notes: {args.description}")
+    lines.append("Everything else stays as it is.")
     return "\n".join(lines)
 
 
@@ -524,7 +556,8 @@ _SPECS: tuple[ActionSpec, ...] = (
                "short previews.",
                MailSearchArgs, RiskClass.READ, _a("inbox", "conversation"), priority=58),
     ActionSpec("mail.read", Capability.GMAIL,
-               "Read one email in full by message id (from mail_search): headers and body text.",
+               "Read one email in full by message id (from mail_search): headers and body text, for what "
+               "it says, its details or key points.",
                MailReadArgs, RiskClass.READ, _a("inbox", "conversation")),
     ActionSpec("mail.thread", Capability.GMAIL, "Read every message in an email thread.",
                MailThreadArgs, RiskClass.READ, _a("inbox")),
