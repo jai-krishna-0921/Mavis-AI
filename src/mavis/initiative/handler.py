@@ -41,6 +41,7 @@ URGENT_URGENCY = 5
 IMMINENT = PREP_LEAD + timedelta(minutes=10)  # the default prep wakeup (60 min ahead) plus slack
 FOLLOW_UP_VALID_FOR = timedelta(hours=24)
 LIVE_STATUSES = (LoopStatus.OPEN, LoopStatus.AWAITING_REPLY)
+REMINDER_PREFIX = "Reminder the user asked for: "
 HANDLED_TYPES = tuple(t for t in EventType if t not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED))
 
 
@@ -60,6 +61,15 @@ class InitiativeHandler:
             return
         kind = event.payload.get("kind")
 
+        if event.type is EventType.WAKEUP and event.payload.get("reminder") and not _too_late(event):
+            # A reminder the user asked for is a commitment, not a judgement call: no reasoner, but it still
+            # goes through the composer and the ping policy.
+            reason = str(event.payload.get("reason", "")).removeprefix(REMINDER_PREFIX).strip()
+            await self._executor.notify(
+                user, NotifyIntent(urgency=4, intent=f"Remind them: {reason}",
+                                   dedupe_key=f"reminder:{event.payload.get('wakeup_id')}"),
+                untrusted=event.trust is Trust.UNTRUSTED)
+            return
         if event.source == "timer" and _too_late(event):
             log.warning("initiative.wakeup_too_late", event_id=event.id, kind=kind,
                         due_at=event.occurred_at.isoformat())

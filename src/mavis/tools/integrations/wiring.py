@@ -216,9 +216,14 @@ async def _notify_first_sync(event: Event) -> None:
 
 
 async def dispatch_task_completed(event: Event) -> None:
-    """Owns TASK_COMPLETED until Phase 4. Phase 4's owner must keep the first_sync branch."""
+    """The single TASK_COMPLETED owner: first sync, orchestrator task results, else the initiative agent."""
     if event.payload.get("kind") == "first_sync":
         await _notify_first_sync(event)
+        return
+    if "task_id" in event.payload:  # a finished task: deliver its result, no reasoner LLM call
+        from mavis.initiative import task_delivery
+
+        await task_delivery.deliver_task_result(event)
         return
     await initiative_wiring.current().handler.handle(event)
 

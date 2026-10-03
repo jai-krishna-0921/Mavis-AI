@@ -9,7 +9,7 @@ from mavis.domain.decisions import (
     TaskRequest,
     WakeupRequest,
 )
-from mavis.domain.events import Event, EventType, Trust
+from mavis.domain.events import Event, EventType, JobKind, Trust
 from mavis.domain.loops import LoopKind, LoopStatus, LoopUpsert
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.composer import Composer
@@ -39,7 +39,7 @@ def ev() -> Event:
     )
 
 
-async def test_apply_tracks_wakes_and_skips_act_placeholder(user, clock, recording_bus, fake_memory):
+async def test_apply_tracks_wakes_and_dispatches_act(user, clock, recording_bus, fake_memory):
     executor, loops, wakeups = build(recording_bus, fake_memory)
     decision = InitiativeDecision(
         track=[LoopUpsert(kind=LoopKind.WAITING_ON, title="Recruiter reply")],
@@ -51,7 +51,8 @@ async def test_apply_tracks_wakes_and_skips_act_placeholder(user, clock, recordi
     assert loop.title == "Recruiter reply" and loop.source == "gmail:msg:9"
     [w] = await wakeups.pending(user.id, WakeupKind.AGENT)
     assert w.reason == "check recruiter"
-    assert recording_bus.jobs == []  # act is a placeholder until Phase 4 dispatches RUN_TASK
+    [job] = recording_bus.jobs  # act dispatches through the executor's own bus
+    assert job.kind is JobKind.RUN_TASK
 
 
 async def test_notify_delivers_logs_and_records(user, clock, recording_bus, fake_memory, fake_llm, channel):
@@ -239,3 +240,15 @@ async def test_released_deferred_delivers_when_awake(
     fake_llm.push_structured(ComposedMessage(send=True, messages=["Summary."]))
     assert await executor.notify(user, intent)  # what the deferred wakeup does when it fires
     assert await deliver_pending(channel) == 1
+
+
+async def test_act_disabled_by_setting_dispatches_nothing(user, clock, recording_bus, fake_memory,
+                                                          monkeypatch):
+    monkeypatch.setenv("INITIATIVE_ACT_ENABLED", "false")
+    from mavis.config import get_settings
+
+    get_settings.cache_clear()
+    executor, _, _ = build(recording_bus, fake_memory)
+    await executor.apply(user, InitiativeDecision(act=[TaskRequest(goal="Draft a follow-up")]), ev())
+    assert recording_bus.jobs == []
+    get_settings.cache_clear()

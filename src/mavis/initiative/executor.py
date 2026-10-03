@@ -83,8 +83,13 @@ class InitiativeExecutor:
             if untrusted:
                 log.warning("initiative.untrusted_act_skipped", event_id=event.id, index=i)
                 continue
-            # Placeholder until Phase 4 registers RUN_TASK dispatch: log and skip, enqueue nothing.
-            log.info("initiative.act_skipped", event_id=event.id, index=i, goal=task.goal[:80])
+            if not get_settings().initiative_act_enabled:
+                log.info("initiative.act_disabled", event_id=event.id, index=i, goal=task.goal[:80])
+                continue
+            from mavis.agents.task_dispatch import dispatch_task_requests  # lazy: avoid an import cycle
+            from mavis.domain.tasks import TaskOrigin
+
+            await dispatch_task_requests(user.id, [task], TaskOrigin.INITIATIVE, bus=self._bus)
         if decision.notify is not None:
             intent = decision.notify
             if intent.dedupe_key is None:  # retry-safe default: one notification per source event
