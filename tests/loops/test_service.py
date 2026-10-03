@@ -245,6 +245,7 @@ def test_similar_titles_ignores_times_dates_and_filler():
     ("pay rent", "pay rest"),
     ("Reply to John", "Reply to Joan"),
     ("call mom", "call bank"),
+    ("Email Raj", "Email Raj and Priya"),  # the longer title adds a person
 ])
 def test_similar_titles_keeps_short_or_name_differences_apart(a, b):
     from mavis.store.repo.loops import similar_titles
@@ -280,3 +281,13 @@ async def test_update_by_id_does_not_reopen_an_awaiting_loop(user, recording_bus
     done = await svc.upsert(user.id, LoopUpsert(id=loop.id, kind=LoopKind.COMMITMENT, title="Interview",
                                                 status=LoopStatus.DONE))
     assert done.status is LoopStatus.DONE  # an explicit close still applies
+
+
+async def test_subset_merge_keeps_the_more_specific_title(user, recording_bus, clock):
+    svc = LoopService(recording_bus)
+    a = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Renew passport"))
+    b = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Renew passport at the office"))
+    assert a.id == b.id and b.title == "Renew passport at the office"
+    c = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Email Raj"))
+    d = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Email Raj and Priya"))
+    assert c.id != d.id
