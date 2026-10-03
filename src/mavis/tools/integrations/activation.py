@@ -7,12 +7,14 @@ from datetime import datetime
 
 import structlog
 
+from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.errors import IntegrationError
 from mavis.domain.integrations import UserRef
 from mavis.domain.policy import Capability
+from mavis.tools.integrations.actions import GOOGLE_CAPABILITIES, workspace_enabled
 from mavis.tools.integrations.base import IntegrationProvider
-from mavis.tools.integrations.composio_map import MAVIS_TRIGGERS
+from mavis.tools.integrations.composio_map import TRIGGER_CONFIGS, triggers_for
 from mavis.tools.integrations.connect_flow import Schedule, UserState
 from mavis.tools.integrations.poller import POLL_KIND, POLLABLE
 
@@ -26,16 +28,23 @@ class Activator:
     ) -> None:
         self.provider, self.state, self.schedule = provider, state, schedule
         self.polling_forced, self.clock = polling_forced, clock
+        self._google_subscribe_failed: set[int] = set()  # users whose Google triggers did not all attach
 
     async def on_active(self, user_id: int, capability: Capability) -> bool:
         subscribed = not self.polling_forced
         if subscribed:
-            for trigger in MAVIS_TRIGGERS.get(capability, ()):
+            # Workspace triggers (share, comment, task) only feed the attention layer, so they need it on.
+            workspace = workspace_enabled() and get_settings().attention_enabled
+            for trigger in triggers_for(capability, workspace=workspace):
                 try:
-                    await self.provider.subscribe(UserRef(user_id=user_id), trigger, {})
+                    await self.provider.subscribe(
+                        UserRef(user_id=user_id), trigger, dict(TRIGGER_CONFIGS.get(trigger, {}))
+                    )
                 except IntegrationError as exc:
                     log.warning("activation.subscribe_failed", trigger=trigger, error=str(exc))
                     subscribed = False
+                    if capability in GOOGLE_CAPABILITIES:
+                        self._google_subscribe_failed.add(user_id)
         poll = not subscribed and capability in POLLABLE
         polling = dict((await self.state.get(user_id)).get("polling", {}))
         polling[capability.value] = poll
@@ -43,3 +52,18 @@ class Activator:
         if poll:
             await self.schedule(user_id, self.clock(), capability.value, POLL_KIND)
         return poll
+
+    async def retire_legacy(self, user_id: int) -> int:
+        """Google upgrade done: the googlesuper triggers are attached, so drop the old Gmail/Calendar ones
+        (a provider without the method has nothing to retire). If any googlesuper trigger failed to
+        attach, the old ones stay so the user keeps getting events."""
+        failed = user_id in self._google_subscribe_failed
+        self._google_subscribe_failed.discard(user_id)
+        retire = getattr(self.provider, "retire_legacy_triggers", None)
+        if retire is None or self.polling_forced or failed:
+            return 0
+        try:
+            return int(await retire(UserRef(user_id=user_id)))
+        except IntegrationError as exc:
+            log.warning("activation.retire_failed", error=str(exc))
+            return 0

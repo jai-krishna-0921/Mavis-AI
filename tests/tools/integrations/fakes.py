@@ -22,6 +22,7 @@ class FakeProvider:
         self.links: list[tuple[int, str, str]] = []
         self.subscribed: list[tuple[int, str]] = []
         self.disconnected: list[tuple[int, str]] = []
+        self.retired: list[int] = []
         self.status_calls = 0
         self.fail_subscribe = False
         self.fail_link = False
@@ -58,6 +59,10 @@ class FakeProvider:
             raise IntegrationError("Composio answered 404 for POST /trigger_instances/x/upsert")
         self.subscribed.append((user.user_id, trigger))
         return "ti_1"
+
+    async def retire_legacy_triggers(self, user: UserRef) -> int:
+        self.retired.append(user.user_id)
+        return 0
 
     def parse_webhook(self, headers: dict[str, str], body: bytes) -> list[Event]:
         return []

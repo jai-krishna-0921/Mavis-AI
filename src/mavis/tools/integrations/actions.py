@@ -26,6 +26,10 @@ WORKSPACE_CAPABILITIES: tuple[Capability, ...] = (
 GOOGLE_CAPABILITIES: tuple[Capability, ...] = (Capability.GMAIL, Capability.CALENDAR, *WORKSPACE_CAPABILITIES)
 GOOGLE_NAME = "Google"
 WORKSPACE_ROW = "Google Workspace"
+# The capability a "/connect google" starts: only googlesuper can make it ACTIVE, so a user with just the
+# legacy Gmail connection still gets the upgrade link instead of "already connected".
+GOOGLE_ANCHOR = Capability.DRIVE
+GOOGLE_ABILITIES = "Gmail, Calendar, Drive, Docs, Sheets, Tasks, Contacts and Meet"
 DISPLAY_NAMES: dict[Capability, str] = {
     Capability.GMAIL: "Gmail", Capability.CALENDAR: "Google Calendar",
     Capability.SLACK: "Slack", Capability.NOTION: "Notion",

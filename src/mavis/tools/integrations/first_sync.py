@@ -67,7 +67,8 @@ class FirstSync:
             Capability.SLACK: self._slack,
             Capability.NOTION: self._notion,
         }
-        noticed = (await handlers[capability](user_id))[:3]
+        handler = handlers.get(capability)  # Docs, Sheets and Meet have nothing to skim
+        noticed = (await handler(user_id))[:3] if handler is not None else []
         await self.bus.publish(
             Event(
                 id=f"first_sync:{user_id}:{capability.value}",
