@@ -16,6 +16,7 @@ from mavis.initiative.routines import BriefItem
 from mavis.store.repo import attention as repo
 from mavis.store.repo import users
 from mavis.tools.integrations.normalize import to_datetime
+from mavis.tools.integrations.workspace_guard import STATE_KEY
 
 MAX_FILES = 3
 MAX_LINES = 5
@@ -81,8 +82,17 @@ class WorkspaceBrief:
 
 
 async def workspace_evening(user_id: int, start: datetime) -> list[str]:
-    """Evening wrap lines: tasks that went overdue today and comments on the user's own docs (3 days)."""
-    overdue = await repo.signals(user_id, start, sources=("tasks",), kinds=(SignalKind.TASK_OVERDUE.value,))
+    """Evening wrap lines: tasks that went overdue today and comments on the user's own docs (3 days).
+
+    poll_tasks writes a TASK_OVERDUE row every day a task stays overdue, so only rows for tasks that
+    became overdue today (overdue_days 1) count, and not ones the user kept or was already asked about:
+    an old backlog never makes a quiet day send a wrap."""
+    rows = await repo.signals(user_id, start, sources=("tasks",), kinds=(SignalKind.TASK_OVERDUE.value,))
+    asked = set((await users.get_state(user_id)).get(STATE_KEY, {}).get("asked") or [])
+    kept = {str((r.facts or {}).get("object_id")) for r in rows if r.feedback == "keep"}
+    overdue = [r for r in rows
+               if (r.facts or {}).get("overdue_days") == 1 and r.verdict != "ask"
+               and str((r.facts or {}).get("object_id")) not in asked | kept]
     recent = await repo.signals(user_id, timeutil.now() - timedelta(days=COMMENT_DAYS), sources=("docs",),
                                 kinds=(SignalKind.COMMENT.value,))
     lines = [f"Overdue task: {r.summary}" for r in overdue[:MAX_LINES]]
