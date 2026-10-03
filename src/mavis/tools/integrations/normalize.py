@@ -15,22 +15,28 @@ HEADER_KEYS = frozenset({"list-unsubscribe", "from", "to", "subject"})
 
 
 _AUTH_PASS = re.compile(r"\b(?:dmarc|dkim)\s*=\s*pass\b", re.I)
-_AUTH_DOMAIN = re.compile(r"\bheader\.(?:d|from)\s*=\s*\"?@?(?P<d>[a-z0-9.-]+)", re.I)
+# header.d=domain and header.from=domain carry a domain; header.i=@domain or user@domain an identity
+_AUTH_DOMAIN = re.compile(r"\bheader\.(?:d|i|from)\s*=\s*\"?(?P<v>[^\s;\"()]+)", re.I)
+TRUSTED_AUTHSERV = frozenset({"mx.google.com"})  # the receiving server whose verdict we accept
 
 
 def sender_authenticated(headers: dict[str, str], from_address: str) -> bool:
-    """True only if Authentication-Results shows dmarc=pass or dkim=pass for the From domain (relaxed
-    alignment: the signing domain equals the From domain or is a parent of it). Returns a bool: the raw
-    header is parsed here and never stored or shown."""
+    """True only if the receiving server (authserv-id in TRUSTED_AUTHSERV) recorded dmarc=pass or dkim=pass
+    for the From domain (relaxed alignment: the signing domain equals the From domain or is a parent of
+    it). Returns a bool: the raw header is parsed here and never stored or shown."""
     value = str(headers.get("authentication-results", "") or "")
     domain = from_address.rpartition("@")[2].strip().lower().strip(".")
     if not value or not domain:
         return False
-    for clause in value.split(";"):
+    authserv, _, results = value.partition(";")
+    tokens = authserv.split()
+    if not tokens or tokens[0].lower().strip(".") not in TRUSTED_AUTHSERV:
+        return False
+    for clause in results.split(";"):
         if not _AUTH_PASS.search(clause):
             continue
         for m in _AUTH_DOMAIN.finditer(clause):
-            d = m["d"].lower().strip(".")
+            d = m["v"].rpartition("@")[2].lower().strip(".")
             if d and (domain == d or domain.endswith("." + d)):
                 return True
     return False

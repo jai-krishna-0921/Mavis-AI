@@ -21,11 +21,12 @@ from mavis.attention.schema import Verdict
 from mavis.attention.understand import BODY_LIMIT
 from mavis.config import get_settings
 from mavis.domain import timeutil
+from mavis.domain.errors import LLMError
 from mavis.domain.events import Event
 from mavis.domain.integrations import UserRef
 from mavis.domain.policy import Capability
 from mavis.domain.wakeups import WakeupKind
-from mavis.initiative.email_triage import DROP_LABELS
+from mavis.initiative.email_triage import DROP_LABELS, classify
 from mavis.initiative.filters import watch_matches
 from mavis.llm import models as llm
 from mavis.loops.service import LoopService
@@ -54,6 +55,19 @@ BACKFILL_DAYS = 14
 BACKFILL_TEMPLATE = "newer_than:{days}d -in:sent -category:promotions -category:social"
 BACKFILL_QUERY = BACKFILL_TEMPLATE.format(days=BACKFILL_DAYS)
 DRAIN_REASON, BACKFILL_REASON = "drain", "backfill"
+DEAD_LABELS = frozenset({"SPAM", "TRASH"})
+DRAIN_BACKOFF_MAX = timedelta(minutes=15)
+
+
+def label_dropped(p: dict) -> bool:
+    """Spam and trash always; promotional, social and forums mail unless it looks like a security notice
+    (Gmail files many sign-in and password alerts under Social). Such mail is understood, but its
+    facts["bulk"] marker still denies it the security budget bypass."""
+    labels = set(p.get("labels") or [])
+    if labels & DEAD_LABELS:
+        return True
+    return bool(labels & DROP_LABELS) and "security" not in classify(p)
+
 
 Forward = Callable[[Event], Awaitable[None]]
 OnEmpty = Callable[[Any], Awaitable[object]]
@@ -84,11 +98,23 @@ class Intake:
         except NoResultFound:
             return
         obs, created = await self.ingest(user.id, p, repo.ORIGIN_LIVE)
+        try:
+            await self._route(user, event, obs, created)
+        except LLMError as exc:  # composing a notify failed: the row stays queued, the drain retries it
+            log.warning("attention.speak_failed", obs_id=obs.id, error=type(exc).__name__)
+            await self._ensure_drain(user.id, at=self._backoff_at(failed=True))
+
+    async def _route(self, user: Any, event: Event, obs: Any, created: bool) -> None:
+        p = event.payload
         if not created and obs.status == repo.DONE:
             if obs.delivery == repo.QUEUED:  # a crash between deciding and speaking: finish the job
                 await self._pipeline.deliver_queued(user, obs)
             return
-        if labels & DROP_LABELS:
+        if not created and obs.origin == repo.ORIGIN_BACKFILL:
+            # backfill saw it first, around connect time: the live copy may still speak if it is fresh
+            await repo.set_fields(obs.id, origin=repo.ORIGIN_LIVE)
+            obs.origin = repo.ORIGIN_LIVE
+        if label_dropped(p):
             await self._pipeline.finalize_cheap(user, obs, p, Verdict.DROPPED)
             return
         if any(watch_matches(lp, event) for lp in await self._loops.active(user.id)):
@@ -126,27 +152,57 @@ class Intake:
         return last is not None and timedelta(0) <= timeutil.now() - last < CHAT_YIELD
 
     async def _ensure_drain(self, user_id: int, at: datetime | None = None) -> None:
-        when = at or timeutil.now() + timedelta(seconds=get_settings().attention_window_s)
+        when = at or self._backoff_at(failed=False)
         await schedule_once(self._wakeups, user_id, WakeupKind.SYSTEM_ATTENTION_DRAIN, DRAIN_REASON, when)
 
+    @staticmethod
+    def _backoff_at(*, failed: bool) -> datetime:
+        """Next drain: one budget window, or longer while the LLM is backing off or a send just failed."""
+        delay = timedelta(seconds=get_settings().attention_window_s)
+        if failed or llm.unavailable_s() > 0:
+            delay = min(DRAIN_BACKOFF_MAX, max(2 * delay, timedelta(seconds=llm.unavailable_s())))
+        return timeutil.now() + delay
+
+    async def _redeliver(self, user: Any) -> bool:
+        """Re-send queued pings. False when a compose failed: the row stays queued for the next drain."""
+        if llm.unavailable_s() > 0:  # a notify needs the composer: do not spend the attempt now
+            return True
+        for obs in await repo.undelivered(user.id, before=timeutil.now() - REDELIVER_AFTER):
+            try:
+                await self._pipeline.deliver_queued(user, obs)
+            except LLMError as exc:
+                log.warning("attention.redeliver_failed", obs_id=obs.id, error=type(exc).__name__)
+                return False
+        return True
+
     async def drain(self, user_id: int, reason: str = "") -> int:
-        """system_attention_drain: redeliver queued pings, then understand pending mail within budget."""
+        """system_attention_drain: redeliver queued pings, then understand pending mail within budget.
+        A failing send never stalls the backlog, and the drain re-arms itself while work remains."""
         try:
             user = await users.get(user_id)
         except NoResultFound:
             return 0
-        for obs in await repo.undelivered(user_id, before=timeutil.now() - REDELIVER_AFTER):
-            await self._pipeline.deliver_queued(user, obs)
-        processed = 0
-        while await self._may_understand(user_id) and not await self._user_active(user_id):
-            batch = await repo.pending(user_id, limit=1)
-            if not batch or not await self._pipeline.process(user, batch[0]):
-                break
-            processed += 1
-        remaining = await repo.pending_count(user_id)
-        if remaining:
-            await self._ensure_drain(user_id)
-        elif self._on_backlog_empty is not None:
+        processed, failed, remaining = 0, False, 0
+        try:
+            failed = not await self._redeliver(user)
+            while await self._may_understand(user_id) and not await self._user_active(user_id):
+                batch = await repo.pending(user_id, limit=1)
+                if not batch:
+                    break
+                try:
+                    if not await self._pipeline.process(user, batch[0]):
+                        break
+                except LLMError as exc:  # decided and stored, but the notify compose failed: still queued
+                    log.warning("attention.speak_failed", obs_id=batch[0].id, error=type(exc).__name__)
+                    failed = True
+                    break
+                processed += 1
+        finally:
+            remaining = await repo.pending_count(user_id)
+            queued = bool(await repo.undelivered(user_id, before=timeutil.now()))
+            if remaining or queued:
+                await self._ensure_drain(user_id, at=self._backoff_at(failed=failed))
+        if not remaining and self._on_backlog_empty is not None:
             await self._on_backlog_empty(user)
         log.info("attention.drain", user_id=user_id, processed=processed, remaining=remaining)
         return processed
@@ -194,7 +250,7 @@ class Intake:
             if not new:
                 continue
             created += 1
-            if set(event.payload.get("labels") or []) & DROP_LABELS:
+            if label_dropped(event.payload):
                 await self._pipeline.finalize_cheap(user, obs, event.payload, Verdict.DROPPED)
         await self._thresholds.patch(user_id, backfilled_at=timeutil.now().isoformat())
         await self._ensure_drain(user_id, at=timeutil.now())
