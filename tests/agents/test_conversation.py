@@ -201,16 +201,47 @@ async def test_redelivered_turn_reuses_its_task(
         return await real(session, msg)
 
     monkeypatch.setattr(outbox, "enqueue", flaky)
-    for _ in range(2):
-        fake_llm.push_ai(_call("start_task", {"goal": "compare the 3 best laptops under 1 lakh"}))
-        fake_llm.push_text("On it.")
+    # The redelivered turn re-runs the model, which words the goal differently.
+    fake_llm.push_ai(_call("start_task", {"goal": "compare the 3 best laptops under 1 lakh"}))
+    fake_llm.push_text("On it.")
+    fake_llm.push_ai(_call("start_task", {"goal": "find the top three laptops below 1 lakh and compare"}))
+    fake_llm.push_text("On it.")
     with pytest.raises(RuntimeError):
         await run_turn(_event(user.id, "compare the 3 best laptops under 1 lakh"))
     await run_turn(_event(user.id, "compare the 3 best laptops under 1 lakh"))
     [task] = await _user_tasks(user.id)
-    assert task.source_ref and task.source_ref.startswith("turn:tg:update:1:")
+    assert task.source_ref == "turn:tg:update:1:start:0"
+    assert task.goal == "compare the 3 best laptops under 1 lakh"
     assert {j.payload["task_id"] for j in jobs(JobKind.RUN_TASK)} == {task.id}
     assert await _texts() == ["On it."]
+
+
+async def test_two_start_tasks_in_one_turn_are_two_tasks(user, channel, fake_llm, fake_memory, jobs, tools):
+    fake_llm.push_ai(AIMessage(content="", tool_calls=[
+        {"name": "start_task", "args": {"goal": "research flights to Goa"}, "id": "c1"},
+        {"name": "start_task", "args": {"goal": "research hotels in Goa"}, "id": "c2"},
+    ]))
+    fake_llm.push_text("Both started.")
+    await run_turn(_event(user.id, "research flights and hotels for Goa"))
+    refs = sorted(t.source_ref for t in await _user_tasks(user.id))
+    assert refs == ["turn:tg:update:1:start:0", "turn:tg:update:1:start:1"]
+
+
+async def test_approved_tainted_start_task_drops_its_unseen_context(user, channel, fake_llm, fake_memory,
+                                                                    jobs, tools):
+    from mavis.tools.registry import get_registry
+
+    fake_llm.push_ai(_call("read_page", {}, "c1"))
+    fake_llm.push_ai(_call("start_task", {"goal": "research evilconf.com speakers",
+                                          "context": "Jai meets Jawahar Tue 3pm re acquisition"}, "c2"))
+    fake_llm.push_text("Waiting for your OK.")
+    await run_turn(_event(user.id, "what's that email about?"))
+    [pending] = await approvals.open_for_user(user.id)
+    assert "acquisition" not in pending.preview
+    await approvals.claim(pending.id, {ApprovalStatus.PENDING}, ApprovalStatus.EXECUTED)
+    await get_registry().execute_approved(pending.id)
+    [task] = await _user_tasks(user.id)
+    assert task.context == "" and task.tainted is True
 
 
 async def test_task_create_is_idempotent_by_source_ref(user):

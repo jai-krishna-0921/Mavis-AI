@@ -6,7 +6,6 @@ turn reuses the same dedupe keys, and the tool loop's `current_run` for taint.
 
 from __future__ import annotations
 
-import zlib
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -20,9 +19,10 @@ from mavis.store.repo import messages, tasks
 from mavis.tools.registry import MavisTool, TaintPolicy, current_run, current_task_id
 
 
-@dataclass(frozen=True)
+@dataclass
 class TurnInfo:
     event_id: str
+    starts: int = 0  # start_task calls so far in this turn (the idempotency key's ordinal)
 
 
 current_turn: ContextVar[TurnInfo | None] = ContextVar("current_turn", default=None)
@@ -61,12 +61,20 @@ async def start_task(user_id: int, args: StartTaskArgs) -> str:
     # After third-party content this tool needs the user's approval first (on_taint=APPROVE); once
     # approved, the task is still tainted for every step it runs. The user saw and approved the goal,
     # so hosts named in it count as theirs (web_extract's allowlist in tainted tasks).
-    tainted = _tainted() or await _approved_from_tainted_task()
     turn = current_turn.get()
-    # A redelivered turn (crash before the reply went out) gets the same task back, not a second one.
-    ref = f"turn:{turn.event_id}:{zlib.crc32(args.goal.encode())}" if turn else None
+    # A redelivered turn (crash before the reply went out) re-runs the model, which words the goal
+    # differently, so the key is the call's position in the turn, not its text. Taken before any await,
+    # so calls from one AI message (run concurrently, started in call order) keep their order.
+    ref = None
+    if turn is not None:
+        ref = f"turn:{turn.event_id}:start:{turn.starts}"
+        turn.starts += 1
+    tainted = _tainted() or await _approved_from_tainted_task()
+    # The approval preview shows only the goal, so after third-party content the unseen `context`
+    # (free text the model chose) is dropped rather than smuggled into the task.
+    context = "" if tainted else args.context
     [task_id] = await dispatch_task_requests(
-        user_id, [TaskRequest(goal=args.goal, context=args.context)], TaskOrigin.USER, tainted=tainted,
+        user_id, [TaskRequest(goal=args.goal, context=context)], TaskOrigin.USER, tainted=tainted,
         source_ref=ref,
     )
     return START_TASK_RESULT.format(id=task_id)
