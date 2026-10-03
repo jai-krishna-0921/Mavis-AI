@@ -264,6 +264,21 @@ async def open_user_ids() -> list[int]:
         return list(rows)
 
 
+async def list_live(user_id: int) -> list[Loop]:
+    """OPEN and AWAITING loops: everything still live."""
+    live = (LoopStatus.OPEN.value, LoopStatus.AWAITING_REPLY.value)
+    async with Session() as s:
+        rows = await s.scalars(select(LoopRow).where(LoopRow.user_id == user_id, LoopRow.status.in_(live)))
+        return [to_domain(r) for r in rows]
+
+
+async def list_done_since(user_id: int, since: datetime) -> list[Loop]:
+    async with Session() as s:
+        rows = await s.scalars(select(LoopRow).where(
+            LoopRow.user_id == user_id, LoopRow.status == LoopStatus.DONE.value, LoopRow.updated_at >= since))
+        return [to_domain(r) for r in rows]
+
+
 async def list_awaiting(user_id: int, since: datetime) -> list[tuple[Loop, datetime]]:
     """Loops waiting on the user's reply to a follow-up sent after `since`, with when they started waiting."""
     async with Session() as s:

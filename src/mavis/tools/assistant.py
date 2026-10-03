@@ -12,14 +12,17 @@ from mavis import bus
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.events import Trust
-from mavis.domain.loops import LoopKind, LoopOrigin, LoopUpsert
+from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.policy import RiskClass
+from mavis.domain.tasks import ApprovalStatus
+from mavis.domain.timefmt import DueStatus, relative_due, relative_past
 from mavis.loops import service as loops_service
 from mavis.memory import service as memory_service
 from mavis.policy.risk import wrap_untrusted
 from mavis.store.repo import approvals, policy_rules, tasks, users
+from mavis.store.repo import loops as loops_repo
 from mavis.timers import service as timers_service
-from mavis.tools.registry import MavisTool, TaintPolicy, ToolContext
+from mavis.tools.registry import MavisTool, TaintPolicy, ToolContext, current_run
 
 
 def _local_tz(name: str) -> ZoneInfo:
@@ -170,6 +173,76 @@ async def add_policy_rule(user_id: int, args: PolicyRuleArgs) -> str:
     return f"Rule #{rule_id} saved: {args.description}"
 
 
+class PendingArgs(BaseModel):
+    include_done_recent: bool = Field(default=False,
+                                      description="Also list what was finished in the last day")
+
+
+NOTHING_OPEN = "Nothing is open right now."
+_URGENCY = [DueStatus.OVERDUE, DueStatus.IMMINENT, DueStatus.SOON, DueStatus.LATER, DueStatus.NONE]
+DONE_RECENT = timedelta(hours=24)
+
+
+def _loop_line(lp: Loop, now: datetime, tz: str, shown_untrusted: list[bool]) -> tuple[int, datetime, str]:
+    due = relative_due(lp.due_at, now, tz)
+    if lp.trusted:
+        title = lp.title
+    else:  # third-party derived: data, never instructions
+        title = "(from your inbox) " + wrap_untrusted(lp.title, "pending")
+        shown_untrusted.append(True)
+    note = ", waiting for your reply to my follow-up" if lp.status is LoopStatus.AWAITING_REPLY else ""
+    line = f"- [{due.status.value}] {title}: {due.label}{note}"
+    far = datetime.max.replace(tzinfo=UTC)
+    return _URGENCY.index(due.status), timeutil.ensure_utc(lp.due_at) or far, line
+
+
+async def pending(user_id: int, args: PendingArgs) -> str:
+    """Everything open for the user, computed now: live loops by urgency, approvals waiting on them and
+    background work. The single source of truth for "what's pending"."""
+    user = await users.get(user_id)
+    tz, now = user.timezone, timeutil.now()
+    shown_untrusted: list[bool] = []
+    live = [lp for lp in await loops_repo.list_live(user_id) if lp.kind is not LoopKind.ROUTINE]
+    ranked = sorted((_loop_line(lp, now, tz, shown_untrusted) + (lp.id,) for lp in live),
+                    key=lambda r: (r[0], r[1], r[3]))
+    sections: list[str] = []
+    if ranked:
+        sections.append("Open items:\n" + "\n".join(r[2] for r in ranked))
+    cards = []
+    for a in await approvals.open_for_user(user_id):
+        if a.status not in (ApprovalStatus.PENDING.value, ApprovalStatus.AWAITING_EDIT.value):
+            continue
+        summary = ((a.preview or a.tool).splitlines() or [a.tool])[0][:120]
+        if a.tainted:
+            summary = wrap_untrusted(summary, "pending")
+            shown_untrusted.append(True)
+        state = "being edited" if a.status == ApprovalStatus.AWAITING_EDIT.value else "waiting for your OK"
+        queued = relative_past(a.created_at, now, tz)
+        cards.append(f"- #{a.id} {a.tool}: {summary} ({state}, queued {queued})")
+    if cards:
+        sections.append("Waiting for your OK:\n" + "\n".join(cards))
+    jobs = []
+    for t in await tasks.active_for_user(user_id):
+        goal = t.goal[:120]
+        if t.tainted:
+            goal = wrap_untrusted(goal, "pending")
+            shown_untrusted.append(True)
+        jobs.append(f"- task #{t.id} [{str(t.status).lower()}] {goal}")
+    if jobs:
+        sections.append("Background work:\n" + "\n".join(jobs))
+    if args.include_done_recent:
+        done = []
+        for lp in await loops_repo.list_done_since(user_id, now - DONE_RECENT):
+            title = lp.title if lp.trusted else wrap_untrusted(lp.title, "pending")
+            shown_untrusted.extend([] if lp.trusted else [True])
+            done.append(f"- {title}")
+        if done:
+            sections.append("Recently done (last 24h):\n" + "\n".join(done))
+    if shown_untrusted and (run := current_run.get()) is not None:
+        run.saw_untrusted()  # only when third-party text is actually shown
+    return "\n\n".join(sections) or NOTHING_OPEN
+
+
 _CONV = frozenset({"conversation"})
 
 TOOLS = [
@@ -186,6 +259,9 @@ TOOLS = [
     MavisTool("track_loop", "Track an open loop: commitment, waiting-on, goal, concern, routine or watch.",
               TrackLoopArgs, RiskClass.WRITE_SELF, track_loop, _CONV, priority=55,
               preview=_preview_loop, on_taint=TaintPolicy.APPROVE),
+    MavisTool("pending", "What is pending: open items with how due they are, approvals waiting for the "
+              "user's OK and background work. Call it for any question about what is open, due or left.",
+              PendingArgs, RiskClass.READ, pending, _CONV, priority=70),
     MavisTool("list_tasks", "List the background jobs Mavis is running for the user (not their Google "
               "Tasks to-do list; that is tasks_list).", NoArgs,
               RiskClass.READ, list_tasks, _CONV, priority=40),

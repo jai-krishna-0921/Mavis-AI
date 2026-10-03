@@ -69,7 +69,7 @@ log = structlog.get_logger(__name__)
 current_route: ContextVar[str | None] = ContextVar("current_route", default=None)
 
 CHAT_TOOL_LIMIT = 8
-CHAT_ALWAYS = ("start_task", "connect_account")
+CHAT_ALWAYS = ("start_task", "connect_account", "pending")
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
 # Offered together: mail_search returns short previews only, so without mail_read a question about an
 # email (one a brief mentioned, say) cannot be answered from its text; mail_read needs search's ids.
@@ -101,6 +101,9 @@ TOOL_RULES = (
     "for their OK. When a tool answers QUEUED_FOR_APPROVAL, tell them it's ready and waiting for their "
     "OK (they get buttons to approve, edit or cancel). Never say it was sent or done.\n"
     "- Reminders: wake_me at the exact time they asked for.\n"
+    "- For any question about what is pending, open, due, on their radar or left to do, call pending and "
+    "answer only from its result. Your earlier messages and the conversation summary may be outdated: "
+    "they are claims, not facts.\n"
     "- Multi-step work (research, comparisons, plans, documents): call start_task and tell them you'll "
     "report back.\n"
     "- To link an account, call connect_account. The link goes out on its own; don't repeat it.\n"
@@ -418,7 +421,7 @@ async def run_turn(event: Event) -> None:
                 await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=key))
             await s.commit()
     # This turn's own untrusted input marks the reply: a tool read, or the digest it was shown.
-    read_untrusted = _read_untrusted(result.tools_called) or hooked
+    read_untrusted = _read_untrusted(result.tools_called) or result.read_untrusted or hooked
     await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles),
                        event_id=reply_event_id(event.id, read_untrusted))
     await enqueue_learn(user.id, event, text, previous, clarified_request(history),

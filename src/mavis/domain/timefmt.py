@@ -94,5 +94,19 @@ def relative_due(due: datetime | None, now: datetime, tz: str) -> RelativeDue:
     return RelativeDue(status, f"due {_day(local, local_now)} {local:%H:%M}")
 
 
+def relative_past(at: datetime, now: datetime, tz: str) -> str:
+    """When something happened, as the user reads it: 'just now', '12 min ago', '5h 48m ago' (same day),
+    else 'yesterday 22:48' or 'Wed 30 Sep 09:18'."""
+    zone = ZoneInfo(tz)
+    at_utc, now_utc = _utc(at), _utc(now)
+    ago = now_utc - at_utc
+    if ago < NOW_WINDOW:
+        return "just now"
+    local, local_now = at_utc.astimezone(zone), now_utc.astimezone(zone)
+    if local.date() == local_now.date():
+        return f"{duration(int(ago.total_seconds() // 60))} ago"
+    return _when(local, local_now)
+
+
 def due_label(due: datetime | None, now: datetime, tz: str) -> str:
     return relative_due(due, now, tz).label

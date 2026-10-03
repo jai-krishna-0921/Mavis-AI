@@ -110,9 +110,14 @@ class ToolRun:
 
     tainted: bool = False
     untrusted_seen: bool = False  # an untrusted_output tool returned during the current step
+    untrusted_reads: int = 0  # every time third-party text reached the model in this run (never reset)
     queued_approvals: list[int] = field(default_factory=list)
     spawned: int = 0  # workers started in the current outermost model step (reset by react_loop)
     memo: dict[str, Any] = field(default_factory=dict)  # per-run cache for `prepare` lookups (file metadata)
+
+    def saw_untrusted(self) -> None:
+        self.untrusted_seen = True
+        self.untrusted_reads += 1
 
     def end_step(self) -> None:
         self.tainted = self.tainted or self.untrusted_seen
@@ -427,7 +432,7 @@ class ToolRegistry:
             if tool.untrusted_output and not raise_errors:
                 # Third-party error text must never reach the model unwrapped.
                 if run is not None:
-                    run.untrusted_seen = True
+                    run.saw_untrusted()
                 return wrap_untrusted(truncate(f"Tool error: {exc}"), tool.name)
             raise
         finally:
@@ -439,7 +444,7 @@ class ToolRegistry:
         if not tool.untrusted_output:
             return text
         if run is not None:
-            run.untrusted_seen = True
+            run.saw_untrusted()
         return wrap_untrusted(text, tool.name)
 
     def _as_langchain(self, tool: MavisTool, user_id: int) -> BaseTool:
