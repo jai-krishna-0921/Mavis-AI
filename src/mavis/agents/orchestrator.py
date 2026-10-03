@@ -118,6 +118,9 @@ async def _fail(task_id: int, user_id: int, reason: str) -> None:
     await _close_approvals(task_id, user_id)
 
 
+fail_task = _fail  # public name for the approval sweep
+
+
 async def _close_approvals(task_id: int, user_id: int) -> None:
     """A failed task never resumes, so its approvals must not stay tappable or stuck."""
     await approvals.reject_open_for_task(task_id)

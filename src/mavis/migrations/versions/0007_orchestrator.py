@@ -69,6 +69,7 @@ def upgrade() -> None:
         sa.Column("expires_at", _DT, nullable=False),
         sa.Column("prompted_at", _DT, nullable=True),
         sa.Column("started_at", _DT, nullable=True),
+        sa.Column("resolving_at", _DT, nullable=True),
         sa.Column("resolved_at", _DT, nullable=True),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"]),
         sa.ForeignKeyConstraint(["task_id"], ["tasks.id"]),

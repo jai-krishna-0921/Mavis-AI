@@ -28,3 +28,17 @@ async def dispatch_button(event: Event) -> None:
         log.debug("buttons.unknown", data=data[:40])
         return
     await BUTTON_HANDLERS[max(matches, key=len)](event, data)
+
+
+APPROVAL_PREFIX = "ap:"
+
+
+async def _approval_button(event: Event, data: str) -> None:
+    from mavis.policy import approvals  # lazy: policy.approvals imports the bus and the LLM layer
+
+    await approvals.handle_approval_button(event)
+
+
+def register_approval_buttons() -> None:
+    """Route `ap:<id>:<ok|edit|no>` taps to the approval flow (the one BUTTON_PRESSED dispatcher)."""
+    register_button_handler(APPROVAL_PREFIX, _approval_button)
