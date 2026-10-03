@@ -302,3 +302,67 @@ async def test_retry_reuses_the_persisted_decision(user, clock, recording_bus, f
     await init.handler.handle(email)  # the retry: the fake LLM has nothing left, so a re-ask would fail
     assert len(fake_llm.structured_calls) == 1
     assert [c["intent"].intent for c in calls] == ["was that you?"]
+
+
+# F2 ----------------------------------------------------------------------------------------------
+
+async def _chat_loop(init, user, recording_bus):
+    data = LoopUpsert(kind=LoopKind.COMMITMENT, title="Interview with Jawahar", due_at=ist(28, 10, 0),
+                      importance=5, source="tg:update:5")
+    loop = await init.loops.upsert(user.id, data)
+    [created] = recording_bus.take()
+    return loop, created
+
+
+async def test_loop_from_just_answered_turn_does_not_ping(user, clock, recording_bus, fake_memory, fake_llm,
+                                                          monkeypatch):
+    from mavis.domain.messages import Role
+    from mavis.domain.wakeups import WakeupKind
+    from mavis.store.repo import messages
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 20, 0))
+    await messages.log(user.id, Role.USER, "interview with Jawahar tomorrow at 10, nervous")
+    await messages.log(user.id, Role.ASSISTANT, "You've got this. Want to run through it tonight?")
+    clock.advance(minutes=2)
+    loop, created = await _chat_loop(init, user, recording_bus)
+    calls = spy_notify(init, monkeypatch)
+    offer = NotifyIntent(urgency=4, intent="Offer a mock interview")
+    fake_llm.push_structured(InitiativeDecision(notify=offer))
+    await init.handler.handle(created)
+    assert calls == []
+    kinds = {w.kind for w in await init.wakeups.pending(user.id)}
+    assert {WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED} <= kinds  # still tracked and scheduled
+
+
+async def test_loop_from_old_turn_may_ping(user, clock, recording_bus, fake_memory, fake_llm, monkeypatch):
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 20, 0))
+    await messages.log(user.id, Role.USER, "interview with Jawahar tomorrow at 10")
+    clock.advance(minutes=30)  # e.g. the LEARN job ran late
+    loop, created = await _chat_loop(init, user, recording_bus)
+    calls = spy_notify(init, monkeypatch)
+    fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="prep reminder")))
+    await init.handler.handle(created)
+    assert len(calls) == 1
+
+
+async def test_prompts_forbid_invented_offers(user, clock, fake_memory, fake_llm):
+    from mavis.domain.decisions import ComposedMessage
+    from mavis.initiative.composer import Composer
+    from mavis.initiative.filters import FilterResult
+    from mavis.initiative.reasoner import Reasoner
+    from mavis.policy.pings import PingPolicy
+
+    fake_llm.push_structured(InitiativeDecision())
+    event = Event(id="x", user_id=user.id, type=EventType.WAKEUP, occurred_at=timeutil.now(), source="timer")
+    await Reasoner(fake_memory, PingPolicy()).decide(user, event, FilterResult(drop=False, summary="s"))
+    fake_llm.push_structured(ComposedMessage(send=False))
+    await Composer(fake_memory).compose(user, "prep", 3)
+    reasoner_system, composer_system = (c["system"] for c in fake_llm.structured_calls)
+    assert "Never invent people, companies" in reasoner_system and "mock interview" in reasoner_system
+    assert "set its loop_id" in reasoner_system
+    assert "Never" in composer_system and "invent people, companies, offers" in composer_system
