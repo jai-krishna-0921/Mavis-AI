@@ -785,30 +785,95 @@ async def test_imminent_floor_requires_importance_four(user, clock, recording_bu
     assert calls[0]["intent"].urgency == 3
 
 
-# reminders (T10b) --------------------------------------------------------------------------------------
+# reminders (T10b; T11 ruling: user-requested reminders always fire) ------------------------------------
 
-def reminder_event(user, eid: str = "wakeup:70", wid: int = 70) -> Event:
-    return Event(id=eid, user_id=user.id, type=EventType.WAKEUP, occurred_at=timeutil.now(), source="timer",
-                 trust=Trust.SYSTEM, payload={"kind": "agent", "reminder": True, "wakeup_id": wid,
-                                              "reason": "Reminder the user asked for: stretch"})
+def reminder_event(user, eid: str = "wakeup:70", wid: int = 70, due=None, **extra) -> Event:
+    return Event(id=eid, user_id=user.id, type=EventType.WAKEUP, occurred_at=due or timeutil.now(),
+                 source="timer", trust=Trust.SYSTEM,
+                 payload={"kind": "agent", "reminder": True, "wakeup_id": wid,
+                          "reason": "Reminder the user asked for: stretch", **extra})
 
 
-async def test_reminder_notifies_without_the_reasoner(user, clock, recording_bus, fake_memory, fake_llm,
-                                                      monkeypatch):
+async def _proactive(user_id: int) -> list[str]:
+    from mavis.store.repo import messages
+
+    return [m.content for m in await messages.recent(user_id) if m.proactive]
+
+
+async def test_reminder_sends_fixed_text_without_reasoner_or_composer(user, clock, recording_bus,
+                                                                       fake_memory, fake_llm):
     init = build(recording_bus, fake_memory)
-    calls = spy_notify(init, monkeypatch)
-    await init.handler.handle(reminder_event(user))  # no InitiativeDecision pushed: the reasoner is not used
-    [c] = calls
-    assert c["intent"].intent == "Remind them: stretch" and c["intent"].urgency == 4
-    assert c["intent"].dedupe_key == "reminder:70" and c["untrusted"] is False
+    clock.set(ist(27, 14, 0))
+    await init.handler.handle(reminder_event(user))  # nothing scripted: any LLM call would raise
+    assert fake_llm.calls == [] and await _proactive(user.id) == ["⏰ Reminder: stretch"]
 
 
 async def test_identical_reminder_is_deduped(user, clock, recording_bus, fake_memory, fake_llm):
-    from mavis.domain.decisions import ComposedMessage
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 14, 0))
+    await init.handler.handle(reminder_event(user))
+    await init.handler.handle(reminder_event(user))
+    assert len(await _proactive(user.id)) == 1
+
+
+async def test_reminder_fires_despite_the_daily_budget(user, clock, recording_bus, fake_memory, fake_llm,
+                                                       settings, monkeypatch):
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    monkeypatch.setattr(settings, "ping_daily_budget", 1)
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 14, 0))
+    for i in range(3):
+        await messages.log(user.id, Role.ASSISTANT, f"earlier ping {i}", proactive=True)
+    await init.handler.handle(reminder_event(user))
+    assert (await _proactive(user.id))[-1] == "⏰ Reminder: stretch"
+
+
+async def test_reminder_in_quiet_hours_is_deferred_then_fires_late_with_a_note(user, clock, recording_bus,
+                                                                                fake_memory, fake_llm):
+    from mavis.domain.wakeups import WakeupKind
+    from mavis.timers.runner import wakeup_event
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 23, 30))  # quiet hours, and the user has not written recently
+    await init.handler.handle(reminder_event(user))
+    assert await _proactive(user.id) == []
+    [w] = await init.wakeups.pending(user.id, WakeupKind.DEFERRED)
+    assert w.payload["reminder"] is True and w.payload["reminder_key"] == "reminder:70"
+    assert w.due_at == ist(28, 7, 0)
+    clock.set(w.due_at)
+    await init.handler.handle(wakeup_event(w))
+    assert await _proactive(user.id) == ["⏰ Reminder, a bit late (it was for Sun 27 Sep, 23:30): stretch"]
+
+
+async def test_reminder_in_quiet_hours_fires_when_the_user_is_awake(user, clock, recording_bus, fake_memory,
+                                                                    fake_llm):
+    from mavis.domain.messages import Role
     from mavis.store.repo import messages
 
     init = build(recording_bus, fake_memory)
-    fake_llm.push_structured(ComposedMessage(send=True, messages=["Time to stretch."]))
+    clock.set(ist(27, 23, 30))
+    await messages.log(user.id, Role.USER, "still up")
     await init.handler.handle(reminder_event(user))
-    await init.handler.handle(reminder_event(user))
-    assert len([m for m in await messages.recent(user.id) if m.proactive]) == 1
+    assert await _proactive(user.id) == ["⏰ Reminder: stretch"]
+
+
+async def test_reminder_more_than_two_hours_late_is_still_delivered(user, clock, recording_bus, fake_memory,
+                                                                    fake_llm):
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 15, 0))
+    await init.handler.handle(reminder_event(user, due=ist(27, 12, 0)))  # the worker was down for 3h
+    assert await _proactive(user.id) == ["⏰ Reminder, a bit late (it was for 12:00): stretch"]
+
+
+async def test_reminder_flag_is_reserved_for_wake_me(user):
+    import pytest
+
+    from mavis.timers.service import WakeupService
+
+    with pytest.raises(ValueError, match="reminder"):
+        await WakeupService().wake_me(user.id, timeutil.now(), "x", payload={"reminder": True})
+    wid = await WakeupService().wake_me(user.id, timeutil.now(), "x", reminder=True)
+    [w] = [w for w in await WakeupService().pending(user.id) if w.id == wid]
+    assert w.payload == {"reminder": True}
