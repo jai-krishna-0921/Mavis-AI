@@ -15,10 +15,10 @@ from sqlalchemy.exc import NoResultFound
 
 from mavis.attention.learning import Thresholds
 from mavis.attention.pipeline import DEFERRED_STALE, AttentionPipeline
-from mavis.attention.sanitize import clean, sender_domain
+from mavis.attention.sanitize import clean, sender_domain, summary_text
 from mavis.attention.scheduling import schedule_once
-from mavis.attention.schema import Verdict
-from mavis.attention.understand import BODY_LIMIT
+from mavis.attention.schema import EmailKind, Verdict
+from mavis.attention.understand import BODY_LIMIT, heuristic
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.errors import LLMError
@@ -37,6 +37,13 @@ from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.normalize import email_event, extract_messages, to_datetime
 
 log = structlog.get_logger()
+
+
+def _reraise_if_strict(exc: Exception) -> None:
+    """Tests run strict: a failure from a fake (FakeLLM "unexpected call") must surface, not be logged."""
+    if get_settings().attention_strict_errors:
+        raise exc
+
 
 PENDING_KEYS = (
     "from",
@@ -136,16 +143,58 @@ class Intake:
         except LLMError:
             raise
         except Exception as exc:  # noqa: BLE001 - one bad row must never block the queue
+            _reraise_if_strict(exc)
             await self._row_failed(obs.id, exc)
             return False
 
     async def _row_failed(self, obs_id: int, exc: Exception) -> None:
-        """Log it; once the row has used its attempts, close it as unreadable so the queue moves on."""
-        log.warning("attention.process_failed", obs_id=obs_id, error=type(exc).__name__)
+        """Log it; once the row has used its attempts, close it so the queue moves on. Mail that cannot be
+        read is still run through the keyword classifier, so a fraud or security notice is never dropped."""
+        log.warning("attention.process_failed", obs_id=obs_id, error=type(exc).__name__, exc_info=exc)
         fresh = await repo.get(obs_id)
-        if fresh is not None and fresh.status == repo.PENDING:
-            if fresh.attempts >= get_settings().attention_max_attempts:
-                await repo.finish(obs_id, method="error", verdict="log", summary="(could not be read)")
+        if fresh is None or fresh.status != repo.PENDING:
+            return
+        if fresh.attempts >= get_settings().attention_max_attempts:
+            await self._close_unreadable(fresh)
+
+    async def _close_unreadable(self, obs: Any) -> None:
+        payload = dict(obs.pending_payload or {})
+        try:
+            u = heuristic(payload)
+        except Exception:  # noqa: BLE001 - the classifier must not stop the close
+            log.warning("attention.heuristic_failed", obs_id=obs.id, exc_info=True)
+            u = None
+        risky = u is not None and u.kind in (EmailKind.SECURITY, EmailKind.MONEY_MOVEMENT)
+        if u is not None:
+            try:  # the normal decision path with the heuristic cap (never ask, urgency at most 4)
+                user = await users.get(obs.user_id)
+                await self._pipeline.finalize(user, obs, payload, u, "heuristic")
+                await self._lift_to_brief(obs.id, risky)
+                return
+            except LLMError:
+                await self._lift_to_brief(obs.id, risky)
+                return  # decided and stored; only the notify compose failed, redelivery retries it
+            except Exception:  # noqa: BLE001 - finalize is what failed before; close by hand
+                log.warning("attention.heuristic_finalize_failed", obs_id=obs.id, exc_info=True)
+        kind = u.kind if u is not None else EmailKind.OTHER
+        # risky mail waits in the morning brief as an untrusted line instead of vanishing as routine
+        await repo.finish(
+            obs.id,
+            method="error",
+            kind=kind.value,
+            verdict="brief" if risky else "log",
+            urgency=0,
+            summary=summary_text(kind, obs.sender_domain, str(payload.get("subject", "")))
+            if risky
+            else "(could not be read)",
+        )
+
+    @staticmethod
+    async def _lift_to_brief(obs_id: int, risky: bool) -> None:
+        """Security or money mail that the keyword pass left as routine still reaches the morning brief."""
+        fresh = await repo.get(obs_id)
+        if risky and fresh is not None and fresh.verdict in ("log", "dropped"):
+            await repo.set_fields(obs_id, verdict="brief")
 
     async def ingest(self, user_id: int, p: dict, origin: str) -> tuple[Any, bool]:
         payload = {k: p.get(k) for k in PENDING_KEYS}
@@ -205,7 +254,10 @@ class Intake:
                 log.warning("attention.redeliver_failed", obs_id=obs.id, error=type(exc).__name__)
                 return False
             except Exception as exc:  # noqa: BLE001 - one bad row must not block the others
-                log.warning("attention.redeliver_failed", obs_id=obs.id, error=type(exc).__name__)
+                _reraise_if_strict(exc)
+                log.warning(
+                    "attention.redeliver_failed", obs_id=obs.id, error=type(exc).__name__, exc_info=True
+                )
         return True
 
     async def drain(self, user_id: int, reason: str = "") -> int:
@@ -231,6 +283,7 @@ class Intake:
                     failed = True
                     break
                 except Exception as exc:  # noqa: BLE001 - one bad row must never block the queue
+                    _reraise_if_strict(exc)
                     await self._row_failed(obs.id, exc)
                     skip.add(obs.id)
                     continue

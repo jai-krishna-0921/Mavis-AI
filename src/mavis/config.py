@@ -118,6 +118,7 @@ class Settings(BaseSettings):
     attention_pref_similarity: float = 0.8
     attention_allow_urgent: bool = True  # deterministic high-risk asks may use urgency 5 (spec 8.4)
     attention_retention_days: int = 90
+    attention_strict_errors: bool = False  # tests only: per-row catch-alls re-raise instead of logging
     attention_backfill_max: int = 120  # messages, paged 50 at a time, within 14 days
     attention_digest_hours: int = 24
     attention_evening_enabled: bool = True

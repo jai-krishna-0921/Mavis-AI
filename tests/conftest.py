@@ -33,6 +33,7 @@ TEST_ENV = {
     "TAVILY_API_KEY": "",
     "LANGFUSE_PUBLIC_KEY": "",
     "LANGFUSE_SECRET_KEY": "",
+    "ATTENTION_STRICT_ERRORS": "true",
     "DEMO_TIME_SCALE": "1.0",
     "PRESENCE_REACTION": "\N{EYES}",  # production default is off; presence tests opt in via this
 }
