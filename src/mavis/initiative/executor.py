@@ -12,7 +12,7 @@ from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision, NotifyIntent, WakeupRequest
 from mavis.domain.events import Event, EventType, Trust
-from mavis.domain.loops import Loop, LoopStatus
+from mavis.domain.loops import Loop, LoopStatus, LoopUpsert
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.composer import Composer
@@ -30,6 +30,7 @@ MAX_UNTRUSTED_URGENCY = 4  # only a trusted origin may bypass quiet hours (urgen
 DELAY_NOTE_AFTER = timedelta(minutes=30)
 RELEASE_DELAY = timedelta(seconds=20)  # let the user's reply go out first
 DEFERRED_TTL = timedelta(hours=12)  # a deferred ping with no better bound goes stale after this
+UNTRUSTED_SOURCE_PREFIX = "untrusted:"  # loop.source after an update driven by third-party content
 SECURITY_DEFER_GRACE = timedelta(hours=2)
 MERGE_WINDOW = timedelta(minutes=30)  # a model wakeup this close to one already set for the loop merges
 LOOP_WAKEUP_KINDS = (WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED, WakeupKind.AGENT)
@@ -50,6 +51,10 @@ class InitiativeExecutor:
                 log.warning("initiative.untrusted_track_skipped", event_id=event.id, title=upsert.title[:80])
                 continue
             try:
+                if untrusted:
+                    upsert = await self._limit_untrusted_update(upsert, event)
+                    if upsert is None:
+                        continue
                 source = upsert.source or event.id
                 await self._loops.upsert(user.id, upsert.model_copy(update={"source": source}))
             except ValueError as exc:  # e.g. the LLM named a loop id that does not exist: not retryable
@@ -144,6 +149,17 @@ class InitiativeExecutor:
             p.loop_id == loop_id and p.kind in LOOP_WAKEUP_KINDS and abs(p.due_at - at) <= MERGE_WINDOW
             for p in await self._wakeups.pending(user_id)
         )
+
+    async def _limit_untrusted_update(self, upsert: LoopUpsert, event: Event) -> LoopUpsert | None:
+        """Third-party content may change a loop's status, entities and watch, never when it is due or how
+        important it is (that would let an email schedule a trusted, quiet-hours-bypassing nudge). The
+        source is marked so wakeups re-planned from this update fire as untrusted."""
+        current = await self._loops.get(upsert.id) if upsert.id is not None else None
+        if current is None:
+            return None
+        return upsert.model_copy(update={
+            "kind": current.kind, "title": current.title, "due_at": current.due_at,
+            "importance": current.importance, "source": f"{UNTRUSTED_SOURCE_PREFIX}{event.id}"[:200]})
 
     async def _owns_existing_loop(self, user_id: int, loop_id: int | None) -> bool:
         if loop_id is None:
