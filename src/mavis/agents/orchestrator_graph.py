@@ -40,6 +40,7 @@ from mavis.config import get_settings
 from mavis.domain.decisions import ComposedMessage
 from mavis.domain.errors import ActionFailed, BudgetExceeded, ConnectionRequired, LLMError
 from mavis.domain.events import Event, EventType, Trust
+from mavis.domain.localtime import localize_args
 from mavis.domain.plans import CriticVerdict, Plan, PlanStep
 from mavis.domain.tasks import ApprovalStatus, StepOutcome, TaskKind, TaskStatus
 from mavis.llm import models as llm
@@ -427,6 +428,9 @@ async def revise_approval(approval: Any, instructions: str) -> None:
         tier=llm.Tier.FAST, **_BG,
     )
     ctx = await tool_context(approval.user_id)
+    # the same wall-clock normalisation invoke/execute_approved use, BEFORE the preview is rendered and
+    # the args stored, so the card shows exactly what will run
+    revised = localize_args(revised, ctx.timezone)
     await approvals.update_args(
         approval.id, revised.model_dump(mode="json"), tool.render_preview(revised, ctx)
     )

@@ -405,6 +405,20 @@ async def test_revise_reschedules_the_action_time_expiry(user, rec_bus, sent, cl
     clock.set(NOW)
     aid = await _card(user.id, "pay_bill", _times("pay_bill", "2026-10-03T13:00:00Z"))
     await flow.send_approval_prompt(user.id, {"approval_id": aid})
-    fake_llm.push_structured(PayArgs(account="A", amount=3, at=datetime(2026, 10, 3, 16, 0, tzinfo=UTC)))
-    await revise_approval(await approvals.get(aid), "make it 4pm UTC")
+    # wall clock as the user said it (21:30 in their IST timezone), never a model-converted instant
+    fake_llm.push_structured(PayArgs(account="A", amount=3, at=datetime(2026, 10, 3, 21, 30)))
+    await revise_approval(await approvals.get(aid), "make it 9:30 pm")
     assert await _action_wakeups(user.id, aid) == [datetime(2026, 10, 3, 16, 0, tzinfo=UTC)]
+
+
+async def test_correction_that_loses_a_race_is_not_reported_as_updated(user, rec_bus, sent, tools,
+                                                                       monkeypatch):
+    existing = await _card(user.id, "pay_bill", {"account": "A1", "amount": 50})
+
+    async def lost_race(*a, **k):
+        return False  # the user tapped the card between our read and our write
+
+    monkeypatch.setattr(approvals, "update_args", lost_race)
+    [lc] = [t for t in tools.for_agent("conversation", user.id) if t.name == "pay_bill"]
+    out = await lc.ainvoke({"account": "A1", "amount": 80})
+    assert out.startswith(f"ALREADY_AWAITING_APPROVAL #{existing}") and "UPDATED" not in out

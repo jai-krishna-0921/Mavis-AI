@@ -144,3 +144,40 @@ def test_date_only_fields_are_not_touched():
 
     out = localize_args(DueArgs(due=date(2026, 10, 4)), "Pacific/Auckland")
     assert out.due == date(2026, 10, 4)
+
+
+# --- fix round 2: the edit path uses the same normalisation, so preview == execution ------------------
+
+
+@pytest.mark.parametrize("user_tz", ZONES)
+@pytest.mark.parametrize("revised_start,tzfield,wall,zone", [
+    ("2026-10-04T08:30", None, "2026-10-04T08:30", None),
+    ("2026-10-04T08:30:00Z", None, "2026-10-04T08:30", None),
+    ("2026-10-04T08:30:00+09:00", None, "2026-10-04T08:30", None),
+    ("2026-10-04T08:30:00Z", "Europe/Paris", "2026-10-04T08:30", "Europe/Paris"),
+])
+async def test_revised_args_are_normalised_before_preview_and_storage(user, fake_llm, rec_bus, sent,
+                                                                     fresh_registry, user_tz, revised_start,
+                                                                     tzfield, wall, zone):
+    from mavis.agents.orchestrator_graph import revise_approval
+    from mavis.store.db import utcnow
+    from mavis.store.repo import approvals, users
+    from mavis.tools.integrations.tools import register_integration_tools
+
+    await users.update(user.id, timezone=user_tz)
+    register_integration_tools(fresh_registry)
+    tool = fresh_registry.get("calendar_create_event")
+    aid = await approvals.create(user.id, None, "calendar_create_event",
+                                 {"summary": "Sync", "start": "2026-10-04T11:00:00+05:30"}, "old",
+                                 utcnow() + __import__("datetime").timedelta(hours=48))
+    fake_llm.push_structured(tool.args_model.model_validate(
+        {"summary": "Sync", "start": revised_start, "timezone": tzfield}))
+    await revise_approval(await approvals.get(aid), "move it to 8:30")
+    row = await approvals.get(aid)
+    want = _expected(wall, zone or user_tz)
+    stored = tool.args_model.model_validate(row.arguments)
+    assert stored.start == want
+    executed = localize_args(stored, user_tz)  # what execute_approved will run
+    assert executed.start == want
+    local = want.astimezone(ZoneInfo(user_tz))
+    assert f"{local:%H:%M} to" in row.preview  # the card shows exactly what will run
