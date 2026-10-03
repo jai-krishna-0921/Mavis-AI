@@ -37,6 +37,15 @@ MAX_REPLY_LOOPS = 5
 AUTOMATED = ("no-reply", "noreply", "notifications", "mailer-daemon", "donotreply", "do-not-reply")
 SECURITY_WORDS = ("security alert", "new sign-in", "suspicious", "unusual activity")
 
+FirstSyncHandler = Callable[[int], Awaitable[list[str]]]
+# Capabilities whose first sync lives elsewhere (Workspace: attention.workspace registers Tasks, Drive and
+# Contacts). Returned notices are shown like the built-in ones; Workspace handlers return none (silent).
+EXTRA_HANDLERS: dict[Capability, FirstSyncHandler] = {}
+
+
+def register_first_sync_handler(capability: Capability, fn: FirstSyncHandler) -> None:
+    EXTRA_HANDLERS[capability] = fn
+
 
 class Learner(Protocol):
     async def learn(self, user_id: int, text: str, source_ref: str) -> Any: ...
@@ -67,7 +76,8 @@ class FirstSync:
             Capability.SLACK: self._slack,
             Capability.NOTION: self._notion,
         }
-        handler = handlers.get(capability)  # Drive, Docs, Sheets, Tasks, Contacts, Meet: nothing to skim
+        # Tasks, Drive and Contacts: registered by attention (EXTRA_HANDLERS); Docs, Sheets, Meet: nothing
+        handler = handlers.get(capability) or EXTRA_HANDLERS.get(capability)
         noticed = (await handler(user_id))[:3] if handler is not None else []
         await self.bus.publish(
             Event(

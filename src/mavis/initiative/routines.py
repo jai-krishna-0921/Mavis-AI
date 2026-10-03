@@ -43,6 +43,10 @@ class BriefItem:
 
 
 class BriefSource(Protocol):
+    """A source may also define `async delivered(user_id, at)`: called once the brief carrying its items
+    went out (not when it was blocked or deferred), so "since the last brief" state is stamped only then.
+    `at` is when the items were gathered."""
+
     name: str
 
     async def items(self, user_id: int, start: datetime, end: datetime) -> list[BriefItem]: ...
@@ -80,6 +84,17 @@ def register_morning_hook(fn: MorningHook) -> None:
 
 def clear_morning_hooks() -> None:
     _morning_hooks.clear()
+
+
+async def _tell_delivered(sources: list[BriefSource], user_id: int, at: datetime) -> None:
+    for src in sources:
+        hook = getattr(src, "delivered", None)
+        if hook is None:
+            continue
+        try:
+            await hook(user_id, at)
+        except Exception:  # noqa: BLE001 - the brief is out; a failed stamp only repeats lines tomorrow
+            log.exception("routines.brief_delivered_failed", source=getattr(src, "name", "?"))
 
 
 def _parse_hhmm(value: str) -> time:
@@ -148,12 +163,15 @@ class Routines:
             if lp.kind is not LoopKind.ROUTINE and lp.due_at is not None
             and start.astimezone(UTC) <= lp.due_at < end.astimezone(UTC)
         ]
+        gathered_at = timeutil.now()
+        served: list[BriefSource] = []
         for src in list(_sources):
             try:
                 for item in await src.items(user.id, start.astimezone(UTC), end.astimezone(UTC)):
                     if isinstance(item, str):  # legacy source without a trust marker: assume untrusted
                         item = BriefItem(item, False)
                     items.append(item)
+                served.append(src)
             except Exception:  # noqa: BLE001 - one broken source must not kill the brief
                 log.exception("routines.brief_source_failed", source=getattr(src, "name", "?"))
         untrusted = any(not i.trusted for i in items)
@@ -164,8 +182,10 @@ class Routines:
             intent = ("Warm good-morning check-in. Nothing scheduled today: ask what's on their plate "
                       "or nudge gently on one of their goals.")
         key = f"morning:{local_now.date().isoformat()}"
-        await self._executor.notify(user, NotifyIntent(urgency=3, intent=intent, dedupe_key=key),
-                                    untrusted=untrusted)
+        sent = await self._executor.notify(user, NotifyIntent(urgency=3, intent=intent, dedupe_key=key),
+                                           untrusted=untrusted)
+        if sent:
+            await _tell_delivered(served, user.id, gathered_at)
 
     async def _ignored_streak(self, user_id: int) -> int:
         async with Session() as s:

@@ -685,6 +685,8 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
                TaskPatchArgs, RiskClass.WRITE_SELF, _INTERNAL),
     ActionSpec("mail.profile", Capability.GMAIL, "The user's own email address.", NoArgs, RiskClass.READ,
                _INTERNAL),
+    ActionSpec("contacts.list", Capability.CONTACTS, "The user's contacts (emails only).", NoArgs,
+               RiskClass.READ, _INTERNAL),
 )
 
 ACTIONS: dict[str, ActionSpec] = {s.name: s for s in (*_SPECS, *_WORKSPACE_SPECS)}
