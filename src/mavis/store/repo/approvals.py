@@ -185,6 +185,19 @@ async def mark_prompted(approval_id: int) -> bool:
         return (res.rowcount or 0) == 1
 
 
+async def executed_for_task(task_id: int) -> list[PendingApproval]:
+    """Approvals whose action ran (EXECUTED and finished), oldest first."""
+    async with Session() as s:
+        rows = await s.scalars(
+            select(PendingApproval)
+            .where(PendingApproval.task_id == task_id,
+                   PendingApproval.status == ApprovalStatus.EXECUTED.value,
+                   PendingApproval.resolved_at.is_not(None))
+            .order_by(PendingApproval.id)
+        )
+        return list(rows)
+
+
 _REJECTABLE = [ApprovalStatus.PENDING.value, ApprovalStatus.AWAITING_EDIT.value]
 
 
