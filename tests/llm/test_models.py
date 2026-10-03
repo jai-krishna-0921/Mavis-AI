@@ -614,3 +614,72 @@ async def test_structured_falls_back_to_secondary(secondary, monkeypatch) -> Non
 async def test_secondary_has_its_own_limiter(secondary) -> None:
     models._limiter()._free = 0  # Ollama slot held (cooldown)
     assert models._limiter(secondary=True)._free == 2
+
+
+# --- invoke_tools: the tool-calling path shares complete()'s chain ------------------------------
+
+
+class _Bindable(_Chat):
+    def bind_tools(self, tools, **kwargs):
+        self.bound = list(tools)
+        self.log.append(f"bind:{self.name}:{len(self.bound)}")
+        return self
+
+
+def _tool_ai() -> AIMessage:
+    return AIMessage(content="", tool_calls=[{"name": "echo", "args": {"text": "x"}, "id": "c1"}])
+
+
+@pytest.fixture
+def bindable(chain, monkeypatch):
+    log, scripts, s = chain
+
+    def fake(tier=Tier.FAST, temperature=0.6, model=None):
+        name = model or s.model_fast
+        return _Bindable(name, log, scripts.setdefault(name, []))
+
+    monkeypatch.setattr(models, "chat_model", fake)
+    return log, scripts, s
+
+
+async def test_invoke_tools_binds_tools_and_allows_empty_content_with_calls(bindable) -> None:
+    log, scripts, s = bindable
+    scripts[s.model_fast] = [_tool_ai()]
+    out = await models.invoke_tools([HumanMessage("hi")], ["t1", "t2"])
+    assert out.tool_calls[0]["name"] == "echo"
+    assert log == [f"bind:{s.model_fast}:2", s.model_fast]
+
+
+async def test_invoke_tools_empty_content_without_calls_raises(bindable) -> None:
+    log, scripts, s = bindable
+    scripts[s.model_fast] = [AIMessage(content="  ")]
+    with pytest.raises(LLMError):
+        await models.invoke_tools([HumanMessage("hi")], ["t"])
+
+
+async def test_invoke_tools_falls_back_on_5xx(bindable) -> None:
+    log, scripts, s = bindable
+    scripts[s.model_fast] = [_http_500()]
+    out = await models.invoke_tools([HumanMessage("hi")], ["t"])
+    assert out.content.startswith("from ")
+    assert len([x for x in log if not x.startswith("bind:")]) == 2
+
+
+async def test_invoke_tools_never_falls_back_to_another_ollama_model_on_429(bindable) -> None:
+    log, scripts, s = bindable
+    scripts[s.model_fast] = [_http_429()]
+    await models.invoke_tools([HumanMessage("hi")], ["t"])
+    assert [x for x in log if not x.startswith("bind:")] == [s.model_fast, s.model_fast]
+
+
+async def test_invoke_tools_uses_secondary_provider_with_tools_bound(bindable, monkeypatch) -> None:
+    log, scripts, s = bindable
+    s.llm_secondary_base_url = "https://sec.example/v1"
+    s.llm_secondary_model_fast = "sec-fast"
+    s.llm_secondary_model_smart = "sec-smart"
+    monkeypatch.setattr(models, "secondary_chat_model",
+                        lambda tier=Tier.FAST, temperature=0.6: _Bindable("secondary", log, [_tool_ai()]))
+    scripts[s.model_fast] = [_timeout()]
+    out = await models.invoke_tools([HumanMessage("hi")], ["t"])
+    assert out.tool_calls[0]["id"] == "c1"
+    assert log == [f"bind:{s.model_fast}:1", s.model_fast, "bind:secondary:1", "secondary"]

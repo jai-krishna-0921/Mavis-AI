@@ -35,8 +35,8 @@ def sanitize_typography(text: str) -> str:
     return re.sub(r",[ \t]{2,}", ", ", text)
 
 
-def _sanitize_line(line: str) -> str:
-    """Typography fixes that leave inline code spans untouched."""
+def sanitize_line(line: str) -> str:
+    """Typography fixes (no em or en dashes) that leave inline code spans untouched."""
     spans: list[str] = []
 
     def hold(m: re.Match[str]) -> str:
@@ -113,7 +113,7 @@ def _render(md: str, *, as_html: bool) -> str:
                 out.append(_fenced(code, as_html))
                 code = None
             continue
-        line = _sanitize_line(raw)
+        line = sanitize_line(raw)
         if _HR.match(line) or (_TABLE_SEP.match(line) and "|" in line):
             continue
         if m := _HEADING.match(line):
