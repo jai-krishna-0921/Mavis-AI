@@ -14,3 +14,7 @@ def load_builtin_tools(registry: ToolRegistry) -> None:
     for module in (assistant, web):
         for tool in module.TOOLS:
             registry.register(tool)
+
+    from mavis.tools.integrations.tools import register_integration_tools
+
+    register_integration_tools(registry)
