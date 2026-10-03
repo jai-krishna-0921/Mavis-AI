@@ -329,6 +329,17 @@ def _reset_integrations():
     for kind in (CHECK_KIND, POLL_KIND):
         system.SYSTEM_WAKEUP_HANDLERS.pop(kind, None)
 
+    # Phase 4 wiring (agents.wiring.register, register_integrations(registry)): the tool registry carries
+    # policy hooks bound to the integration singletons, the "connect" interrupt is bound to the flow,
+    # and the approval and task delivery wakeups are process-wide.
+    from mavis.agents import interrupts
+    from mavis.tools import registry as registry_mod
+
+    registry_mod._REGISTRY = None
+    interrupts.reset_defaults()
+    for kind in ("system_approval_remind", "system_approval_expire", "system_task_delivery"):
+        system.SYSTEM_WAKEUP_HANDLERS.pop(kind, None)
+
 
 @pytest.fixture
 def provider():

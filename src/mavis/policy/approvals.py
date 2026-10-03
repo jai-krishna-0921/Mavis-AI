@@ -328,17 +328,24 @@ async def sweep(user_id: int | None = None) -> dict[str, int]:
     return out
 
 
+async def sweep_approvals() -> None:
+    """Worker start hook. It runs before the consumers start, which is safe: a RESOLVING row only
+    counts as stuck after STALE_AFTER, longer than the bus redelivery window."""
+    await sweep()
+
+
+async def sweep_for_user(user_id: int) -> None:
+    """Morning check-in hook."""
+    await sweep(user_id)
+
+
 def register_sweeps() -> None:
-    """Hook the sweep into worker start and the daily check-in, and the two approval wakeups."""
+    """Hook the sweep into worker start and the daily check-in, and the two approval wakeups.
+
+    Idempotent: module-level functions, so the hook lists dedupe them on every call."""
     from mavis.initiative import routines
     from mavis.timers.system import register_system_wakeup
     from mavis.worker.runner import register_startup_hook
-
-    async def sweep_approvals() -> None:
-        await sweep()
-
-    async def sweep_for_user(user_id: int) -> None:
-        await sweep(user_id)
 
     register_startup_hook(sweep_approvals)
     routines.register_morning_hook(sweep_for_user)
