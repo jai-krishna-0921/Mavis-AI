@@ -18,7 +18,7 @@ import structlog
 
 from mavis.bus.base import EventBus
 from mavis.domain import timeutil
-from mavis.domain.errors import IntegrationError
+from mavis.domain.errors import IntegrationError, NoSuchConnection
 from mavis.domain.events import Event, EventType, Job, JobKind, Trust
 from mavis.domain.integrations import ConnectionState, PendingStatus, UserRef
 from mavis.domain.messages import Button, Outbound
@@ -57,6 +57,7 @@ RETRY_PREFIX = "conn:retry:"
 Notify = Callable[[Outbound], Awaitable[None]]
 Schedule = Callable[[int, datetime, str, str], Awaitable[int]]  # (user_id, at, reason, kind)
 OnActive = Callable[[int, Capability], Awaitable[None]]
+OnGoogleBegin = Callable[[int], object]  # a googlesuper fan-out starts (reset per-activation state)
 OnGoogleActive = Callable[[int], Awaitable[object]]  # once per googlesuper activation (retire old triggers)
 HasChecks = Callable[[int, int], Awaitable[bool]]  # (user_id, pending_id) -> a check is still scheduled
 CancelChecks = Callable[[int, int], Awaitable[object]]  # (user_id, pending_id): drop its scheduled checks
@@ -118,12 +119,14 @@ class ConnectFlow:
         cancel_checks: CancelChecks | None = None,
         clock: Callable[[], datetime] = timeutil.now,
         on_google_active: OnGoogleActive | None = None,
+        on_google_begin: OnGoogleBegin | None = None,
     ) -> None:
         self.provider, self.cache, self.bus = provider, cache, bus
         self.notify, self.schedule, self.state = notify, schedule, state
         self.base_url = base_url.rstrip("/")
         self.on_active = on_active
         self.on_google_active = on_google_active
+        self.on_google_begin = on_google_begin
         self.has_checks = has_checks
         self.cancel_checks = cancel_checks
         self.clock = clock
@@ -324,6 +327,8 @@ class ConnectFlow:
         states = await self.cache.status(user_id, fresh=True)
         if states.get(GOOGLE_ANCHOR.value) is not ConnectionState.ACTIVE:
             return [capability]
+        if self.on_google_begin is not None:
+            self.on_google_begin(user_id)
         return list(GOOGLE_CAPABILITIES)
 
     async def _activate(self, user_id: int, capability: Capability) -> bool:
@@ -333,7 +338,7 @@ class ConnectFlow:
         ran = False
         for target in targets:
             ran = await self._activate_one(user_id, target) or ran
-        if len(targets) > 1 and self.on_google_active is not None:
+        if len(targets) > 1 and ran and self.on_google_active is not None:
             try:
                 await self.on_google_active(user_id)
             except Exception as exc:  # noqa: BLE001 - leftover legacy triggers only duplicate events
@@ -355,7 +360,10 @@ class ConnectFlow:
                 synced[capability.value] = self.clock().isoformat()
                 await self.state.update(user_id, {"synced": synced})
         prompted = dict(st.get("reconnect_prompted", {}))
-        if prompted.pop(capability.value, None) is not None:
+        cleared = prompted.pop(capability.value, None) is not None
+        if is_google(capability):
+            cleared = prompted.pop(GOOGLE_KEY, None) is not None or cleared
+        if cleared:
             await self.state.update(user_id, {"reconnect_prompted": prompted})
         if self.on_active is not None:
             await self.on_active(user_id, capability)
@@ -506,9 +514,13 @@ class ConnectFlow:
         label = "Gmail" if alias.startswith("gmail") else "Calendar"
         try:
             await self.provider.disconnect(UserRef(user_id=user_id), alias)
+        except NoSuchConnection:
+            await self.send(user_id, f"There's no old {label} connection to remove.")
+            return
         except IntegrationError as exc:
             log.warning("connect.disconnect_failed", capability=alias, error=str(exc))
-            await self.send(user_id, f"There's no old {label} connection to remove.")
+            await self.send(user_id, f"I couldn't remove the old {label} connection just now. "
+                                     "Mind trying again in a bit?")
             return
         self.cache.invalidate(user_id)
         await self.send(user_id, f"Removed the old {label} connection. Your Google connection is untouched.")

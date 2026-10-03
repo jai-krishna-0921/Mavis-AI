@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from mavis.domain.errors import IntegrationError
+from mavis.domain.errors import IntegrationError, NoSuchConnection
 from mavis.domain.events import Event
 from mavis.domain.integrations import ConnectionState, Toolkit, ToolResult, UserRef
 from mavis.domain.policy import Capability
@@ -242,7 +242,7 @@ class ComposioProvider:
         if not row and name == GOOGLESUPER and original in LEGACY_TOOLKITS.values():
             row = accounts.get(original)  # legacy-only user disconnecting "gmail" or "googlecalendar"
         if not row:
-            raise IntegrationError(f"there is no {toolkit} connection to remove.")
+            raise NoSuchConnection(f"there is no {toolkit} connection to remove.")
         await self._request("DELETE", f"/connected_accounts/{row.get('id')}")
         self._routes.pop(user.provider_id, None)  # after the DELETE, so no concurrent execute re-caches it
 
