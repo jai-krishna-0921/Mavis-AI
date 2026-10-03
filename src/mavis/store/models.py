@@ -199,3 +199,89 @@ class ConnectionPending(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     resolved_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class AttentionObservation(Base):
+    """One processed email (spec attention section 11). No bodies at rest: `pending_payload` holds the
+    normalized snippet only until the email is understood, then it is cleared."""
+
+    __tablename__ = "attention_observations"
+    __table_args__ = (UniqueConstraint("user_id", "message_id", name="uq_attention_observations_user_msg"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    message_id: Mapped[str] = mapped_column(String(200))
+    thread_id: Mapped[str] = mapped_column(String(200), default="")
+    origin: Mapped[str] = mapped_column(String(12), default="live")
+    status: Mapped[str] = mapped_column(String(12), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    method: Mapped[str] = mapped_column(String(12), default="")
+    sender_domain: Mapped[str] = mapped_column(String(120), default="")
+    sender_name: Mapped[str] = mapped_column(String(80), default="")
+    kind: Mapped[str] = mapped_column(String(24), default="other")
+    needs_user: Mapped[bool] = mapped_column(default=False)
+    verdict: Mapped[str] = mapped_column(String(12), default="pending")
+    urgency: Mapped[int] = mapped_column(Integer, default=0)
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    reasons: Mapped[list] = mapped_column(JSON, default=list)
+    facts: Mapped[dict] = mapped_column(JSON, default=dict)
+    summary: Mapped[str] = mapped_column(String(240), default="")
+    action: Mapped[str] = mapped_column(String(160), default="")
+    point_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pending_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    delivery: Mapped[str] = mapped_column(String(12), default="none")
+    feedback: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    received_at: Mapped[datetime] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    processed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class AttentionSender(Base):
+    __tablename__ = "attention_senders"
+    __table_args__ = (UniqueConstraint("user_id", "address", name="uq_attention_senders_user_address"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    address: Mapped[str] = mapped_column(String(200))
+    domain: Mapped[str] = mapped_column(String(120), default="")
+    count: Mapped[int] = mapped_column(Integer, default=0)
+    first_seen: Mapped[datetime] = mapped_column()
+    last_seen: Mapped[datetime] = mapped_column()
+
+
+class AttentionMoneyBaseline(Base):
+    """Rolling robust stats of debits per counterparty, per method and overall ('*')."""
+
+    __tablename__ = "attention_money_baselines"
+    __table_args__ = (
+        UniqueConstraint("user_id", "scope", "key", "currency", name="uq_attention_money_user_scope_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    scope: Mapped[str] = mapped_column(String(16))
+    key: Mapped[str] = mapped_column(String(120))
+    currency: Mapped[str] = mapped_column(String(3))
+    count: Mapped[int] = mapped_column(Integer, default=0)
+    amounts: Mapped[list] = mapped_column(JSON, default=list)
+    median: Mapped[float] = mapped_column(Float, default=0.0)
+    mad: Mapped[float] = mapped_column(Float, default=0.0)
+    hours: Mapped[list] = mapped_column(JSON, default=list)
+    first_seen: Mapped[datetime] = mapped_column()
+    last_seen: Mapped[datetime] = mapped_column()
+
+
+class AttentionPref(Base):
+    """User feedback on an observation, mirrored as a vector in the Qdrant 'attention' collection."""
+
+    __tablename__ = "attention_prefs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    observation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    kind: Mapped[str] = mapped_column(String(24))
+    sentiment: Mapped[str] = mapped_column(String(12))
+    summary: Mapped[str] = mapped_column(String(240), default="")
+    point_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
