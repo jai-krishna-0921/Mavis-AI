@@ -40,8 +40,13 @@ def args_hash(arguments: dict) -> str:
     return hashlib.sha256(canon.encode()).hexdigest()
 
 
-# Free text a model rewords on every attempt; it does not change WHICH action this is.
-_FREE_TEXT_KEYS = frozenset({"description", "body", "content", "text", "notes", "message"})
+# Free text a model rewords on every attempt, ignored ONLY for tools whose other arguments identify
+# the action (an invite: start + guests + title; an email: to + subject). For every other tool (Slack
+# message, reply, Notion page, notes) the text IS the action and is compared, case/space-normalised.
+_IGNORED_TEXT: dict[str, frozenset[str]] = {
+    "calendar_create_event": frozenset({"description"}),
+    "mail_send": frozenset({"body"}),
+}
 _WAITING = [ApprovalStatus.PENDING.value, ApprovalStatus.AWAITING_EDIT.value]
 
 
@@ -61,24 +66,25 @@ def _canon(value: Any) -> Any:
     return value
 
 
-def equivalence_key(arguments: dict) -> str:
-    """Canonical form of an action's arguments for duplicate detection: free-text fields dropped,
-    whitespace and case folded, lists sorted, ISO datetimes in UTC. A tool whose arguments are all
-    free text (a note, a Slack message) is compared on everything instead."""
+def equivalence_key(tool: str, arguments: dict) -> str:
+    """Canonical form of an action's arguments for duplicate detection: whitespace and case folded,
+    lists sorted, ISO datetimes in UTC, and for the tools in _IGNORED_TEXT the reworded free text
+    dropped."""
     canon = _canon(arguments or {})
-    keyed = {k: v for k, v in canon.items() if k not in _FREE_TEXT_KEYS}
-    return json.dumps(keyed or canon, sort_keys=True, default=str, ensure_ascii=False)
+    ignored = _IGNORED_TEXT.get(tool, frozenset())
+    keyed = {k: v for k, v in canon.items() if k not in ignored}
+    return json.dumps(keyed, sort_keys=True, default=str, ensure_ascii=False)
 
 
-def equivalent(a: dict, b: dict) -> bool:
-    return equivalence_key(a) == equivalence_key(b)
+def equivalent(tool: str, a: dict, b: dict) -> bool:
+    return equivalence_key(tool, a) == equivalence_key(tool, b)
 
 
 async def waiting_equivalents(user_id: int, tool: str, arguments: dict, *,
                               exclude_id: int | None = None) -> list[PendingApproval]:
     """This user's approvals still waiting on them (PENDING / AWAITING_EDIT) for the same tool and
     equivalent arguments, in any task, oldest first."""
-    want = equivalence_key(arguments)
+    want = equivalence_key(tool, arguments)
     async with Session() as s:
         rows = await s.scalars(
             select(PendingApproval)
@@ -86,7 +92,7 @@ async def waiting_equivalents(user_id: int, tool: str, arguments: dict, *,
                    PendingApproval.status.in_(_WAITING))
             .order_by(PendingApproval.id)
         )
-        return [r for r in rows if r.id != exclude_id and equivalence_key(r.arguments or {}) == want]
+        return [r for r in rows if r.id != exclude_id and equivalence_key(tool, r.arguments or {}) == want]
 
 
 async def find_open(user_id: int, task_id: int | None, tool: str, arguments: dict) -> PendingApproval | None:
