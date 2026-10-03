@@ -22,6 +22,10 @@ class WakeupKind(StrEnum):
     SYSTEM_TASK_DELIVERY = "system_task_delivery"        # Phase 4
     SYSTEM_POLL = "system_poll"                          # Phase 5
     SYSTEM_CONNECTION_CHECK = "system_connection_check"  # Phase 5
+    SYSTEM_ATTENTION_DRAIN = "system_attention_drain"  # Phase 8
+    SYSTEM_ATTENTION_SPEAK = "system_attention_speak"  # Phase 8
+    SYSTEM_ATTENTION_BACKFILL = "system_attn_backfill"  # Phase 8
+    SYSTEM_EVENING_WRAP = "system_evening_wrap"  # Phase 8
 
 
 class WakeupStatus(StrEnum):
@@ -56,4 +60,8 @@ EVENT_TYPE_FOR_KIND: dict[WakeupKind, EventType] = {
     WakeupKind.SYSTEM_TASK_DELIVERY: EventType.WAKEUP,
     WakeupKind.SYSTEM_POLL: EventType.WAKEUP,
     WakeupKind.SYSTEM_CONNECTION_CHECK: EventType.WAKEUP,
+    WakeupKind.SYSTEM_ATTENTION_DRAIN: EventType.WAKEUP,
+    WakeupKind.SYSTEM_ATTENTION_SPEAK: EventType.WAKEUP,
+    WakeupKind.SYSTEM_ATTENTION_BACKFILL: EventType.WAKEUP,
+    WakeupKind.SYSTEM_EVENING_WRAP: EventType.WAKEUP,
 }
