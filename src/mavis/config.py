@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     integration_status_ttl_s: int = 60
     integration_provider: Literal["composio"] = "composio"
     tavily_api_key: str = ""
+    # Google Workspace through Composio's googlesuper toolkit (spec 2026-10-03). Off: behaviour is exactly
+    # the Gmail + Calendar setup from before. Prod turns it on in compose after the verify script passes.
+    google_workspace_enabled: bool = False
+    workspace_poll_minutes: int = 30  # Tasks due/overdue and Drive shared-with-me safety-net polls
 
     # --- orchestration (Phase 4) ----------------------------------------------
     task_timeout_s: float = 480

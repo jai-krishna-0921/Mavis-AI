@@ -105,6 +105,7 @@ class ToolRun:
     untrusted_seen: bool = False  # an untrusted_output tool returned during the current step
     queued_approvals: list[int] = field(default_factory=list)
     spawned: int = 0  # workers started in the current outermost model step (reset by react_loop)
+    memo: dict[str, Any] = field(default_factory=dict)  # per-run cache for `prepare` lookups (file metadata)
 
     def end_step(self) -> None:
         self.tainted = self.tainted or self.untrusted_seen
@@ -181,6 +182,9 @@ class MavisTool:
     on_taint: TaintPolicy = TaintPolicy.ALLOW
     tainted_fn: ToolFn | None = None  # required for TaintPolicy.DOWNGRADE
     timeout_s: float | None = None  # react_loop per-call limit; None = tool_timeout_s, <= 0 = none
+    # Async pre-step with network access (file metadata, allowlists), run by invoke() before the taint and
+    # approval checks; never by execute_approved (the user already saw the preview and said yes).
+    prepare: PrepareFn | None = None
 
     def effective_risk(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn is not None else self.risk
@@ -191,6 +195,30 @@ class MavisTool:
                 return self.preview(args, ctx or ToolContext(user_id=0))
             return self.preview(args)
         return f"{self.name} {args.model_dump_json()}"
+
+
+@dataclass(frozen=True)
+class Prepared:
+    """What a tool's async pre-step decided, before taint and approval checks (Workspace spec 4.1).
+
+    `risk` can only raise the call's risk (an escalation to OUTWARD or DESTRUCTIVE); `refusal` is returned
+    to the model as the tool result and nothing runs or queues; `note` is appended to the approval preview
+    (facts the pre-step verified, such as the real file title, never model-written text)."""
+
+    risk: RiskClass | None = None
+    refusal: str | None = None
+    note: str | None = None
+
+
+PrepareFn = Callable[[ToolContext, BaseModel], Awaitable[Prepared]]
+_RISK_RANK = {
+    RiskClass.READ: 0, RiskClass.WRITE_SELF: 1, RiskClass.OUTWARD: 2, RiskClass.SPEND: 3,
+    RiskClass.DESTRUCTIVE: 4,
+}
+
+
+def higher_risk(a: RiskClass, b: RiskClass) -> RiskClass:
+    return a if _RISK_RANK[a] >= _RISK_RANK[b] else b
 
 
 async def _always_available(user_id: int, capability: Capability) -> bool:
@@ -261,26 +289,49 @@ class ToolRegistry:
         if tool.requires is not None and not await self.capability_check(user_id, tool.requires):
             raise ConnectionRequired(tool.requires, self.capability_reason(tool.requires))
 
+    async def _prepared(self, tool: MavisTool, user_id: int, args: BaseModel) -> Prepared:
+        """The call's effective risk (always set) or a refusal. A failing pre-step fails closed."""
+        risk = tool.effective_risk(args)
+        if tool.prepare is None:
+            return Prepared(risk=risk)
+        try:
+            prepared = await tool.prepare(await tool_context(user_id), args)
+        except (ApprovalRequired, ConnectionRequired):
+            raise
+        except Exception as exc:  # noqa: BLE001 - unknown means the user decides
+            log.warning("tool.prepare_failed", tool=tool.name, error_type=type(exc).__name__)
+            return Prepared(risk=higher_risk(risk, RiskClass.OUTWARD))
+        if prepared.refusal is not None:
+            log.info("tool.refused_before_approval", tool=tool.name)
+            return Prepared(risk=risk, refusal=prepared.refusal)
+        escalated = higher_risk(risk, prepared.risk) if prepared.risk is not None else risk
+        return Prepared(risk=escalated, note=prepared.note)
+
     async def invoke(self, tool: MavisTool, user_id: int, args: BaseModel) -> str:
         # Capability first: the user is asked to connect BEFORE being asked to approve.
         await self._require_capability(tool, user_id)
         payload = args.model_dump(mode="json")
+        prepared = await self._prepared(tool, user_id, args)
+        if prepared.refusal is not None:
+            return prepared.refusal  # refused before approval: nothing runs and nothing is queued
+        risk = prepared.risk or tool.effective_risk(args)
+        note = f"\n{prepared.note}" if prepared.note else ""
         tainted = _run_tainted()
         if tainted and tool.on_taint is TaintPolicy.APPROVE:
             log.info("tool.taint_needs_approval", tool=tool.name)
-            preview = tool.render_preview(args, await tool_context(user_id))
+            preview = tool.render_preview(args, await tool_context(user_id)) + note
             raise ApprovalRequired(tool.name, preview, payload)
-        if tool.effective_risk(args).needs_approval:
+        if risk.needs_approval:
             # Standing rules may waive approval for OUTWARD tools only; SPEND and DESTRUCTIVE always queue.
             # Never after untrusted output: an email must not ride a rule like "always allow X".
             auto = (
                 not tainted
-                and tool.effective_risk(args) is RiskClass.OUTWARD
+                and risk is RiskClass.OUTWARD
                 and tool.name not in NEVER_AUTO_APPROVE
                 and await policy_rules.matches(user_id, tool.name, payload)
             )
             if not auto:
-                preview = tool.render_preview(args, await tool_context(user_id))
+                preview = tool.render_preview(args, await tool_context(user_id)) + note
                 raise ApprovalRequired(tool.name, preview, payload)
         if tainted and tool.on_taint is TaintPolicy.DOWNGRADE and tool.tainted_fn is not None:
             log.info("tool.taint_downgraded", tool=tool.name)

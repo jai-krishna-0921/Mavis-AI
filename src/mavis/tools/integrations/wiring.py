@@ -31,11 +31,17 @@ from mavis.initiative.email_triage import EmailTriage, email_prefilter
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.timers.system import register_system_wakeup
 from mavis.tools.integrations import get_connection_cache, get_provider
-from mavis.tools.integrations.actions import CAPABILITY_PURPOSE, DISPLAY_NAMES, INTEGRATION_CAPABILITIES
+from mavis.tools.integrations.actions import (
+    CAPABILITY_PURPOSE,
+    GOOGLE_CAPABILITIES,
+    active_capabilities,
+    display_name,
+    workspace_enabled,
+)
 from mavis.tools.integrations.activation import Activator
 from mavis.tools.integrations.connect_flow import CHECK_KIND, ConnectFlow, RepoUserState
 from mavis.tools.integrations.first_sync import FirstSync
-from mavis.tools.integrations.poller import POLL_KIND, Poller
+from mavis.tools.integrations.poller import POLL_KIND, WORKSPACE_POLL_KIND, Poller
 from mavis.worker.runner import register_event_handler, register_job_handler, register_startup_hook
 
 if TYPE_CHECKING:
@@ -74,14 +80,15 @@ async def outbox_notify(msg: Outbound) -> None:
 
 
 async def wakeup_schedule(user_id: int, at: datetime, reason: str, kind: str) -> int:
-    """Schedule a system wakeup. Poll wakeups collapse onto an existing pending one (one chain per
-    user and capability); connection checks do not dedupe."""
+    """Schedule a system wakeup. Poll wakeups (and Workspace polls and deferred Workspace pings) collapse
+    onto an existing pending one with the same reason (one chain per user and capability); connection
+    checks do not dedupe."""
     from mavis.timers.service import WakeupService
 
     service = WakeupService()
-    if kind == POLL_KIND:
+    if kind in (POLL_KIND, WORKSPACE_POLL_KIND):
         now = timeutil.now()
-        for w in await service.pending(user_id, WakeupKind.SYSTEM_POLL):
+        for w in await service.pending(user_id, WakeupKind(kind)):
             if w.reason != reason:
                 continue
             # Any pending poll absorbs an immediate request (the Activator asks for "now"). A request
@@ -91,6 +98,18 @@ async def wakeup_schedule(user_id: int, at: datetime, reason: str, kind: str) ->
                 return w.id
     # plumbing, not agent intent: never compressed by DEMO_TIME_SCALE
     return await service.wake_me(user_id, at, reason, kind=kind, scale=False)
+
+
+async def google_activated(user_id: int) -> None:
+    """googlesuper is live for this user: drop the legacy triggers and start the Workspace polls, the
+    first one a full interval out so first sync sets the quiet baseline before any poll speaks (A3)."""
+    try:
+        await get_activator().retire_legacy(user_id)
+    finally:  # leftover legacy triggers only duplicate events; the polls must start regardless
+        if get_settings().attention_enabled and workspace_enabled():
+            from mavis.attention.wiring import get_workspace  # lazy: attention is wired after integrations
+
+            await get_workspace().ensure_chains(user_id, later=True)
 
 
 async def connection_checks_pending(user_id: int, pending_id: int) -> bool:
@@ -112,6 +131,14 @@ async def cancel_connection_checks(user_id: int, pending_id: int) -> None:
 async def reconnect_prompt(user_id: int, capability: Capability) -> object:
     """Expired or revoked access seen by the poller, a brief or an action: one prompt per day."""
     return await get_connect_flow().prompt_reconnect(user_id, capability)
+
+
+async def nudge_upgrade(user_id: int) -> None:
+    """Morning hook: a legacy-only Google user gets the one upgrade nudge (Workspace flag on)."""
+    try:
+        await get_connect_flow().maybe_nudge_upgrade(user_id)
+    except Exception as exc:  # noqa: BLE001 - the morning check-in must go on
+        log.warning("integrations.nudge_failed", user_id=user_id, error=type(exc).__name__)
 
 
 async def all_user_ids() -> list[int]:
@@ -159,7 +186,8 @@ def get_connect_flow() -> ConnectFlow:
         provider=get_provider(), cache=get_connection_cache(), bus=_LazyBus(), notify=outbox_notify,
         schedule=wakeup_schedule, state=RepoUserState(), base_url=get_settings().public_base_url,
         on_active=get_activator().on_active, has_checks=connection_checks_pending,
-        cancel_checks=cancel_connection_checks,
+        cancel_checks=cancel_connection_checks, on_google_active=google_activated,
+        on_google_begin=get_activator().begin_google,
     )
 
 
@@ -207,7 +235,7 @@ async def _notify_first_sync(event: Event) -> None:
         return
     capability = str(event.payload.get("capability", ""))
     try:
-        name = DISPLAY_NAMES[Capability(capability)]
+        name = display_name(Capability(capability))
     except ValueError:
         name = capability
     user = await users.get(event.user_id)
@@ -242,7 +270,7 @@ async def capability_check(user_id: int, capability: Capability) -> bool:
     user is asked to connect first. WEB and SANDBOX always pass. An expired or revoked account raises
     ConnectionRequired(revoked=True) itself, so the prompt says "reconnect". If the provider cannot be
     reached the check passes, and the tool reports "unreachable" instead of sending a connect link."""
-    if capability not in INTEGRATION_CAPABILITIES:
+    if capability not in active_capabilities():
         return True
     from mavis.tools import integrations  # module lookup at call time (tests swap the singletons)
 
@@ -267,8 +295,8 @@ def capability_reason(capability: Capability) -> str:
 def tool_available(tool: MavisTool) -> bool:
     """Integration tools are offered only when a provider is configured (a dev box without a key
     does not waste tool rounds on them)."""
-    if tool.requires not in INTEGRATION_CAPABILITIES:
-        return True
+    if tool.requires not in active_capabilities():
+        return tool.requires is None or tool.requires not in GOOGLE_CAPABILITIES
     from mavis.tools import integrations
 
     try:
@@ -301,6 +329,8 @@ def register_integrations(registry: ToolRegistry | None = None) -> None:
     # Self-healing: the poll chain lives in the wakeups table, so re-arm it on start and each morning.
     register_startup_hook(heal_all_poll_chains)
     routines.register_morning_hook(heal_poll_chains)
+    if workspace_enabled():
+        routines.register_morning_hook(nudge_upgrade)
 
     triage = get_email_triage()
     if email_prefilter not in hooks.PREFILTERS:

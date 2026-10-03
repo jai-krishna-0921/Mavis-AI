@@ -61,5 +61,9 @@ class IntegrationError(MavisError):
     """Provider unreachable, misconfigured or refused. Message is safe to show; never contains credentials."""
 
 
+class NoSuchConnection(IntegrationError):
+    """Disconnect asked for an account the user does not have."""
+
+
 class WebhookVerificationError(IntegrationError):
     """Inbound webhook failed signature/timestamp verification."""

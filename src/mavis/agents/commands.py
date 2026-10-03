@@ -7,7 +7,14 @@ import re
 from mavis.domain.events import Event
 from mavis.domain.messages import Role
 from mavis.domain.policy import Capability
-from mavis.tools.integrations.actions import DISPLAY_NAMES, INTEGRATION_CAPABILITIES
+from mavis.tools.integrations.actions import (
+    DISPLAY_NAMES,
+    GOOGLE_ANCHOR,
+    active_capabilities,
+    is_google,
+    workspace_enabled,
+)
+from mavis.tools.integrations.composio_map import LEGACY_ALIASES
 from mavis.tools.integrations.connect_flow import ConnectFlow
 
 NOT_CONFIGURED_TEXT = "Connections aren't set up on this Mavis yet."
@@ -31,7 +38,20 @@ def parse_command(text: str) -> tuple[str, list[str]] | None:
     return parts[0].split("@", 1)[0].lower(), parts[1:]
 
 
+# With Workspace on, every Google word opens the one Google consent (spec 3.3).
+_GOOGLE_WORDS = re.compile(
+    r"\b(google|workspace|g?suite|drive|docs?|sheets?|spreadsheets?|tasks?|to-?dos?|contacts?|meet)\b", re.I
+)
+
+
 def capability_from_text(text: str) -> Capability | None:
+    if workspace_enabled():
+        for pattern, capability in _KEYWORDS:  # Slack and Notion first: "notion docs" is Notion
+            if not is_google(capability) and pattern.search(text or ""):
+                return capability
+        if _GOOGLE_WORDS.search(text or "") or any(p.search(text or "") for p, _ in _KEYWORDS):
+            return GOOGLE_ANCHOR  # only Google keywords are left (gmail, calendar...)
+        return None
     for pattern, capability in _KEYWORDS:
         if pattern.search(text or ""):
             return capability
@@ -74,7 +94,11 @@ async def _run(f: ConnectFlow, event: Event, name: str, args: list[str]) -> None
     if not _configured(f):
         await f.send(event.user_id, NOT_CONFIGURED_TEXT)
         return
-    capability = capability_from_text(" ".join(args)) if args else None
+    words = " ".join(args).strip().lower()
+    if name == "disconnect" and workspace_enabled() and words in LEGACY_ALIASES:
+        await f.disconnect_legacy(event.user_id, words)
+        return
+    capability = capability_from_text(words) if args else None
     if name == "connect":
         if capability is not None:
             await f.start(event.user_id, capability, "")
@@ -82,9 +106,13 @@ async def _run(f: ConnectFlow, event: Event, name: str, args: list[str]) -> None
             await f.offer_menu(event.user_id)
     elif name == "connections":
         await f.send(event.user_id, await f.status_text(event.user_id))
-    elif capability is None or capability not in INTEGRATION_CAPABILITIES:
-        options = ", ".join(DISPLAY_NAMES[c].split()[-1].lower() for c in INTEGRATION_CAPABILITIES)
-        await f.send(event.user_id, f"Which one? e.g. /disconnect gmail ({options})")
+    elif capability is None or capability not in active_capabilities():
+        if workspace_enabled():
+            await f.send(event.user_id, "Which one? e.g. /disconnect google (google, slack, notion, "
+                                        "gmail-legacy, calendar-legacy)")
+        else:
+            options = ", ".join(DISPLAY_NAMES[c].split()[-1].lower() for c in active_capabilities())
+            await f.send(event.user_id, f"Which one? e.g. /disconnect gmail ({options})")
     else:
         await f.disconnect(event.user_id, capability)
 

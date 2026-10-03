@@ -19,6 +19,7 @@ def get_provider() -> IntegrationProvider:
         return ComposioProvider(
             api_key=s.composio_api_key, base_url=s.composio_base_url,
             webhook_secret=s.composio_webhook_secret, timeout_s=s.composio_timeout_s,
+            workspace=s.google_workspace_enabled,
         )
     raise IntegrationError(f"unknown INTEGRATION_PROVIDER {s.integration_provider!r}")
 

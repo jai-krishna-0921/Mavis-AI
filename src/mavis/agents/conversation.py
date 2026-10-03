@@ -146,10 +146,13 @@ async def handle_connect(user_id: int, text: str) -> str | None:
 
 
 def _connect_hint(exc: ConnectionRequired) -> str:
-    from mavis.tools.integrations.actions import DISPLAY_NAMES
+    from mavis.tools.integrations.actions import display_name, is_google
 
-    name = DISPLAY_NAMES.get(exc.capability, exc.capability.value)
-    word = "calendar" if exc.capability.value == "googlecalendar" else exc.capability.value
+    name = display_name(exc.capability)
+    if is_google(exc.capability):
+        word = "google"
+    else:
+        word = "calendar" if exc.capability.value == "googlecalendar" else exc.capability.value
     return f"I need your {name} linked for that. Send /connect {word} and I'll take it from there."
 
 
