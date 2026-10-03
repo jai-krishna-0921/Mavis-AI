@@ -188,3 +188,39 @@ async def test_malformed_success_body_is_integration_error(provider, response):
     respx.get(f"{BASE}/connected_accounts").mock(return_value=response)
     with pytest.raises(IntegrationError):
         await provider.status(USER)
+
+
+# --- hotfix3 RC4: an abandoned connect link is "not connected", never "expired" -------------------
+NEVER_STARTED = "Connection expired before authorization was started"
+NOT_FINISHED = "Authorization was started but not completed within 10 minutes"
+
+
+def _attempt(slug, created, acct_id, reason):
+    return {**_acct(slug, "EXPIRED", created, acct_id), "status_reason": reason}
+
+
+@respx.mock
+@pytest.mark.parametrize("reason", [NEVER_STARTED, NOT_FINISHED])
+async def test_abandoned_connect_attempt_is_not_connected(provider, reason):
+    respx.get(f"{BASE}/connected_accounts").mock(return_value=httpx.Response(200, json={"items": [
+        _attempt("googlecalendar", "2026-10-03T08:05:35Z", "ca_1", reason),
+        _attempt("googlecalendar", "2026-10-03T08:54:31Z", "ca_2", reason),
+    ]}))
+    assert (await provider.status(USER))["googlecalendar"] is ConnectionState.NONE
+
+
+@respx.mock
+async def test_abandoned_attempt_does_not_hide_a_really_expired_account(provider):
+    respx.get(f"{BASE}/connected_accounts").mock(return_value=httpx.Response(200, json={"items": [
+        {**_acct("gmail", "EXPIRED", "2026-09-01T00:00:00Z", "ca_real"), "status_reason": "Token revoked"},
+        _attempt("gmail", "2026-10-03T08:05:35Z", "ca_try", NEVER_STARTED),
+    ]}))
+    assert (await provider.status(USER))["gmail"] is ConnectionState.FAILED
+
+
+@respx.mock
+async def test_initiated_attempt_is_not_reported_as_failed(provider):
+    respx.get(f"{BASE}/connected_accounts").mock(return_value=httpx.Response(200, json={"items": [
+        _acct("googlecalendar", "INITIATED", "2026-10-03T08:05:35Z", "ca_1"),
+    ]}))
+    assert (await provider.status(USER))["googlecalendar"] is not ConnectionState.FAILED

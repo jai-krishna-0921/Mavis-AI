@@ -44,6 +44,9 @@ CHECK_DELAYS = (
     PENDING_TTL + timedelta(minutes=1),  # the last one is past the TTL, so the expiry is reachable
 )
 REUSE_WINDOW = timedelta(minutes=10)
+# A task that needs a capability while a connect prompt for it is still open (and this recent) joins
+# that request silently instead of sending another prompt; the user can always ask for a fresh link.
+TASK_JOIN_WINDOW = timedelta(hours=2)
 NOT_NOW_PREFIX = "conn:no:"
 START_PREFIX = "conn:start:"
 RETRY_PREFIX = "conn:retry:"
@@ -153,7 +156,8 @@ class ConnectFlow:
 
         now = self.clock()
         recent = await connections.latest_open(user_id, capability)
-        if recent is not None and now - _aware(recent.created_at) < REUSE_WINDOW:
+        window = TASK_JOIN_WINDOW if task_id else REUSE_WINDOW
+        if recent is not None and now - _aware(recent.created_at) < window:
             # A link went out moments ago: remember this run, hand the link over again, and make sure
             # something is still watching for the sign-in to finish.
             if task_id:
