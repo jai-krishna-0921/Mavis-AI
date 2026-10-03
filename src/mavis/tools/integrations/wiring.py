@@ -36,6 +36,7 @@ from mavis.tools.integrations.actions import (
     GOOGLE_CAPABILITIES,
     active_capabilities,
     display_name,
+    workspace_enabled,
 )
 from mavis.tools.integrations.activation import Activator
 from mavis.tools.integrations.connect_flow import CHECK_KIND, ConnectFlow, RepoUserState
@@ -119,6 +120,14 @@ async def reconnect_prompt(user_id: int, capability: Capability) -> object:
     return await get_connect_flow().prompt_reconnect(user_id, capability)
 
 
+async def nudge_upgrade(user_id: int) -> None:
+    """Morning hook: a legacy-only Google user gets the one upgrade nudge (Workspace flag on)."""
+    try:
+        await get_connect_flow().maybe_nudge_upgrade(user_id)
+    except Exception as exc:  # noqa: BLE001 - the morning check-in must go on
+        log.warning("integrations.nudge_failed", user_id=user_id, error=type(exc).__name__)
+
+
 async def all_user_ids() -> list[int]:
     from mavis.store.repo import users
 
@@ -164,7 +173,7 @@ def get_connect_flow() -> ConnectFlow:
         provider=get_provider(), cache=get_connection_cache(), bus=_LazyBus(), notify=outbox_notify,
         schedule=wakeup_schedule, state=RepoUserState(), base_url=get_settings().public_base_url,
         on_active=get_activator().on_active, has_checks=connection_checks_pending,
-        cancel_checks=cancel_connection_checks,
+        cancel_checks=cancel_connection_checks, on_google_active=get_activator().retire_legacy,
     )
 
 
@@ -306,6 +315,8 @@ def register_integrations(registry: ToolRegistry | None = None) -> None:
     # Self-healing: the poll chain lives in the wakeups table, so re-arm it on start and each morning.
     register_startup_hook(heal_all_poll_chains)
     routines.register_morning_hook(heal_poll_chains)
+    if workspace_enabled():
+        routines.register_morning_hook(nudge_upgrade)
 
     triage = get_email_triage()
     if email_prefilter not in hooks.PREFILTERS:
