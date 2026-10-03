@@ -13,7 +13,7 @@ from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision, NotifyIntent, WakeupRequest
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import Loop, LoopStatus, LoopUpsert
-from mavis.domain.messages import Outbound, Role
+from mavis.domain.messages import Button, Outbound, Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.composer import Composer
 from mavis.initiative.quiet import QuietTracker
@@ -169,7 +169,8 @@ class InitiativeExecutor:
 
     async def notify(self, user, intent: NotifyIntent, context: str = "", quiet_streak: int = 0,
                      untrusted: bool = False, original_due: datetime | None = None,
-                     origin: dict[str, Any] | None = None) -> bool:
+                     origin: dict[str, Any] | None = None,
+                     buttons: list[list[Button]] | None = None) -> bool:
         if untrusted and intent.urgency > MAX_UNTRUSTED_URGENCY:
             intent = intent.model_copy(update={"urgency": MAX_UNTRUSTED_URGENCY})
         # an untrusted ping must not use up the loop's daily slot for this kind of ping
@@ -209,7 +210,7 @@ class InitiativeExecutor:
             log.info("initiative.composer_dropped", user=user.id, intent=intent.intent[:80])
             return False
         await self.deliver(user, message.messages, intent.dedupe_key, intent.urgency, quiet_streak,
-                           extra_keys=extra)
+                           extra_keys=extra, buttons=buttons)
         await self._follow_up_sent(origin)
         return True
 
@@ -236,7 +237,8 @@ class InitiativeExecutor:
         return True
 
     async def deliver(self, user, bubbles: list[str], dedupe_key: str | None = None, urgency: int = 3,
-                      quiet_streak: int = 0, extra_keys: list[str] | None = None) -> None:
+                      quiet_streak: int = 0, extra_keys: list[str] | None = None,
+                      buttons: list[list[Button]] | None = None) -> None:
         now = timeutil.now()
         local_date = timeutil.to_local(now, user.timezone).date().isoformat()
 
@@ -244,9 +246,11 @@ class InitiativeExecutor:
             return f"{prefix}{dedupe_key}:{local_date}:{i}" if dedupe_key else None
 
         async with Session() as session:
+            last = len(bubbles) - 1
             for i, text in enumerate(bubbles):
+                rows = buttons if (buttons and i == last) else []  # the keyboard rides on the last bubble
                 await outbox.enqueue(session, Outbound(user_id=user.id, text=text, proactive=True,
-                                                       dedupe_key=scoped("", i)))
+                                                       dedupe_key=scoped("", i), buttons=rows))
             await session.commit()
         await messages.log(user.id, Role.ASSISTANT, "\n".join(bubbles), proactive=True,
                            event_id=scoped("proactive:", 0))
