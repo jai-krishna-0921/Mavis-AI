@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import ValidationError
 
+from mavis.config import get_settings
 from mavis.domain.errors import IntegrationError, NoSuchConnection
 from mavis.domain.events import Event
 from mavis.domain.integrations import ConnectionState, Toolkit, ToolResult, UserRef
@@ -35,6 +38,28 @@ from mavis.tools.integrations.composio_map import (
     slug_for,
     toolkit_of_slug,
 )
+
+# Hosts Composio's presigned upload URLs may point at (its OpenAPI: storage_backend s3 or azure_blob_storage).
+STORAGE_HOST_SUFFIXES = (".amazonaws.com", ".composio.dev", ".blob.core.windows.net")
+UPLOAD_LIMIT = 5 * 1024 * 1024  # googlesuper UPLOAD_FILE takes at most 5 MB
+
+
+def _storage_host_ok(url: str) -> bool:
+    """https only, a DNS name (no IP literal, no localhost) under a known storage domain."""
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return False
+    if parts.scheme != "https" or not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return False
+    except ValueError:
+        pass
+    return host.endswith(STORAGE_HOST_SUFFIXES)
+
 
 CATALOG: tuple[Toolkit, ...] = (
     Toolkit(slug="gmail", name="Gmail", description="Read, triage and draft email."),
@@ -209,10 +234,20 @@ class ComposioProvider:
                 states[capability.value] = legacy  # Gmail/Calendar keep working on the old connection
         return states
 
+    @staticmethod
+    def _read_artifact(path: str) -> bytes:
+        """Defence in depth: only a regular file inside the artifacts directory, at most 5 MiB."""
+        resolved = Path(path).resolve()
+        if not resolved.is_relative_to(get_settings().artifacts_dir.resolve()) or not resolved.is_file():
+            raise IntegrationError("the file is not an artifact of this app")
+        if resolved.stat().st_size > UPLOAD_LIMIT:
+            raise IntegrationError("the file is larger than 5 MB")
+        return resolved.read_bytes()
+
     async def _stage_file(self, slug: str, path: str, name: str, mime: str) -> dict[str, str]:
         """Upload a local file to Composio's storage for `slug` and return the file reference the tool takes.
         The presigned PUT goes to the storage host without the API key."""
-        data = await asyncio.to_thread(Path(path).read_bytes)
+        data = await asyncio.to_thread(self._read_artifact, path)
         answer = await self._request("POST", "/files/upload/request", body={
             "toolkit_slug": GOOGLESUPER, "tool_slug": slug, "filename": name, "mimetype": mime,
             "md5": hashlib.md5(data).hexdigest(),  # Composio's dedupe key, not a security check
@@ -222,9 +257,14 @@ class ComposioProvider:
             raise IntegrationError("Composio returned no storage key for the upload.")
         url = str(answer.get("new_presigned_url") or answer.get("newPresignedUrl") or "")
         if url:  # absent when Composio already holds a file with this md5
+            if not _storage_host_ok(url):
+                raise IntegrationError("unexpected upload host")
+            headers = {"Content-Type": mime}
+            if (urlsplit(url).hostname or "").lower().endswith(".blob.core.windows.net"):
+                headers["x-ms-blob-type"] = "BlockBlob"  # Azure storage backend requires it
             try:
                 async with httpx.AsyncClient(timeout=self._timeout) as storage:
-                    resp = await storage.put(url, content=data, headers={"Content-Type": mime})
+                    resp = await storage.put(url, content=data, headers=headers)
             except httpx.HTTPError as exc:
                 raise IntegrationError(f"could not upload the file: {type(exc).__name__}") from None
             if resp.status_code >= 400:
