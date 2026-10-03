@@ -23,6 +23,7 @@ from mavis.initiative.routines import Routines
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.loops.service import LoopService
 from mavis.policy.pings import normalize_dedupe_key
+from mavis.store.repo import decisions as decisions_repo
 from mavis.store.repo import users
 from mavis.timers import system
 from mavis.timers.service import WakeupService
@@ -97,20 +98,18 @@ class InitiativeHandler:
         if not result.matched_loops and (reason := await hooks.run_prefilters(event)):
             log.info("initiative.prefiltered", event_id=event.id, reason=reason)
             return
-        result.extra = await hooks.gather_enrichments(event)
-        try:
-            decision = _normalize_llm_key(_cap_llm_urgency(await self._reasoner.decide(user, event, result)))
-        except LLMError as exc:
-            log.warning("initiative.reasoner_failed", event_id=event.id, error=str(exc))
-            decision = fallback_decision(event, result)
+        # A retry (the executor failed part way) re-applies the first decision: asking the model again
+        # could decide differently after half of the first decision's side effects already happened.
+        decision = await decisions_repo.get(event.id)
+        if decision is None:
+            decision = await self._decide(user, event, result)
+            await decisions_repo.save(user.id, event.id, decision)
+        else:
+            log.info("initiative.decision_reused", event_id=event.id)
 
         if event.type is EventType.LOOP_CREATED:
             # Always: the model's own wakeups are deduped against these by the executor, not instead of them
             await schedule_default_signals(self._wakeups, Loop.model_validate(event.payload))
-
-        decision = await hooks.apply_decision_policies(event, decision)
-        decision = _imminent_floor(event, decision, result.matched_loops)
-        decision = _with_default_dedupe(decision, event)
         context = result.summary
         if event.trust is Trust.UNTRUSTED:
             context = wrap_untrusted(result.summary, event.type.value)
@@ -121,6 +120,17 @@ class InitiativeHandler:
 
         if event.type is EventType.EVENT_ENDED and event.payload.get("loop_id"):
             await self._loops.close(int(event.payload["loop_id"]), LoopStatus.DONE)
+
+    async def _decide(self, user, event: Event, result) -> InitiativeDecision:
+        result.extra = await hooks.gather_enrichments(event)
+        try:
+            decision = _normalize_llm_key(_cap_llm_urgency(await self._reasoner.decide(user, event, result)))
+        except LLMError as exc:
+            log.warning("initiative.reasoner_failed", event_id=event.id, error=str(exc))
+            decision = fallback_decision(event, result)
+        decision = await hooks.apply_decision_policies(event, decision)
+        decision = _imminent_floor(event, decision, result.matched_loops)
+        return _with_default_dedupe(decision, event)
 
     async def _deferred_stale(self, user_id: int, payload: dict) -> str | None:
         """Send-time revalidation of a deferred ping: why it should no longer go out, or None."""
