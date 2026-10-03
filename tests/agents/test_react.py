@@ -147,6 +147,9 @@ async def test_connection_required_raised_after_other_calls_settle(fake_llm):
         await react_loop(tools, [HumanMessage("go")], max_steps=3)
     assert exc.value.capability is Capability.GMAIL and exc.value.revoked is True
     assert done == ["y"]
+    assert [m.content for m in exc.value.partial_messages if m.tool_call_id == "c2"] == ["ok"]
+    assert [m.tool_call_id for m in exc.value.partial_messages] == ["c1", "c2"]
+    assert exc.value.queued_approvals == []
     assert not fake_llm.ai_queue  # no further model call
     assert current_run.get() is None  # run state does not leak out of the loop
 
@@ -180,6 +183,8 @@ async def test_malformed_tool_call_is_answered_and_loop_continues(fake_llm):
     answered = [m.tool_call_id for m in res.messages[2:4]]
     assert answered == ids
     assert "Malformed tool call" in res.messages[3].content
+    assert "bad JSON" in res.messages[3].content  # parse error still reported to the model
+    assert ai.invalid_tool_calls[0]["args"] == "{}"  # never echo broken JSON back to the provider
     assert calls == ["ok"]
     assert res.text == "fixed"
 
@@ -398,3 +403,139 @@ def test_split_bubbles_keeps_code_blocks_whole_and_drops_dashes():
     assert split_bubbles(text) == ["Here it is, enjoy.", "```\nx = 1\n\ny = 2 — 3\n```", "Bye"]
     out = split_bubbles("A–B notes\n\nsecond")
     assert not any(d in b for b in out for d in DASHES)
+
+
+# --- fix round 1 -------------------------------------------------------------------------------
+
+
+async def test_malformed_call_copied_even_when_ids_present(fake_llm):
+    bad = AIMessage(
+        content="",
+        invalid_tool_calls=[{"name": "echo", "args": "{nope", "id": "x1", "error": "bad JSON"}],
+        additional_kwargs={"tool_calls": [{"id": "x1", "function": {"name": "echo", "arguments": "{nope"}}]},
+    )
+    fake_llm.push_ai(bad)
+    fake_llm.push_text("ok")
+    res = await react_loop([_echo_tool([])], [HumanMessage("go")], max_steps=3)
+    ai = res.messages[1]
+    assert ai.invalid_tool_calls[0]["args"] == "{}" and ai.invalid_tool_calls[0]["id"] == "x1"
+    assert "tool_calls" not in ai.additional_kwargs
+    assert res.tools_called == []
+
+
+async def test_connection_required_carries_queued_approvals(fake_llm, note_tool, fresh_registry, user):
+    note_tool_registry = fresh_registry
+    async def needs_gmail(text: str) -> str:
+        raise ConnectionRequired(Capability.GMAIL, "read your email")
+
+    gmail = StructuredTool.from_function(coroutine=needs_gmail, name="gmail", description="G.")
+    tools = [*_tools(note_tool_registry, user.id), gmail]
+    fake_llm.push_ai(_call("send_note", {"text": "hi"}, "c1"))
+    fake_llm.push_ai(_call("gmail", {"text": "x"}, "c2"))
+    with pytest.raises(ConnectionRequired) as exc:
+        await react_loop(tools, [HumanMessage("go")], max_steps=3)
+    assert len(exc.value.queued_approvals) == 1
+    assert (await approvals.get(exc.value.queued_approvals[0])).tool == "send_note"
+
+
+async def test_tools_called_lists_only_calls_that_ran(fake_llm):
+    async def boom(text: str) -> str:
+        raise RuntimeError("kaput")
+
+    tools = [StructuredTool.from_function(coroutine=boom, name="boom", description="F."), _echo_tool([])]
+    fake_llm.push_ai(_calls(
+        ("boom", {"text": "x"}, "c1"), ("nope", {}, "c2"), ("echo", {"text": "y"}, "c3"),
+        ("echo", {"bad": 1}, "c4"),
+    ))
+    fake_llm.push_text("ok")
+    res = await react_loop(tools, [HumanMessage("go")], max_steps=3)
+    assert res.tools_called == ["echo"]
+
+
+async def test_hung_tool_times_out_with_wrapped_error(fake_llm, settings):
+    settings.tool_timeout_s = 0.05
+
+    async def hang(text: str) -> str:
+        await asyncio.sleep(5)
+        return "never"
+
+    tool = StructuredTool.from_function(coroutine=hang, name="hang", description="H.")
+    fake_llm.push_ai(_call("hang", {"text": "x"}, "c1"))
+    fake_llm.push_text("sorry")
+    res = await react_loop([tool], [HumanMessage("go")], max_steps=3)
+    content = res.messages[2].content
+    assert content.startswith('<untrusted source="hang">') and "took longer than 0.05s" in content
+    assert res.tools_called == []
+    assert res.text == "sorry"
+
+
+async def test_tool_metadata_can_lift_the_timeout(fake_llm, settings):
+    settings.tool_timeout_s = 0.01
+
+    async def slowish(text: str) -> str:
+        await asyncio.sleep(0.05)
+        return "finished"
+
+    tool = StructuredTool.from_function(
+        coroutine=slowish, name="slowish", description="S.", metadata={"timeout_s": 0}
+    )
+    fake_llm.push_ai(_call("slowish", {"text": "x"}, "c1"))
+    fake_llm.push_text("ok")
+    res = await react_loop([tool], [HumanMessage("go")], max_steps=3)
+    assert res.messages[2].content == "finished"
+
+
+async def test_tools_own_timeout_error_is_a_plain_tool_error(fake_llm, settings):
+    async def own(text: str) -> str:
+        raise TimeoutError("upstream slow")
+
+    tool = StructuredTool.from_function(coroutine=own, name="own", description="O.")
+    fake_llm.push_ai(_call("own", {"text": "x"}, "c1"))
+    fake_llm.push_text("ok")
+    res = await react_loop([tool], [HumanMessage("go")], max_steps=3)
+    assert res.messages[2].content == "Tool error: TimeoutError: upstream slow"
+
+
+def test_registry_passes_tool_timeout_as_metadata(fresh_registry):
+    async def fn(user_id, args):
+        return ""
+
+    fresh_registry.register(MavisTool(
+        name="long", description="d", args_model=_MailArgs, risk=RiskClass.READ, fn=fn,
+        agents=frozenset({"conversation"}), timeout_s=300,
+    ))
+    (tool,) = fresh_registry.for_agent("conversation", 1)
+    assert tool.metadata == {"timeout_s": 300}
+
+
+async def test_tainted_run_queues_cancel_task(fake_llm, taint_registry, user, monkeypatch):
+    cancelled: list[int] = []
+
+    async def fake_cancel(user_id, task_id):
+        cancelled.append(task_id)
+        return True
+
+    monkeypatch.setattr(assistant.tasks, "cancel", fake_cancel)
+    taint_registry.register(next(t for t in assistant.TOOLS if t.name == "cancel_task"))
+    fake_llm.push_ai(_call("mail_read", {"message_id": "m1"}, "c1"))
+    fake_llm.push_ai(_call("cancel_task", {"task_id": 9}, "c2"))
+    fake_llm.push_text("Waiting for your OK.")
+    res = await react_loop(_tools(taint_registry, user.id), [HumanMessage("read")], max_steps=4)
+    assert cancelled == []
+    row = await approvals.get(res.queued_approvals[0])
+    assert row.tool == "cancel_task" and row.preview == "Cancel background task #9"
+
+
+def test_wake_preview_uses_users_local_time():
+    from datetime import datetime
+
+    from mavis.tools.registry import ToolContext
+
+    tool = next(t for t in assistant.TOOLS if t.name == "wake_me")
+    ctx = ToolContext(user_id=1, timezone="Asia/Kolkata")
+    aware = assistant.WakeMeArgs(at=datetime.fromisoformat("2026-10-05T10:00:00+00:00"), reason="call mum")
+    assert tool.render_preview(aware, ctx) == "Set a reminder for Mon 05 Oct 2026, 15:30: call mum"
+    naive = assistant.WakeMeArgs(at=datetime.fromisoformat("2026-10-05T09:00:00"), reason="stretch")
+    assert "09:00" in tool.render_preview(naive, ctx)
+    bad_tz = ToolContext(user_id=1, timezone="Not/AZone")
+    assert tool.render_preview(aware, bad_tz).startswith("Set a reminder for")

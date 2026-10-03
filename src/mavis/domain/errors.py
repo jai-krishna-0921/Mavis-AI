@@ -17,6 +17,10 @@ class ConnectionRequired(MavisError):
         self.capability = capability
         self.reason = reason
         self.revoked = revoked
+        # Filled by agents.react.react_loop when a tool raises this mid-run, so the caller can still
+        # report what did happen (e.g. "reminder set, now connect Gmail") and attach queued approvals.
+        self.partial_messages: list = []  # ToolMessages of the interrupted step, in call order
+        self.queued_approvals: list[int] = []  # pending_approvals ids queued earlier in the run
 
 
 class ApprovalRequired(MavisError):

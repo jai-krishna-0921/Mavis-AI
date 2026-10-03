@@ -79,6 +79,7 @@ class Settings(BaseSettings):
     task_progress_after_s: float = 30
     approval_ttl_hours: int = 48
     react_max_steps: int = 8
+    tool_timeout_s: float = 45  # per tool call inside react_loop; a tool may override via metadata
     task_step_parallelism: int = 1
     initiative_act_enabled: bool = True
 
