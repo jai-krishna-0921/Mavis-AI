@@ -102,7 +102,9 @@ class InitiativeExecutor:
             from mavis.agents.task_dispatch import dispatch_task_requests  # lazy: avoid an import cycle
             from mavis.domain.tasks import TaskOrigin
 
-            await dispatch_task_requests(user.id, [task], TaskOrigin.INITIATIVE, bus=self._bus)
+            # always tainted: the reasoner's prompt carries untrusted history, memory and email
+            await dispatch_task_requests(user.id, [task], TaskOrigin.INITIATIVE, bus=self._bus,
+                                         tainted=True)
         if decision.notify is not None:
             intent = decision.notify
             if intent.dedupe_key is None:  # retry-safe default: one notification per source event

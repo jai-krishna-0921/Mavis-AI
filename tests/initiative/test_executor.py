@@ -252,3 +252,21 @@ async def test_act_disabled_by_setting_dispatches_nothing(user, clock, recording
     await executor.apply(user, InitiativeDecision(act=[TaskRequest(goal="Draft a follow-up")]), ev())
     assert recording_bus.jobs == []
     get_settings.cache_clear()
+
+
+async def test_act_creates_a_tainted_initiative_task(user, clock, recording_bus, fake_memory):
+    """The reasoner's prompt carries untrusted history, memory and email: its tasks always run tainted."""
+    from mavis.store.repo import tasks
+
+    executor, _, _ = build(recording_bus, fake_memory)
+    await executor.apply(user, InitiativeDecision(act=[TaskRequest(goal="Draft a follow-up")]), ev())
+    [job] = recording_bus.jobs
+    task = await tasks.get(job.payload["task_id"])
+    assert task.tainted and task.origin == "initiative"
+
+
+def test_initiative_act_switch_is_in_prod_compose() -> None:
+    from pathlib import Path
+
+    compose = (Path(__file__).resolve().parents[2] / "docker-compose.prod.yml").read_text()
+    assert "INITIATIVE_ACT_ENABLED: ${INITIATIVE_ACT_ENABLED:-true}" in compose
