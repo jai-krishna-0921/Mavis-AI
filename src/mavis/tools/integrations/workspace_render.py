@@ -136,6 +136,11 @@ def _value_ranges(data: Any) -> list[dict]:
     return [r for r in ranges or [] if isinstance(r, dict)]
 
 
+def has_value_ranges(data: Any) -> bool:
+    """True when a BATCH_GET reply carries at least one valueRange (an empty range still has one)."""
+    return bool(_value_ranges(data))
+
+
 def sheet_rows(data: Any) -> tuple[str, list[list[str]]]:
     ranges = _value_ranges(data)
     if not ranges:
@@ -243,7 +248,6 @@ RENDERERS = {
     "tasks.list": render_tasks,
     "contacts.search": render_contacts,
     "meet.transcript": render_transcripts,
-    "drive.move": render_created,
     "docs.comment": render_created,
     "tasks.delete": render_created,
     "meet.create": render_meet,

@@ -26,7 +26,7 @@ from mavis.tools.integrations.workspace_guard import (
     update_workspace_state,
 )
 from mavis.tools.integrations.workspace_render import render_created
-from mavis.tools.integrations.workspace_tools import docs_append, drive_share
+from mavis.tools.integrations.workspace_tools import docs_append, drive_move, drive_share
 from mavis.tools.registry import ToolContext, ToolRegistry, ToolRun, current_run
 
 ME = "jai@example.com"
@@ -240,3 +240,29 @@ def test_created_ids_and_render_created_share_id_keys():
     data = {"response_data": {"documentId": "doc-9"}}
     assert created_ids(data) == ["doc-9"]
     assert render_created(data) == 'Done. {"documentId": "doc-9"}'
+
+
+def test_a_sole_owner_with_another_known_email_is_not_mine():
+    assert ownership([OWNER_OTHER], ME) == (False, False)
+    assert ownership([OWNER_OTHER], "") == (True, False)  # cannot compare: only you can list it
+    assert ownership([{"role": "owner", "type": "user"}], ME) == (True, False)  # no email to compare
+    assert ownership([OWNER_ME], ME) == (True, False)
+
+
+async def test_foreign_sole_owner_write_is_outward(google, user):
+    perms(google, OWNER_OTHER)
+    out = await prepare_row(ToolContext(user_id=user.id), ROW)
+    assert out.risk is RiskClass.OUTWARD and "owned by someone else" in out.note
+
+
+async def test_moving_a_file_forgets_its_cached_facts(google, user):
+    ctx = ToolContext(user_id=user.id)
+    perms(google, {"id": "p1", "type": "user", "role": "owner"})
+    token = current_run.set(ToolRun())
+    try:
+        assert (await file_meta(ctx, "s1")).shared_with_others is False
+        await drive_move(ctx, a.DriveMoveArgs(file_id="s1", to_folder_id="team"))
+        perms(google, OWNER_ME, READER_OTHER)  # the shared folder's members now see it
+        assert (await file_meta(ctx, "s1")).shared_with_others is True
+    finally:
+        current_run.reset(token)

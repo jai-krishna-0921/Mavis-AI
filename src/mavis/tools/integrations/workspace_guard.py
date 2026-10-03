@@ -27,7 +27,7 @@ from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connections import ConnectionCache
 from mavis.tools.integrations.normalize import extract_list, pick
 from mavis.tools.integrations.tools import action_data
-from mavis.tools.integrations.workspace_render import ID_KEYS, kind_of, one_line, sheet_rows
+from mavis.tools.integrations.workspace_render import ID_KEYS, has_value_ranges, kind_of, one_line, sheet_rows
 from mavis.tools.registry import Prepared, PrepareFn, ToolContext, current_run
 
 MAX_TRACKED_TASKS = 200
@@ -115,7 +115,12 @@ def ownership(permissions: list[dict], me: str) -> tuple[bool, bool]:
     live = [p for p in permissions if isinstance(p, dict) and not p.get("deleted")]
     owners = [p for p in live if p.get("role") == "owner"]
     mine = bool(me) and any(str(p.get("emailAddress") or "").strip().lower() == me for p in owners)
-    owned = (len(live) == 1 and len(owners) == 1) or mine
+    # The single-owner shortcut holds only when we cannot compare: `me` unknown or the owner has no email.
+    # A known `me` that differs from the owner's email means someone else's file.
+    sole_owner = len(live) == 1 and len(owners) == 1
+    owner_email = str(owners[0].get("emailAddress") or "").strip() if sole_owner else ""
+    comparable = bool(me) and bool(owner_email)
+    owned = mine or (sole_owner and not comparable)
     shared = len(live) > 1 or any(p.get("type") in ("anyone", "domain") for p in live)
     return owned, shared
 
@@ -196,9 +201,9 @@ async def filled_cells(ctx: ToolContext, args: SheetUpdateArgs) -> int | None:
                                                                      range=where))
     except (ActionFailed, ValueError):
         return None
-    found, rows = sheet_rows(data)
-    if not found:
+    if not has_value_ranges(data):
         return None  # no valueRanges in the reply: not proof that the range is empty
+    _, rows = sheet_rows(data)
     return sum(1 for row in rows for cell in row if str(cell).strip())
 
 
@@ -247,6 +252,10 @@ ESCALATIONS: dict[str, PrepareFn] = {
 # --- Google Tasks: the real task, never the model's idea of it -------------------------------------------
 
 
+def _task_key(user_id: int, task_id: str) -> str:
+    return f"task:{user_id}:{task_id}"
+
+
 @dataclass(frozen=True)
 class TaskFacts:
     task_id: str
@@ -264,7 +273,7 @@ async def task_facts(
     """The task's title and status as Google has them (tasks.get); None when the lookup fails or the reply
     has no title. Cached for the tool loop, so prepare and the write share one lookup."""
     run = current_run.get()
-    key = f"task:{ctx.user_id}:{task_id}"
+    key = _task_key(ctx.user_id, task_id)
     if run is not None and key in run.memo:
         return run.memo[key]
     try:
@@ -280,6 +289,14 @@ async def task_facts(
     if run is not None:
         run.memo[key] = result
     return result
+
+
+def remember_task(ctx: ToolContext, facts: TaskFacts) -> None:
+    """After a successful write, the run's cached task is what was just sent, so a second call in the same
+    loop neither reopens a task nor undoes a rename (and its approval note shows the new title)."""
+    run = current_run.get()
+    if run is not None:
+        run.memo[_task_key(ctx.user_id, facts.task_id)] = facts
 
 
 async def prepare_task(ctx: ToolContext, args: Any) -> Prepared:
