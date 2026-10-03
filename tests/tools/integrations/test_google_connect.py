@@ -302,3 +302,10 @@ async def test_disconnect_google_with_no_connection_at_all_says_so(
     flow = make_flow(provider, cache, fake_bus, rec, state)
     await run_command(msg("/disconnect gmail"), flow)
     assert rec.sent[-1].text == "There's no Google connection to remove."
+
+
+def test_slack_and_notion_win_over_google_words(workspace_on):
+    assert capability_from_text("notion docs") is Capability.NOTION
+    assert capability_from_text("slack tasks") is Capability.SLACK
+    assert capability_from_text("my notion to-do list") is Capability.NOTION
+    assert capability_from_text("google docs") is Capability.DRIVE
