@@ -8,3 +8,6 @@ __pycache__/
 .pytest_cache/
 .mcp.json
 .superpowers/
+
+# isolated agent workspaces (inside this repo only)
+.worktrees/
