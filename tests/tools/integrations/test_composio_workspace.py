@@ -195,3 +195,20 @@ async def test_drive_with_legacy_only_raises_connection_required(ws):
     with pytest.raises(ConnectionRequired) as exc:
         await cache.ensure(7, Capability.DRIVE, "find and work with your Drive files")
     assert exc.value.capability is Capability.DRIVE and exc.value.revoked is False
+
+
+@respx.mock
+@pytest.mark.parametrize("name,acct", [("gmail", "ca_l"), ("googlecalendar", "ca_c")])
+async def test_disconnect_legacy_only_user_removes_the_legacy_row(ws, name, acct):
+    _accounts(_acct("gmail", "ACTIVE", "ca_l"), _acct("googlecalendar", "ACTIVE", "ca_c"))
+    drop = respx.delete(f"{BASE}/connected_accounts/{acct}").mock(return_value=httpx.Response(200, json={}))
+    await ws.disconnect(USER, name)
+    assert drop.called
+
+
+@respx.mock
+async def test_disconnect_drops_route_cache_after_delete(ws):
+    _accounts(_acct("googlesuper", "ACTIVE", "ca_g"))
+    respx.delete(f"{BASE}/connected_accounts/ca_g").mock(return_value=httpx.Response(200, json={}))
+    await ws.disconnect(USER, "google")
+    assert USER.provider_id not in ws._routes
