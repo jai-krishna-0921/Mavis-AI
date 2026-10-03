@@ -67,7 +67,7 @@ class FirstSync:
             Capability.SLACK: self._slack,
             Capability.NOTION: self._notion,
         }
-        handler = handlers.get(capability)  # Docs, Sheets and Meet have nothing to skim
+        handler = handlers.get(capability)  # Drive, Docs, Sheets, Tasks, Contacts, Meet: nothing to skim
         noticed = (await handler(user_id))[:3] if handler is not None else []
         await self.bus.publish(
             Event(

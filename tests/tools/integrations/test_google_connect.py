@@ -18,6 +18,7 @@ def make_flow(provider, cache, fake_bus, rec, state, activator=None):
         base_url="https://mavis.test", clock=lambda: NOW,
         on_active=activator.on_active if activator else None,
         on_google_active=activator.retire_legacy if activator else None,
+        on_google_begin=activator.begin_google if activator else None,
     )
 
 
@@ -210,4 +211,55 @@ async def test_attention_off_subscribes_no_workspace_triggers(
     await _activate_google(provider, cache, fake_bus, rec, state)
     subscribed = {t for _, t in provider.subscribed}
     assert subscribed == {"mail.new_message", "calendar.event_changed"}
+    assert provider.retired == [1]
+
+
+async def test_stale_legacy_subscribe_failure_does_not_block_retirement(
+    db, workspace_on, provider, cache, fake_bus, rec, state
+):
+    activator = Activator(provider=provider, state=state, schedule=rec.schedule, polling_forced=False,
+                          clock=lambda: NOW)
+    provider.fail_subscribe = True
+    await activator.on_active(1, Capability.GMAIL)  # legacy activation, no fan-out, fails
+    provider.fail_subscribe = False
+    await _activate_google(provider, cache, fake_bus, rec, state)
+    assert provider.retired == [1]
+
+
+async def test_second_google_reconnect_prompt_after_reactivation_same_day(
+    db, workspace_on, provider, cache, fake_bus, rec, state
+):
+    google_active(provider)
+    await state.update(1, {"reconnect_prompted": {"google": NOW.date().isoformat()}})
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    await flow.reconcile(1, Capability.GMAIL)
+    assert "google" not in (await state.get(1)).get("reconnect_prompted", {})
+
+
+async def test_disconnect_legacy_other_error_is_not_reported_as_missing(
+    db, workspace_on, provider, cache, fake_bus, rec, state
+):
+    from mavis.domain.errors import IntegrationError
+
+    async def boom(user, toolkit):
+        raise IntegrationError("Composio answered 500")
+
+    provider.disconnect = boom
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    await flow.disconnect_legacy(1, "gmail-legacy")
+    assert "no old" not in rec.sent[-1].text and "couldn't remove" in rec.sent[-1].text
+
+
+async def test_repeated_connection_events_fan_out_and_retire_once(
+    db, workspace_on, provider, cache, fake_bus, rec, state
+):
+    await _activate_google(provider, cache, fake_bus, rec, state)
+    activator = Activator(provider=provider, state=state, schedule=rec.schedule, polling_forced=False,
+                          clock=lambda: NOW)
+    flow = make_flow(provider, cache, fake_bus, rec, state, activator)
+    for i in range(2):
+        await flow.on_connection_changed(Event(
+            id=f"again{i}", user_id=1, type=EventType.CONNECTION_CHANGED, occurred_at=NOW,
+            source="integrations", payload={"capability": "drive", "state": "ACTIVE", "pending_id": 0},
+        ))
     assert provider.retired == [1]

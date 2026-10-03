@@ -174,6 +174,7 @@ def get_connect_flow() -> ConnectFlow:
         schedule=wakeup_schedule, state=RepoUserState(), base_url=get_settings().public_base_url,
         on_active=get_activator().on_active, has_checks=connection_checks_pending,
         cancel_checks=cancel_connection_checks, on_google_active=get_activator().retire_legacy,
+        on_google_begin=get_activator().begin_google,
     )
 
 
