@@ -16,8 +16,9 @@ from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import Loop, LoopKind, LoopStatus, LoopUpsert
 from mavis.domain.memory import Extraction
+from mavis.domain.messages import Role
 from mavis.store.repo import loops as repo
-from mavis.store.repo import users
+from mavis.store.repo import messages, users
 from mavis.worker.locks import lock
 
 log = structlog.get_logger()
@@ -99,6 +100,25 @@ class LoopService:
                 await self._emit(loop, EventType.LOOP_UPDATED)
         return loop
 
+    async def on_user_message(self, user_id: int, text: str) -> int:
+        """Close loops whose follow-up the user is answering: the message names the loop, or it is the
+        user's first message since a proactive message sent after the loop started waiting."""
+        now = timeutil.now()
+        awaiting = await repo.list_awaiting(user_id, now - repo.AWAITING_FOR)
+        if not awaiting:
+            return 0
+        said = set(repo.title_tokens(text))
+        replying_since = await _proactive_reply_anchor(user_id)
+        closed = 0
+        for loop, waiting_since in awaiting:
+            named = said & set(repo.title_tokens(" ".join([loop.title, *loop.entities])))
+            if named or (replying_since is not None and replying_since >= waiting_since):
+                await self.close(loop.id, LoopStatus.DONE)
+                closed += 1
+        if closed:
+            log.info("loops.closed_on_reply", user_id=user_id, count=closed)
+        return closed
+
     async def expire_stale(self) -> int:
         total = 0
         for user_id in await repo.open_user_ids():
@@ -121,6 +141,17 @@ class LoopService:
             trust=Trust.SYSTEM,
         )
         await self._bus.publish(event)
+
+
+async def _proactive_reply_anchor(user_id: int) -> datetime | None:
+    """When the user's latest message directly follows a proactive message: that message's time."""
+    recent = await messages.recent(user_id, 3)
+    if len(recent) < 2 or recent[-1].role != Role.USER.value:
+        return None
+    prev = recent[-2]
+    if prev.role != Role.ASSISTANT.value or not prev.proactive:
+        return None
+    return timeutil.ensure_utc(prev.created_at)
 
 
 async def _upsert_unless_closed(service: LoopService, user_id: int, data: LoopUpsert) -> None:

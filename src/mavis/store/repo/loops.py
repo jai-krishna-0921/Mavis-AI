@@ -14,6 +14,7 @@ from mavis.store.db import Session
 from mavis.store.models import LoopRow
 
 STALE_AFTER = timedelta(days=2)
+AWAITING_FOR = timedelta(hours=24)  # a follow-up nobody answered closes its loop after this
 EXPIRING_KINDS = (LoopKind.COMMITMENT.value, LoopKind.WAITING_ON.value, LoopKind.WATCH.value)
 
 
@@ -159,9 +160,9 @@ def normalise_title(title: str) -> str:
 
 
 async def find_recently_closed(user_id: int, title: str, since: datetime) -> Loop | None:
-    """A DONE/DROPPED loop with the same normalised title closed after `since`."""
+    """A DONE/DROPPED (or awaiting-reply) loop with the same normalised title closed after `since`."""
     wanted = normalise_title(title)
-    closed = (LoopStatus.DONE.value, LoopStatus.DROPPED.value)
+    closed = (LoopStatus.DONE.value, LoopStatus.DROPPED.value, LoopStatus.AWAITING_REPLY.value)
     async with Session() as s:
         rows = await s.scalars(
             select(LoopRow).where(
@@ -189,22 +190,44 @@ async def set_status(user_id: int, loop_id: int, status: LoopStatus) -> tuple[Lo
         return to_domain(row), True
 
 
+_EXPIRY_STATUSES = (LoopStatus.OPEN.value, LoopStatus.AWAITING_REPLY.value)
+
+
 async def open_user_ids() -> list[int]:
     async with Session() as s:
         rows = await s.scalars(
-            select(LoopRow.user_id).where(LoopRow.status == LoopStatus.OPEN.value).distinct()
+            select(LoopRow.user_id).where(LoopRow.status.in_(_EXPIRY_STATUSES)).distinct()
         )
         return list(rows)
 
 
+async def list_awaiting(user_id: int, since: datetime) -> list[tuple[Loop, datetime]]:
+    """Loops waiting on the user's reply to a follow-up sent after `since`, with when they started waiting."""
+    async with Session() as s:
+        rows = await s.scalars(
+            select(LoopRow).where(LoopRow.user_id == user_id,
+                                  LoopRow.status == LoopStatus.AWAITING_REPLY.value,
+                                  LoopRow.updated_at >= since)
+        )
+        return [(to_domain(r), timeutil.ensure_utc(r.updated_at)) for r in rows]
+
+
 async def expire(user_id: int, now) -> list[Loop]:
-    """Mark one user's stale OPEN loops EXPIRED; returns the loops that changed."""
+    """Mark one user's stale OPEN loops EXPIRED, and close loops whose follow-up got no reply within
+    AWAITING_FOR; returns the loops that changed."""
     expired: list[Loop] = []
     async with Session() as s:
         rows = await s.scalars(
-            select(LoopRow).where(LoopRow.user_id == user_id, LoopRow.status == LoopStatus.OPEN.value)
+            select(LoopRow).where(LoopRow.user_id == user_id, LoopRow.status.in_(_EXPIRY_STATUSES))
         )
         for row in rows:
+            if row.status == LoopStatus.AWAITING_REPLY.value:
+                if timeutil.ensure_utc(row.updated_at) < now - AWAITING_FOR:
+                    row.status = LoopStatus.DONE.value
+                    row.updated_at = now
+                    row.version = (row.version or 1) + 1
+                    expired.append(to_domain(row))
+                continue
             due = timeutil.ensure_utc(row.due_at)
             deadline = (
                 timeutil.ensure_utc(WatchSpec.model_validate(row.watch).deadline) if row.watch else None
