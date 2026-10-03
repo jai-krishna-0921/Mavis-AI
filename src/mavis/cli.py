@@ -88,7 +88,12 @@ async def _cleanup(tasks: list[asyncio.Task], bus: EventBus) -> None:
         try:
             await close_provider()
         finally:
-            await dispose_engine()
+            try:
+                from mavis.attention.wiring import close_attention
+
+                await close_attention()
+            finally:
+                await dispose_engine()
 
 
 async def _run_tasks(tasks: list[asyncio.Task], bus: EventBus) -> None:

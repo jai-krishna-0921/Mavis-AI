@@ -193,6 +193,15 @@ async def _poll_job(job: Job) -> None:
     await get_poller().poll(job.user_id, Capability(job.payload["capability"]))
 
 
+# Capabilities whose after-connect summary another layer sends (the attention layer's first look for Gmail).
+FIRST_SYNC_NOTICE_OWNERS: set[str] = set()
+
+
+def own_first_sync_notice(capability: Capability) -> None:
+    """Another layer sends the after-connect summary for `capability`; Phase 5's noticed lines stay quiet."""
+    FIRST_SYNC_NOTICE_OWNERS.add(capability.value)
+
+
 async def _notify_first_sync(event: Event) -> None:
     from mavis.store.repo import users
 
@@ -200,6 +209,9 @@ async def _notify_first_sync(event: Event) -> None:
     if not noticed:
         return
     capability = str(event.payload.get("capability", ""))
+    if capability in FIRST_SYNC_NOTICE_OWNERS:
+        log.info("first_sync.notice_owned_elsewhere", user_id=event.user_id, capability=capability)
+        return
     try:
         name = DISPLAY_NAMES[Capability(capability)]
     except ValueError:
