@@ -7,6 +7,8 @@ exception into a {"type": "connect"} interrupt that ConnectFlow (Task 8) answers
 
 from __future__ import annotations
 
+import functools
+import inspect
 from collections.abc import Callable
 from typing import Any
 
@@ -108,7 +110,10 @@ def _make_tool(spec: ActionSpec) -> MavisTool:
         localized = localize(args, ctx.timezone)
         if custom is not None:
             return await custom(ctx, localized)
-        return await gated(ctx, spec.name, localized, render=render)
+        bound = render
+        if render is not None and "args" in inspect.signature(render).parameters:
+            bound = functools.partial(render, args=localized)  # renderers that echo the request
+        return await gated(ctx, spec.name, localized, render=bound)
 
     def preview(args: BaseModel, ctx: ToolContext) -> str:
         localized = localize(args, ctx.timezone)

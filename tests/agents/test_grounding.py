@@ -75,11 +75,14 @@ def test_chat_prompt_requires_verifying_absence():
 
 
 @pytest.mark.parametrize("empty", [{"messages": []}, {}, {"data": {"messages": []}}, None])
-def test_empty_search_says_not_found_with_that_query(empty):
-    out = render_search(empty).lower()
-    assert "with this query" in out or "that query" in out
-    assert "broader" in out
-    assert not DENIAL.search(out)
+@pytest.mark.parametrize("query", ["Meetup TOS", "from:bank.example after:2026/10/01", ""])
+def test_empty_search_is_a_neutral_fact_naming_the_query(empty, query):
+    """Inside the untrusted tool output only a fact; the guidance lives in the system prompt rules."""
+    from types import SimpleNamespace
+
+    out = render_search(empty, args=SimpleNamespace(query=query))
+    assert out == (f"No emails matched the query {query!r}." if query else "No emails matched the query.")
+    assert not DENIAL.search(out) and "try" not in out.lower()
 
 
 # --- a scripted turn: the first search misses, a broader one finds the email listed in context -------
@@ -129,7 +132,7 @@ async def test_turn_retries_broader_and_reads_the_listed_email(db, channel, fake
     assert "not found with that query" in first_prompt.lower()
     assert not DENIAL.search(str(fake_llm.calls[0]))
     [miss] = _tool_messages(fake_llm.calls[1])
-    assert "broader" in miss.content.lower()
+    assert "No emails matched the query 'builders talk invite'." in miss.content
     assert queries == ["builders talk invite", "from:meetup.com"]  # retried within the step budget
     await OutboxSender(channel).run_once()
     assert channel.texts and "RSVP" in channel.texts[-1]
