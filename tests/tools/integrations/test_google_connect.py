@@ -309,3 +309,34 @@ def test_slack_and_notion_win_over_google_words(workspace_on):
     assert capability_from_text("slack tasks") is Capability.SLACK
     assert capability_from_text("my notion to-do list") is Capability.NOTION
     assert capability_from_text("google docs") is Capability.DRIVE
+
+
+def _connect_tool():
+    from mavis.tools import chat_tools
+
+    [tool] = [t for t in chat_tools.current_tools() if t.name == "connect_account"]
+    return tool
+
+
+def test_connect_account_mentions_google_services_when_workspace_is_on(workspace_on):
+    tool = _connect_tool()
+    for word in ("Google", "Drive", "Docs", "Sheets", "Tasks"):
+        assert word in tool.description, word
+        assert word.lower() in tool.args_model.model_fields["service"].description.lower(), word
+
+
+def test_connect_account_keeps_the_old_wording_with_the_flag_off(settings):
+    tool = _connect_tool()
+    assert "Drive" not in tool.description
+    assert tool.args_model.model_fields["service"].description == "gmail, calendar, slack or notion"
+
+
+def test_google_tasks_and_mavis_background_tasks_are_told_apart():
+    from mavis.tools import assistant
+    from mavis.tools.integrations.actions import ACTIONS
+
+    for name in ("tasks.list", "tasks.add"):
+        assert "your Google Tasks to-do list" in ACTIONS[name].description, name
+    [jobs] = [t for t in assistant.TOOLS if t.name == "list_tasks"]
+    assert "background jobs Mavis is running" in jobs.description
+    assert "Google Tasks" in jobs.description  # and says it is not the to-do list

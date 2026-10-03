@@ -184,7 +184,8 @@ TOOLS = [
     MavisTool("track_loop", "Track an open loop: commitment, waiting-on, goal, concern, routine or watch.",
               TrackLoopArgs, RiskClass.WRITE_SELF, track_loop, _CONV, priority=55,
               preview=_preview_loop, on_taint=TaintPolicy.APPROVE),
-    MavisTool("list_tasks", "List background tasks Mavis is working on.", NoArgs,
+    MavisTool("list_tasks", "List the background jobs Mavis is running for the user (not their Google "
+              "Tasks to-do list; that is tasks_list).", NoArgs,
               RiskClass.READ, list_tasks, _CONV, priority=40),
     MavisTool("cancel_task", "Cancel a background task by id. Call list_tasks first to find the id.",
               CancelTaskArgs, RiskClass.WRITE_SELF, cancel_task, _CONV, priority=35,
