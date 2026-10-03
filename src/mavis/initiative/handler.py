@@ -14,9 +14,14 @@ from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import Loop, LoopKind, LoopStatus
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative import hooks
-from mavis.initiative.executor import DEFERRED_TTL, InitiativeExecutor
+from mavis.initiative.executor import DEFERRED_TTL, UNTRUSTED_SOURCE_PREFIX, InitiativeExecutor
 from mavis.initiative.filters import EventFilter
-from mavis.initiative.planner import PREP_LEAD, fallback_decision, schedule_default_signals
+from mavis.initiative.planner import (
+    PREP_LEAD,
+    PREP_MIN_IMPORTANCE,
+    fallback_decision,
+    schedule_default_signals,
+)
 from mavis.initiative.quiet import QuietTracker
 from mavis.initiative.reasoner import Reasoner
 from mavis.initiative.routines import Routines
@@ -202,7 +207,9 @@ class InitiativeHandler:
         if loop.due_at is not None:  # due date may have moved: re-plan derived signals
             derived = [WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED]
             await self._wakeups.cancel_where(loop.user_id, derived, loop_id=loop.id)
-            await schedule_default_signals(self._wakeups, loop)
+            # last touched by third-party content: the re-planned signals fire as untrusted (capped at 4)
+            await schedule_default_signals(self._wakeups, loop,
+                                           untrusted=loop.source.startswith(UNTRUSTED_SOURCE_PREFIX))
 
 
 def _quiet_after_turn(event: Event, decision: InitiativeDecision) -> InitiativeDecision:
@@ -231,9 +238,11 @@ def _imminent_floor(event: Event, decision: InitiativeDecision, loops: list[Loop
     """Deterministic rule: the prep nudge for a commitment starting within the prep lead is urgent."""
     if event.type is not EventType.EVENT_STARTING or decision.notify is None:
         return decision
+    if event.trust is Trust.UNTRUSTED:  # a signal re-planned from third-party content never earns 5
+        return decision
     loop_id = event.payload.get("loop_id")
     loop = next((lp for lp in loops if lp.id == loop_id), None)
-    if loop is None or loop.due_at is None:
+    if loop is None or loop.due_at is None or loop.importance < PREP_MIN_IMPORTANCE:
         return decision
     if not timedelta(0) < timeutil.ensure_utc(loop.due_at) - timeutil.now() <= IMMINENT:
         return decision

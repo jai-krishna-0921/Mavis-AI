@@ -732,3 +732,54 @@ async def test_security_bypass_is_capped_at_two_then_deferred(user, clock, recor
     assert len(deferred) == 2
     assert all(w.due_at == ist(28, 7, 0) for w in deferred)
     assert all(datetime.fromisoformat(w.payload["valid_until"]) > w.due_at for w in deferred)
+
+
+# re-review R2 ------------------------------------------------------------------------------------
+
+async def test_reschedule_email_cannot_produce_a_trusted_urgent_ping(user, clock, recording_bus, fake_memory,
+                                                                     fake_llm, monkeypatch):
+    from mavis.domain.loops import LoopUpsert as LU
+    from mavis.domain.wakeups import WakeupKind
+    from mavis.timers.runner import wakeup_event
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 20, 0))
+    due = ist(28, 15, 0)
+    data = LoopUpsert(kind=LoopKind.COMMITMENT, title="Interview with Jawahar", due_at=due, importance=4,
+                      source="tg:update:1")
+    loop = await init.loops.upsert(user.id, data)
+    recording_bus.take()
+    email = Event(id="gmail:msg:resched", user_id=user.id, type=EventType.EMAIL_RECEIVED,
+                  occurred_at=timeutil.now(), source="composio", trust=Trust.UNTRUSTED,
+                  payload={"from": "hr@fractal.example", "subject": "Interview rescheduled",
+                           "snippet": "Now at 3:30 AM", "message_id": "resched"})
+    fake_llm.push_structured(InitiativeDecision(track=[
+        LU(id=loop.id, kind=LoopKind.COMMITMENT, title="Interview with Jawahar", due_at=ist(28, 3, 30),
+           importance=5, entities=["HR"])]))
+    await init.handler.handle(email)
+    after = await init.loops.get(loop.id)
+    assert after.due_at == due and after.importance == 4  # email cannot move or upgrade the loop
+    assert after.entities == ["HR"] and after.source.startswith("untrusted:")
+    for event in recording_bus.take():
+        await init.handler.handle(event)  # LOOP_UPDATED re-plans the derived signals
+    [prep] = await init.wakeups.pending(user.id, WakeupKind.EVENT_STARTING)
+    assert prep.due_at == due - timedelta(hours=1) and prep.payload.get("untrusted") is True
+
+    calls = spy_notify(init, monkeypatch)
+    clock.set(prep.due_at)
+    fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=4, intent="prep now")))
+    await init.handler.handle(wakeup_event(prep))
+    assert calls and calls[0]["untrusted"] is True and calls[0]["intent"].urgency <= 4
+
+
+async def test_imminent_floor_requires_importance_four(user, clock, recording_bus, fake_memory, fake_llm,
+                                                       monkeypatch):
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 9, 30))
+    loop = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Coffee",
+                                                       due_at=ist(27, 10, 0), importance=3))
+    recording_bus.take()
+    calls = spy_notify(init, monkeypatch)
+    fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="coffee soon")))
+    await init.handler.handle(starting_event(user, loop.id))
+    assert calls[0]["intent"].urgency == 3
