@@ -567,6 +567,7 @@ async def finish(state: OrchestratorState) -> dict:
         payload={
             "task_id": task_id, "messages": messages, "artifacts": artifacts,
             "origin": task.origin, "notify_on_complete": task.notify_on_complete,
+            "tainted": bool(task.tainted),
         },
     ))
     return {}

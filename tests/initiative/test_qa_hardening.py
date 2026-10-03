@@ -783,3 +783,32 @@ async def test_imminent_floor_requires_importance_four(user, clock, recording_bu
     fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="coffee soon")))
     await init.handler.handle(starting_event(user, loop.id))
     assert calls[0]["intent"].urgency == 3
+
+
+# reminders (T10b) --------------------------------------------------------------------------------------
+
+def reminder_event(user, eid: str = "wakeup:70", wid: int = 70) -> Event:
+    return Event(id=eid, user_id=user.id, type=EventType.WAKEUP, occurred_at=timeutil.now(), source="timer",
+                 trust=Trust.SYSTEM, payload={"kind": "agent", "reminder": True, "wakeup_id": wid,
+                                              "reason": "Reminder the user asked for: stretch"})
+
+
+async def test_reminder_notifies_without_the_reasoner(user, clock, recording_bus, fake_memory, fake_llm,
+                                                      monkeypatch):
+    init = build(recording_bus, fake_memory)
+    calls = spy_notify(init, monkeypatch)
+    await init.handler.handle(reminder_event(user))  # no InitiativeDecision pushed: the reasoner is not used
+    [c] = calls
+    assert c["intent"].intent == "Remind them: stretch" and c["intent"].urgency == 4
+    assert c["intent"].dedupe_key == "reminder:70" and c["untrusted"] is False
+
+
+async def test_identical_reminder_is_deduped(user, clock, recording_bus, fake_memory, fake_llm):
+    from mavis.domain.decisions import ComposedMessage
+    from mavis.store.repo import messages
+
+    init = build(recording_bus, fake_memory)
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["Time to stretch."]))
+    await init.handler.handle(reminder_event(user))
+    await init.handler.handle(reminder_event(user))
+    assert len([m for m in await messages.recent(user.id) if m.proactive]) == 1
