@@ -38,6 +38,7 @@ CATEGORY_PATTERNS: dict[str, re.Pattern[str]] = {
     cat: re.compile(r"\b(?:" + "|".join(re.escape(w) for w in words) + r")s?\b")
     for cat, words in CATEGORY_WORDS.items()
 }
+BULK_LABELS = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS"})
 DEAD_LABELS = frozenset({"SPAM", "TRASH"})  # never ping for these, even a lookalike security alert
 DROP_LABELS = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS", "SPAM", "TRASH"})
 AUTOMATED = ("no-reply", "noreply", "notifications", "mailer-daemon", "donotreply", "do-not-reply")
@@ -96,6 +97,13 @@ async def email_prefilter(event: Event) -> str | None:
     return None
 
 
+def _bulk_mail(payload: dict) -> bool:
+    labels = set(payload.get("labels") or [])
+    headers = {str(k).casefold() for k in (payload.get("headers") or {})}
+    unsubscribe = bool(payload.get("list_unsubscribe")) or "list-unsubscribe" in headers
+    return bool(labels & BULK_LABELS) or unsubscribe
+
+
 class EmailTriage:
     def __init__(self, known_names: Callable[[int], Awaitable[set[str]]]) -> None:
         self._known_names = known_names
@@ -120,11 +128,16 @@ class EmailTriage:
             return decision
         if set(event.payload.get("labels") or []) & DEAD_LABELS:
             return decision
+        # The budget bypass is earned by the mail's provenance, not its wording: bulk mail (promo, social,
+        # forums, List-Unsubscribe) that merely says "unusual activity" keeps the urgency floor only.
+        bypass = not _bulk_mail(event.payload)
         if decision.notify is not None and decision.notify.urgency >= 4:
-            return decision
+            notify = decision.notify.model_copy(update={"security": bypass})
+            return decision.model_copy(update={"notify": notify})
         notify = NotifyIntent(
             urgency=4,
             intent=SECURITY_INTENT,
             dedupe_key=f"email:{event.user_id}:{event.payload.get('message_id', event.id)}",
+            security=bypass,
         )
         return decision.model_copy(update={"notify": notify, "ignore_reason": None})

@@ -19,19 +19,22 @@ FOLLOW_UP_MIN_IMPORTANCE = 3
 SIGNAL_NOTIFY_RELEVANCE = 0.9
 
 
-async def schedule_default_signals(wakeups: WakeupService, loop: Loop) -> list[int]:
+async def schedule_default_signals(wakeups: WakeupService, loop: Loop, untrusted: bool = False) -> list[int]:
+    """`untrusted`: the loop was last changed by third-party content, so the signals fire as untrusted."""
     if loop.kind is not LoopKind.COMMITMENT or loop.due_at is None:
         return []
+    payload = {"untrusted": True} if untrusted else None
     now = timeutil.now()
     ids: list[int] = []
     if loop.importance >= PREP_MIN_IMPORTANCE and loop.due_at - PREP_LEAD > now:
         ids.append(await wakeups.wake_me(
             loop.user_id, loop.due_at - PREP_LEAD, f"Prep nudge before: {loop.title}", loop.id,
-            WakeupKind.EVENT_STARTING, dedupe_key=f"loop:{loop.id}:starting"))
+            WakeupKind.EVENT_STARTING, dedupe_key=f"loop:{loop.id}:starting", payload=payload))
     if loop.importance >= FOLLOW_UP_MIN_IMPORTANCE and loop.due_at + FOLLOW_UP_LAG > now:
         ids.append(await wakeups.wake_me(loop.user_id, loop.due_at + FOLLOW_UP_LAG,
                                          f"Follow up on how it went: {loop.title}", loop.id,
-                                         WakeupKind.EVENT_ENDED, dedupe_key=f"loop:{loop.id}:ended"))
+                                         WakeupKind.EVENT_ENDED, dedupe_key=f"loop:{loop.id}:ended",
+                                         payload=payload))
     return ids
 
 

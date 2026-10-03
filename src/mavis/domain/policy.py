@@ -31,3 +31,4 @@ class PolicyVerdict(BaseModel):
     allow: bool
     defer_until: datetime | None = None
     reason: str = ""
+    budget_bypass: bool = False  # allowed only because it is a security notice over the daily budget

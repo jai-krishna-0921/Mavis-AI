@@ -10,16 +10,18 @@ import structlog
 from mavis.bus.base import EventBus
 from mavis.config import get_settings
 from mavis.domain import timeutil
-from mavis.domain.decisions import InitiativeDecision, NotifyIntent
-from mavis.domain.events import Event, Trust
+from mavis.domain.decisions import InitiativeDecision, NotifyIntent, WakeupRequest
+from mavis.domain.events import Event, EventType, Trust
+from mavis.domain.loops import Loop, LoopStatus, LoopUpsert
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.composer import Composer
 from mavis.initiative.quiet import QuietTracker
 from mavis.loops.service import LoopService
-from mavis.policy.pings import PingPolicy, in_quiet_hours
+from mavis.policy.pings import SECURITY_BYPASS_PREFIX, PingPolicy, in_quiet_hours, loop_ping_key
 from mavis.store.db import Session
 from mavis.store.repo import messages, outbox
+from mavis.store.repo.loops import title_tokens
 from mavis.timers.service import WakeupService
 
 log = structlog.get_logger()
@@ -27,6 +29,11 @@ log = structlog.get_logger()
 MAX_UNTRUSTED_URGENCY = 4  # only a trusted origin may bypass quiet hours (urgency 5)
 DELAY_NOTE_AFTER = timedelta(minutes=30)
 RELEASE_DELAY = timedelta(seconds=20)  # let the user's reply go out first
+DEFERRED_TTL = timedelta(hours=12)  # a deferred ping with no better bound goes stale after this
+UNTRUSTED_SOURCE_PREFIX = "untrusted:"  # loop.source after an update driven by third-party content
+SECURITY_DEFER_GRACE = timedelta(hours=2)
+MERGE_WINDOW = timedelta(minutes=30)  # a model wakeup this close to one already set for the loop merges
+LOOP_WAKEUP_KINDS = (WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED, WakeupKind.AGENT)
 
 
 class InitiativeExecutor:
@@ -36,23 +43,39 @@ class InitiativeExecutor:
         self._policy, self._composer, self._quiet = policy, composer, quiet
 
     async def apply(self, user, decision: InitiativeDecision, event: Event, context: str = "",
-                    quiet_streak: int = 0, origin: dict[str, Any] | None = None) -> None:
+                    quiet_streak: int = 0, origin: dict[str, Any] | None = None,
+                    open_loops: list[Loop] | None = None, event_loop_id: int | None = None) -> None:
         untrusted = event.trust is Trust.UNTRUSTED  # spec 8.3: third-party content may not create work
         for upsert in decision.track:
             if untrusted and not await self._owns_existing_loop(user.id, upsert.id):
                 log.warning("initiative.untrusted_track_skipped", event_id=event.id, title=upsert.title[:80])
                 continue
             try:
+                if untrusted:
+                    upsert = await self._limit_untrusted_update(upsert, event)
+                    if upsert is None:
+                        continue
                 source = upsert.source or event.id
                 await self._loops.upsert(user.id, upsert.model_copy(update={"source": source}))
             except ValueError as exc:  # e.g. the LLM named a loop id that does not exist: not retryable
                 log.warning("initiative.track_failed", event_id=event.id, title=upsert.title[:80],
                             error=str(exc))
         for i, w in enumerate(decision.wakeups):
-            key = f"agent:{w.loop_id}:{w.reason[:60]}" if w.loop_id else f"agent:{event.id}:{i}"
+            ended = event.type is EventType.EVENT_ENDED
+            loop_id = await self._wakeup_loop(user.id, w, open_loops or [], None if ended else event_loop_id)
+            if ended and loop_id == event_loop_id:
+                # the ended loop is about to close (AWAITING/DONE cancels its wakeups): a follow-up check
+                # like "did the thank-you note go out" must outlive it, so it is not tied to that loop
+                loop_id = None
+            if loop_id is not None and await self._covered(user.id, loop_id, w.at):
+                log.info("initiative.wakeup_merged", event_id=event.id, loop_id=loop_id, reason=w.reason[:80])
+                continue
+            key = f"agent:{loop_id}:{w.reason[:60]}" if loop_id else f"agent:{event.id}:{i}"
             try:
-                await self._wakeups.wake_me(user.id, w.at, w.reason, w.loop_id, WakeupKind.AGENT,
-                                            dedupe_key=key)
+                # spec 8.3: a wakeup an untrusted event asked for fires as untrusted too (scrubbed, capped)
+                await self._wakeups.wake_me(user.id, w.at, w.reason, loop_id, WakeupKind.AGENT,
+                                            dedupe_key=key,
+                                            payload={"untrusted": True} if untrusted else None)
             except ValueError as exc:
                 log.warning("initiative.wakeup_failed", event_id=event.id, reason=w.reason[:80],
                             error=str(exc))
@@ -92,6 +115,52 @@ class InitiativeExecutor:
             log.info("initiative.deferred_released", user=user.id, count=moved)
         return moved
 
+    async def _wakeup_loop(self, user_id: int, w: WakeupRequest, open_loops: list[Loop],
+                           fallback: int | None) -> int | None:
+        """The loop a model wakeup is about, so closing that loop cancels it: the id the model gave (if
+        it is really this user's), else an open loop the reason clearly names, else the event's loop."""
+        if w.loop_id is not None and await self._owns_existing_loop(user_id, w.loop_id):
+            return w.loop_id
+        said = set(title_tokens(w.reason))
+        best, best_score = None, 0.0
+        for lp in open_loops:
+            words = set(title_tokens(lp.title))
+            shared = len(words & said)
+            if not words or not (shared >= 2 or shared == len(words)):
+                continue
+            score = shared / len(words)
+            if score > best_score:
+                best, best_score = lp.id, score
+            elif score == best_score:
+                best = None  # two loops fit equally well: do not guess
+        if best is not None:
+            return best
+        if fallback is not None and await self._owns_existing_loop(user_id, fallback):
+            return fallback
+        return None
+
+    async def _covered(self, user_id: int, loop_id: int, at: datetime) -> bool:
+        """A pending wakeup for the same loop within MERGE_WINDOW already covers this one."""
+        at = timeutil.ensure_utc(at)
+        now = timeutil.now()
+        if at > now:
+            at = now + timeutil.scale_offset(at - now)  # compare like wake_me stores it
+        return any(
+            p.loop_id == loop_id and p.kind in LOOP_WAKEUP_KINDS and abs(p.due_at - at) <= MERGE_WINDOW
+            for p in await self._wakeups.pending(user_id)
+        )
+
+    async def _limit_untrusted_update(self, upsert: LoopUpsert, event: Event) -> LoopUpsert | None:
+        """Third-party content may change a loop's status, entities and watch, never when it is due or how
+        important it is (that would let an email schedule a trusted, quiet-hours-bypassing nudge). The
+        source is marked so wakeups re-planned from this update fire as untrusted."""
+        current = await self._loops.get(upsert.id) if upsert.id is not None else None
+        if current is None:
+            return None
+        return upsert.model_copy(update={
+            "kind": current.kind, "title": current.title, "due_at": current.due_at,
+            "importance": current.importance, "source": f"{UNTRUSTED_SOURCE_PREFIX}{event.id}"[:200]})
+
     async def _owns_existing_loop(self, user_id: int, loop_id: int | None) -> bool:
         if loop_id is None:
             return False
@@ -103,20 +172,35 @@ class InitiativeExecutor:
                      origin: dict[str, Any] | None = None) -> bool:
         if untrusted and intent.urgency > MAX_UNTRUSTED_URGENCY:
             intent = intent.model_copy(update={"urgency": MAX_UNTRUSTED_URGENCY})
-        verdict = await self._policy.check(user, intent.urgency, intent.dedupe_key, timeutil.now())
+        # an untrusted ping must not use up the loop's daily slot for this kind of ping
+        o = origin or {}
+        loop_key = None if untrusted else loop_ping_key(o.get("loop_id"), o.get("kind"))
+        extra = [loop_key] if loop_key else []
+        verdict = await self._policy.check(user, intent.urgency, intent.dedupe_key, timeutil.now(),
+                                           extra_keys=extra, bypass_budget=intent.security)
         if not verdict.allow:
             log.info("initiative.notify_blocked", user=user.id, reason=verdict.reason,
                      defer_until=verdict.defer_until)
             if verdict.defer_until is not None:
+                due = original_due or timeutil.now()
+                valid_until = (origin or {}).get("valid_until") or (due + DEFERRED_TTL).isoformat()
+                if intent.security:  # a capped security notice waits for the morning: still valid then
+                    floor = timeutil.ensure_utc(verdict.defer_until) + SECURITY_DEFER_GRACE
+                    current = timeutil.ensure_utc(datetime.fromisoformat(valid_until))
+                    valid_until = max(current, floor).isoformat()
                 await self._wakeups.wake_me(
-                    user.id, verdict.defer_until, f"deferred: {intent.intent[:80]}", kind=WakeupKind.DEFERRED,
+                    user.id, verdict.defer_until, f"deferred: {intent.intent[:80]}", _loop_id(origin),
+                    kind=WakeupKind.DEFERRED,
                     payload={"notify": intent.model_dump(mode="json"), "untrusted": untrusted,
-                             "original_due": (original_due or timeutil.now()).isoformat(), "origin": origin},
+                             "original_due": due.isoformat(), "origin": origin, "valid_until": valid_until},
                     scale=False,
                     dedupe_key=f"deferred:{intent.dedupe_key}" if intent.dedupe_key else None,
                 )
             return False
+        if verdict.budget_bypass:  # counts toward the daily cap on over-budget security notices
+            extra = [*extra, f"{SECURITY_BYPASS_PREFIX}{intent.dedupe_key or timeutil.now().isoformat()}"]
         if intent.dedupe_key and await self._recover_partial(user, intent):
+            await self._follow_up_sent(origin)
             return False
         message = await self._composer.compose(user, intent.intent, intent.urgency,
                                                 _with_delay_note(context, original_due, user),
@@ -124,8 +208,19 @@ class InitiativeExecutor:
         if not message.send:
             log.info("initiative.composer_dropped", user=user.id, intent=intent.intent[:80])
             return False
-        await self.deliver(user, message.messages, intent.dedupe_key, intent.urgency, quiet_streak)
+        await self.deliver(user, message.messages, intent.dedupe_key, intent.urgency, quiet_streak,
+                           extra_keys=extra)
+        await self._follow_up_sent(origin)
         return True
+
+    async def _follow_up_sent(self, origin: dict[str, Any] | None) -> None:
+        """A "how did it go?" was delivered: its loop now waits for the user's answer."""
+        loop_id = _loop_id(origin)
+        if loop_id is None or (origin or {}).get("kind") != EventType.EVENT_ENDED.value:
+            return
+        loop = await self._loops.get(loop_id)
+        if loop is not None and loop.status is LoopStatus.OPEN:
+            await self._loops.close(loop_id, LoopStatus.AWAITING_REPLY)
 
     async def _recover_partial(self, user, intent: NotifyIntent) -> bool:
         """A prior attempt enqueued bubbles but died before log/record: finish that, send nothing new."""
@@ -141,7 +236,7 @@ class InitiativeExecutor:
         return True
 
     async def deliver(self, user, bubbles: list[str], dedupe_key: str | None = None, urgency: int = 3,
-                      quiet_streak: int = 0) -> None:
+                      quiet_streak: int = 0, extra_keys: list[str] | None = None) -> None:
         now = timeutil.now()
         local_date = timeutil.to_local(now, user.timezone).date().isoformat()
 
@@ -155,9 +250,17 @@ class InitiativeExecutor:
             await session.commit()
         await messages.log(user.id, Role.ASSISTANT, "\n".join(bubbles), proactive=True,
                            event_id=scoped("proactive:", 0))
-        await self._policy.record(user, dedupe_key, urgency, now)
+        await self._policy.record(user, dedupe_key, urgency, now, extra_keys=extra_keys or ())
         if quiet_streak > 0:  # only a USER_QUIET nudge continues its chain; other proactive never arm one
             await self._quiet.after_assistant_message(user.id, bubbles[-1], streak=quiet_streak)
+
+
+def _loop_id(origin: dict[str, Any] | None) -> int | None:
+    raw = (origin or {}).get("loop_id")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _with_delay_note(context: str, original_due: datetime | None, user) -> str:
