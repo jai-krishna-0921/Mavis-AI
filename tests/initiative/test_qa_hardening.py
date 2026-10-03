@@ -437,3 +437,24 @@ async def test_awaiting_keeps_a_deferred_follow_up(user, clock, recording_bus, f
     for event in recording_bus.take():
         await init.handler.handle(event)
     assert [w.kind for w in await init.wakeups.pending(user.id)] == [WakeupKind.DEFERRED]
+
+
+# review I6 ---------------------------------------------------------------------------------------
+
+async def test_missing_decisions_table_fails_open(user, clock, recording_bus, fake_memory, fake_llm,
+                                                  monkeypatch):
+    from sqlalchemy import text
+
+    from mavis.store.db import Session
+
+    async with Session() as s:
+        await s.execute(text("DROP TABLE initiative_decisions"))
+        await s.commit()
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 14, 0))
+    calls = spy_notify(init, monkeypatch)
+    fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="hello")))
+    await init.handler.handle(Event(id="wakeup:90", user_id=user.id, type=EventType.WAKEUP,
+                                    occurred_at=timeutil.now(), source="timer",
+                                    payload={"kind": "agent", "reason": "check", "wakeup_id": 90}))
+    assert len(calls) == 1
