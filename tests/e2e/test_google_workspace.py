@@ -43,6 +43,16 @@ def google(workspace_on, provider, cache, monkeypatch, user):
     return provider
 
 
+async def open_approvals(user_id: int, task_id: int, tool: str) -> list:
+    """Every open approval of `tool` for the task, whatever its arguments."""
+    return [a for a in await approvals.open_for_user(user_id) if a.task_id == task_id and a.tool == tool]
+
+
+async def baselined(user_id: int, **extra) -> None:
+    """First sync has run: intake is in its steady state (asks and notifies may go out)."""
+    await users.update_state(user_id, {"workspace": {"baselined_at": "2026-10-02T00:00:00+00:00", **extra}})
+
+
 def registry() -> ToolRegistry:
     reg = ToolRegistry()
     register_integration_tools(reg)
@@ -74,8 +84,7 @@ async def test_tainted_task_cannot_share_with_an_outsider(google, user, fake_llm
         current_task_id.reset(token)
     assert res.messages[-2].content == REFUSAL
     assert "drive.share" not in [e[1] for e in google.executed]
-    shared = {"file_id": PAYROLL, "email": "attacker@evil.example", "role": "reader"}
-    assert await approvals.find_open(user.id, tid, "drive_share", shared) is None
+    assert await open_approvals(user.id, tid, "drive_share") == []
 
 
 async def test_injection_doc_cannot_share_delete_or_send(google, user, fake_llm):
@@ -89,6 +98,7 @@ async def test_injection_doc_cannot_share_delete_or_send(google, user, fake_llm)
     google.results["drive.meta"] = ToolResult(ok=True, data={"name": "Payroll 2026"})
     google.results["tasks.get"] = ToolResult(ok=True, data={"id": "t9", "title": "File taxes"})
     reg = registry()
+    # mail_send is not a spawn tool; it is mixed in on purpose so the injection can try all three
     tools = reg.for_agent("spawn", user.id) + reg.for_agent("conversation", user.id, names=["mail_send"])
     fake_llm.push_ai(calls(("docs_read", {"document_id": ONBOARDING}, "c1")))
     fake_llm.push_ai(calls(
@@ -108,7 +118,10 @@ async def test_injection_doc_cannot_share_delete_or_send(google, user, fake_llm)
     executed = [e[1] for e in google.executed]
     assert not {"drive.share", "tasks.delete", "mail.send"} & set(executed)
     mail = {"to": ["attacker@evil.example"], "subject": "Budget", "body": "attached", "cc": []}
-    assert await approvals.find_open(user.id, tid, "mail_send", mail) is not None
+    queued = await approvals.find_open(user.id, tid, "mail_send", mail)
+    assert queued is not None and queued.tainted  # never merged with an untainted request
+    assert await open_approvals(user.id, tid, "drive_share") == []
+    assert await open_approvals(user.id, tid, "tasks_delete") == []
 
 
 class Exec:
@@ -133,7 +146,7 @@ class NoLoops:
 
 async def test_share_webhook_from_a_known_contact_becomes_a_brief_line(user, provider, rec, clock):
     clock.set(NOW)
-    await users.update_state(user.id, {"workspace": {"contacts": ["priya@example.com"]}})
+    await baselined(user.id, contacts=["priya@example.com"])
     provider.results["drive.list_recent"] = ToolResult(ok=True, data={"files": [{
         "id": "f1", "name": "Q3 deck", "sharedWithMeTime": "2026-10-03T02:20:00Z",
         "owners": [{"emailAddress": "priya@example.com"}],
@@ -151,10 +164,13 @@ async def test_share_webhook_from_a_known_contact_becomes_a_brief_line(user, pro
 
 async def test_due_task_appears_in_the_morning_brief(user, provider, rec, clock):
     clock.set(NOW)
+    await baselined(user.id)
     provider.results["tasks.list"] = ToolResult(ok=True, data={"tasks": [
         {"id": "t1", "title": "Pay rent", "due": "2026-10-03T00:00:00.000Z", "status": "needsAction"}]})
-    ws = WorkspaceIntake(provider=provider, executor_of=Exec, loops=NoLoops(), schedule=rec.schedule,
+    ex = Exec()
+    ws = WorkspaceIntake(provider=provider, executor_of=lambda: ex, loops=NoLoops(), schedule=rec.schedule,
                          clock=lambda: NOW)
-    await ws.poll_tasks(user.id)
+    assert await ws.poll_tasks(user.id) == 1
     items = await WorkspaceBrief(ws).items(user.id, NOW, NOW + timedelta(hours=1))
     assert [(i.text, i.trusted) for i in items] == [("Today: 1 task due: Pay rent", False)]
+    assert ex.notified == []  # steady state: a task due today is a brief line, not a ping
