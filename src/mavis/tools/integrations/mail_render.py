@@ -20,11 +20,20 @@ BODY_CHARS = 5500  # leaves room for the header lines under the registry's 6000-
 PREVIEW_CHARS = 280
 _BLANKS = re.compile(r"\n\s*\n\s*\n+")
 _SPACES = re.compile(r"[ \t ]+")
+_URL = r"(?:https?://|www\.)[^\s<>()\[\]]+"
+_PAREN_URL = re.compile(rf"\s*[(<\[]\s*{_URL}\s*[)>\]]")
+_BARE_URL = re.compile(_URL)
 _TAGS = re.compile(r"<(script|style)[^>]*>.*?</\1>|<[^>]+>", re.S | re.I)
 
 
+def strip_urls(text: str) -> str:
+    """Drop parenthesised/bracketed URLs and replace bare ones with [link]. Tracking links eat the body
+    budget and widen the injection surface; summaries never need raw URLs."""
+    return _BARE_URL.sub("[link]", _PAREN_URL.sub("", text))
+
+
 def _clean(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = strip_urls(text.replace("\r\n", "\n").replace("\r", "\n"))
     text = _SPACES.sub(" ", text)
     return _BLANKS.sub("\n\n", text).strip()
 
