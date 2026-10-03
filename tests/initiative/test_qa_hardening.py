@@ -366,3 +366,74 @@ async def test_prompts_forbid_invented_offers(user, clock, fake_memory, fake_llm
     assert "Never invent people, companies" in reasoner_system and "mock interview" in reasoner_system
     assert "set its loop_id" in reasoner_system
     assert "Never" in composer_system and "invent people, companies, offers" in composer_system
+
+
+# follow-up closes on the user's reply, not when it is sent -----------------------------------------
+
+async def _awaiting_loop(init, user, recording_bus, title="Interview with Jawahar"):
+    from mavis.domain.loops import LoopStatus
+
+    loop = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title=title,
+                                                       due_at=ist(27, 10, 0), importance=5))
+    await init.loops.close(loop.id, LoopStatus.AWAITING_REPLY)
+    recording_bus.take()
+    return loop
+
+
+async def test_reply_naming_the_loop_closes_it(user, clock, recording_bus, fake_memory):
+    from mavis.domain.loops import LoopStatus
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 12, 0))
+    loop = await _awaiting_loop(init, user, recording_bus)
+    assert await init.loops.on_user_message(user.id, "what's for dinner?") == 0
+    assert (await init.loops.get(loop.id)).status is LoopStatus.AWAITING_REPLY
+    assert await init.loops.on_user_message(user.id, "the interview was fine, Jawahar was kind") == 1
+    assert (await init.loops.get(loop.id)).status is LoopStatus.DONE
+
+
+async def test_first_reply_to_the_follow_up_closes_it(user, clock, recording_bus, fake_memory):
+    from mavis.domain.loops import LoopStatus
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 12, 0))
+    loop = await _awaiting_loop(init, user, recording_bus)
+    clock.advance(seconds=5)
+    await messages.log(user.id, Role.ASSISTANT, "How did it go?", proactive=True)
+    clock.advance(minutes=20)
+    await messages.log(user.id, Role.USER, "pretty good actually")
+    assert await init.loops.on_user_message(user.id, "pretty good actually") == 1
+    assert (await init.loops.get(loop.id)).status is LoopStatus.DONE
+
+
+async def test_unanswered_follow_up_closes_after_a_day(user, clock, recording_bus, fake_memory):
+    from mavis.domain.loops import LoopStatus
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 12, 0))
+    loop = await _awaiting_loop(init, user, recording_bus)
+    clock.advance(hours=23)
+    assert await init.loops.expire_stale() == 0
+    clock.advance(hours=2)
+    assert await init.loops.expire_stale() == 1
+    assert (await init.loops.get(loop.id)).status is LoopStatus.DONE
+
+
+async def test_awaiting_keeps_a_deferred_follow_up(user, clock, recording_bus, fake_memory):
+    from mavis.domain.wakeups import WakeupKind
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 12, 0))
+    loop = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Dentist",
+                                                       due_at=ist(27, 10, 0), importance=3))
+    recording_bus.take()
+    await init.wakeups.wake_me(user.id, ist(28, 7, 0), "deferred: how did it go", loop.id,
+                               WakeupKind.DEFERRED, scale=False)
+    from mavis.domain.loops import LoopStatus
+
+    await init.loops.close(loop.id, LoopStatus.AWAITING_REPLY)
+    for event in recording_bus.take():
+        await init.handler.handle(event)
+    assert [w.kind for w in await init.wakeups.pending(user.id)] == [WakeupKind.DEFERRED]

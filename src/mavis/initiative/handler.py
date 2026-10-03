@@ -37,7 +37,7 @@ URGENT_URGENCY = 5
 IMMINENT = timedelta(minutes=15)
 POST_TURN_QUIET = timedelta(minutes=10)
 FOLLOW_UP_VALID_FOR = timedelta(hours=24)
-LIVE_STATUSES = (LoopStatus.OPEN,)
+LIVE_STATUSES = (LoopStatus.OPEN, LoopStatus.AWAITING_REPLY)
 HANDLED_TYPES = tuple(t for t in EventType if t not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED))
 
 
@@ -122,7 +122,10 @@ class InitiativeHandler:
                                   event_loop_id=_event_loop_id(event))
 
         if event.type is EventType.EVENT_ENDED and event.payload.get("loop_id"):
-            await self._loops.close(int(event.payload["loop_id"]), LoopStatus.DONE)
+            # Asked how it went: the loop stays alive until the user answers (or 24h pass), not closed
+            # the moment the question goes out.
+            status = LoopStatus.AWAITING_REPLY if decision.notify is not None else LoopStatus.DONE
+            await self._loops.close(int(event.payload["loop_id"]), status)
 
     async def _quiet_after_turn(self, event: Event, decision: InitiativeDecision) -> InitiativeDecision:
         """A loop extracted from a chat turn the assistant just answered must not trigger a ping right
@@ -201,6 +204,8 @@ class InitiativeHandler:
     async def _on_loop_updated(self, loop: Loop) -> None:
         if loop.status is not LoopStatus.OPEN:
             kinds = [k for k in WakeupKind if not k.value.startswith(system.SYSTEM_PREFIX)]
+            if loop.status is LoopStatus.AWAITING_REPLY:  # the follow-up itself may still be deferred
+                kinds = [k for k in kinds if k is not WakeupKind.DEFERRED]
             await self._wakeups.cancel_where(loop.user_id, kinds, loop_id=loop.id)
             return
         if loop.due_at is not None:  # due date may have moved: re-plan derived signals

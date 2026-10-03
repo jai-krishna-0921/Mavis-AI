@@ -104,7 +104,7 @@ async def test_event_ended_llm_failure_still_follows_up(user, clock, recording_b
                                              "reason": "Follow up"}))
     await deliver_pending(channel)
     assert any("How'd the interview prep go?" in str(s) for s in channel.sent)
-    assert (await init.loops.get(loop.id)).status is LoopStatus.DONE
+    assert (await init.loops.get(loop.id)).status is LoopStatus.AWAITING_REPLY  # until the user answers
 
 
 async def test_deferred_wakeup_goes_straight_to_notify(user, clock, recording_bus, fake_memory, fake_llm,
