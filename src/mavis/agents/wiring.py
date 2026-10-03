@@ -15,7 +15,7 @@ from mavis.domain.events import EventType, Job, JobKind
 from mavis.initiative import task_delivery
 from mavis.policy import approvals as approval_flow
 from mavis.timers.system import register_system_wakeup
-from mavis.worker.runner import register_event_handler, register_job_handler
+from mavis.worker.runner import register_event_handler, register_job_handler, register_startup_hook
 
 log = structlog.get_logger(__name__)
 
@@ -54,6 +54,8 @@ def register() -> None:
     register_event_handler(EventType.TASK_PROGRESS, task_delivery.on_progress, replace=True)
     register_job_handler(JobKind.RUN_TASK, _run_task_job)
     register_job_handler(JobKind.RESUME_TASK, _resume_task_job)
+    # Fail tasks a restart left RUNNING and re-enqueue QUEUED ones before the approval sweep runs.
+    register_startup_hook(orchestrator.recover_tasks_on_start)
     # Startup and morning sweeps plus the system_approval_remind / system_approval_expire wakeups.
     approval_flow.register_sweeps()
     register_system_wakeup(TASK_DELIVERY_KIND, _task_delivery)

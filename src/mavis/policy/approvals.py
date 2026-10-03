@@ -86,11 +86,13 @@ _REASON = re.compile(r"^approval:(\d+)$")
 _OPENABLE = {ApprovalStatus.PENDING, ApprovalStatus.AWAITING_EDIT}
 _DONE = {ApprovalStatus.EXECUTED, ApprovalStatus.REJECTED, ApprovalStatus.EXPIRED, ApprovalStatus.FAILED}
 
-INTERPRET_PROMPT = """The user was shown a pending action and asked to approve it. Classify their reply:
-- approve: they want it done as is ("yes", "send it", "go ahead")
+INTERPRET_PROMPT = """The user was shown a pending action and asked to approve it.
+Their reply was not a plain yes.
+Classify it:
 - cancel: they don't want it ("no", "don't", "cancel")
-- edit: they want changes; put the requested change in `instructions`
-- unrelated: the reply is about something else entirely"""
+- edit: they want changes to the action; put the requested change in `instructions`
+- unrelated: anything else, including questions about the action and anything that sounds like a yes
+Never answer approve: approving takes the button or a plain yes."""
 
 EDIT_QUESTION = "Sure, what should I change?"
 
@@ -178,10 +180,16 @@ async def interpret_reply(approval, text: str) -> ApprovalReplyInterpretation:
         return quick
     if approval.status == ApprovalStatus.AWAITING_EDIT:
         return ApprovalReplyInterpretation(decision="edit", instructions=text)
-    return await llm.structured(
+    # The model never approves: only a plain short answer (above) or the button does. It never sees the
+    # preview either, which may carry third-party text written to steer it; it gets the tool name only.
+    interp = await llm.structured(
         ApprovalReplyInterpretation, INTERPRET_PROMPT,
-        f"Pending action:\n{approval.preview}\n\nUser's reply:\n{text}", tier=llm.Tier.FAST,
+        f"Pending action: a {approval.tool} action (details withheld)\n\nUser's reply:\n{text}",
+        tier=llm.Tier.FAST,
     )
+    if interp.decision == "approve":
+        return ApprovalReplyInterpretation(decision="unrelated")
+    return interp
 
 
 async def _which_one(approval) -> str | None:
@@ -316,7 +324,11 @@ async def sweep(user_id: int | None = None, *, skip: frozenset[str] = frozenset(
     Runs at worker start, with the morning check-in, and whenever an approval reminder or expiry
     wakeup fires. Each step is isolated so one failure does not hide the rest. `skip` names steps
     to leave out."""
+    from mavis.agents import orchestrator  # lazy: the runner imports this module
+
     steps = {
+        # first: a task stuck RUNNING or QUEUED without a job holds up the approvals behind it
+        "tasks": lambda: orchestrator.recover_tasks(user_id),
         "expired": lambda: _sweep_overdue(user_id),
         "stuck": lambda: _sweep_stuck_resolving(utcnow() - STALE_AFTER, user_id),
         "may_have_run": lambda: _sweep_may_have_run(user_id),

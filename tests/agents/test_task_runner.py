@@ -486,3 +486,76 @@ async def test_inner_timeout_is_not_reported_as_the_task_limit(
     assert (await tasks.get(tid)).status == TaskStatus.FAILED
     assert "longer than I allow" not in sent[-1].text
     assert "timed out" in sent[-1].text
+
+
+async def test_restart_mid_task_fails_it_closes_approvals_and_kicks_the_queue(user, rec_bus, sent):
+    """I1: a restart left A RUNNING (no job) and B QUEUED behind it (deferred, no job). The worker start
+    hook fails A through claim, closes its approvals, tells the user, and re-enqueues B."""
+    from mavis.domain.tasks import TaskKind
+
+    a = await tasks.create(user.id, goal="research")
+    await tasks.claim(a, TaskStatus.QUEUED, TaskStatus.RUNNING)
+    aid = await approvals.create(user.id, a, "send_note", {"text": "hi"}, "Send note: hi",
+                                 utcnow() + timedelta(hours=48))
+    b = await tasks.create(user.id, goal="send", kind=TaskKind.APPROVAL)
+    await orchestrator.recover_tasks_on_start()
+    task_a = await tasks.get(a)
+    assert task_a.status == TaskStatus.FAILED and "restarted" in task_a.error
+    assert (await approvals.get(aid)).status not in (ApprovalStatus.PENDING, ApprovalStatus.RESOLVING)
+    assert any(m.dedupe_key == f"task:{a}:failed" for m in sent)
+    runs = [j for j in rec_bus.jobs if j.kind == JobKind.RUN_TASK]
+    assert [j.payload["task_id"] for j in runs] == [b]
+    # a second sweep is harmless: nothing more is failed, and only a duplicate RUN_TASK (claimed once)
+    assert await orchestrator.recover_tasks() == 0
+
+
+async def test_periodic_sweep_fails_only_tasks_past_the_wall_clock(user, rec_bus, sent):
+    from sqlalchemy import update
+
+    from mavis.store.models import Task
+
+    fresh = await tasks.create(user.id, goal="fresh")
+    await tasks.claim(fresh, TaskStatus.QUEUED, TaskStatus.RUNNING)
+    old = await tasks.create(user.id, goal="old")
+    await tasks.claim(old, TaskStatus.QUEUED, TaskStatus.RUNNING)
+    async with Session() as s:
+        await s.execute(update(Task).where(Task.id == old).values(
+            started_at=utcnow() - timedelta(seconds=get_settings().task_timeout_s + 120)))
+        await s.commit()
+    assert await orchestrator.recover_tasks(user.id) == 1
+    assert (await tasks.get(old)).status == TaskStatus.FAILED
+    assert (await tasks.get(fresh)).status == TaskStatus.RUNNING
+
+
+async def test_approval_task_does_not_wait_for_the_task_slot(user, rec_bus, sent, monkeypatch):
+    """I2: a chat approval prompt appears at once even while a research task holds the one slot."""
+    from mavis.domain.tasks import TaskKind
+
+    driven: list[int] = []
+
+    async def fake_drive(task_id, user_id, graph_input):
+        driven.append(task_id)
+
+    monkeypatch.setattr(orchestrator, "_drive", fake_drive)
+    research = await tasks.create(user.id, goal="research laptops")
+    await tasks.claim(research, TaskStatus.QUEUED, TaskStatus.RUNNING)
+    other = await tasks.create(user.id, goal="another research")
+    await orchestrator.run_task(other)
+    assert driven == [] and (await tasks.get(other)).status == TaskStatus.QUEUED  # still slot-bound
+    ap_task = await tasks.create(user.id, goal="send email", kind=TaskKind.APPROVAL)
+    await orchestrator.run_task(ap_task)
+    assert driven == [ap_task] and (await tasks.get(ap_task)).status == TaskStatus.RUNNING
+    # a running approval task takes no slot either
+    await tasks.claim(research, TaskStatus.RUNNING, TaskStatus.DONE)
+    await orchestrator.run_task(other)
+    assert driven == [ap_task, other]
+
+
+async def test_no_progress_line_for_an_approval_task(user, rec_bus):
+    """M6: a slow approval edit must not send "still on it"."""
+    from mavis.domain.tasks import TaskKind
+
+    tid = await tasks.create(user.id, goal="send email", kind=TaskKind.APPROVAL)
+    await tasks.claim(tid, TaskStatus.QUEUED, TaskStatus.RUNNING)
+    await orchestrator._progress_after(tid, user.id, 0)
+    assert not [e for e in rec_bus.events if e.type == EventType.TASK_PROGRESS]

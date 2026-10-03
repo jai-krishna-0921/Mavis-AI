@@ -109,10 +109,12 @@ async def save_plan(task_id: int, plan: dict) -> bool:
 
 
 async def running_count(user_id: int) -> int:
+    """RUNNING planned tasks. APPROVAL tasks only show a prompt and wait, so they take no task slot."""
     async with Session() as s:
         n = await s.scalar(
             select(func.count(Task.id)).where(
-                Task.user_id == user_id, Task.status == TaskStatus.RUNNING.value
+                Task.user_id == user_id, Task.status == TaskStatus.RUNNING.value,
+                Task.kind != TaskKind.APPROVAL.value,
             )
         )
         return int(n or 0)
@@ -128,12 +130,40 @@ async def stale_running(user_id: int, started_before: datetime) -> list[Task]:
         return list(rows)
 
 
+async def running_started_before(started_before: datetime, user_id: int | None = None) -> list[Task]:
+    """Every user's (or one user's) RUNNING tasks whose current run began before `started_before`."""
+    q = select(Task).where(Task.status == TaskStatus.RUNNING.value, Task.started_at < started_before)
+    if user_id is not None:
+        q = q.where(Task.user_id == user_id)
+    async with Session() as s:
+        return list(await s.scalars(q.order_by(Task.id)))
+
+
+async def users_with_queued(user_id: int | None = None) -> list[int]:
+    q = select(Task.user_id).where(Task.status == TaskStatus.QUEUED.value).distinct()
+    if user_id is not None:
+        q = q.where(Task.user_id == user_id)
+    async with Session() as s:
+        return sorted(await s.scalars(q))
+
+
 async def next_queued(user_id: int) -> Task | None:
+    """The oldest QUEUED planned task (APPROVAL tasks never wait for a slot)."""
     async with Session() as s:
         return await s.scalar(
-            select(Task).where(Task.user_id == user_id, Task.status == TaskStatus.QUEUED.value)
+            select(Task).where(Task.user_id == user_id, Task.status == TaskStatus.QUEUED.value,
+                               Task.kind != TaskKind.APPROVAL.value)
             .order_by(Task.id).limit(1)
         )
+
+
+async def queued_approval_tasks(user_id: int) -> list[Task]:
+    async with Session() as s:
+        rows = await s.scalars(
+            select(Task).where(Task.user_id == user_id, Task.status == TaskStatus.QUEUED.value,
+                               Task.kind == TaskKind.APPROVAL.value).order_by(Task.id)
+        )
+        return list(rows)
 
 
 async def active_for_user(user_id: int) -> list[Task]:

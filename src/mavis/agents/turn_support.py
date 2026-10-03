@@ -121,6 +121,12 @@ def previous_tainted(history: list[Message]) -> bool:
     return False
 
 
+def window_tainted(history: list[Message]) -> bool:
+    """Any assistant message in the replayed history window is tainted. The whole window goes into the
+    prompt (to_langchain), so a tainted reply several turns back can still steer this turn."""
+    return any(m.role == Role.ASSISTANT.value and is_tainted(m) for m in history)
+
+
 def clarified_request(history: list[Message]) -> str | None:
     """The user message a clarifying question was about, if the last assistant reply was one."""
     last_user = max((i for i, m in enumerate(history) if m.role == Role.USER.value), default=None)

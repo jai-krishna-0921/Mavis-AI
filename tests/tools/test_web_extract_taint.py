@@ -1,10 +1,12 @@
-"""Inside a tainted task, web_extract opens only exact URLs the user gave (verbatim in the root goal) or
-that the task's own web_search returned. Untainted tasks are unchanged."""
+"""Inside a tainted task, web_extract opens only URLs the task's own web_search returned, plus exact URLs
+in the root goal when the user gave that goal in an untainted turn (origin USER, root not tainted; the
+task became tainted mid-run). Untainted tasks are unchanged."""
 
 from __future__ import annotations
 
 import pytest
 
+from mavis.domain.tasks import TaskOrigin
 from mavis.store.repo import tasks
 from mavis.tools import web
 from mavis.tools.registry import ToolRun, current_run, current_task_id
@@ -39,24 +41,40 @@ async def _extract(task_id: int, url: str, run_tainted: bool = False) -> str:
 
 
 async def test_query_on_a_named_host_is_refused(user, fetched):
-    tid = await tasks.create(user.id, goal="research the speaker list on evilconf.com", tainted=True)
-    assert (await _extract(tid, "https://evilconf.com/?d=secret")).startswith("Refused")
-    assert (await _extract(tid, "https://evilconf.com/speakers")).startswith("Refused")
+    tid = await tasks.create(user.id, goal="research the speaker list on evilconf.com")
+    assert (await _extract(tid, "https://evilconf.com/?d=secret", True)).startswith("Refused")
+    assert (await _extract(tid, "https://evilconf.com/speakers", True)).startswith("Refused")
     assert fetched == []
-    assert await _extract(tid, "https://EvilConf.com/") == "page text"  # the bare root page only
+    assert await _extract(tid, "https://EvilConf.com/", True) == "page text"  # the bare root page only
 
 
 async def test_form_on_a_subdomain_of_a_named_host_is_refused(user, fetched):
-    tid = await tasks.create(user.id, goal="look up my question on google.com", tainted=True)
+    tid = await tasks.create(user.id, goal="look up my question on google.com")
     form = "https://docs.google.com/forms/d/e/abc/formResponse?entry.1=secret"
-    assert (await _extract(tid, form)).startswith("Refused") and fetched == []
+    assert (await _extract(tid, form, True)).startswith("Refused") and fetched == []
 
 
 async def test_verbatim_goal_url_is_allowed_exactly(user, fetched):
-    tid = await tasks.create(user.id, goal="summarize https://example.com/laptops/review?id=7.", tainted=True)
-    assert await _extract(tid, "https://EXAMPLE.COM/laptops/review?id=7") == "page text"
-    assert (await _extract(tid, "https://example.com/laptops/review?id=7&d=secret")).startswith("Refused")
-    assert (await _extract(tid, "https://example.com/Laptops/review?id=7")).startswith("Refused")
+    tid = await tasks.create(user.id, goal="summarize https://example.com/laptops/review?id=7.")
+    assert await _extract(tid, "https://EXAMPLE.COM/laptops/review?id=7", True) == "page text"
+    extra = "https://example.com/laptops/review?id=7&d=secret"
+    assert (await _extract(tid, extra, True)).startswith("Refused")
+    assert (await _extract(tid, "https://example.com/Laptops/review?id=7", True)).startswith("Refused")
+
+
+async def test_goal_urls_of_a_tainted_root_are_not_trusted(user, fetched):
+    """A goal written in a tainted turn is model text that may carry an injected link."""
+    tid = await tasks.create(user.id, goal="summarize https://evil.example/?d=secret", tainted=True)
+    assert (await _extract(tid, "https://evil.example/?d=secret")).startswith("Refused")
+    assert fetched == []
+
+
+async def test_goal_urls_of_an_initiative_task_are_not_trusted(user, fetched):
+    """The initiative reasoner writes the goal: never trusted, even before the task is marked tainted."""
+    tid = await tasks.create(user.id, goal="look up https://evil.example/a?u=1",
+                             origin=TaskOrigin.INITIATIVE, tainted=True)
+    assert (await _extract(tid, "https://evil.example/a?u=1")).startswith("Refused")
+    assert fetched == []
 
 
 async def test_url_from_the_tasks_own_search_is_allowed(user, fetched, monkeypatch):
@@ -80,7 +98,7 @@ async def test_task_tainted_mid_run_is_restricted_too(user, fetched):
 
 async def test_subtask_uses_the_root_goal(user, fetched):
     doc = "https://docs.python.org/3/library/asyncio.html"
-    root = await tasks.create(user.id, goal=f"read {doc}", tainted=True)
+    root = await tasks.create(user.id, goal=f"read {doc}")
     child = await tasks.create(user.id, goal="open https://evil.example/", parent_id=root, tainted=True)
     assert (await _extract(child, "https://evil.example/")).startswith("Refused")
     assert await _extract(child, "https://docs.python.org/3/library/asyncio.html") == "page text"
