@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from email.utils import parseaddr
 from typing import Any
@@ -11,6 +12,28 @@ from mavis.domain.events import Event, EventType, Trust
 
 SNIPPET_LIMIT = 1000
 HEADER_KEYS = frozenset({"list-unsubscribe", "from", "to", "subject"})
+
+
+_AUTH_PASS = re.compile(r"\b(?:dmarc|dkim)\s*=\s*pass\b", re.I)
+_AUTH_DOMAIN = re.compile(r"\bheader\.(?:d|from)\s*=\s*\"?@?(?P<d>[a-z0-9.-]+)", re.I)
+
+
+def sender_authenticated(headers: dict[str, str], from_address: str) -> bool:
+    """True only if Authentication-Results shows dmarc=pass or dkim=pass for the From domain (relaxed
+    alignment: the signing domain equals the From domain or is a parent of it). Returns a bool: the raw
+    header is parsed here and never stored or shown."""
+    value = str(headers.get("authentication-results", "") or "")
+    domain = from_address.rpartition("@")[2].strip().lower().strip(".")
+    if not value or not domain:
+        return False
+    for clause in value.split(";"):
+        if not _AUTH_PASS.search(clause):
+            continue
+        for m in _AUTH_DOMAIN.finditer(clause):
+            d = m["d"].lower().strip(".")
+            if d and (domain == d or domain.endswith("." + d)):
+                return True
+    return False
 
 
 def pick(d: Any, *keys: str, default: Any = None) -> Any:

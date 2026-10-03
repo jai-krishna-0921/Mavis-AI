@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mavis.attention.schema import Feedback
+from mavis.attention.schema import EmailKind, Feedback
 from mavis.store.repo import users
 
 STATE_KEY = "attention"
@@ -15,11 +15,16 @@ OFFSET_STEP: dict[Feedback, float] = {
     Feedback.DISPUTED: -0.05,
 }
 OFFSET_MIN, OFFSET_MAX = -0.2, 0.3
+SENSITIVE_MAX = 0.1  # money_movement and security can be tuned down only a little
+SENSITIVE_KINDS = frozenset({EmailKind.MONEY_MOVEMENT, EmailKind.SECURITY})
 
 
 def learn(offsets: dict[str, float], kind: str, feedback: Feedback) -> dict[str, float]:
+    if kind not in {k.value for k in EmailKind}:
+        return dict(offsets)  # arbitrary keys would grow users.state without bound
     new = dict(offsets)
-    new[kind] = round(max(OFFSET_MIN, min(OFFSET_MAX, new.get(kind, 0.0) + OFFSET_STEP[feedback])), 3)
+    top = SENSITIVE_MAX if kind in SENSITIVE_KINDS else OFFSET_MAX
+    new[kind] = round(max(OFFSET_MIN, min(top, new.get(kind, 0.0) + OFFSET_STEP[feedback])), 3)
     return new
 
 
