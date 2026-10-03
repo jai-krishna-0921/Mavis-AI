@@ -34,7 +34,8 @@ def wakeup_event(w: Wakeup) -> Event:
             "reason": w.reason,
             "loop_id": w.loop_id,
         },
-        trust=Trust.SYSTEM,
+        # set by the executor when the wakeup came from third-party content; deferred pings carry it too
+        trust=Trust.UNTRUSTED if w.payload.get("untrusted") is True else Trust.SYSTEM,
     )
 
 
