@@ -10,8 +10,9 @@ import asyncio
 import ipaddress
 import re
 import socket
+from collections import OrderedDict
 from html import unescape
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import httpcore
 import httpx
@@ -103,6 +104,7 @@ async def search(query: str, max_results: int = 5) -> list[SearchHit]:
 
 async def web_search(user_id: int, args: SearchArgs) -> str:
     rows = [h.model_dump() for h in await search(args.query, args.max_results)]
+    record_search_urls(current_task_id.get(), [str(r["url"]) for r in rows])  # web_extract may open these
     if not rows:
         return "No results."
     return "\n".join(f"[{i}] {r['title']}: {r['url']}\n{r['snippet']}" for i, r in enumerate(rows, start=1))
@@ -278,23 +280,52 @@ async def extract(url: str, max_chars: int = _MAX_PAGE_CHARS) -> str:
     return text[:max_chars]
 
 
-# Hostnames in free text: "example.com", "https://docs.example.co.uk/x", "www.site.org".
-_HOST_IN_TEXT = re.compile(r"(?:https?://)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})\b", re.I)
+# --- web_extract inside tainted tasks ----------------------------------------------------------------
+# A tainted task has read third-party content, which may try to send data out in a URL it makes up (an
+# exfiltration GET: evil.com/?d=<secret>, a Google Form submit URL, ...). There, only exact URLs the user
+# gave (verbatim in the root goal) or that this task's own web_search returned may be opened. Search
+# result URLs come from the search engine and cannot carry live user data.
+
+_URL_IN_TEXT = re.compile(r"https?://[^\s<>\"']+", re.I)
+_BARE_HOST = re.compile(
+    r"(?<![\w@./-])((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})(?![\w/-]|\.\w)", re.I
+)
+_TRAILING_PUNCT = ".,;:!?)]}"
 _MAX_PARENT_HOPS = 5
+_MAX_TRACKED_TASKS = 200
+_search_urls: OrderedDict[int, set[str]] = OrderedDict()  # task id -> URLs its web_search returned
 
 
-def named_hosts(text: str) -> set[str]:
-    return {m.group(1).lower().removeprefix("www.") for m in _HOST_IN_TEXT.finditer(text or "")}
+def normalize_url(url: str) -> str:
+    """Exact-match form: scheme and host lowercased, one trailing slash dropped. Nothing else changes."""
+    parts = urlsplit(url.strip())
+    path = parts.path[:-1] if parts.path.endswith("/") else parts.path
+    netloc = parts.netloc.lower()
+    return urlunsplit((parts.scheme.lower(), netloc, path, parts.query, parts.fragment))
 
 
-def host_allowed(url: str, allowed: set[str]) -> bool:
-    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
-    return bool(host) and any(host == h or host.endswith(f".{h}") for h in allowed)
+def urls_in_goal(text: str) -> set[str]:
+    """Allowed URLs from the user's own words: every URL written out, plus the bare root page of a site
+    named without a scheme ("evilconf.com" allows https://evilconf.com/ only, no path or query)."""
+    found = {normalize_url(m.group(0).rstrip(_TRAILING_PUNCT)) for m in _URL_IN_TEXT.finditer(text or "")}
+    without_urls = _URL_IN_TEXT.sub(" ", text or "")
+    for m in _BARE_HOST.finditer(without_urls):
+        host = m.group(1).lower()
+        found |= {f"https://{host}", f"http://{host}"}
+    return found
 
 
-async def _tainted_task_hosts() -> set[str] | None:
-    """Inside a tainted task: the hosts its trusted origin (the root task's goal, as the user asked for it
-    in a clean turn or approved it) names. None when not in a task or the task is not tainted."""
+def record_search_urls(task_id: int | None, urls: list[str]) -> None:
+    if task_id is None or not urls:
+        return
+    _search_urls.setdefault(task_id, set()).update(normalize_url(u) for u in urls)
+    _search_urls.move_to_end(task_id)
+    while len(_search_urls) > _MAX_TRACKED_TASKS:
+        _search_urls.popitem(last=False)
+
+
+async def _tainted_task_urls() -> set[str] | None:
+    """Inside a tainted task: the URLs it may open. None when not in a task or the task is not tainted."""
     from mavis.store.repo import tasks  # lazy: keeps this module import-light
 
     task_id = current_task_id.get()
@@ -306,6 +337,7 @@ async def _tainted_task_hosts() -> set[str] | None:
     run = current_run.get()
     if not (task.tainted or (run is not None and run.tainted)):
         return None
+    allowed = set(_search_urls.get(task.id, ()))
     for _ in range(_MAX_PARENT_HOPS):
         if task.parent_id is None:
             break
@@ -313,17 +345,17 @@ async def _tainted_task_hosts() -> set[str] | None:
         if parent is None:
             break
         task = parent
-    return named_hosts(task.goal)
+        allowed |= _search_urls.get(task.id, set())
+    return allowed | urls_in_goal(task.goal)
 
 
 async def web_extract(user_id: int, args: ExtractArgs) -> str:
-    # A tainted task has read third-party content, which may try to send data out in a URL it makes up
-    # (an exfiltration GET). There, only sites the user named themselves may be opened.
-    allowed = await _tainted_task_hosts()
-    if allowed is not None and not host_allowed(args.url, allowed):
+    allowed = await _tainted_task_urls()
+    if allowed is not None and normalize_url(args.url) not in allowed:
         log.warning("web.extract_refused_tainted", host=urlparse(args.url).hostname)
-        return ("Refused: this task has read third-party content, so it only opens sites the user named "
-                "in their request, and this host was not one of them. Do not retry; work with what you have.")
+        return ("Refused: this task has read third-party content, so it only opens the exact links the user "
+                "gave or that a web search in this task returned. Do not retry or change the link; work "
+                "with what you have.")
     return await extract(args.url)
 
 
