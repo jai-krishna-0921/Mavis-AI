@@ -116,13 +116,13 @@ _DUP_STOPWORDS = frozenset(
 )
 
 
-def _dup_tokens(title: str) -> list[str]:
+def title_tokens(title: str) -> list[str]:
     """Title words that identify the thing: no times, dates, weekdays or filler."""
     return [t for t in normalise_title(title).split() if t not in _DUP_STOPWORDS and not _TIME_TOKEN.match(t)]
 
 
 def similar_titles(a: str, b: str) -> bool:
-    ta, tb = _dup_tokens(a), _dup_tokens(b)
+    ta, tb = title_tokens(a), title_tokens(b)
     if not ta or not tb:
         return normalise_title(a) == normalise_title(b)
     sa, sb = set(ta), set(tb)

@@ -105,9 +105,8 @@ class InitiativeHandler:
             decision = fallback_decision(event, result)
 
         if event.type is EventType.LOOP_CREATED:
-            loop = Loop.model_validate(event.payload)
-            if not any(w.loop_id == loop.id for w in decision.wakeups):
-                await schedule_default_signals(self._wakeups, loop)
+            # Always: the model's own wakeups are deduped against these by the executor, not instead of them
+            await schedule_default_signals(self._wakeups, Loop.model_validate(event.payload))
 
         decision = await hooks.apply_decision_policies(event, decision)
         decision = _imminent_floor(event, decision, result.matched_loops)
@@ -117,7 +116,8 @@ class InitiativeHandler:
             context = wrap_untrusted(result.summary, event.type.value)
         streak = int(event.payload.get("streak", 0)) + 1 if event.type is EventType.USER_QUIET else 0
         await self._executor.apply(user, decision, event, context=context, quiet_streak=streak,
-                                  origin=await self._origin_for(event))
+                                  origin=await self._origin_for(event), open_loops=open_loops,
+                                  event_loop_id=_event_loop_id(event))
 
         if event.type is EventType.EVENT_ENDED and event.payload.get("loop_id"):
             await self._loops.close(int(event.payload["loop_id"]), LoopStatus.DONE)
