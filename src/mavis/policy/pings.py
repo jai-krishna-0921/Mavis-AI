@@ -75,10 +75,13 @@ def _day_key(dedupe_key: str, local_now: datetime) -> str:
 
 class PingPolicy:
     async def check(self, user, urgency: int, dedupe_key: str | None, now: datetime,
-                    extra_keys: Sequence[str] = (), bypass_budget: bool = False) -> PolicyVerdict:
+                    extra_keys: Sequence[str] = (), bypass_budget: bool = False,
+                    reminder: bool = False) -> PolicyVerdict:
         """`extra_keys` are further dedupe keys (e.g. one per loop and kind of ping): any seen one blocks.
         `bypass_budget` is for deterministic security notices: still deduped and quiet-hours deferred, and
-        at most SECURITY_OVER_BUDGET_MAX of them per day go over the budget (then: next morning)."""
+        at most SECURITY_OVER_BUDGET_MAX of them per day go over the budget (then: next morning).
+        `reminder` is a reminder the user asked for: deduped and quiet-hours deferred (unless they are
+        awake), but never held back by the daily budget."""
         s = get_settings()
         local = timeutil.to_local(now, user.timezone)
         for key in _keys(dedupe_key, extra_keys):
@@ -90,6 +93,8 @@ class PingPolicy:
         ):
             defer = next_quiet_end(local, s.quiet_end).astimezone(UTC)
             return PolicyVerdict(allow=False, defer_until=defer, reason="quiet hours")
+        if reminder:
+            return PolicyVerdict(allow=True, reason="user reminder")
         if await self.count_today(user, now) >= s.ping_daily_budget:
             if bypass_budget:
                 if await self._security_bypasses_today(user, now) < SECURITY_OVER_BUDGET_MAX:

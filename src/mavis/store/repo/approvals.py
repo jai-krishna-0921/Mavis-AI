@@ -7,11 +7,16 @@ import json
 from collections.abc import Iterable
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
-from mavis.domain.tasks import OPEN_APPROVAL_STATUSES, TERMINAL_APPROVAL_STATUSES, ApprovalStatus
+from mavis.domain.tasks import (
+    OPEN_APPROVAL_STATUSES,
+    TERMINAL_APPROVAL_STATUSES,
+    ApprovalStatus,
+    TaskStatus,
+)
 from mavis.store.db import Session, utcnow
-from mavis.store.models import PendingApproval
+from mavis.store.models import PendingApproval, Task
 
 _OPEN = [s.value for s in OPEN_APPROVAL_STATUSES]
 
@@ -107,12 +112,15 @@ async def attach(approval_ids: Iterable[int], task_id: int) -> None:
 
 async def claim(approval_id: int, from_statuses: Iterable[ApprovalStatus], to: ApprovalStatus) -> bool:
     """Atomic status transition; exactly one concurrent caller gets True."""
+    values: dict = {"status": to.value}
+    if to == ApprovalStatus.RESOLVING:
+        values["resolving_at"] = utcnow()
     async with Session() as s:
         res = await s.execute(
             update(PendingApproval)
             .where(PendingApproval.id == approval_id,
                    PendingApproval.status.in_([x.value for x in from_statuses]))
-            .values(status=to.value)
+            .values(**values)
         )
         await s.commit()
         return (res.rowcount or 0) == 1
@@ -185,6 +193,52 @@ async def mark_prompted(approval_id: int) -> bool:
         return (res.rowcount or 0) == 1
 
 
+async def executed_for_task(task_id: int) -> list[PendingApproval]:
+    """Approvals whose action ran (EXECUTED and finished), oldest first."""
+    async with Session() as s:
+        rows = await s.scalars(
+            select(PendingApproval)
+            .where(PendingApproval.task_id == task_id,
+                   PendingApproval.status == ApprovalStatus.EXECUTED.value,
+                   PendingApproval.resolved_at.is_not(None))
+            .order_by(PendingApproval.id)
+        )
+        return list(rows)
+
+
+async def fail_unstarted_for_task(task_id: int, note: str) -> int:
+    """Close approvals that can never run now: RESOLVING (decision never applied) and EXECUTED rows
+    that were claimed but never started. FAILED, with `note` as the result."""
+    async with Session() as s:
+        res = await s.execute(
+            update(PendingApproval)
+            .where(
+                PendingApproval.task_id == task_id,
+                (PendingApproval.status == ApprovalStatus.RESOLVING.value)
+                | ((PendingApproval.status == ApprovalStatus.EXECUTED.value)
+                   & PendingApproval.started_at.is_(None)
+                   & PendingApproval.resolved_at.is_(None)),
+            )
+            .values(status=ApprovalStatus.FAILED.value, result=note, resolved_at=utcnow())
+        )
+        await s.commit()
+        return res.rowcount or 0
+
+
+async def may_have_run_for_task(task_id: int) -> list[PendingApproval]:
+    """EXECUTED and started but never finished: the action may or may not have gone through."""
+    async with Session() as s:
+        rows = await s.scalars(
+            select(PendingApproval)
+            .where(PendingApproval.task_id == task_id,
+                   PendingApproval.status == ApprovalStatus.EXECUTED.value,
+                   PendingApproval.started_at.is_not(None),
+                   PendingApproval.resolved_at.is_(None))
+            .order_by(PendingApproval.id)
+        )
+        return list(rows)
+
+
 _REJECTABLE = [ApprovalStatus.PENDING.value, ApprovalStatus.AWAITING_EDIT.value]
 
 
@@ -199,3 +253,70 @@ async def reject_open_for_task(task_id: int) -> int:
         )
         await s.commit()
         return res.rowcount or 0
+
+
+# --- sweep queries ------------------------------------------------------------------------
+
+
+def _for_user(stmt, user_id: int | None):
+    return stmt if user_id is None else stmt.where(PendingApproval.user_id == user_id)
+
+
+async def overdue_open(now: datetime, user_id: int | None = None) -> list[PendingApproval]:
+    """PENDING / AWAITING_EDIT approvals past their expiry (the expire wakeup was lost)."""
+    stmt = select(PendingApproval).where(PendingApproval.status.in_(_REJECTABLE),
+                                         PendingApproval.expires_at < now)
+    async with Session() as s:
+        return list(await s.scalars(_for_user(stmt, user_id).order_by(PendingApproval.id)))
+
+
+async def stuck_resolving(cutoff: datetime, user_id: int | None = None) -> list[PendingApproval]:
+    """RESOLVING since before `cutoff` and never started: the resume job was lost."""
+    stmt = select(PendingApproval).where(
+        PendingApproval.status == ApprovalStatus.RESOLVING.value,
+        PendingApproval.started_at.is_(None),
+        func.coalesce(PendingApproval.resolving_at, PendingApproval.created_at) < cutoff,
+    )
+    async with Session() as s:
+        return list(await s.scalars(_for_user(stmt, user_id).order_by(PendingApproval.id)))
+
+
+async def stale_may_have_run(cutoff: datetime, user_id: int | None = None) -> list[PendingApproval]:
+    """EXECUTED, started before `cutoff`, never finished: the process died mid-action."""
+    stmt = select(PendingApproval).where(
+        PendingApproval.status == ApprovalStatus.EXECUTED.value,
+        PendingApproval.started_at.is_not(None),
+        PendingApproval.started_at < cutoff,
+        PendingApproval.resolved_at.is_(None),
+    )
+    async with Session() as s:
+        return list(await s.scalars(_for_user(stmt, user_id).order_by(PendingApproval.id)))
+
+
+async def close_may_have_run(approval_id: int, note: str) -> bool:
+    """Finish an EXECUTED-but-unfinished row as FAILED (outcome unknown) once the user was told."""
+    async with Session() as s:
+        res = await s.execute(
+            update(PendingApproval)
+            .where(PendingApproval.id == approval_id,
+                   PendingApproval.status == ApprovalStatus.EXECUTED.value,
+                   PendingApproval.started_at.is_not(None),
+                   PendingApproval.resolved_at.is_(None))
+            .values(status=ApprovalStatus.FAILED.value, result=note, resolved_at=utcnow())
+        )
+        await s.commit()
+        return (res.rowcount or 0) == 1
+
+
+async def executed_after_stop(since: datetime, user_id: int | None = None) -> list[PendingApproval]:
+    """Executed approvals of tasks that were cancelled or failed since `since`."""
+    stmt = (
+        select(PendingApproval)
+        .join(Task, Task.id == PendingApproval.task_id)
+        .where(PendingApproval.status == ApprovalStatus.EXECUTED.value,
+               PendingApproval.resolved_at.is_not(None),
+               Task.status.in_([TaskStatus.CANCELLED.value, TaskStatus.FAILED.value]),
+               Task.finished_at >= since)
+    )
+    async with Session() as s:
+        return list(await s.scalars(_for_user(stmt, user_id).order_by(PendingApproval.id)))

@@ -13,7 +13,7 @@ from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision, NotifyIntent, WakeupRequest
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import Loop, LoopStatus, LoopUpsert
-from mavis.domain.messages import Button, Outbound, Role
+from mavis.domain.messages import TAINT_SUFFIX, Button, Outbound, Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.composer import Composer
 from mavis.initiative.quiet import QuietTracker
@@ -34,6 +34,19 @@ UNTRUSTED_SOURCE_PREFIX = "untrusted:"  # loop.source after an update driven by 
 SECURITY_DEFER_GRACE = timedelta(hours=2)
 MERGE_WINDOW = timedelta(minutes=30)  # a model wakeup this close to one already set for the loop merges
 LOOP_WAKEUP_KINDS = (WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED, WakeupKind.AGENT)
+REMINDER_PREFIX = "Reminder the user asked for: "  # wake_me's wakeup reason
+REMINDER_URGENCY = 4
+LATE_REMINDER_AFTER = timedelta(hours=2)  # later than this, the reminder says it is late
+
+
+def reminder_text(reason: str, due: datetime, now: datetime, timezone: str) -> str:
+    """Fixed reminder copy (no composer, so nothing can decide not to send it)."""
+    what = " ".join(reason.split()) or "the thing you asked me to remind you about"
+    if now - timeutil.ensure_utc(due) <= LATE_REMINDER_AFTER:
+        return f"⏰ Reminder: {what}"
+    local_due, local_now = timeutil.to_local(due, timezone), timeutil.to_local(now, timezone)
+    when = f"{local_due:%H:%M}" if local_due.date() == local_now.date() else f"{local_due:%a %d %b, %H:%M}"
+    return f"⏰ Reminder, a bit late (it was for {when}): {what}"
 
 
 class InitiativeExecutor:
@@ -83,8 +96,13 @@ class InitiativeExecutor:
             if untrusted:
                 log.warning("initiative.untrusted_act_skipped", event_id=event.id, index=i)
                 continue
-            # Placeholder until Phase 4 registers RUN_TASK dispatch: log and skip, enqueue nothing.
-            log.info("initiative.act_skipped", event_id=event.id, index=i, goal=task.goal[:80])
+            if not get_settings().initiative_act_enabled:
+                log.info("initiative.act_disabled", event_id=event.id, index=i, goal=task.goal[:80])
+                continue
+            from mavis.agents.task_dispatch import dispatch_task_requests  # lazy: avoid an import cycle
+            from mavis.domain.tasks import TaskOrigin
+
+            await dispatch_task_requests(user.id, [task], TaskOrigin.INITIATIVE, bus=self._bus)
         if decision.notify is not None:
             intent = decision.notify
             if intent.dedupe_key is None:  # retry-safe default: one notification per source event
@@ -116,6 +134,27 @@ class InitiativeExecutor:
         if moved:
             log.info("initiative.deferred_released", user=user.id, count=moved)
         return moved
+
+    async def remind(self, user, reason: str, dedupe_key: str, due: datetime) -> bool:
+        """Deliver a reminder the user asked for. It always fires: fixed text, not the composer; the daily
+        budget does not apply; quiet hours defer it (unless the user is awake) to a DEFERRED wakeup that
+        comes back here, so writing during quiet hours releases it; late ones say so."""
+        now = timeutil.now()
+        verdict = await self._policy.check(user, REMINDER_URGENCY, dedupe_key, now, reminder=True)
+        if not verdict.allow:
+            log.info("initiative.reminder_held", user=user.id, reason=verdict.reason,
+                     defer_until=verdict.defer_until)
+            if verdict.defer_until is not None:
+                await self._wakeups.wake_me(
+                    user.id, verdict.defer_until, f"{REMINDER_PREFIX}{reason}", kind=WakeupKind.DEFERRED,
+                    payload={"reminder_key": dedupe_key,
+                             "original_due": timeutil.ensure_utc(due).isoformat()},
+                    scale=False, reminder=True, dedupe_key=f"deferred:{dedupe_key}",
+                )
+            return False
+        text = reminder_text(reason, due, now, user.timezone)
+        await self.deliver(user, [text], dedupe_key, REMINDER_URGENCY)
+        return True
 
     async def _wakeup_loop(self, user_id: int, w: WakeupRequest, open_loops: list[Loop],
                            fallback: int | None) -> int | None:
@@ -262,9 +301,6 @@ class InitiativeExecutor:
         await self._policy.record(user, dedupe_key, urgency, now, extra_keys=extra_keys or ())
         if quiet_streak > 0:  # only a USER_QUIET nudge continues its chain; other proactive never arm one
             await self._quiet.after_assistant_message(user.id, bubbles[-1], streak=quiet_streak)
-
-
-TAINT_SUFFIX = ":tainted"  # the same marker simple_turn.is_tainted reads on chat replies
 
 
 def proactive_event_id(key: str, tainted: bool) -> str:

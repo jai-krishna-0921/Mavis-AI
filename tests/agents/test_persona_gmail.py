@@ -11,5 +11,5 @@ async def test_prompt_says_gmail_reading_works(db):
     prompt = system_prompt(user, NOW)
     assert "what's new in their inbox" in prompt and '"was this you?"' in prompt
     assert prompt.index("what's new in their inbox") < prompt.index("On the way")
-    assert "reading and watching Gmail already works" in prompt
+    assert "Coming next: sending email" not in prompt  # sending works now (Phase 4), with their OK
     assert "\u2014" not in prompt and "\u2013" not in prompt

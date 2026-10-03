@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -17,7 +18,9 @@ from mavis.bus import get_bus
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import NotifyIntent
+from mavis.domain.errors import ConnectionRequired, IntegrationError
 from mavis.domain.events import Event, EventType, Job, JobKind
+from mavis.domain.integrations import ConnectionState
 from mavis.domain.messages import Outbound
 from mavis.domain.policy import Capability
 from mavis.domain.wakeups import WakeupKind
@@ -28,12 +31,15 @@ from mavis.initiative.email_triage import EmailTriage, email_prefilter
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.timers.system import register_system_wakeup
 from mavis.tools.integrations import get_connection_cache, get_provider
-from mavis.tools.integrations.actions import DISPLAY_NAMES
+from mavis.tools.integrations.actions import CAPABILITY_PURPOSE, DISPLAY_NAMES, INTEGRATION_CAPABILITIES
 from mavis.tools.integrations.activation import Activator
 from mavis.tools.integrations.connect_flow import CHECK_KIND, ConnectFlow, RepoUserState
 from mavis.tools.integrations.first_sync import FirstSync
 from mavis.tools.integrations.poller import POLL_KIND, Poller
 from mavis.worker.runner import register_event_handler, register_job_handler, register_startup_hook
+
+if TYPE_CHECKING:
+    from mavis.tools.registry import MavisTool, ToolRegistry
 
 log = structlog.get_logger(__name__)
 
@@ -216,18 +222,73 @@ async def _notify_first_sync(event: Event) -> None:
 
 
 async def dispatch_task_completed(event: Event) -> None:
-    """Owns TASK_COMPLETED until Phase 4. Phase 4's owner must keep the first_sync branch."""
+    """The single TASK_COMPLETED owner: first sync, orchestrator task results, else the initiative agent."""
     if event.payload.get("kind") == "first_sync":
         await _notify_first_sync(event)
+        return
+    if "task_id" in event.payload:  # a finished task: deliver its result, no reasoner LLM call
+        from mavis.initiative import task_delivery
+
+        await task_delivery.deliver_task_result(event)
         return
     await initiative_wiring.current().handler.handle(event)
 
 
-def register_integrations(registry: object | None = None) -> None:
-    """Hook integrations into the worker. `registry` is the Phase 4 ToolRegistry (unused here)."""
-    # Phase 4: register_integration_tools(registry), registry.capability_check = capability_check
-    # Phase 4: register_interrupt_handler("connect", flow.on_connect_interrupt), specialists
+# --- tool registry policy hooks (Phase 4) ----------------------------------------------------------
+
+
+async def capability_check(user_id: int, capability: Capability) -> bool:
+    """Is this capability usable right now? Checked before a tool runs or asks for approval, so the
+    user is asked to connect first. WEB and SANDBOX always pass. An expired or revoked account raises
+    ConnectionRequired(revoked=True) itself, so the prompt says "reconnect". If the provider cannot be
+    reached the check passes, and the tool reports "unreachable" instead of sending a connect link."""
+    if capability not in INTEGRATION_CAPABILITIES:
+        return True
+    from mavis.tools import integrations  # module lookup at call time (tests swap the singletons)
+
+    try:
+        state = (await integrations.get_connection_cache().status(user_id)).get(capability.value)
+    except IntegrationError as exc:
+        log.warning("integrations.capability_check_failed", capability=capability.value,
+                    error=type(exc).__name__)
+        return True
+    if state is ConnectionState.ACTIVE:
+        return True
+    if state is ConnectionState.FAILED:
+        raise ConnectionRequired(capability, capability_reason(capability), revoked=True)
+    return False
+
+
+def capability_reason(capability: Capability) -> str:
+    """Completes "To <reason>, I need access to your <name>" in the connect prompt."""
+    return CAPABILITY_PURPOSE.get(capability, f"use your {capability.value}")
+
+
+def tool_available(tool: MavisTool) -> bool:
+    """Integration tools are offered only when a provider is configured (a dev box without a key
+    does not waste tool rounds on them)."""
+    if tool.requires not in INTEGRATION_CAPABILITIES:
+        return True
+    from mavis.tools import integrations
+
+    try:
+        return bool(getattr(integrations.get_provider(), "configured", True))
+    except IntegrationError:
+        return False
+
+
+def register_integrations(registry: ToolRegistry | None = None) -> None:
+    """Hook integrations into the worker. With the Phase 4 ToolRegistry, also set its policy hooks."""
+    from mavis.agents.interrupts import register_interrupt_handler
+
+    if registry is not None:
+        registry.capability_check = capability_check
+        registry.capability_reason = capability_reason
+        registry.available = tool_available
     flow = get_connect_flow()
+    # A task that needs an account pauses on a connect interrupt; ConnectFlow sends the link and
+    # resumes the task (RESUME_TASK) once the account is active, declined or failed.
+    register_interrupt_handler("connect", flow.on_connect_interrupt)
     register_event_handler(EventType.BUTTON_PRESSED, dispatch_button)
     register_button_handler("conn:", flow.on_button)
     register_event_handler(EventType.CONNECTION_CHANGED, flow.on_connection_changed, replace=True)
