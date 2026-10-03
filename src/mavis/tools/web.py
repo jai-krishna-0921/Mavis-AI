@@ -294,6 +294,8 @@ TOOLS = [
         name="web_extract",
         description="Read the main text of a web page by URL.",
         args_model=ExtractArgs, risk=RiskClass.READ, fn=web_extract, requires=Capability.WEB,
+        # Not "conversation": chat reads mail and calendar, so a model-chosen URL fetch there could
+        # carry private data out in a query string. Research runs on tainted-aware task loops.
         agents=frozenset({"research", "spawn"}),
         untrusted_output=True, priority=40,
     ),
