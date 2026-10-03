@@ -19,7 +19,7 @@ from mavis import bus
 from mavis.channels.formatting import sanitize_line
 from mavis.config import get_settings
 from mavis.domain.events import Event, Job, JobKind
-from mavis.domain.messages import Button, Outbound, Role
+from mavis.domain.messages import TAINT_SUFFIX, Button, Outbound, Role
 from mavis.domain.tasks import ApprovalStatus, TaskStatus
 from mavis.llm import models as llm
 from mavis.store.db import Session, utcnow
@@ -38,7 +38,9 @@ def approval_buttons(approval_id: int) -> list[list[Button]]:
 
 
 async def say(user_id: int, text: str, buttons: list[list[Button]] | None = None,
-              dedupe_key: str | None = None) -> None:
+              dedupe_key: str | None = None, tainted: bool = False) -> None:
+    """`tainted`: the text carries third-party content (a tainted task's approval preview). It is logged
+    with the taint marker so the next turn runs tainted and learns it as untrusted."""
     async with Session() as s:
         # A deduped send is not a new message: it must not be logged to history a second time.
         is_new = not (dedupe_key and await outbox.exists_with_key(s, dedupe_key))
@@ -47,7 +49,15 @@ async def say(user_id: int, text: str, buttons: list[list[Button]] | None = None
         )
         await s.commit()
     if is_new:
-        await messages.log(user_id, Role.ASSISTANT, text)
+        event_id = f"say:{dedupe_key or uuid4().hex}{TAINT_SUFFIX}" if tainted else None
+        await messages.log(user_id, Role.ASSISTANT, text, event_id=event_id)
+
+
+async def _task_tainted(approval) -> bool:
+    if approval.task_id is None:
+        return False
+    task = await tasks.get(approval.task_id)
+    return bool(task is not None and task.tainted)
 
 
 async def send_approval_prompt(user_id: int, payload: dict) -> None:
@@ -56,7 +66,8 @@ async def send_approval_prompt(user_id: int, payload: dict) -> None:
         return
     text = f"Ready when you are. Want me to go ahead?\n\n{approval.preview}"
     await say(user_id, text, approval_buttons(approval.id),
-              dedupe_key=f"approval:{approval.id}:{int(utcnow().timestamp() * 1000)}")
+              dedupe_key=f"approval:{approval.id}:{int(utcnow().timestamp() * 1000)}",
+              tainted=await _task_tainted(approval))
     if await approvals.mark_prompted(approval.id):
         ttl = timedelta(hours=get_settings().approval_ttl_hours)
         now = utcnow()
@@ -214,7 +225,8 @@ async def remind(user_id: int, approval_id: int) -> None:
     if approval is None or approval.user_id != user_id or approval.status != ApprovalStatus.PENDING:
         return
     text = f"Still want me to go ahead with this? It expires in about 2 hours.\n\n{approval.preview}"
-    await say(user_id, text, approval_buttons(approval_id), dedupe_key=f"approval:{approval_id}:remind")
+    await say(user_id, text, approval_buttons(approval_id), dedupe_key=f"approval:{approval_id}:remind",
+              tainted=await _task_tainted(approval))
 
 
 async def expire(user_id: int, approval_id: int) -> None:

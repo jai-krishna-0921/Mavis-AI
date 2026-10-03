@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from mavis.config import get_settings
 from mavis.domain.policy import Capability, RiskClass
-from mavis.tools.registry import MavisTool
+from mavis.tools.registry import MavisTool, current_run, current_task_id
 
 log = structlog.get_logger()
 
@@ -278,7 +278,52 @@ async def extract(url: str, max_chars: int = _MAX_PAGE_CHARS) -> str:
     return text[:max_chars]
 
 
+# Hostnames in free text: "example.com", "https://docs.example.co.uk/x", "www.site.org".
+_HOST_IN_TEXT = re.compile(r"(?:https?://)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})\b", re.I)
+_MAX_PARENT_HOPS = 5
+
+
+def named_hosts(text: str) -> set[str]:
+    return {m.group(1).lower().removeprefix("www.") for m in _HOST_IN_TEXT.finditer(text or "")}
+
+
+def host_allowed(url: str, allowed: set[str]) -> bool:
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    return bool(host) and any(host == h or host.endswith(f".{h}") for h in allowed)
+
+
+async def _tainted_task_hosts() -> set[str] | None:
+    """Inside a tainted task: the hosts its trusted origin (the root task's goal, as the user asked for it
+    in a clean turn or approved it) names. None when not in a task or the task is not tainted."""
+    from mavis.store.repo import tasks  # lazy: keeps this module import-light
+
+    task_id = current_task_id.get()
+    if task_id is None:
+        return None
+    task = await tasks.get(task_id)
+    if task is None:
+        return set()
+    run = current_run.get()
+    if not (task.tainted or (run is not None and run.tainted)):
+        return None
+    for _ in range(_MAX_PARENT_HOPS):
+        if task.parent_id is None:
+            break
+        parent = await tasks.get(task.parent_id)
+        if parent is None:
+            break
+        task = parent
+    return named_hosts(task.goal)
+
+
 async def web_extract(user_id: int, args: ExtractArgs) -> str:
+    # A tainted task has read third-party content, which may try to send data out in a URL it makes up
+    # (an exfiltration GET). There, only sites the user named themselves may be opened.
+    allowed = await _tainted_task_hosts()
+    if allowed is not None and not host_allowed(args.url, allowed):
+        log.warning("web.extract_refused_tainted", host=urlparse(args.url).hostname)
+        return ("Refused: this task has read third-party content, so it only opens sites the user named "
+                "in their request, and this host was not one of them. Do not retry; work with what you have.")
     return await extract(args.url)
 
 

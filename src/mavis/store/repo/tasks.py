@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from datetime import datetime
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from mavis.domain.tasks import TaskKind, TaskOrigin, TaskStatus
 from mavis.store.db import Session, utcnow
@@ -24,16 +25,34 @@ async def create(
     notify_on_complete: bool = True,
     parent_id: int | None = None,
     tainted: bool = False,
+    source_ref: str | None = None,
 ) -> int:
+    """`source_ref` (unique per user): when a task with it exists already, return that task's id."""
+    if source_ref is not None and (existing := await by_source_ref(user_id, source_ref)) is not None:
+        return existing
     async with Session() as s:
         t = Task(
             user_id=user_id, goal=goal, context=context, kind=kind.value, origin=origin.value,
             notify_on_complete=notify_on_complete, parent_id=parent_id, status=TaskStatus.QUEUED.value,
-            tainted=tainted,
+            tainted=tainted, source_ref=source_ref,
         )
         s.add(t)
-        await s.commit()
+        try:
+            await s.commit()
+        except IntegrityError:
+            if source_ref is None:
+                raise
+            await s.rollback()  # lost a race with a concurrent create for the same source_ref
+            found = await by_source_ref(user_id, source_ref)
+            if found is None:
+                raise
+            return found
         return t.id
+
+
+async def by_source_ref(user_id: int, source_ref: str) -> int | None:
+    async with Session() as s:
+        return await s.scalar(select(Task.id).where(Task.user_id == user_id, Task.source_ref == source_ref))
 
 
 async def get(task_id: int) -> Task | None:

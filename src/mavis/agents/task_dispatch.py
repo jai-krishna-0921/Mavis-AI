@@ -20,14 +20,18 @@ async def enqueue_run(task_id: int, user_id: int, bus: Any = None) -> None:
 
 
 async def dispatch_task_requests(
-    user_id: int, requests: list[TaskRequest], origin: TaskOrigin, bus: Any = None, *, tainted: bool = False
+    user_id: int, requests: list[TaskRequest], origin: TaskOrigin, bus: Any = None, *,
+    tainted: bool = False, source_ref: str | None = None,
 ) -> list[int]:
-    """`tainted`: the requester saw third-party content; every step of these tasks runs tainted."""
+    """`tainted`: the requester saw third-party content; every step of these tasks runs tainted.
+    `source_ref`: idempotency key (a retried caller gets the same task back; RUN_TASK is re-enqueued,
+    which is harmless: run_task only claims a QUEUED task once)."""
     ids: list[int] = []
-    for req in requests:
+    for i, req in enumerate(requests):
+        ref = source_ref if source_ref is None or len(requests) == 1 else f"{source_ref}:{i}"
         task_id = await tasks.create(
             user_id, goal=req.goal, context=req.context, origin=origin,
-            notify_on_complete=req.notify_on_complete, tainted=tainted,
+            notify_on_complete=req.notify_on_complete, tainted=tainted, source_ref=ref,
         )
         await enqueue_run(task_id, user_id, bus)
         ids.append(task_id)

@@ -70,12 +70,14 @@ current_route: ContextVar[str | None] = ContextVar("current_route", default=None
 CHAT_TOOL_LIMIT = 8
 CHAT_ALWAYS = ("start_task", "connect_account")
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
-CHAT_MAX_STEPS = 4  # tool rounds; then the model must answer with what it has
+CHAT_MAX_STEPS = 6  # tool rounds (slice value), then she answers with what she has; CHAT_DEADLINE_S caps time
 CHAT_DEADLINE_S = 40.0  # after this, no more tool rounds: answer now
 CHAT_TOOL_TIMEOUT_S = 20.0  # per tool call (provider round trips), well inside the turn deadline
 WRAP_UP_FALLBACK = "I couldn't finish checking that just now. Want me to try again?"
 APPROVAL_REPLY_WINDOW = timedelta(hours=2)  # a text reply counts only for a prompt this recent
-APPROVAL_REPLY_RECENT = 2  # ...that is also among this many latest assistant messages
+APPROVAL_REPLY_RECENT = 2  # ...that is also among this many latest assistant messages (edit / cancel)
+# Approving needs more: the prompt must be THE latest assistant message. A "yes" to a later question
+# (a proactive "want the summary?") must never send the earlier email.
 
 TOOL_RULES = (
     "Using your tools\n"
@@ -220,11 +222,24 @@ async def approval_awaiting_reply(user_id: int, history: list[Message]) -> Pendi
     return prompted[-1] if prompted else None
 
 
+def prompt_is_latest(approval: PendingApproval, history: list[Message]) -> bool:
+    """The approval's prompt (or, after Edit was tapped, the edit question) is the newest assistant
+    message, with nothing (proactive or otherwise) after it."""
+    latest = _recent_assistant(history, 1)
+    if _shown(approval, latest):
+        return True
+    return approval.status == ApprovalStatus.AWAITING_EDIT and any(
+        approval_flow.EDIT_QUESTION in t for t in latest)
+
+
 async def _approval_reply(event: Event, user_id: int, text: str, history: list[Message]) -> bool:
     approval = await approval_awaiting_reply(user_id, history)
     if approval is None:
         return False
     interp = await approval_flow.interpret_reply(approval, text)
+    if interp.decision == "approve" and not prompt_is_latest(approval, history):
+        log.info("conversation.approve_not_latest", approval_id=approval.id)
+        return False  # something was said after the prompt: this "yes" may answer that instead
     ack = await approval_flow.apply_reply(approval, interp)
     if ack is None:  # unrelated: an ordinary message after all
         return False
