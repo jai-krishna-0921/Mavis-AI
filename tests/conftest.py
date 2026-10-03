@@ -34,6 +34,7 @@ TEST_ENV = {
     "LANGFUSE_PUBLIC_KEY": "",
     "LANGFUSE_SECRET_KEY": "",
     "ATTENTION_STRICT_ERRORS": "true",
+    "GOOGLE_WORKSPACE_ENABLED": "false",  # spec 7: off in tests unless a test opts in (workspace_on)
     "DEMO_TIME_SCALE": "1.0",
     "PRESENCE_REACTION": "\N{EYES}",  # production default is off; presence tests opt in via this
 }
@@ -70,6 +71,17 @@ def settings(tmp_path, monkeypatch) -> Iterator:
     monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path / "data" / "artifacts"))
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}")
     monkeypatch.chdir(tmp_path)  # Settings reads ".env" relative to cwd; the temp dir has none
+    get_settings.cache_clear()
+    yield get_settings()
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def workspace_on(settings, monkeypatch):
+    """GOOGLE_WORKSPACE_ENABLED=true for one test (Settings is lru_cached, so the cache is cleared)."""
+    from mavis.config import get_settings
+
+    monkeypatch.setenv("GOOGLE_WORKSPACE_ENABLED", "true")
     get_settings.cache_clear()
     yield get_settings()
     get_settings.cache_clear()
