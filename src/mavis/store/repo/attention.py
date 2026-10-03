@@ -346,10 +346,11 @@ async def insert_signal(
         s.add(row)
         try:
             await s.commit()
-        except IntegrityError:
+        except IntegrityError as exc:
             await s.rollback()
             again = await s.scalar(_by_message(user_id, message_id))
-            assert again is not None
+            if again is None:
+                raise RuntimeError(f"insert_signal: {message_id!r} conflicted, not readable") from exc
             return again, False
         await s.refresh(row)
         return row, True

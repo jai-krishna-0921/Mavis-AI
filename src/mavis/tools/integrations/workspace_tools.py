@@ -74,6 +74,13 @@ UPLOAD_LIMIT = 5 * 1024 * 1024  # googlesuper UPLOAD_FILE takes at most 5 MB
 TEXT_MIMES = ("text/", "application/json", "application/xml")
 
 
+def _expect[M: BaseModel](args: BaseModel, model: type[M]) -> M:
+    """The registry validated `args` against the action's model; anything else is a wiring bug."""
+    if not isinstance(args, model):
+        raise TypeError(f"expected {model.__name__}, got {type(args).__name__}")
+    return args
+
+
 async def drive_read(
     ctx: ToolContext,
     args: FileArgs,
@@ -108,7 +115,7 @@ async def drive_read(
 
 
 async def _drive_read(ctx: ToolContext, args: BaseModel) -> str:
-    assert isinstance(args, FileArgs)
+    args = _expect(args, FileArgs)
     return await drive_read(ctx, args)
 
 
@@ -158,7 +165,7 @@ async def drive_upload(
 
 
 async def _drive_upload(ctx: ToolContext, args: BaseModel) -> str:
-    assert isinstance(args, DriveUploadArgs)
+    args = _expect(args, DriveUploadArgs)
     return await drive_upload(ctx, args)
 
 
@@ -184,7 +191,7 @@ async def docs_append(
 
 
 async def _docs_append(ctx: ToolContext, args: BaseModel) -> str:
-    assert isinstance(args, DocAppendArgs)
+    args = _expect(args, DocAppendArgs)
     return await docs_append(ctx, args)
 
 
@@ -205,7 +212,7 @@ async def drive_share(
 
 
 async def _drive_share(ctx: ToolContext, args: BaseModel) -> str:
-    assert isinstance(args, DriveShareArgs)
+    args = _expect(args, DriveShareArgs)
     return await drive_share(ctx, args)
 
 
@@ -225,7 +232,7 @@ async def drive_move(
 
 
 async def _drive_move(ctx: ToolContext, args: BaseModel) -> str:
-    assert isinstance(args, DriveMoveArgs)
+    args = _expect(args, DriveMoveArgs)
     return await drive_move(ctx, args)
 
 
@@ -275,12 +282,12 @@ async def tasks_update(
 
 
 async def _tasks_complete(ctx: ToolContext, args: BaseModel) -> str:
-    assert isinstance(args, TaskCompleteArgs)
+    args = _expect(args, TaskCompleteArgs)
     return await tasks_complete(ctx, args)
 
 
 async def _tasks_update(ctx: ToolContext, args: BaseModel) -> str:
-    assert isinstance(args, TaskUpdateArgs)
+    args = _expect(args, TaskUpdateArgs)
     return await tasks_update(ctx, args)
 
 

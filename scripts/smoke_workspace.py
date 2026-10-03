@@ -6,7 +6,7 @@ Runs drive.search, drive.meta, drive.permissions, docs.read, sheets.find, sheets
 tasks.get, contacts.search and mail.profile through the real adapter, then checks that the googlesuper
 NEW_MESSAGE trigger type exists. Prints only ok/failed, counts and key names
 (so we learn the live response shapes, e.g. whether permissions carry emailAddress); never file content,
-names, addresses or secrets. Strictly read-only: every action is asserted to be in READ_ONLY. Exit code 1
+names, addresses or secrets. Strictly read-only: every action is checked against READ_ONLY. Exit code 1
 if any call failed.
 
 If permissions show email_present=False, ownership of shared docs falls back to the single-owner rule (more
@@ -49,7 +49,8 @@ async def main(user_id: int) -> int:
 
     async def run(action: str, args: dict) -> Any:
         nonlocal failures
-        assert action in READ_ONLY, action
+        if action not in READ_ONLY:
+            raise RuntimeError(f"{action} is not a read-only action; the smoke script never writes")
         res = await provider.execute(user, action, args)
         print(f"{'OK    ' if res.ok else 'FAILED'} {action:18} keys={_keys(res.data) if res.ok else '-'}")
         failures += not res.ok
