@@ -549,3 +549,13 @@ async def test_approval_task_does_not_wait_for_the_task_slot(user, rec_bus, sent
     await tasks.claim(research, TaskStatus.RUNNING, TaskStatus.DONE)
     await orchestrator.run_task(other)
     assert driven == [ap_task, other]
+
+
+async def test_no_progress_line_for_an_approval_task(user, rec_bus):
+    """M6: a slow approval edit must not send "still on it"."""
+    from mavis.domain.tasks import TaskKind
+
+    tid = await tasks.create(user.id, goal="send email", kind=TaskKind.APPROVAL)
+    await tasks.claim(tid, TaskStatus.QUEUED, TaskStatus.RUNNING)
+    await orchestrator._progress_after(tid, user.id, 0)
+    assert not [e for e in rec_bus.events if e.type == EventType.TASK_PROGRESS]
