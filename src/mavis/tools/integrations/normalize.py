@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from email.utils import parseaddr
 from typing import Any
@@ -11,6 +12,34 @@ from mavis.domain.events import Event, EventType, Trust
 
 SNIPPET_LIMIT = 1000
 HEADER_KEYS = frozenset({"list-unsubscribe", "from", "to", "subject"})
+
+
+_AUTH_PASS = re.compile(r"\b(?:dmarc|dkim)\s*=\s*pass\b", re.I)
+# header.d=domain and header.from=domain carry a domain; header.i=@domain or user@domain an identity
+_AUTH_DOMAIN = re.compile(r"\bheader\.(?:d|i|from)\s*=\s*\"?(?P<v>[^\s;\"()]+)", re.I)
+TRUSTED_AUTHSERV = frozenset({"mx.google.com"})  # the receiving server whose verdict we accept
+
+
+def sender_authenticated(headers: dict[str, str], from_address: str) -> bool:
+    """True only if the receiving server (authserv-id in TRUSTED_AUTHSERV) recorded dmarc=pass or dkim=pass
+    for the From domain (relaxed alignment: the signing domain equals the From domain or is a parent of
+    it). Returns a bool: the raw header is parsed here and never stored or shown."""
+    value = str(headers.get("authentication-results", "") or "")
+    domain = from_address.rpartition("@")[2].strip().lower().strip(".")
+    if not value or not domain:
+        return False
+    authserv, _, results = value.partition(";")
+    tokens = authserv.split()
+    if not tokens or tokens[0].lower().strip(".") not in TRUSTED_AUTHSERV:
+        return False
+    for clause in results.split(";"):
+        if not _AUTH_PASS.search(clause):
+            continue
+        for m in _AUTH_DOMAIN.finditer(clause):
+            d = m["v"].rpartition("@")[2].lower().strip(".")
+            if d and (domain == d or domain.endswith("." + d)):
+                return True
+    return False
 
 
 def pick(d: Any, *keys: str, default: Any = None) -> Any:
@@ -57,6 +86,20 @@ def _headers(d: dict) -> dict[str, str]:
     }
 
 
+def _first_auth_results(d: dict) -> dict[str, str]:
+    """The topmost Authentication-Results header only: the receiving server prepends its own, so a copy
+    lower down was written by the sender and must never override it (the `_headers` dict keeps the last)."""
+    raw = pick(d, "payload.headers", "headers", default=[])
+    if isinstance(raw, dict):
+        items = [{"name": k, "value": v} for k, v in raw.items()]
+    else:
+        items = [h for h in raw if isinstance(h, dict) and "name" in h]
+    for h in items:
+        if str(h["name"]).lower() == "authentication-results":
+            return {"authentication-results": str(h.get("value", ""))}
+    return {}
+
+
 def normalize_email(d: dict) -> dict[str, Any]:
     headers = _headers(d)
     sender = str(pick(d, "sender", "from", default=headers.get("from", "")))
@@ -81,6 +124,8 @@ def normalize_email(d: dict) -> dict[str, Any]:
         ),
         "headers": {k: v for k, v in headers.items() if k in HEADER_KEYS},
         "from_me": "SENT" in label_list,
+        # parsed to a bool here: the raw Authentication-Results header is never stored
+        "sender_authenticated": sender_authenticated(_first_auth_results(d), address.lower()),
     }
 
 

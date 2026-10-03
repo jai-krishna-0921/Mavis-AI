@@ -36,7 +36,7 @@ from mavis.agents.turn_support import (
     HISTORY_LIMIT,
     RESTART_HINT,
     START_HINT,
-    build_context,
+    build_context_ex,
     clarified_request,
     connection_states,
     enqueue_learn,
@@ -318,12 +318,14 @@ async def run_turn(event: Event) -> None:
             m.role == Role.ASSISTANT.value for m in persona.recent_messages(history, utcnow())
         )
         hint = RESTART_HINT if recent_assistant else START_HINT
-    # The previous reply was written from third-party content and is in this prompt: start tainted.
-    carried_taint = previous_tainted(history)
     async with presence.typing(user.telegram_chat_id):  # refreshed until the reply is queued
-        context, connections, card_name = await asyncio.gather(
-            build_context(user.id, text, hint), connection_states(user.id), known_name(user.id)
+        (context, hooked), connections, card_name = await asyncio.gather(
+            build_context_ex(user.id, text, hint), connection_states(user.id), known_name(user.id)
         )
+        # Start tainted when third-party content is already in the prompt: the previous reply was written
+        # from it, or hook context (the inbox digest) was added. The react loop then applies the taint
+        # rules (outward tools and start_task need approval, a started task is tainted).
+        carried_taint = previous_tainted(history) or hooked
         now = utcnow()
         name = user.name or card_name
         recent = persona.recent_messages(history, now)
@@ -375,7 +377,8 @@ async def run_turn(event: Event) -> None:
                 key = f"reply:{event.id}:{i}"
                 await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=key))
             await s.commit()
-    read_untrusted = _read_untrusted(result.tools_called)
+    # This turn's own untrusted input marks the reply: a tool read, or the digest it was shown.
+    read_untrusted = _read_untrusted(result.tools_called) or hooked
     await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles),
                        event_id=reply_event_id(event.id, read_untrusted))
     await enqueue_learn(user.id, event, text, previous, clarified_request(history),

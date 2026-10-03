@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from mavis.agents import buttons, conversation, interrupts, wiring
+from mavis.attention.wiring import get_intake
 from mavis.domain.errors import ConnectionRequired, IntegrationError
 from mavis.domain.events import Event, EventType, Job, JobKind, Trust
 from mavis.domain.integrations import ConnectionState
@@ -49,10 +50,12 @@ def test_register_installs_handlers(settings):
     register_default_handlers()  # idempotent: nothing is registered twice
     events = runner._event_handlers
     assert events[EventType.USER_MESSAGE] == [conversation.run_turn]
-    assert events[EventType.TASK_COMPLETED] == [integrations_wiring.dispatch_task_completed]
+    # attention is on by default and appends its own TASK_COMPLETED handler (first_sync only)
+    assert events[EventType.TASK_COMPLETED] == [integrations_wiring.dispatch_task_completed,
+                                                get_intake().on_task_completed]
     assert events[EventType.BUTTON_PRESSED] == [buttons.dispatch_button]
     assert events[EventType.TASK_PROGRESS] == [task_delivery.on_progress]
-    assert {"ap:", "conn:"} <= set(buttons.BUTTON_HANDLERS)
+    assert {"ap:", "conn:", "at:"} <= set(buttons.BUTTON_HANDLERS)
     assert {JobKind.RUN_TASK, JobKind.RESUME_TASK, JobKind.LEARN, JobKind.CONNECTION_CHECK} <= set(
         runner._job_handlers)
     assert system.SYSTEM_WAKEUP_HANDLERS["system_approval_remind"] is approval_flow.on_remind_wakeup

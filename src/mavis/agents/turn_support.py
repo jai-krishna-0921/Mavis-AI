@@ -12,7 +12,7 @@ import time
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from mavis.agents import clarify
+from mavis.agents import clarify, context_hooks
 from mavis.bus import get_bus
 from mavis.domain.events import Event, Job, JobKind, Trust
 from mavis.domain.messages import TAINT_SUFFIX, Role
@@ -57,8 +57,12 @@ def to_langchain(history: list[Message]) -> list[BaseMessage]:
     return [HumanMessage(m.content) if m.role == Role.USER.value else AIMessage(m.content) for m in history]
 
 
-async def build_context(user_id: int, text: str, hint: str = "") -> str:
-    """Hint + rolling summary + recalled memory for the system prompt. Never raises."""
+async def build_context_ex(user_id: int, text: str, hint: str = "") -> tuple[str, bool]:
+    """Hint + rolling summary + recalled memory + hook context for the system prompt. Never raises.
+
+    The bool is True when hook context (the inbox digest, ...) was included. That block is derived from
+    third-party content, so the whole turn is tainted, exactly as if the model had read an email.
+    """
     parts = [hint] if hint else []
     try:
         memory = get_memory()
@@ -68,7 +72,14 @@ async def build_context(user_id: int, text: str, hint: str = "") -> str:
         parts.append(recall.render())
     except Exception:
         log.warning("simple_turn.recall_failed", exc_info=True)
-    return "\n\n".join(p for p in parts if p.strip())
+    extra = await context_hooks.gather_context(user_id, text)  # never raises
+    if extra.strip():
+        parts.append(extra)
+    return "\n\n".join(p for p in parts if p.strip()), bool(extra.strip())
+
+
+async def build_context(user_id: int, text: str, hint: str = "") -> str:
+    return (await build_context_ex(user_id, text, hint))[0]
 
 
 # TAINT_SUFFIX (domain.messages): a reply written after the model read untrusted tool output is logged
