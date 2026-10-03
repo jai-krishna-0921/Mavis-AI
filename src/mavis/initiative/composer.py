@@ -44,10 +44,15 @@ _UPI = re.compile(r"(?<![\w@])[\w.-]{2,}@[A-Za-z][A-Za-z0-9]{1,}\b")  # name@oka
 _TLDS = (
     "com|net|org|edu|gov|info|biz|io|co|in|me|ly|gl|gd|to|app|dev|xyz|ai|us|uk|ru|cn|link|site|online|"
     "top|club|shop|live|page|cc|tk|ml|ga|cf|gq|ws|be|de|fr|nl|au|ca|sh|so|tv|fm|am|vip|win|bid|icu|"
-    "click|money|bank|support|help|today|tech|store|cloud|email|pw|su|lk|pk|bd|np|ae|sg|my"
+    "click|money|bank|support|help|today|tech|store|cloud|email|pw|su|lk|pk|bd|np|ae|sg|my|"
+    "zip|mov|company|example"
 )
+_WIDE_DOT = re.compile("[\u3002\uff0e\uff61]")  # ideographic and full-width dots
+_SPELLED_DOT = re.compile(rf"\b([a-z0-9-]+)\s+dot\s+({_TLDS})\b", re.IGNORECASE)
+_HANDLE = re.compile(r"(?<![\w@])@[A-Za-z0-9_]{4,}")
 _DOMAIN = re.compile(
-    rf"(?<![\w@.-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:{_TLDS})\b(?:/(?:[^\s<>()]*{_END})?)?",
+    rf"(?<![\w@.-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:{_TLDS})\b(?:\.[a-z0-9-]+)*"
+    rf"(?:/(?:[^\s<>()]*{_END})?)?",
     re.IGNORECASE,
 )
 _PHONE = re.compile(r"(?<![\w(])(?:\+|\()?\d[\d\s().-]{6,}\d(?![\w])")
@@ -69,8 +74,10 @@ def _phone(m: re.Match[str]) -> str:
 def scrub_untrusted_origin(text: str) -> str:
     """Deterministically remove links, emails, payment ids, phone numbers and one-time codes from text
     that came from third parties."""
+    text = _WIDE_DOT.sub(".", text)
     text = _OBF_COLON.sub(":", _OBF_AT.sub("@", _OBF_DOT.sub(".", text)))
-    for pattern in (_URL, _EMAIL, _UPI, _DOMAIN):
+    text = _SPELLED_DOT.sub(r"\1.\2", text)
+    for pattern in (_URL, _EMAIL, _UPI, _DOMAIN, _HANDLE):
         text = pattern.sub(CHECK_DIRECTLY, text)
     text = _PHONE.sub(_phone, text)
     text = _OTP_AFTER.sub(lambda m: m.group(1) + CHECK_DIRECTLY, text)

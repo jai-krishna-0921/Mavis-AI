@@ -131,6 +131,11 @@ async def test_composer_without_history_or_name_never_asks_or_greets(
     ("your code is 482913", "482913"),
     ("482913 is your OTP", "482913"),
     ("PIN: 1234", "1234"),
+    ("visit acme dot com today", "acme"),
+    ("visit acme\u3002com today", "acme"),
+    ("visit acme\uff0ecom today", "acme"),
+    ("DM @acme_support for a refund", "acme_support"),
+    ("log in at paypal.com.secure-login.zip now", "secure-login"),
 ])
 def test_scrub_covers_obfuscated_and_payment_details(raw, gone):
     out = scrub_untrusted_origin(raw)
@@ -145,7 +150,7 @@ def test_scrub_phone_in_parentheses_has_no_artifact():
 
 @pytest.mark.parametrize("text", [
     "meeting on 2026-10-03 at 10", "Interview at 10:30 with Jawahar", "e.g. this, i.e. that",
-    "room 1234", "Node.js and file.py", "the interview went well.",
+    "room 1234", "Node.js and file.py", "the interview went well.", "email me @ 5", "connect the dots",
 ])
 def test_scrub_leaves_ordinary_text(text):
     assert scrub_untrusted_origin(text) == text
