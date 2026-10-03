@@ -10,11 +10,12 @@ from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from mavis.store.db import Session, utcnow
-from mavis.store.models import AttentionObservation, AttentionPref
+from mavis.store.models import AttentionObservation, AttentionPref, AttentionSender
 
 PENDING, DONE = "pending", "done"
 ORIGIN_LIVE, ORIGIN_BACKFILL = "live", "backfill"
 QUEUED = "queued"
+SOURCE_MAIL = "mail"
 _Obs = AttentionObservation
 
 
@@ -160,11 +161,18 @@ async def users_needing_drain() -> list[int]:
 
 
 async def recent(
-    user_id: int, since: datetime, *, origin: str | None = None, limit: int = 50
+    user_id: int,
+    since: datetime,
+    *,
+    origin: str | None = None,
+    limit: int = 50,
+    source: str | None = SOURCE_MAIL,
 ) -> list[AttentionObservation]:
     q = select(_Obs).where(_Obs.user_id == user_id, _Obs.status == DONE, _Obs.received_at >= since)
     if origin is not None:
         q = q.where(_Obs.origin == origin)
+    if source is not None:  # mail readers (brief, evening wrap, digest) never see Workspace signals
+        q = q.where(_Obs.source == source)
     async with Session() as s:
         return list(await s.scalars(q.order_by(_Obs.received_at.desc(), _Obs.id.desc()).limit(limit)))
 
@@ -182,8 +190,10 @@ async def by_ids(user_id: int, ids: Iterable[int]) -> list[AttentionObservation]
 
 
 async def has_any(user_id: int) -> bool:
+    """The user has mail observations; Workspace signals do not make a mailbox "watched"."""
     async with Session() as s:
-        return await s.scalar(select(_Obs.id).where(_Obs.user_id == user_id).limit(1)) is not None
+        q = select(_Obs.id).where(_Obs.user_id == user_id, _Obs.source == SOURCE_MAIL).limit(1)
+        return await s.scalar(q) is not None
 
 
 async def recent_debits(user_id: int, since: datetime, exclude_id: int) -> int:
@@ -296,3 +306,65 @@ async def expire_pending(cutoff: datetime, user_id: int | None = None) -> int:
         )
         await s.commit()
     return int(res.rowcount or 0)
+
+
+async def insert_signal(
+    user_id: int,
+    message_id: str,
+    *,
+    source: str,
+    kind: str,
+    verdict: str,
+    urgency: int,
+    summary: str,
+    facts: dict[str, Any],
+    received_at: datetime,
+) -> tuple[AttentionObservation, bool]:
+    """A Workspace signal, decided by rules at once (no pending phase). Idempotent on (user, message_id):
+    a webhook and a poll seeing the same share produce one row."""
+    async with Session() as s:
+        existing = await s.scalar(_by_message(user_id, message_id))
+        if existing is not None:
+            return existing, False
+        now = utcnow()
+        row = _Obs(
+            user_id=user_id, message_id=message_id, thread_id="", origin=ORIGIN_LIVE, source=source,
+            status=DONE, attempts=0, method="rules", sender_domain="", sender_name="", kind=kind[:24],
+            needs_user=False, verdict=verdict, urgency=urgency, score=0.0, reasons=[], facts=facts,
+            summary=summary[:240], action="", pending_payload=None, delivery="none", received_at=received_at,
+            created_at=now, processed_at=now,
+        )
+        s.add(row)
+        try:
+            await s.commit()
+        except IntegrityError:
+            await s.rollback()
+            again = await s.scalar(_by_message(user_id, message_id))
+            assert again is not None
+            return again, False
+        await s.refresh(row)
+        return row, True
+
+
+async def signals(
+    user_id: int, since: datetime, *, sources: Iterable[str], kinds: Iterable[str] | None = None,
+    limit: int = 50,
+) -> list[AttentionObservation]:
+    q = select(_Obs).where(
+        _Obs.user_id == user_id, _Obs.source.in_(list(sources)), _Obs.received_at >= since
+    )
+    if kinds is not None:
+        q = q.where(_Obs.kind.in_(list(kinds)))
+    async with Session() as s:
+        return list(await s.scalars(q.order_by(_Obs.received_at.desc(), _Obs.id.desc()).limit(limit)))
+
+
+async def sender_known(user_id: int, address: str) -> bool:
+    """The address has mailed this user before (attention_senders): Workspace `actor_known`."""
+    async with Session() as s:
+        found = await s.scalar(
+            select(AttentionSender.id).where(
+                AttentionSender.user_id == user_id, AttentionSender.address == address.strip().lower()
+            ).limit(1)
+        )
+    return found is not None
