@@ -96,3 +96,31 @@ def test_match_loop_needs_a_waiting_or_commitment_loop_and_real_overlap():
     ]
     assert match_loop("Q3 Sales Deck v2", loops) == 2
     assert match_loop("Holiday photos", loops) is None
+
+
+def test_mentions_match_whole_handles_only():
+    from mavis.attention.workspace_signals import mentions
+
+    assert mentions("@jai can you look?", "jai@example.com")
+    assert mentions("Thanks @Jai.", "jai@example.com")
+    assert mentions("cc jai@example.com", "jai@example.com")
+    assert not mentions("@jaiswal can you look?", "jai@example.com")
+    assert not mentions("mail xjai@example.com", "jai@example.com")
+    assert not mentions("mail jai@example.com.au", "jai@example.com")
+    assert mentions("+jai@example.com see this.", "jai@example.com")
+    assert not mentions("@jai can you look?", "")
+
+
+def test_titles_turn_control_characters_into_spaces():
+    assert safe_title("Line one\nLine two\tend") == "Line one Line two end"
+    assert safe_title("a\x00b") == "a b"
+
+
+def test_match_loop_prefers_the_best_overlap_and_ignores_function_words():
+    loops = [
+        Loop(id=1, user_id=1, kind=LoopKind.WAITING_ON, title="Priya Q3 notes"),
+        Loop(id=2, user_id=1, kind=LoopKind.WAITING_ON, title="Q3 budget review"),
+    ]
+    assert match_loop("Priya budget review Q3", loops) == 2
+    chat = [Loop(id=3, user_id=1, kind=LoopKind.WAITING_ON, title="Talk to Ravi to be sure it is in")]
+    assert match_loop("Notes to be filed in it", chat) is None

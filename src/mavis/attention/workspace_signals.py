@@ -21,13 +21,18 @@ from mavis.tools.integrations.mail_render import strip_urls
 
 PREVIEW_CHARS = 280
 ASK_AFTER_DAYS = 2
-_MARKUP = re.compile(r"[<>`\x00-\x1f\x7f]")
+_MARKUP = re.compile(r"[<>`]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 LURE = re.compile(
     r"\.(exe|scr|bat|cmd|js|vbs|msi|apk|jar|iso|lnk|html?)\b"
     r"|\b(password|passcode|log-?in|sign-?in|verify|verification|invoice|payment|wire|bank|urgent|account)\b",
     re.I,
 )
-_STOP = frozenset("the and for from with your you file doc docs deck sheet send sent share".split())
+# Words that say nothing about which file: generic file nouns and short function words ("to", "be").
+_STOP = frozenset(
+    "the and for from with your you file doc docs deck sheet send sent share "
+    "a an to of in on at by or is it be as my me we us our are was will can this that please".split()
+)
 _WORD = re.compile(r"[a-z0-9]+")
 
 
@@ -67,7 +72,7 @@ class Signal(BaseModel):
 
 
 def safe_title(text: object, limit: int = 120) -> str:
-    flat = " ".join(_MARKUP.sub("", strip_urls(str(text or ""))).split())
+    flat = " ".join(_MARKUP.sub("", _CONTROL.sub(" ", strip_urls(str(text or "")))).split())
     return flat[:limit].rstrip()
 
 
@@ -76,10 +81,15 @@ def is_lure(raw_title: str) -> bool:
 
 
 def mentions(text: str, email: str) -> bool:
+    """The comment names the user: their address, or an @handle of their local part as a whole word
+    (@jai is not @jaiswal, and xjai@example.com is not jai@example.com)."""
+    email = (email or "").strip().lower()
     if not email:
         return False
     low = (text or "").lower()
-    return email.lower() in low or f"@{email.split('@')[0].lower()}" in low
+    address = rf"(?<![\w.-]){re.escape(email)}(?![\w-]|\.\w)"
+    handle = rf"@{re.escape(email.split('@')[0])}(?![\w@-])"
+    return re.search(address, low) is not None or re.search(handle, low) is not None
 
 
 def _email(person: object) -> str:
@@ -137,16 +147,19 @@ def _tokens(text: str) -> set[str]:
 
 
 def match_loop(title: str, loops: list[Loop]) -> int | None:
-    """A loop the user is waiting on (or committed to) that this file title plausibly fulfils."""
+    """The loop the user is waiting on (or committed to) that this file title most plausibly fulfils:
+    the most shared words wins, then the closer spelling."""
     words = _tokens(title)
+    best: tuple[int, float] | None = None
+    found: int | None = None
     for loop in loops:
         if loop.kind not in (LoopKind.WAITING_ON, LoopKind.COMMITMENT):
             continue
-        shared = words & _tokens(loop.title)
+        shared = len(words & _tokens(loop.title))
         ratio = difflib.SequenceMatcher(None, title.casefold(), loop.title.casefold()).ratio()
-        if len(shared) >= 2 or ratio >= 0.75:
-            return loop.id
-    return None
+        if (shared >= 2 or ratio >= 0.75) and (best is None or (shared, ratio) > best):
+            best, found = (shared, ratio), loop.id
+    return found
 
 
 @dataclass(frozen=True)

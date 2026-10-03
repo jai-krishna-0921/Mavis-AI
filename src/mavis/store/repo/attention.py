@@ -140,6 +140,7 @@ async def undelivered(user_id: int, before: datetime) -> list[AttentionObservati
             select(_Obs)
             .where(
                 _Obs.user_id == user_id,
+                _Obs.source == SOURCE_MAIL,  # mail redelivery never re-sends a Workspace row
                 _Obs.status == DONE,
                 _Obs.delivery == QUEUED,
                 _Obs.processed_at < before,
@@ -153,7 +154,7 @@ async def users_needing_drain() -> list[int]:
     async with Session() as s:
         rows = await s.scalars(
             select(_Obs.user_id)
-            .where((_Obs.status == PENDING) | (_Obs.delivery == QUEUED))
+            .where(_Obs.source == SOURCE_MAIL, (_Obs.status == PENDING) | (_Obs.delivery == QUEUED))
             .distinct()
             .order_by(_Obs.user_id)
         )
@@ -183,7 +184,9 @@ async def by_ids(user_id: int, ids: Iterable[int]) -> list[AttentionObservation]
         return []
     async with Session() as s:
         rows = await s.scalars(
-            select(_Obs).where(_Obs.user_id == user_id, _Obs.id.in_(wanted), _Obs.status == DONE)
+            select(_Obs).where(
+                _Obs.user_id == user_id, _Obs.id.in_(wanted), _Obs.status == DONE, _Obs.source == SOURCE_MAIL
+            )
         )
         found = {r.id: r for r in rows}
     return [found[i] for i in wanted if i in found]
@@ -202,7 +205,11 @@ async def recent_debits(user_id: int, since: datetime, exclude_id: int) -> int:
         facts = await s.scalars(
             select(_Obs.facts)
             .where(
-                _Obs.user_id == user_id, _Obs.status == DONE, _Obs.received_at >= since, _Obs.id != exclude_id
+                _Obs.user_id == user_id,
+                _Obs.source == SOURCE_MAIL,
+                _Obs.status == DONE,
+                _Obs.received_at >= since,
+                _Obs.id != exclude_id,
             )
             .order_by(_Obs.received_at.desc(), _Obs.id.desc())
             .limit(50)
@@ -220,6 +227,7 @@ async def prior_security(user_id: int, sender_domain: str, exclude_id: int) -> b
             select(_Obs.facts)
             .where(
                 _Obs.user_id == user_id,
+                _Obs.source == SOURCE_MAIL,
                 _Obs.status == DONE,
                 _Obs.kind == "security",
                 _Obs.sender_domain == sender_domain,
@@ -238,6 +246,7 @@ async def baselined_on(user_id: int, counterparty_key: str, start: datetime, end
         facts = await s.scalars(
             select(_Obs.facts).where(
                 _Obs.user_id == user_id,
+                _Obs.source == SOURCE_MAIL,
                 _Obs.status == DONE,
                 _Obs.received_at >= start,
                 _Obs.received_at < end,
