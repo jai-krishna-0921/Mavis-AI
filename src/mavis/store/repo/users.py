@@ -69,3 +69,17 @@ async def update_state(user_id: int, patch: dict) -> dict:
         u.state = merged
         await s.commit()
         return merged
+
+
+async def update_nested(user_id: int, key: str, patch: dict) -> dict:
+    """Shallow merge `patch` into the dict at users.state[key], inside the same row lock as update_state,
+    and return the merged sub-dict. Concurrent writers of different sub-keys keep each other's values."""
+    async with Session() as s:
+        u = await s.get_one(User, user_id, with_for_update=True, populate_existing=True)
+        state = dict(u.state or {})
+        current = state.get(key)
+        merged = {**(current if isinstance(current, dict) else {}), **patch}
+        state[key] = merged
+        u.state = state
+        await s.commit()
+        return merged
