@@ -77,6 +77,7 @@ class ToolRun:
     tainted: bool = False
     untrusted_seen: bool = False  # an untrusted_output tool returned during the current step
     queued_approvals: list[int] = field(default_factory=list)
+    spawned: int = 0  # workers started in the current outermost model step (reset by react_loop)
 
     def end_step(self) -> None:
         self.tainted = self.tainted or self.untrusted_seen
