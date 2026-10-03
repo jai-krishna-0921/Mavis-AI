@@ -11,7 +11,10 @@ scripts/composio_mcp_server.py):
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -206,6 +209,28 @@ class ComposioProvider:
                 states[capability.value] = legacy  # Gmail/Calendar keep working on the old connection
         return states
 
+    async def _stage_file(self, slug: str, path: str, name: str, mime: str) -> dict[str, str]:
+        """Upload a local file to Composio's storage for `slug` and return the file reference the tool takes.
+        The presigned PUT goes to the storage host without the API key."""
+        data = await asyncio.to_thread(Path(path).read_bytes)
+        answer = await self._request("POST", "/files/upload/request", body={
+            "toolkit_slug": GOOGLESUPER, "tool_slug": slug, "filename": name, "mimetype": mime,
+            "md5": hashlib.md5(data).hexdigest(),  # Composio's dedupe key, not a security check
+        })
+        key = str(answer.get("key") or "")
+        if not key:
+            raise IntegrationError("Composio returned no storage key for the upload.")
+        url = str(answer.get("new_presigned_url") or answer.get("newPresignedUrl") or "")
+        if url:  # absent when Composio already holds a file with this md5
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout) as storage:
+                    resp = await storage.put(url, content=data, headers={"Content-Type": mime})
+            except httpx.HTTPError as exc:
+                raise IntegrationError(f"could not upload the file: {type(exc).__name__}") from None
+            if resp.status_code >= 400:
+                raise IntegrationError(f"file storage answered {resp.status_code} for the upload") from None
+        return {"name": name, "mimetype": mime, "s3key": key}
+
     async def _toolkit_for(self, user: UserRef, capability: Capability, legacy_slug: str) -> str:
         if not self._workspace or capability not in GOOGLE_CAPABILITIES:
             return toolkit_of_slug(legacy_slug)
@@ -260,9 +285,14 @@ class ComposioProvider:
             return ToolResult(ok=False, error=f"invalid arguments for {action}: {fields}")
         try:
             slug = slug_for(action, await self._toolkit_for(user, spec.capability, mapping.slug))
+            arguments = mapping.translate(parsed)
+            if mapping.file_arg:
+                arguments[mapping.file_arg] = await self._stage_file(
+                    slug, parsed.path, parsed.name, parsed.mime  # type: ignore[attr-defined]
+                )
             answer = await self._request(
                 "POST", f"/tools/execute/{slug}",
-                body={"user_id": user.provider_id, "arguments": mapping.translate(parsed)},
+                body={"user_id": user.provider_id, "arguments": arguments},
             )
         except IntegrationError as exc:
             return ToolResult(ok=False, error=str(exc))
