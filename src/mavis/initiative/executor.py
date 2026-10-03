@@ -34,6 +34,19 @@ UNTRUSTED_SOURCE_PREFIX = "untrusted:"  # loop.source after an update driven by 
 SECURITY_DEFER_GRACE = timedelta(hours=2)
 MERGE_WINDOW = timedelta(minutes=30)  # a model wakeup this close to one already set for the loop merges
 LOOP_WAKEUP_KINDS = (WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED, WakeupKind.AGENT)
+REMINDER_PREFIX = "Reminder the user asked for: "  # wake_me's wakeup reason
+REMINDER_URGENCY = 4
+LATE_REMINDER_AFTER = timedelta(hours=2)  # later than this, the reminder says it is late
+
+
+def reminder_text(reason: str, due: datetime, now: datetime, timezone: str) -> str:
+    """Fixed reminder copy (no composer, so nothing can decide not to send it)."""
+    what = " ".join(reason.split()) or "the thing you asked me to remind you about"
+    if now - timeutil.ensure_utc(due) <= LATE_REMINDER_AFTER:
+        return f"⏰ Reminder: {what}"
+    local_due, local_now = timeutil.to_local(due, timezone), timeutil.to_local(now, timezone)
+    when = f"{local_due:%H:%M}" if local_due.date() == local_now.date() else f"{local_due:%a %d %b, %H:%M}"
+    return f"⏰ Reminder, a bit late (it was for {when}): {what}"
 
 
 class InitiativeExecutor:
@@ -119,6 +132,27 @@ class InitiativeExecutor:
         if moved:
             log.info("initiative.deferred_released", user=user.id, count=moved)
         return moved
+
+    async def remind(self, user, reason: str, dedupe_key: str, due: datetime) -> bool:
+        """Deliver a reminder the user asked for. It always fires: fixed text, not the composer; the daily
+        budget does not apply; quiet hours defer it (unless the user is awake) to a DEFERRED wakeup that
+        comes back here, so writing during quiet hours releases it; late ones say so."""
+        now = timeutil.now()
+        verdict = await self._policy.check(user, REMINDER_URGENCY, dedupe_key, now, reminder=True)
+        if not verdict.allow:
+            log.info("initiative.reminder_held", user=user.id, reason=verdict.reason,
+                     defer_until=verdict.defer_until)
+            if verdict.defer_until is not None:
+                await self._wakeups.wake_me(
+                    user.id, verdict.defer_until, f"{REMINDER_PREFIX}{reason}", kind=WakeupKind.DEFERRED,
+                    payload={"reminder_key": dedupe_key,
+                             "original_due": timeutil.ensure_utc(due).isoformat()},
+                    scale=False, reminder=True, dedupe_key=f"deferred:{dedupe_key}",
+                )
+            return False
+        text = reminder_text(reason, due, now, user.timezone)
+        await self.deliver(user, [text], dedupe_key, REMINDER_URGENCY)
+        return True
 
     async def _wakeup_loop(self, user_id: int, w: WakeupRequest, open_loops: list[Loop],
                            fallback: int | None) -> int | None:

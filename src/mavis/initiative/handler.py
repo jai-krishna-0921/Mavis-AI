@@ -14,7 +14,13 @@ from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import Loop, LoopKind, LoopStatus
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative import hooks
-from mavis.initiative.executor import DEFERRED_TTL, UNTRUSTED_SOURCE_PREFIX, InitiativeExecutor
+from mavis.initiative.executor import (
+    DEFERRED_TTL,
+    REMINDER_PREFIX,
+    REMINDER_URGENCY,
+    UNTRUSTED_SOURCE_PREFIX,
+    InitiativeExecutor,
+)
 from mavis.initiative.filters import EventFilter
 from mavis.initiative.planner import (
     PREP_LEAD,
@@ -41,7 +47,6 @@ URGENT_URGENCY = 5
 IMMINENT = PREP_LEAD + timedelta(minutes=10)  # the default prep wakeup (60 min ahead) plus slack
 FOLLOW_UP_VALID_FOR = timedelta(hours=24)
 LIVE_STATUSES = (LoopStatus.OPEN, LoopStatus.AWAITING_REPLY)
-REMINDER_PREFIX = "Reminder the user asked for: "
 HANDLED_TYPES = tuple(t for t in EventType if t not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED))
 
 
@@ -61,14 +66,19 @@ class InitiativeHandler:
             return
         kind = event.payload.get("kind")
 
-        if event.type is EventType.WAKEUP and event.payload.get("reminder") and not _too_late(event):
-            # A reminder the user asked for is a commitment, not a judgement call: no reasoner, but it still
-            # goes through the composer and the ping policy.
+        if event.type is EventType.WAKEUP and event.payload.get("reminder"):
+            # A reminder the user asked for is a commitment, not a judgement call: no reasoner, no composer,
+            # no daily budget, and never dropped for being late (it says so instead).
             reason = str(event.payload.get("reason", "")).removeprefix(REMINDER_PREFIX).strip()
-            await self._executor.notify(
-                user, NotifyIntent(urgency=4, intent=f"Remind them: {reason}",
-                                   dedupe_key=f"reminder:{event.payload.get('wakeup_id')}"),
-                untrusted=event.trust is Trust.UNTRUSTED)
+            key = str(event.payload.get("reminder_key") or f"reminder:{event.payload.get('wakeup_id')}")
+            if event.trust is Trust.UNTRUSTED:  # never set by wake_me; keep the cautious path just in case
+                await self._executor.notify(
+                    user, NotifyIntent(urgency=REMINDER_URGENCY, intent=f"Remind them: {reason}",
+                                       dedupe_key=key), untrusted=True)
+                return
+            original_due = event.payload.get("original_due")
+            due = datetime.fromisoformat(original_due) if original_due else event.occurred_at
+            await self._executor.remind(user, reason, key, due)
             return
         if event.source == "timer" and _too_late(event):
             log.warning("initiative.wakeup_too_late", event_id=event.id, kind=kind,
