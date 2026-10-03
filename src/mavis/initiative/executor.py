@@ -152,9 +152,12 @@ class InitiativeExecutor:
                      origin: dict[str, Any] | None = None) -> bool:
         if untrusted and intent.urgency > MAX_UNTRUSTED_URGENCY:
             intent = intent.model_copy(update={"urgency": MAX_UNTRUSTED_URGENCY})
-        extra = [k for k in (loop_ping_key((origin or {}).get("loop_id"), (origin or {}).get("kind")),) if k]
+        # an untrusted ping must not use up the loop's daily slot for this kind of ping
+        o = origin or {}
+        loop_key = None if untrusted else loop_ping_key(o.get("loop_id"), o.get("kind"))
+        extra = [loop_key] if loop_key else []
         verdict = await self._policy.check(user, intent.urgency, intent.dedupe_key, timeutil.now(),
-                                           extra_keys=extra)
+                                           extra_keys=extra, bypass_budget=intent.security)
         if not verdict.allow:
             log.info("initiative.notify_blocked", user=user.id, reason=verdict.reason,
                      defer_until=verdict.defer_until)

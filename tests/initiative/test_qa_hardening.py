@@ -43,7 +43,7 @@ def starting_event(user, loop_id: int, eid: str = "wakeup:50") -> Event:
 async def test_llm_urgency_capped_at_four_for_pre_event_nudge(user, clock, recording_bus, fake_memory,
                                                               fake_llm, monkeypatch):
     init = build(recording_bus, fake_memory)
-    clock.set(ist(27, 9, 0))
+    clock.set(ist(27, 7, 30))  # well before the prep window: no deterministic floor applies
     loop = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Interview",
                                                        due_at=ist(27, 10, 0), importance=5))
     recording_bus.take()
@@ -56,7 +56,7 @@ async def test_llm_urgency_capped_at_four_for_pre_event_nudge(user, clock, recor
 async def test_imminent_event_is_urgent_by_rule(user, clock, recording_bus, fake_memory, fake_llm,
                                                 monkeypatch):
     init = build(recording_bus, fake_memory)
-    clock.set(ist(27, 9, 50))
+    clock.set(ist(27, 9, 0))  # the default prep wakeup fires 60 min ahead
     loop = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Interview",
                                                        due_at=ist(27, 10, 0), importance=5))
     recording_bus.take()
@@ -489,3 +489,78 @@ async def test_missing_decisions_table_fails_open(user, clock, recording_bus, fa
                                     occurred_at=timeutil.now(), source="timer",
                                     payload={"kind": "agent", "reason": "check", "wakeup_id": 90}))
     assert len(calls) == 1
+
+
+# review I4 ---------------------------------------------------------------------------------------
+
+async def test_security_notice_survives_the_budget(user, clock, recording_bus, fake_memory, fake_llm,
+                                                   settings, monkeypatch):
+    from mavis.domain.decisions import ComposedMessage
+    from mavis.domain.messages import Role
+    from mavis.initiative import hooks
+    from mavis.initiative.email_triage import EmailTriage
+    from mavis.store.repo import messages, outbox
+
+    async def no_names(uid):
+        return set()
+
+    hooks.DECISION_POLICIES.append(EmailTriage(no_names).apply_policy)
+    monkeypatch.setattr(settings, "ping_daily_budget", 1)
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 14, 0))
+    await messages.log(user.id, Role.ASSISTANT, "earlier ping", proactive=True)
+    email = Event(id="gmail:msg:s1", user_id=user.id, type=EventType.EMAIL_RECEIVED,
+                  occurred_at=timeutil.now(), source="composio", trust=Trust.UNTRUSTED,
+                  payload={"from": "no-reply@accounts.example", "subject": "Security alert: new sign-in",
+                           "snippet": "", "message_id": "s1"})
+    fake_llm.push_structured(InitiativeDecision(ignore_reason="meh"))
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["Was that new sign-in you?"]))
+    await init.handler.handle(email)
+    assert await outbox.texts_with_dedupe_prefix(f"email:{user.id}:s1:") == ["Was that new sign-in you?"]
+
+
+async def test_model_cannot_claim_security(user, clock, recording_bus, fake_memory, fake_llm, settings,
+                                           monkeypatch):
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    monkeypatch.setattr(settings, "ping_daily_budget", 1)
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 14, 0))
+    await messages.log(user.id, Role.ASSISTANT, "earlier ping", proactive=True)
+    fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=4, intent="hi", security=True)))
+    await init.handler.handle(Event(id="wakeup:91", user_id=user.id, type=EventType.WAKEUP,
+                                    occurred_at=timeutil.now(), source="timer",
+                                    payload={"kind": "agent", "reason": "check", "wakeup_id": 91}))
+    assert [m.content for m in await messages.recent(user.id) if m.proactive] == ["earlier ping"]
+
+
+def test_security_flag_hidden_from_model_schema():
+    assert "security" not in NotifyIntent.model_json_schema()["properties"]
+
+
+async def test_security_notice_still_waits_for_quiet_hours(user, clock, settings, monkeypatch):
+    from mavis.policy.pings import PingPolicy
+
+    clock.set(ist(27, 2, 0))
+    verdict = await PingPolicy().check(user, 4, "sec", timeutil.now(), bypass_budget=True)
+    assert not verdict.allow and verdict.defer_until is not None
+
+
+async def test_untrusted_ping_does_not_use_the_loop_slot(user, clock, recording_bus, fake_memory, fake_llm):
+    from mavis.domain.decisions import ComposedMessage
+    from mavis.store.repo import messages
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 9, 0))
+    loop = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.WAITING_ON, title="Reply from Jawahar"))
+    recording_bus.take()
+    for i, trust in enumerate([Trust.UNTRUSTED, Trust.SYSTEM]):
+        fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="nudge",
+                                                                        dedupe_key=f"k{i}")))
+        fake_llm.push_structured(ComposedMessage(send=True, messages=[f"nudge {i}"]))
+        await init.handler.handle(Event(id=f"wakeup:{95 + i}", user_id=user.id, type=EventType.WAKEUP,
+                                        occurred_at=timeutil.now(), source="timer", trust=trust,
+                                        payload={"kind": "agent", "loop_id": loop.id, "reason": "r",
+                                                 "wakeup_id": 95 + i}))
+    assert [m.content for m in await messages.recent(user.id) if m.proactive] == ["nudge 0", "nudge 1"]
