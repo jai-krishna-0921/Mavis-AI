@@ -39,24 +39,33 @@ class Tier(StrEnum):
     SMART = "smart"
 
 
+REASONING_EFFORT_PREFIX = "gpt-oss"  # models that accept reasoning_effort
+
+
 @lru_cache(maxsize=32)
-def _build(model: str, base_url: str, api_key: str, temperature: float, timeout: float) -> ChatOpenAI:
+def _build(model: str, base_url: str, api_key: str, temperature: float, timeout: float,
+           reasoning_effort: str = "") -> ChatOpenAI:
     # max_retries=0: failover to the next model beats re-trying a dead one (each retry costs a full timeout).
+    extra: dict[str, Any] = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
     return ChatOpenAI(
         model=model, base_url=base_url, api_key=api_key or "missing",
-        temperature=temperature, timeout=timeout, max_retries=0,
+        temperature=temperature, timeout=timeout, max_retries=0, **extra,
     )
 
 
 def chat_model(tier: Tier = Tier.FAST, temperature: float = 0.6, model: str | None = None) -> BaseChatModel:
     s = get_settings()
     fast = tier is Tier.FAST
+    name = model or (s.model_fast if fast else s.model_smart)
     return _build(
-        model or (s.model_fast if fast else s.model_smart),
+        name,
         s.ollama_base_url,
         s.ollama_api_key,
         temperature,
         s.llm_timeout_fast_s if fast else s.llm_timeout_smart_s,
+        # gpt-oss emits ~60% fewer tokens at "low": shorter calls hold the single slot for less time.
+        # Only gpt-oss takes it; other models (gemma fallback) may reject an unknown parameter.
+        s.llm_reasoning_effort_fast if fast and name.startswith(REASONING_EFFORT_PREFIX) else "",
     )
 
 
@@ -102,9 +111,8 @@ def _chain(tier: Tier, fallback: bool = True) -> list[str | None]:
 
 
 def _use_fallback(priority: Priority, fallback: bool | None) -> bool:
-    """Interactive calls walk the whole fallback chain. Background calls (LEARN, summaries,
-    consolidation) make one model attempt, so a slow model never holds the single LLM slot for
-    timeout x chain length; a 429 still backs off on that model and the bus retries the job.
+    """Interactive calls walk the whole fallback chain. Background and best_effort calls make one
+    model attempt, so a slow model never holds the single LLM slot for timeout x chain length.
     Pass `fallback=True` to opt a user-visible background call back in."""
     return priority == "interactive" if fallback is None else fallback
 
@@ -135,46 +143,72 @@ def _is_retriable(exc: BaseException) -> bool:
     return _is_provider_down(exc) or _is_model_specific(exc)
 
 
-Priority = Literal["interactive", "background"]
+# interactive: a chat reply. background: user-visible work off the reply path (task runs, initiative
+# reasoning/composing, attention understanding). best_effort: work that may simply be skipped (memory
+# extraction, summaries, consolidation): it yields the slot to everything else and is never retried.
+Priority = Literal["interactive", "background", "best_effort"]
+_RANK: dict[str, int] = {"interactive": 0, "background": 1, "best_effort": 2}
 RETRY_AFTER_CAP_S = 30.0
 # global backoff after a 429 without Retry-After; reset on the first success
 RATE_LIMIT_BACKOFF_S = (5.0, 10.0, 20.0, 30.0)
 MAX_ATTEMPTS = 6  # same-model attempts per call (timeouts / 429s), always bounded by the deadline
 
 
-BACKGROUND_AGING_S = 30.0  # a background waiter this old is treated as interactive (no starvation)
+# best_effort work yields: while an interactive or background caller waits, or one used the slot
+# this recently, a best_effort acquire fails fast (LLMError) instead of taking the slot (one LEARN
+# attempt holds the only slot for timeout + cooldown, 75s in prod). Callers drop the failure. A chat
+# turn or a task makes several calls in a row with gaps between them, hence the grace window.
+INTERACTIVE_GRACE_S = 20.0
+BACKGROUND_AGING_S = 30.0  # a background waiter this old ranks with interactive (no starvation)
 BACKGROUND_ACQUIRE_TIMEOUT_S = 600.0  # below BUS_CLAIM_IDLE_MS (15 min): never outlive a bus claim
 INTERACTIVE_DEADLINE_S = 45.0  # chain-wide budget (queue + attempts + 429 backoffs) for a FAST reply
 BACKGROUND_DEADLINE_S = 120.0  # same, for background calls and SMART-tier calls
+_YIELDED = "LLM slot reserved for interactive work"
 
 
 class _Waiter:
-    __slots__ = ("fut", "interactive", "since")
+    __slots__ = ("fut", "rank", "since")
 
-    def __init__(self, fut: asyncio.Future[None], interactive: bool, since: float) -> None:
-        self.fut, self.interactive, self.since = fut, interactive, since
+    def __init__(self, fut: asyncio.Future[None], rank: int, since: float) -> None:
+        self.fut, self.rank, self.since = fut, rank, since
 
 
 class _Limiter:
     """Process-wide cap on in-flight LLM calls (Ollama Cloud 429s on concurrent requests).
 
-    Two levels: a freed slot goes to the oldest *eligible* waiter, where eligible means interactive
-    or a background waiter that has waited >= BACKGROUND_AGING_S. If none is eligible the oldest
-    background waiter gets it. So replies never queue behind LEARN traffic, yet background work
-    cannot starve. A running call is never preempted. Everything here is synchronous (no await
-    between state changes), so release() cannot be interrupted by a second cancellation.
+    A freed slot goes to the oldest waiter of the best rank: interactive, then background, then
+    best_effort; a background waiter that has waited >= BACKGROUND_AGING_S ranks with interactive,
+    so task work cannot starve behind chat. best_effort never ages and never waits behind or right
+    after other work: it fails fast with LLMError while a higher-rank caller is queued or one held
+    a slot within INTERACTIVE_GRACE_S.
+    A running call is never preempted. Everything here is synchronous (no await between state
+    changes), so release() cannot be interrupted by a second cancellation.
     """
 
     def __init__(self, size: int) -> None:
         self._free = max(1, size)
         self._waiters: list[_Waiter] = []
+        self._last_used = float("-inf")  # loop time a non-best_effort call last held a slot
+
+    def touch(self) -> None:
+        """A non-best_effort call is using (or just used) a slot: best_effort keeps off it a while."""
+        self._last_used = asyncio.get_running_loop().time()
+
+    def _best_effort_blocked(self, now: float) -> bool:
+        return (any(w.rank < 2 and not w.fut.done() for w in self._waiters)
+                or now - self._last_used < INTERACTIVE_GRACE_S)
 
     async def acquire(self, priority: Priority, wait_s: float) -> None:
         loop = asyncio.get_running_loop()
+        rank = _RANK[priority]
+        if rank == 2 and self._best_effort_blocked(loop.time()):
+            raise LLMError(_YIELDED)
         if self._free > 0 and not self._waiters:
             self._free -= 1
+            if rank < 2:
+                self.touch()
             return
-        waiter = _Waiter(loop.create_future(), priority == "interactive", loop.time())
+        waiter = _Waiter(loop.create_future(), rank, loop.time())
         self._waiters.append(waiter)
         self._dispatch()
         try:
@@ -182,7 +216,7 @@ class _Limiter:
         except BaseException as exc:
             if waiter in self._waiters:
                 self._waiters.remove(waiter)
-            elif waiter.fut.done() and not waiter.fut.cancelled():
+            elif waiter.fut.done() and not waiter.fut.cancelled() and waiter.fut.exception() is None:
                 self.release()  # slot was handed over just as we gave up: pass it on
             if isinstance(exc, TimeoutError):
                 raise LLMError("timed out waiting for an LLM slot") from exc
@@ -196,16 +230,27 @@ class _Limiter:
         """Hand free slots to live waiters. Never raises; dead (cancelled/timed-out) waiters are dropped."""
         now = asyncio.get_running_loop().time()
         self._waiters = [w for w in self._waiters if not w.fut.done()]
+        if any(w.rank < 2 for w in self._waiters) or now - self._last_used < INTERACTIVE_GRACE_S:
+            self._fail_best_effort()
         while self._free > 0 and self._waiters:
-            pick = next(
-                (w for w in self._waiters if w.interactive or now - w.since >= BACKGROUND_AGING_S),
-                self._waiters[0],
-            )
+            pick = min(self._waiters, key=lambda w: (self._effective_rank(w, now), w.since))
             self._waiters.remove(pick)
             if pick.fut.done():  # defensive: cancelled between the filter and here
                 continue
             self._free -= 1
+            if pick.rank < 2:
+                self._last_used = now
             pick.fut.set_result(None)
+
+    @staticmethod
+    def _effective_rank(w: _Waiter, now: float) -> int:
+        return 0 if w.rank == 1 and now - w.since >= BACKGROUND_AGING_S else w.rank
+
+    def _fail_best_effort(self) -> None:
+        for w in [w for w in self._waiters if w.rank == 2]:
+            self._waiters.remove(w)
+            if not w.fut.done():
+                w.fut.set_exception(LLMError(_YIELDED))
 
 
 # one limiter per event loop and provider: asyncio primitives must not be shared across loops
@@ -315,10 +360,13 @@ def _deadline_for(tier: Tier, priority: Priority) -> _Deadline:
 
 
 async def _await_backoff(priority: Priority, deadline: _Deadline) -> None:
-    """Global 429 backoff: everyone waits. Interactive callers only if the wait fits the deadline."""
+    """Global 429 backoff: everyone waits. Interactive callers only if the wait fits the deadline;
+    best_effort callers never wait (their work is dropped, the account is saturated)."""
     remaining = _ollama.backoff_remaining()
     if remaining <= 0:
         return
+    if priority == "best_effort":
+        raise LLMError("LLM rate-limit backoff active")
     left = deadline.check()
     if priority == "interactive" and remaining >= left:
         raise LLMError("LLM rate-limit backoff outlasts the deadline")
@@ -333,7 +381,8 @@ async def _call[R](
 
     Ollama: after a client timeout the slot stays occupied for the cooldown (the abandoned request
     still runs server-side); a 429 sets the process-wide backoff. Both retry the SAME model, unless
-    `may_fail_over` (a secondary provider exists), in which case they are raised straight away.
+    `may_fail_over` (a secondary provider exists) or the call is best_effort, in which case they
+    are raised straight away.
     """
     last: Exception | None = None
     for _ in range(MAX_ATTEMPTS):
@@ -369,10 +418,12 @@ async def _call[R](
                 log.warning("llm.rate_limited", backoff_s=dur)
             else:
                 raise
-            if may_fail_over:
+            if may_fail_over or priority == "best_effort":
                 raise
             last = exc
         finally:
+            if priority != "best_effort":
+                lim.touch()  # the grace window runs from the END of a chat or task call
             if hold > 0:
                 asyncio.get_running_loop().call_later(hold, lim.release)  # server still busy
             else:

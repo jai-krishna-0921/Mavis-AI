@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import func, select, update
 
@@ -22,12 +23,13 @@ _OPEN = [s.value for s in OPEN_APPROVAL_STATUSES]
 
 
 async def create(
-    user_id: int, task_id: int | None, tool: str, arguments: dict, preview: str, expires_at: datetime
+    user_id: int, task_id: int | None, tool: str, arguments: dict, preview: str, expires_at: datetime,
+    *, tainted: bool = False,
 ) -> int:
     async with Session() as s:
         a = PendingApproval(
             user_id=user_id, task_id=task_id, tool=tool, arguments=arguments, preview=preview,
-            expires_at=expires_at, status=ApprovalStatus.PENDING.value,
+            expires_at=expires_at, status=ApprovalStatus.PENDING.value, tainted=tainted,
         )
         s.add(a)
         await s.commit()
@@ -37,6 +39,64 @@ async def create(
 def args_hash(arguments: dict) -> str:
     canon = json.dumps(arguments, sort_keys=True, default=str, ensure_ascii=False)
     return hashlib.sha256(canon.encode()).hexdigest()
+
+
+# Free text a model rewords on every attempt, ignored ONLY for tools whose other arguments identify
+# the action (an invite: start + guests + title; an email: to + subject). For every other tool (Slack
+# message, reply, Notion page, notes) the text IS the action and is compared, case/space-normalised.
+_IGNORED_TEXT: dict[str, frozenset[str]] = {
+    "calendar_create_event": frozenset({"description"}),
+    "mail_send": frozenset({"body"}),
+}
+_WAITING = [ApprovalStatus.PENDING.value, ApprovalStatus.AWAITING_EDIT.value]
+
+
+def _canon(value: Any) -> Any:
+    if isinstance(value, str):
+        try:  # one instant written two ways ("...+05:30" / "...Z") is the same start time
+            parsed = datetime.fromisoformat(value.strip())
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None and "T" in value:
+            return parsed.astimezone(UTC).isoformat()
+        return " ".join(value.split()).casefold()
+    if isinstance(value, dict):
+        return {k: _canon(v) for k, v in value.items() if v not in (None, "", [], {})}
+    if isinstance(value, list):
+        return sorted((_canon(v) for v in value), key=lambda v: json.dumps(v, sort_keys=True, default=str))
+    return value
+
+
+def equivalence_key(tool: str, arguments: dict) -> str:
+    """Canonical form of an action's arguments for duplicate detection: whitespace and case folded,
+    lists sorted, ISO datetimes in UTC, and for the tools in _IGNORED_TEXT the reworded free text
+    dropped."""
+    canon = _canon(arguments or {})
+    ignored = _IGNORED_TEXT.get(tool, frozenset())
+    keyed = {k: v for k, v in canon.items() if k not in ignored}
+    return json.dumps(keyed, sort_keys=True, default=str, ensure_ascii=False)
+
+
+def equivalent(tool: str, a: dict, b: dict) -> bool:
+    return equivalence_key(tool, a) == equivalence_key(tool, b)
+
+
+async def waiting_equivalents(user_id: int, tool: str, arguments: dict, *, tainted: bool,
+                              exclude_id: int | None = None) -> list[PendingApproval]:
+    """This user's approvals still waiting on them (PENDING / AWAITING_EDIT) for the same tool and
+    equivalent arguments, in any task, oldest first, with the same taint: a request from a clean run
+    is never merged into a card a tainted run queued (its text may be attacker-shaped), nor the
+    reverse."""
+    want = equivalence_key(tool, arguments)
+    async with Session() as s:
+        rows = await s.scalars(
+            select(PendingApproval)
+            .where(PendingApproval.user_id == user_id, PendingApproval.tool == tool,
+                   PendingApproval.status.in_(_WAITING))
+            .order_by(PendingApproval.id)
+        )
+        return [r for r in rows if r.id != exclude_id and bool(r.tainted) == tainted
+                and equivalence_key(tool, r.arguments or {}) == want]
 
 
 async def find_open(user_id: int, task_id: int | None, tool: str, arguments: dict) -> PendingApproval | None:
