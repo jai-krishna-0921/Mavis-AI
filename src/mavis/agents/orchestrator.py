@@ -187,7 +187,8 @@ async def _report_executed_after_stop(task_id: int, user_id: int) -> None:
 async def _progress_after(task_id: int, user_id: int, delay_s: float) -> None:
     await asyncio.sleep(delay_s)
     task = await tasks.get(task_id)
-    if task is None or task.status != TaskStatus.RUNNING:
+    # an APPROVAL task's slow Edit is about an email, not a long job: no "still on it" line
+    if task is None or task.status != TaskStatus.RUNNING or task.kind == TaskKind.APPROVAL:
         return
     await bus.get_bus().publish(Event(
         id=f"task:{task_id}:progress", user_id=user_id, type=EventType.TASK_PROGRESS,
