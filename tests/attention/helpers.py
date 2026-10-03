@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import select
+
 from mavis.domain.events import Event
+from mavis.store.db import Session
+from mavis.store.models import OutboxMessage
 from mavis.tools.integrations.normalize import email_event
+
+EPOCH = datetime(2020, 1, 1, tzinfo=UTC)
 
 
 def raw_email(
@@ -52,3 +58,12 @@ def pending_payload(event: Event) -> dict[str, Any]:
         "received_at",
     )
     return {k: event.payload.get(k) for k in keys}
+
+
+async def outbox_rows() -> list[OutboxMessage]:
+    async with Session() as s:
+        return list(await s.scalars(select(OutboxMessage).order_by(OutboxMessage.id)))
+
+
+async def outbox_texts() -> list[str]:
+    return [r.text for r in await outbox_rows()]

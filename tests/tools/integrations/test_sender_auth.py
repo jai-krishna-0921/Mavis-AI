@@ -23,3 +23,34 @@ def test_rejects_other_domain_fail_or_missing():
     assert not sender_authenticated(h("mx; dkim=pass header.d=sub.bank.com"), "a@bank.com")
     assert not sender_authenticated({}, "a@bank.com")
     assert not sender_authenticated(h("mx; dmarc=pass header.from=bank.com"), "")
+
+
+def _raw(headers: list[dict[str, str]]) -> dict:
+    return {"messageId": "m1", "sender": "Bank <a@bank.com>", "payload": {"headers": headers}}
+
+
+def test_normalize_stores_only_the_bool():
+    from mavis.tools.integrations.normalize import normalize_email
+
+    out = normalize_email(
+        _raw([{"name": "Authentication-Results", "value": "mx; dkim=pass header.d=bank.com"}])
+    )
+    assert out["sender_authenticated"] is True
+    assert "authentication-results" not in out["headers"]
+    assert "dkim" not in repr(out)
+    assert normalize_email(_raw([]))["sender_authenticated"] is False
+
+
+def test_normalize_uses_the_topmost_header_only():
+    """A sender-written Authentication-Results lower in the message never overrides the receiver's."""
+    from mavis.tools.integrations.normalize import normalize_email
+
+    out = normalize_email(
+        _raw(
+            [
+                {"name": "Authentication-Results", "value": "mx; dkim=fail header.d=bank.com"},
+                {"name": "Authentication-Results", "value": "mx; dkim=pass header.d=bank.com"},
+            ]
+        )
+    )
+    assert out["sender_authenticated"] is False
