@@ -207,6 +207,7 @@ class ActionSpec:
     agents: frozenset[str]
     risk_fn: Callable[[BaseModel], RiskClass] | None = None
     preview: Callable[[BaseModel, str], str] | None = None  # (args, timezone) -> text
+    priority: int = 50  # registry.select tie-break when a chat message shares no words with any tool
 
     def risk_for(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn else self.risk
@@ -218,8 +219,9 @@ def _a(*names: str) -> frozenset[str]:
 
 _SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("mail.search", Capability.GMAIL,
-               "Search the user's Gmail. Returns message ids, senders, subjects, dates and short previews.",
-               MailSearchArgs, RiskClass.READ, _a("inbox", "conversation")),
+               "Search or find emails in the user's Gmail. Returns message ids, senders, subjects, dates and "
+               "short previews.",
+               MailSearchArgs, RiskClass.READ, _a("inbox", "conversation"), priority=58),
     ActionSpec("mail.read", Capability.GMAIL,
                "Read one email in full by message id (from mail_search): headers and body text.",
                MailReadArgs, RiskClass.READ, _a("inbox", "conversation")),
@@ -233,13 +235,13 @@ _SPECS: tuple[ActionSpec, ...] = (
                "Reply on an existing thread. The user is asked to approve first.",
                MailReplyArgs, RiskClass.OUTWARD, _a("inbox", "conversation"), preview=_preview_reply),
     ActionSpec("calendar.list", Capability.CALENDAR, "List calendar events in a time window.",
-               CalendarListArgs, RiskClass.READ, _a("calendar", "conversation")),
+               CalendarListArgs, RiskClass.READ, _a("calendar", "conversation"), priority=56),
     ActionSpec("calendar.find", Capability.CALENDAR, "Find calendar events matching text.",
                CalendarFindArgs, RiskClass.READ, _a("calendar", "conversation")),
     ActionSpec("calendar.free_slots", Capability.CALENDAR, "Find free time between two times.",
                CalendarSlotsArgs, RiskClass.READ, _a("calendar", "conversation")),
     ActionSpec("calendar.create_event", Capability.CALENDAR,
-               "Create a calendar event. With guests, invites are sent after the user approves.",
+               "Create a calendar event or meeting. With guests, invites are sent after the user approves.",
                CalendarCreateArgs, RiskClass.WRITE_SELF, _a("calendar", "conversation"),
                risk_fn=_attendee_risk, preview=_preview_create),
     ActionSpec("calendar.update_event", Capability.CALENDAR,

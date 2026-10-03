@@ -20,13 +20,14 @@ async def enqueue_run(task_id: int, user_id: int, bus: Any = None) -> None:
 
 
 async def dispatch_task_requests(
-    user_id: int, requests: list[TaskRequest], origin: TaskOrigin, bus: Any = None
+    user_id: int, requests: list[TaskRequest], origin: TaskOrigin, bus: Any = None, *, tainted: bool = False
 ) -> list[int]:
+    """`tainted`: the requester saw third-party content; every step of these tasks runs tainted."""
     ids: list[int] = []
     for req in requests:
         task_id = await tasks.create(
             user_id, goal=req.goal, context=req.context, origin=origin,
-            notify_on_complete=req.notify_on_complete,
+            notify_on_complete=req.notify_on_complete, tainted=tainted,
         )
         await enqueue_run(task_id, user_id, bus)
         ids.append(task_id)
