@@ -318,7 +318,10 @@ def authed(user_id: int, mid: str, sender: str, *, passing: bool = True, **kw) -
     domain = sender.rpartition("@")[2].rstrip(">")
     verdict = "pass" if passing else "fail"
     d.setdefault("payload", {}).setdefault("headers", []).append(
-        {"name": "Authentication-Results", "value": f"mx.example; dkim={verdict} header.d={domain}"}
+        {
+            "name": "Authentication-Results",
+            "value": f"mx.google.com; dkim={verdict} header.i=@{domain} header.s=s1 header.b=AbC12",
+        }
     )
     event = email_event(user_id, d, source="poller")
     assert event is not None
@@ -576,3 +579,143 @@ async def test_backfill_stays_within_retention(user, stack, provider, settings, 
     [(_, _, args)] = provider.executed
     assert args["query"].startswith("newer_than:2d ")
     assert [o.message_id for o in await repo.pending(user.id)] == ["new"]
+
+
+# --- fix round 1 ---------------------------------------------------------------------------------------
+
+
+async def queued_notify(user_id: int, mid: str, clock):
+    obs, _ = await repo.insert_pending(
+        user_id,
+        mid,
+        thread_id="",
+        origin=repo.ORIGIN_LIVE,
+        sender_domain="examplepower.in",
+        sender_name="Power",
+        received_at=clock.t,
+        payload={},
+    )
+    await repo.finish(
+        obs.id,
+        kind="deadline_or_bill",
+        verdict="notify",
+        urgency=3,
+        delivery=repo.QUEUED,
+        summary="deadline or bill from examplepower: bill due",
+        facts={"codes": []},
+    )
+    return obs
+
+
+async def test_failing_compose_does_not_stall_the_drain(user, stack, fake_llm, monkeypatch, clock):
+    q = await queued_notify(user.id, "q-fail", clock)
+    monkeypatch.setattr(llm, "unavailable_s", lambda: 5.0)
+    await stack.intake.on_email(email(user.id, "p-1", subject="Notice"))  # stays pending
+    monkeypatch.setattr(llm, "unavailable_s", lambda: 0.0)
+    clock.advance(minutes=3)
+    fake_llm.push_error(LLMError("compose down"), structured=True)  # the queued notify's compose
+    fake_llm.push_structured(ACCOUNT)  # the pending email is still understood
+    assert await stack.intake.drain(user.id) == 1
+    assert await repo.pending_count(user.id) == 0
+    assert (await repo.get(q.id)).delivery == repo.QUEUED
+    [nxt] = await drains(stack, user.id)  # the earlier future drain absorbs the re-arm
+    assert nxt.due_at > clock.t
+    assert await outbox_texts() == []
+
+
+async def test_drain_skips_redelivery_while_llm_backs_off(user, stack, fake_llm, monkeypatch, clock):
+    q = await queued_notify(user.id, "q-wait", clock)
+    clock.advance(minutes=3)
+    monkeypatch.setattr(llm, "unavailable_s", lambda: 600.0)
+    assert await stack.intake.drain(user.id) == 0  # an unexpected compose call would fail inside FakeLLM
+    assert (await repo.get(q.id)).delivery == repo.QUEUED
+    [nxt] = await drains(stack, user.id)
+    assert nxt.due_at == clock.t + timedelta(seconds=600)
+
+
+async def test_live_compose_failure_keeps_row_queued_and_arms_drain(user, stack, fake_llm, clock):
+    fake_llm.push_structured(
+        EmailUnderstanding(kind=EmailKind.SECURITY, needs_user=True, risk_flags=[RiskFlag.NEW_SIGNIN])
+    )
+    fake_llm.push_error(LLMError("compose down"), structured=True)
+    await stack.intake.on_email(email(user.id, "live-f", sender=f"Accounts <{ACCOUNTS}>"))
+    obs = await only(user.id)
+    assert (obs.verdict, obs.delivery) == ("notify", repo.QUEUED)
+    assert len(await drains(stack, user.id)) == 1
+    clock.advance(minutes=5)
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["New sign-in on your account."]))
+    await stack.intake.drain(user.id)
+    assert (await repo.get(obs.id)).delivery == "sent"
+
+
+async def test_security_alert_in_social_tab_is_understood_but_stays_bulk(
+    user, stack, fake_llm, settings, monkeypatch
+):
+    monkeypatch.setattr(settings, "ping_daily_budget", 0)
+    fake_llm.push_structured(
+        EmailUnderstanding(kind=EmailKind.SECURITY, needs_user=True, risk_flags=[RiskFlag.NEW_SIGNIN])
+    )
+    await stack.intake.on_email(
+        email(
+            user.id,
+            "soc",
+            sender="Social <security@examplesocial.com>",
+            subject="New sign-in to your account",
+            labels=("INBOX", "CATEGORY_SOCIAL"),
+        )
+    )
+    obs = await only(user.id)
+    assert (obs.method, obs.verdict) == ("llm", "notify")
+    assert obs.facts["bulk"] == ["social"] and is_bulk(obs)
+    assert obs.delivery == "dropped"  # bulk: no security budget bypass
+
+
+async def test_spam_is_dropped_even_when_it_looks_like_security(user, stack, fake_llm):
+    await stack.intake.on_email(
+        email(user.id, "sp", subject="Security alert: new sign-in", labels=("SPAM", "CATEGORY_SOCIAL"))
+    )
+    assert fake_llm.structured_calls == []
+    assert (await only(user.id)).verdict == "dropped"
+
+
+async def test_backfill_keeps_security_looking_bulk_mail_and_drops_spam(user, stack, provider, clock):
+    old = clock.t - timedelta(days=2)
+    provider.results["mail.search"] = ToolResult(
+        ok=True,
+        data={
+            "messages": [
+                raw_email("f1", subject="Password reset requested", labels=("CATEGORY_FORUMS",), at=old),
+                raw_email("f2", subject="Weekly digest", labels=("CATEGORY_FORUMS",), at=old),
+                raw_email("f3", subject="Unusual activity", labels=("SPAM",), at=old),
+            ]
+        },
+    )
+    assert await stack.intake.backfill(user.id) == 3
+    assert [o.message_id for o in await repo.pending(user.id)] == ["f1"]
+
+
+async def test_live_copy_reclaims_a_row_backfill_created(user, stack, fake_llm, provider, clock):
+    provider.results["mail.search"] = ToolResult(
+        ok=True,
+        data={"messages": [raw_email("race", sender=f"Accounts <{ACCOUNTS}>", at=clock.t)]},
+    )
+    assert await stack.intake.backfill(user.id) == 1
+    fake_llm.push_structured(
+        EmailUnderstanding(kind=EmailKind.SECURITY, needs_user=True, risk_flags=[RiskFlag.NEW_SIGNIN])
+    )
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["New sign-in on your account."]))
+    await stack.intake.on_email(email(user.id, "race", sender=f"Accounts <{ACCOUNTS}>", at=clock.t))
+    obs = await only(user.id)
+    assert (obs.origin, obs.delivery) == ("live", "sent")
+
+
+async def test_baseline_cap_counts_by_the_mail_day(user, stack, fake_llm, clock):
+    await establish(stack, user.id, "orders@exampleshop.com", clock)
+    for i, days in enumerate((3, 3, 2, 2)):
+        fake_llm.push_structured(debit(500))
+        await stack.intake.on_email(
+            email(
+                user.id, f"md{i}", sender="Shop <orders@exampleshop.com>", at=clock.t - timedelta(days=days)
+            )
+        )
+    assert (await Baselines().snapshot(user.id, "INR", "exampleshop", "card")).counterparty.count == 4

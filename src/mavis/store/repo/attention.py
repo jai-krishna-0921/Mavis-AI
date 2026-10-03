@@ -221,14 +221,17 @@ async def prior_security(user_id: int, sender_domain: str, exclude_id: int) -> b
         return any((f or {}).get("authenticated") is True for f in facts)
 
 
-async def baselined_since(user_id: int, counterparty_key: str, since: datetime) -> int:
-    """Debits recorded into the money baseline for this payee since `since` (per-payee daily cap)."""
+async def baselined_on(user_id: int, counterparty_key: str, start: datetime, end: datetime) -> int:
+    """Debits recorded into the money baseline for this payee among mail received in [start, end): the
+    per-payee daily cap counts by the mail's day, so a backfill warms up each day separately."""
     async with Session() as s:
         facts = await s.scalars(
-            select(_Obs.facts)
-            .where(_Obs.user_id == user_id, _Obs.status == DONE, _Obs.processed_at >= since)
-            .order_by(_Obs.id.desc())
-            .limit(200)
+            select(_Obs.facts).where(
+                _Obs.user_id == user_id,
+                _Obs.status == DONE,
+                _Obs.received_at >= start,
+                _Obs.received_at < end,
+            )
         )
         return sum(
             1

@@ -171,7 +171,7 @@ class AttentionPipeline:
         speak = (
             decision.verdict in SPEAKS and obs.origin == repo.ORIGIN_LIVE and now - received <= SPEAK_WINDOW
         )
-        record = await self._may_record(user, money, decision, sender_established, lookalike, now)
+        record = await self._may_record(user, money, decision, sender_established, lookalike, received)
         point_id = await self._index_observation(user.id, obs.id, u.kind.value, vector, received)
         facts = {
             "money": money,
@@ -240,17 +240,19 @@ class AttentionPipeline:
         decision: AttentionDecision,
         sender_established: bool,
         lookalike: bool,
-        now: datetime,
+        received: datetime,
     ) -> bool:
         """Baseline poisoning ruling: only debits from an established, non-lookalike sender that were not
-        held as an ask feed the money baseline, at most BASELINE_DAILY_CAP per payee per local day. A held
+        held as an ask feed the money baseline, at most BASELINE_DAILY_CAP per payee per local day of
+        the mail. A held
         debit is recorded only on the user's explicit Yes (feedback)."""
         if money is None or money["direction"] != Direction.DEBIT.value:
             return False
         if decision.verdict is Verdict.ASK or not sender_established or lookalike:
             return False
-        since = local_day_start(now, user.timezone)
-        return await repo.baselined_since(user.id, money["counterparty_key"], since) < BASELINE_DAILY_CAP
+        start = local_day_start(received, user.timezone)
+        count = await repo.baselined_on(user.id, money["counterparty_key"], start, start + timedelta(days=1))
+        return count < BASELINE_DAILY_CAP
 
     async def _money(
         self, user: Any, obs: Any, u: EmailUnderstanding, received: Any
