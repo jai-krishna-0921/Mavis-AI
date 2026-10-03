@@ -161,8 +161,10 @@ def similar_titles(a: str, b: str, entities_a: list[str] | None = None,
     shared = sa & sb
     if len(shared) / len(sa | sb) >= DUPLICATE_SIMILARITY:
         return True
-    smaller = min(sa, sb, key=len)
-    return len(smaller) >= 2 and smaller <= (sa if smaller is sb else sb)
+    smaller, larger = (sa, sb) if len(sa) <= len(sb) else (sb, sa)
+    # a subset merges only when the extra words add no person or name ("Email Raj and Priya" is not
+    # "Email Raj"); the caller keeps the more specific title
+    return len(smaller) >= 2 and smaller <= larger and not ((larger - smaller) & names)
 
 
 def _due_close(a: datetime | None, b: datetime | None) -> bool:
