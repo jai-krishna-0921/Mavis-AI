@@ -282,3 +282,62 @@ def test_render_read_decodes_plain_part_when_no_message_text() -> None:
         {"mimeType": "text/plain", "body": {"data": data}},
     ]}}
     assert "Plain body from the MIME part" in render_read(msg)
+
+
+# --- taint reaches learning as untrusted ---------------------------------------------------------------
+
+
+async def test_tainted_turn_and_next_turn_learn_as_untrusted(
+    db, channel, fake_llm, memory, bus, integ, monkeypatch
+) -> None:
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    jobs = await _jobs(bus, monkeypatch)
+    integ.set_state(user.id, Capability.GMAIL, ConnectionState.ACTIVE)
+    integ.results["mail.read"] = ToolResult(ok=True, data=READ_DATA)
+    fake_llm.push_ai(_call("mail_read", {"message_id": "m1"}, "c1"))
+    fake_llm.push_text("Meetup Thursday 6pm, RSVP by Wednesday.")
+    await run_turn(msg_event(user.id, "what's in the Meetup email?", "e1"))
+    fake_llm.push_text("Nice.")
+    await run_turn(msg_event(user.id, "cool, I'll go", "e2"))
+    fake_llm.push_text("Sounds good.")
+    await run_turn(msg_event(user.id, "thanks", "e3"))
+
+    learns = [j for j in jobs if j.kind is JobKind.LEARN]
+    assert [j.payload["trust"] for j in learns] == ["untrusted", "untrusted", "user"]
+    assert "RSVP" in learns[1].payload["text"]  # the tainted reply is in turn 2's learn text
+    log = await messages.recent(user.id)
+    assert [simple_turn.is_tainted(m) for m in log if m.role == "assistant"] == [True, False, False]
+
+
+async def test_untainted_turn_learns_with_user_trust(db, channel, fake_llm, memory, bus, integ, monkeypatch):
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    jobs = await _jobs(bus, monkeypatch)
+    fake_llm.push_text("Hey!")
+    await run_turn(msg_event(user.id, "hi"))
+    [learn] = [j for j in jobs if j.kind is JobKind.LEARN]
+    assert learn.payload["trust"] == "user"
+
+
+def test_rendered_mail_drops_urls() -> None:
+    body = ("View in browser (https://info.jobscan.co/e3t/Ctc/abc?x=1&y=2)\n"
+            "Talk at 6pm. Details: https://meetup.com/e/123 and <http://t.co/zz>. Visit www.example.com now")
+    out = render_read(dict(READ_DATA, messageText=body))
+    assert "http" not in out and "www." not in out and "jobscan" not in out
+    assert "View in browser\nTalk at 6pm. Details: [link] and." in out and "Visit [link] now" in out
+    preview = render_search({"messages": [dict(READ_DATA, messageText=body)]})
+    assert "http" not in preview and "[link]" in preview
+
+
+async def test_retry_with_unknown_taint_assumes_tainted(db, channel, fake_llm, memory, bus, monkeypatch):
+    from mavis.domain.messages import Outbound, Role
+
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    jobs = await _jobs(bus, monkeypatch)
+    event = msg_event(user.id, "summarize it")
+    await messages.log(user.id, Role.USER, "summarize it", event_id=event.id)
+    await outbox.enqueue_now(Outbound(user_id=user.id, text="Summary", dedupe_key=f"reply:{event.id}:0"))
+    await run_turn(event)  # first attempt died before logging: no record of whether it read mail
+    assert fake_llm.calls == []
+    assert simple_turn.is_tainted((await messages.recent(user.id))[-1])
+    [learn] = [j for j in jobs if j.kind is JobKind.LEARN]
+    assert learn.payload["trust"] == "untrusted"

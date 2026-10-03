@@ -22,7 +22,7 @@ from mavis.agents.react import react_loop
 from mavis.bus import get_bus
 from mavis.channels import presence
 from mavis.domain.errors import ConnectionRequired
-from mavis.domain.events import Event, Job, JobKind
+from mavis.domain.events import Event, Job, JobKind, Trust
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.policy import RiskClass
 from mavis.initiative import wiring
@@ -83,12 +83,35 @@ async def build_context(user_id: int, text: str, hint: str = "") -> str:
     return "\n\n".join(p for p in parts if p.strip())
 
 
-def _previous_reply(history: list[Message]) -> str | None:
-    """The last assistant message before the most recent user message."""
+# A reply written after the model read untrusted tool output (an email, a web page) is logged with this
+# event_id suffix (no schema change). Learn text that includes it is learned at untrusted trust.
+TAINT_SUFFIX = ":tainted"
+
+
+def _reply_event_id(event_id: str, tainted: bool) -> str:
+    return f"reply:{event_id}{TAINT_SUFFIX if tainted else ''}"
+
+
+def is_tainted(message: Message) -> bool:
+    return bool(message.event_id and message.event_id.endswith(TAINT_SUFFIX))
+
+
+def _previous_message(history: list[Message]) -> Message | None:
     last_user = max((i for i, m in enumerate(history) if m.role == Role.USER.value), default=None)
     if last_user is None:
         return None
-    return next((m.content for m in reversed(history[:last_user]) if m.role == Role.ASSISTANT.value), None)
+    return next((m for m in reversed(history[:last_user]) if m.role == Role.ASSISTANT.value), None)
+
+
+def _previous_reply(history: list[Message]) -> str | None:
+    """The last assistant message before the most recent user message."""
+    prev = _previous_message(history)
+    return prev.content if prev is not None else None
+
+
+def _previous_tainted(history: list[Message]) -> bool:
+    prev = _previous_message(history)
+    return prev is not None and is_tainted(prev)
 
 
 def _clarified_request(history: list[Message]) -> str | None:
@@ -139,14 +162,17 @@ async def _known_name(user_id: int) -> str | None:
 
 
 async def enqueue_learn(
-    user_id: int, event: Event, text: str, previous_reply: str | None, original: str | None = None
+    user_id: int, event: Event, text: str, previous_reply: str | None, original: str | None = None,
+    *, tainted: bool = False,
 ) -> None:
+    """`tainted`: the turn or the included previous reply saw untrusted tool output: learn as untrusted."""
+    trust = Trust.UNTRUSTED.value if tainted else event.trust.value
     convo = f"Mavis: {previous_reply}\nUser: {text}" if previous_reply else text
     if original:
         convo = f"User: {original}\n{convo}"
     await get_bus().enqueue(Job(
         id=f"learn:{event.id}", user_id=user_id, kind=JobKind.LEARN,
-        payload={"text": convo, "source_ref": event.id, "trust": event.trust.value, "conversation": True},
+        payload={"text": convo, "source_ref": event.id, "trust": trust, "conversation": True},
     ))
 
 
@@ -242,13 +268,18 @@ async def run_turn(event: Event) -> None:
     # Retry after the reply was enqueued: don't call the LLM again (it could split differently).
     enqueued = await outbox.texts_with_dedupe_prefix(f"reply:{event.id}:")
     if enqueued:
-        await messages.log(user.id, Role.ASSISTANT, "\n\n".join(enqueued), event_id=f"reply:{event.id}")
+        # Whether the first attempt read untrusted output is unknown unless it logged: assume it did.
+        tainted = not await messages.exists(_reply_event_id(event.id, False))
+        if tainted:
+            await messages.log(user.id, Role.ASSISTANT, "\n\n".join(enqueued),
+                               event_id=_reply_event_id(event.id, True))
         await _initiative_hook("quiet.after_assistant_message",
                                lambda i: i.quiet.after_assistant_message(user.id, enqueued[-1]))
         # The first attempt may have died before enqueuing LEARN, so enqueue again. The bus does not
         # dedupe by job id; the LEARN handler skips a source_ref already recorded as processed.
         history = await messages.recent(user.id, HISTORY_LIMIT)
-        await enqueue_learn(user.id, event, text, _previous_reply(history), _clarified_request(history))
+        await enqueue_learn(user.id, event, text, _previous_reply(history), _clarified_request(history),
+                            tainted=tainted or _previous_tainted(history))
         return
 
     history = await messages.recent(user.id, HISTORY_LIMIT)
@@ -265,7 +296,8 @@ async def run_turn(event: Event) -> None:
         await _initiative_hook("quiet.after_assistant_message",
                                lambda i: i.quiet.after_assistant_message(user.id, question))
         # The request still carries information (people, titles); the hooks skip its ambiguous time.
-        await enqueue_learn(user.id, event, text, previous, _clarified_request(history))
+        await enqueue_learn(user.id, event, text, previous, _clarified_request(history),
+                            tainted=_previous_tainted(history))
         return
 
     hint = ""
@@ -306,7 +338,8 @@ async def run_turn(event: Event) -> None:
             # The connect prompt (with buttons) is already queued under the flow's own dedupe keys.
             await messages.log(user.id, Role.ASSISTANT, "\n\n".join(connect_texts),
                                event_id=f"reply:{event.id}")
-            await enqueue_learn(user.id, event, text, previous_reply, _clarified_request(history))
+            await enqueue_learn(user.id, event, text, previous_reply, _clarified_request(history),
+                                tainted=_previous_tainted(history))
             await _initiative_hook("quiet.after_assistant_message",
                                    lambda i: i.quiet.after_assistant_message(user.id, connect_texts[-1]))
             return
@@ -321,7 +354,9 @@ async def run_turn(event: Event) -> None:
                 key = f"reply:{event.id}:{i}"
                 await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=key))
             await s.commit()
-    await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles), event_id=f"reply:{event.id}")
-    await enqueue_learn(user.id, event, text, previous_reply, _clarified_request(history))
+    await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles),
+                       event_id=_reply_event_id(event.id, result.tainted))
+    await enqueue_learn(user.id, event, text, previous_reply, _clarified_request(history),
+                        tainted=result.tainted or _previous_tainted(history))
     await _initiative_hook("quiet.after_assistant_message",
                            lambda i: i.quiet.after_assistant_message(user.id, bubbles[-1]))
