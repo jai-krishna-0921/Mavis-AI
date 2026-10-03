@@ -68,6 +68,7 @@ async def test_job_learner_enqueues_untrusted_learn_job(monkeypatch):
     await learner.learn(7, "more", "first_sync:gmail:1")
     first, second = bus.jobs
     assert first.kind is JobKind.LEARN and first.user_id == 7
+    assert first.payload.pop("anchor_at")  # when the text was gathered (phase A3)
     assert first.payload == {"text": "Recent emails:\nx", "source_ref": "first_sync:gmail:0",
                              "trust": "untrusted", "conversation": False}
     assert first.id != second.id
@@ -207,7 +208,8 @@ async def test_two_users_first_sync_learn_markers_do_not_collide(db, monkeypatch
     learned = []
 
     class FakeMemoryService:
-        async def learn(self, user_id, text, source_ref="", trust=Trust.USER, conversation=True):
+        async def learn(self, user_id, text, source_ref="", trust=Trust.USER, conversation=True,
+                        anchor_at=None):
             learned.append((user_id, source_ref))
 
     monkeypatch.setattr(jobs, "get_memory", lambda: FakeMemoryService())

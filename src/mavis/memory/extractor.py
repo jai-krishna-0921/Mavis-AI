@@ -20,7 +20,7 @@ from mavis.memory.names import node_key, sanitize_label, sanitize_rel
 log = structlog.get_logger()
 
 SYSTEM_PROMPT = """You extract durable memory for {agent}, a personal assistant, from one piece of text.
-Current local time for the user: {now_local} ({tz}). The user's name: {name}.
+The text was written at {now_local} ({tz}), the user's local time. The user's name: {name}.
 
 Rules:
 - Keep only things likely to matter later: people and how they relate to the user, work/study, goals,
@@ -28,9 +28,10 @@ Rules:
 - Use "User" as the subject for the user themself.
 - Entity labels must be one of: {labels}.
 - Relation types must be one of: {rels}.
-- Resolve relative dates ("tomorrow", "Monday 10am") against the current local time and output ISO-8601
-  WITH the user's UTC offset. If the day is ambiguous (e.g. "tomorrow" said between 00:00 and 04:59 local),
-  set ambiguous=true and starts_at=null.
+- Resolve relative dates and times ("tomorrow", "Monday 10am", "at 7 PM") against when they were written:
+  the date stated next to an item (an email's received date) if there is one, else the time the text was
+  written above. Output ISO-8601 WITH the user's UTC offset. If the day is ambiguous (e.g. "tomorrow"
+  said between 00:00 and 04:59 local), set ambiguous=true and starts_at=null.
 - loops.kind is one of COMMITMENT, WAITING_ON, GOAL, CONCERN, ROUTINE, WATCH.
 - profile_updates only for stable traits (name, timezone, tone, goals, key_people, routines, dislikes).
 - mood: one word, only if clearly expressed by the user.

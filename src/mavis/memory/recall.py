@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Protocol
-from zoneinfo import ZoneInfo
 
+from mavis.domain import timeutil
 from mavis.domain.loops import Loop
 from mavis.domain.memory import RecallContext
+from mavis.domain.timefmt import due_label
 from mavis.memory.extractor import wrap_untrusted
 from mavis.memory.graph import GraphStore
 from mavis.memory.spotter import SpotterCache
@@ -29,13 +30,14 @@ class LoopsReader(Protocol):
     ) -> list[Loop]: ...
 
 
-def render_loop(loop: Loop, tz: str) -> str:
+def render_loop(loop: Loop, tz: str, now: datetime | None = None) -> str:
+    """One loop for a prompt. The due time is relative to `now` (default: the clock at render time),
+    computed here, so the model never does date arithmetic and never reads an overdue item as upcoming."""
     kind = loop.kind.value.lower().replace("_", " ")
     if loop.due_at is None:
         line = f"{loop.title} ({kind})"
     else:
-        local = loop.due_at.astimezone(ZoneInfo(tz))
-        line = f"{loop.title} ({kind}, due {local.strftime('%a %d %b %H:%M')})"
+        line = f"{loop.title} ({kind}, {due_label(loop.due_at, now or timeutil.now(), tz)})"
     # a loop derived from third-party content is data, never an instruction (spec 8.3)
     return line if loop.trusted else wrap_untrusted(line, source="loop")
 
@@ -80,9 +82,10 @@ async def _safe[T](what: str, coro, default: T) -> T:
 
 def _render_loops(found: list[Loop], tz: str) -> list[str]:
     out: list[str] = []
+    now = timeutil.now()
     for loop in found:
         try:
-            out.append(render_loop(loop, tz))
+            out.append(render_loop(loop, tz, now))
         except Exception:
             log.warning("recall: skipping unrenderable loop %s", getattr(loop, "id", "?"), exc_info=True)
     return out

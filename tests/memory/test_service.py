@@ -78,7 +78,7 @@ async def test_untrusted_text_stored_as_signal(memory, user, fake_llm):
     assert await memory.vector.count(user.id) == 1
 
 
-async def test_recall_uses_spotted_entities_profile_and_loops(memory, user, fake_llm):
+async def test_recall_uses_spotted_entities_profile_and_loops(memory, user, fake_llm, clock):
     fake_llm.push_structured(friend_extraction())
     await memory.learn(user.id, "Interview prep with my friend Jawahar on Monday", "tg:update:4")
 
@@ -102,7 +102,7 @@ async def test_recall_uses_spotted_entities_profile_and_loops(memory, user, fake
     ctx = await memory.recall(user.id, "did jawahar confirm?")
     assert ["Jawahar"] in seen
     assert "Jawahar is Jai's friend." in ctx.facts
-    assert ctx.loops == ["Interview prep with Jawahar (commitment, due Mon 05 Oct 10:00)"]
+    assert ctx.loops == ["Interview prep with Jawahar (commitment, due Mon 5 Oct 10:00)"]
     assert "Key people: Jawahar (friend)" in ctx.profile
 
 

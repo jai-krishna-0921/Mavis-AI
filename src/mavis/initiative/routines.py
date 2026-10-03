@@ -17,6 +17,7 @@ from mavis.domain.decisions import NotifyIntent
 from mavis.domain.events import Trust
 from mavis.domain.loops import LoopKind, LoopOrigin, LoopUpsert
 from mavis.domain.messages import Role
+from mavis.domain.timefmt import due_label
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.executor import InitiativeExecutor
 from mavis.initiative.untrusted import wrap_untrusted
@@ -161,7 +162,7 @@ class Routines:
         start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
         items = [
-            BriefItem(f"{lp.title} at {timeutil.to_local(lp.due_at, user.timezone):%H:%M}", lp.trusted)
+            BriefItem(f"{lp.title}, {due_label(lp.due_at, timeutil.now(), user.timezone)}", lp.trusted)
             for lp in await self._loops.active(user.id)
             if lp.kind is not LoopKind.ROUTINE and lp.due_at is not None
             and start.astimezone(UTC) <= lp.due_at < end.astimezone(UTC)

@@ -123,7 +123,7 @@ class InitiativeHandler:
             return
 
         open_loops = await self._loops.active(user.id)
-        result = await self._filter.apply(event, open_loops)
+        result = await self._filter.apply(event, open_loops, user.timezone)
         if result.drop:
             log.info("initiative.dropped", event_id=event.id, reason=result.reason)
             return

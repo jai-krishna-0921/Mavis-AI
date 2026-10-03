@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 
 import structlog
 
@@ -123,24 +124,28 @@ class MemoryService:
 
     async def learn(
         self, user_id: int, text: str, source_ref: str = "", trust: Trust = Trust.USER,
-        conversation: bool = True,
+        conversation: bool = True, anchor_at: datetime | None = None,
     ) -> Extraction:
         """Extract and persist. LLMError from extraction propagates; the LEARN job drops it (best effort).
 
         `trust` and `conversation` are the origin's provenance; hooks receive them unchanged.
+        `anchor_at` is when the text was written (the turn, the email): relative times in it ("7 PM",
+        "tomorrow") resolve against that, not against when this job happens to run.
 
         Idempotent on retry: graph writes are MERGEs, vector ids are uuid5 of the text.
         """
         await self.init()
         user = await users.get(user_id)
         card = await profile_repo.get(user_id)
+        anchor = anchor_at or timeutil.now()
         extraction = await extract(
-            text, user_name=user.name or card.name, tz=user.timezone, trust=trust, source=source_ref
+            text, user_name=user.name or card.name, tz=user.timezone, now=anchor, trust=trust,
+            source=source_ref,
         )
         if not card.tracks_mood:
             extraction = extraction.model_copy(update={"mood": None})
         if trust is Trust.USER:  # the model sometimes misreads "by Tuesday": fix the plain cases in code
-            extraction = apply_relative_day(extraction, user_message_of(text), timeutil.now(), user.timezone)
+            extraction = apply_relative_day(extraction, user_message_of(text), anchor, user.timezone)
 
         resolution = await resolve(extraction, await self.graph.entities(user_id), self.embedder)
         trusted = trust is Trust.USER
