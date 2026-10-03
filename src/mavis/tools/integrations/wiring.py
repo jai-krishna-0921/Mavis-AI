@@ -66,7 +66,9 @@ class JobLearner:
     async def learn(self, user_id: int, text: str, source_ref: str) -> None:
         await get_bus().enqueue(Job(
             id=f"learn:{source_ref}", user_id=user_id, kind=JobKind.LEARN,
-            payload={"text": text, "source_ref": source_ref, "trust": "untrusted", "conversation": False},
+            payload={"text": text, "source_ref": source_ref, "trust": "untrusted", "conversation": False,
+                     # gathered now; each line carries its own date for the extractor to anchor on
+                     "anchor_at": timeutil.now().isoformat()},
         ))
 
 

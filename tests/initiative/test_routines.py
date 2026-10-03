@@ -80,7 +80,7 @@ async def test_morning_checkin_composes_with_items_and_reschedules(user, clock, 
     msg = ComposedMessage(send=True, messages=["Morning! Interview prep with Jawahar at 10."])
     fake_llm.push_structured(msg)
     await routines.run(user, {"routine": MORNING_ROUTINE, "loop_id": routine.id})
-    assert "Interview prep with Jawahar at 10:00" in seen["intent"]
+    assert "Interview prep with Jawahar, due today 10:00 (in 1h 30m)" in seen["intent"]
     assert "2 unread from Acme recruiting" in seen["intent"]
     await deliver_pending(channel)
     assert any("Morning!" in str(s) for s in channel.sent)

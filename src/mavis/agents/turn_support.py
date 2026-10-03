@@ -194,5 +194,6 @@ async def enqueue_learn(
     await get_bus().enqueue(Job(
         id=f"learn:{event.id}", user_id=user_id, kind=JobKind.LEARN,
         payload={"text": convo, "source_ref": event.id, "trust": trust, "conversation": True,
-                 "not_before": not_before.isoformat()},
+                 "not_before": not_before.isoformat(),
+                 "anchor_at": timeutil.ensure_utc(event.occurred_at).isoformat()},
     ))

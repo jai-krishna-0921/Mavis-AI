@@ -36,8 +36,8 @@ def test_render_loop_in_user_tz():
         title="Interview prep with Jawahar",
         due_at=datetime(2026, 10, 5, 4, 30, tzinfo=UTC),
     )
-    expected = "Interview prep with Jawahar (commitment, due Mon 05 Oct 10:00)"
-    assert render_loop(loop, "Asia/Kolkata") == expected
+    expected = "Interview prep with Jawahar (commitment, due Mon 5 Oct 10:00)"
+    assert render_loop(loop, "Asia/Kolkata", datetime(2026, 10, 1, 6, 0, tzinfo=UTC)) == expected
 
 
 class _Graph:
@@ -111,7 +111,8 @@ async def _run(graph, vector, loops=None):
     )
 
 
-async def test_recall_assembles_all_sources():
+async def test_recall_assembles_all_sources(clock):
+    clock.set(datetime(2026, 10, 2, 14, 0, tzinfo=UTC))
     graph, loops = _Graph(), _Loops()
     ctx = await _run(graph, _Vector(), loops)
     assert graph.asked == [["Jawahar"]]
@@ -123,8 +124,8 @@ async def test_recall_assembles_all_sources():
     assert ctx.episodes == ["Talked to Jawahar about the interview"]
     assert ctx.loops == [
         "Call Jawahar (commitment)",
-        "Unrelated in 10h (commitment, due Sat 03 Oct 00:00)",
-        "Later (commitment, due Sun 04 Oct 00:00)",
+        "Unrelated in 10h (commitment, due tomorrow 00:00)",
+        "Later (commitment, due Sun 4 Oct 00:00)",
     ]
     assert ctx.profile == "Name: Jai"
 
