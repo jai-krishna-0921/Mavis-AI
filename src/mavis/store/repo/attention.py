@@ -194,6 +194,7 @@ async def recent_debits(user_id: int, since: datetime, exclude_id: int) -> int:
             .where(
                 _Obs.user_id == user_id, _Obs.status == DONE, _Obs.received_at >= since, _Obs.id != exclude_id
             )
+            .order_by(_Obs.received_at.desc(), _Obs.id.desc())
             .limit(50)
         )
         return sum(1 for f in facts if ((f or {}).get("money") or {}).get("direction") == "debit")

@@ -116,3 +116,15 @@ def test_settings_defaults(settings):
     assert settings.attention_enabled is True
     assert settings.attention_large_amounts["INR"] == 10000.0
     assert settings.attention_evening_time == "20:30"
+
+
+async def test_recent_debits_limit_keeps_the_newest(user, clock):
+    clock.set(T0)
+    since = T0 - timedelta(hours=3)
+    for i in range(50):  # older credits fill the 50 row window if rows are not ordered newest first
+        obs, _ = await _insert(user.id, f"old{i}", at=T0 - timedelta(hours=2, minutes=i))
+        await repo.finish(obs.id, facts={"money": {"direction": "credit", "amount": 1.0}})
+    for i in range(3):
+        obs, _ = await _insert(user.id, f"new{i}", at=T0 - timedelta(minutes=i))
+        await repo.finish(obs.id, facts={"money": {"direction": "debit", "amount": 1.0}})
+    assert await repo.recent_debits(user.id, since, exclude_id=-1) == 3
