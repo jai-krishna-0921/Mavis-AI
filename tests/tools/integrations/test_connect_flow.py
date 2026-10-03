@@ -431,3 +431,26 @@ async def test_connection_required_interrupts_and_resumes(db, user, provider, ca
     fake_llm.push_structured(ComposedMessage(send=True, messages=["One new email: Hi."]))
     final = await graph.ainvoke(Command(resume=resume.payload["value"]), cfg)
     assert final["results"]["s1"]["ok"] is True and "Hi" in final["results"]["s1"]["text"]
+
+
+# --- hotfix3 RC4: one open connect prompt per user and capability ---------------------------------
+
+
+async def test_second_task_an_hour_later_joins_the_open_prompt(db, provider, cache, fake_bus, rec, state):
+    now = [NOW]
+    flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
+    first = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="3")
+    now[0] = NOW + timedelta(minutes=39)  # prod: 13:45 then 14:24 then 15:26 IST
+    again = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="6", revoked=True)
+    assert again == first
+    assert len(rec.sent) == 1 and len(provider.links) == 1  # no second prompt, no "expired" wording
+    assert {p.task_id for p in await connections.open_for(1, Capability.CALENDAR)} == {"3", "6"}
+
+
+async def test_a_stale_open_prompt_gets_a_fresh_one(db, provider, cache, fake_bus, rec, state):
+    now = [NOW]
+    flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="3")
+    now[0] = NOW + timedelta(hours=3)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="9")
+    assert len(rec.sent) == 2
