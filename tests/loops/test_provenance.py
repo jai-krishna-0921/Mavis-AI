@@ -244,3 +244,58 @@ def test_post_turn_quieting_follows_origin_not_source(origin, suppressed, source
     decision = InitiativeDecision(notify=NotifyIntent(urgency=3, intent="nudge"))
     out = _quiet_after_turn(event, decision)
     assert (out.notify is None) is suppressed
+
+
+# --- fix round 1, I2: a wakeup's trust is decided when it fires, from its loop's CURRENT trust --------
+
+
+class _Leader:
+    async def acquire(self) -> bool:
+        return True
+
+    async def release(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("kind", [WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED, WakeupKind.AGENT])
+@pytest.mark.parametrize("loop_trust,flag,expected", [
+    (Trust.USER, None, Trust.SYSTEM),
+    (Trust.SYSTEM, None, Trust.SYSTEM),
+    (Trust.UNTRUSTED, None, Trust.UNTRUSTED),          # e.g. a legacy loop the migration marked untrusted
+    (Trust.USER, {"untrusted": True}, Trust.UNTRUSTED),  # the flag still counts: least trusted wins
+])
+async def test_fired_wakeup_combines_its_flag_with_the_loops_trust(user, clock, recording_bus, kind,
+                                                                   loop_trust, flag, expected):
+    from mavis.timers.runner import TimerRunner
+    from mavis.timers.service import WakeupService
+
+    loops = LoopService(recording_bus)
+    loop = await loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Board prep",
+                                                  trust=loop_trust))
+    recording_bus.take()
+    await WakeupService().wake_me(user.id, clock.t + timedelta(minutes=1), "r", loop.id, kind, payload=flag,
+                                  scale=False)
+    clock.set(clock.t + timedelta(minutes=2))
+    await TimerRunner(recording_bus, WakeupService(), _Leader(), 0.01, loops=loops).tick()
+    [event] = [e for e in recording_bus.take() if e.type is not EventType.LOOP_UPDATED]
+    assert event.trust is expected
+    assert bool(event.payload.get("untrusted")) is (expected is Trust.UNTRUSTED)
+
+
+async def test_wakeup_scheduled_trusted_fires_untrusted_after_its_loop_was_tainted(user, clock,
+                                                                                  recording_bus):
+    from mavis.timers.runner import TimerRunner
+    from mavis.timers.service import WakeupService
+
+    loops = LoopService(recording_bus)
+    loop = await loops.upsert(user.id, LoopUpsert(kind=LoopKind.WAITING_ON, title="Reply from Ana",
+                                                  trust=Trust.USER))
+    await WakeupService().wake_me(user.id, clock.t + timedelta(minutes=1), "check", loop.id, WakeupKind.AGENT,
+                                  scale=False)
+    await loops.upsert(user.id, LoopUpsert(id=loop.id, kind=LoopKind.WAITING_ON, title="Reply from Ana",
+                                           entities=["Ana Corp"], trust=Trust.UNTRUSTED))
+    recording_bus.take()
+    clock.set(clock.t + timedelta(minutes=2))
+    await TimerRunner(recording_bus, WakeupService(), _Leader(), 0.01, loops=loops).tick()
+    [event] = [e for e in recording_bus.take() if e.type is EventType.WAKEUP]
+    assert event.trust is Trust.UNTRUSTED
