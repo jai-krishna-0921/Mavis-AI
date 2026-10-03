@@ -35,7 +35,7 @@ from mavis.attention.workspace_signals import (
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import NotifyIntent
-from mavis.domain.errors import ConnectionRequired, LLMError
+from mavis.domain.errors import ConnectionRequired
 from mavis.domain.events import Event
 from mavis.domain.integrations import UserRef
 from mavis.domain.loops import LoopStatus
@@ -57,6 +57,7 @@ from mavis.tools.integrations.workspace_guard import (
     update_workspace_state,
 )
 from mavis.tools.registry import ToolContext
+from mavis.worker.locks import lock
 
 log = structlog.get_logger()
 
@@ -282,7 +283,10 @@ class WorkspaceIntake:
         else:
             await self._notify_share(user, obs, s, key, urgency, loop_title)
 
-    def _mute_button(self, obs: Any) -> list[list[Button]]:
+    def _mute_button(self, obs: Any, s: Signal) -> list[list[Button]] | None:
+        """None without an actor: an empty mute key ("comment:") would silence every nameless comment."""
+        if not s.actor.strip():
+            return None
         return [[Button(label="Not useful", data=f"{MUTE}{obs.id}")]]
 
     async def _notify_share(
@@ -292,7 +296,7 @@ class WorkspaceIntake:
         loop = f' ("{loop_title}")' if loop_title else ""
         text = (f'{s.actor or "Someone"} shared "{s.object_title}". It looks like what you were waiting '
                 f"for{loop}, so I marked that done.")
-        await self.executor_of().deliver(user, [text], key, urgency, buttons=self._mute_button(obs),
+        await self.executor_of().deliver(user, [text], key, urgency, buttons=self._mute_button(obs, s),
                                          tainted=True)
         await repo.set_fields(obs.id, delivery=SENT)
 
@@ -312,11 +316,11 @@ class WorkspaceIntake:
         notice = NotifyIntent(urgency=max(1, urgency), intent=intent, dedupe_key=key)
         executor = self.executor_of()
         try:
-            sent = await executor.notify(user, notice, untrusted=True, buttons=self._mute_button(obs))
-        except LLMError as exc:
+            sent = await executor.notify(user, notice, untrusted=True, buttons=self._mute_button(obs, s))
+        except Exception as exc:  # noqa: BLE001 - LLM busy or any composer failure: the row is still spoken
             log.warning("workspace.notify_fallback_text", obs_id=obs.id, error=type(exc).__name__)
             await executor.deliver(user, [self._comment_text(s)], key, notice.urgency,
-                                   buttons=self._mute_button(obs), tainted=True)
+                                   buttons=self._mute_button(obs, s), tainted=True)
             sent = True
         await repo.set_fields(obs.id, delivery=SENT if sent else NONE)
 
@@ -367,31 +371,45 @@ class WorkspaceIntake:
             obs_id = int(data.rsplit(":", 1)[1])
         except (ValueError, IndexError):
             return
-        obs = await repo.get(obs_id)
-        if obs is None or obs.user_id != event.user_id or obs.source not in WORKSPACE_SOURCES:
-            return
+        # the lock attention's FeedbackHandler uses: a double tap reads the first tap's result
+        async with lock(f"attention-feedback:{event.user_id}"):
+            obs = await repo.get(obs_id)
+            if obs is None or obs.user_id != event.user_id or obs.source not in WORKSPACE_SOURCES:
+                return
+            text = await self._feedback(obs, data)
+        if text:
+            await reply(event, [text])
+
+    async def _feedback(self, obs: Any, data: str) -> str | None:
         facts = obs.facts or {}
         if data.startswith(MUTE):
-            await self._append(obs.user_id, "muted", f"{obs.kind}:{str(facts.get('actor') or '').lower()}")
+            actor = str(facts.get("actor") or "").strip().lower()
+            if not actor:
+                return None  # never a catch-all "kind:" key
+            await self._append(obs.user_id, "muted", f"{obs.kind}:{actor}")
             await repo.set_fields(obs.id, feedback="mute")
-            text = "Got it. Those go to your brief from now on."
-        elif data.startswith(KEEP):
+            return "Got it. Those go to your brief from now on."
+        if obs.source != SOURCE_OF[SignalKind.TASK_OVERDUE]:
+            return None  # Keep and Drop only exist on task questions
+        if data.startswith(KEEP):
             await repo.set_fields(obs.id, feedback="keep")
-            text = "Okay, keeping it on your list."
-        elif data.startswith(DROP):
-            if obs.feedback == "drop":
-                return  # a second tap on the same button
-            task_id = str(facts.get("object_id") or "")
+            return "Okay, keeping it on your list."
+        if not data.startswith(DROP) or obs.feedback == "drop":
+            return None  # unknown, or a second tap on Drop
+        task_id = str(facts.get("object_id") or "")
+        try:
             res = await self.provider.execute(UserRef(user_id=obs.user_id), "tasks.delete",
                                               {"task_id": task_id})
-            await audit.record(obs.user_id, actor="user_button", action="tasks_delete",
-                               detail={"task_id": task_id, "outcome": "ok" if res.ok else "error"})
-            await repo.set_fields(obs.id, feedback="drop" if res.ok else None)
-            text = ("Dropped it from your list." if res.ok
-                    else "I couldn't drop it just now. You can remove it in Google Tasks.")
-        else:
-            return
-        await reply(event, [text])
+            ok = res.ok
+        except Exception as exc:  # noqa: BLE001 - audited as an error, the user is told
+            log.warning("workspace.drop_failed", error=type(exc).__name__)
+            ok = False
+        await audit.record(obs.user_id, actor="user_button", action="tasks_delete",
+                           detail={"task_id": task_id, "outcome": "ok" if ok else "error"})
+        if not ok:
+            return "I couldn't drop it just now. You can remove it in Google Tasks."
+        await repo.set_fields(obs.id, feedback="drop")
+        return "Dropped it from your list."
 
     # --- poll chains ------------------------------------------------------------------------------------
 

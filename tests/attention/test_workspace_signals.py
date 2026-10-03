@@ -86,6 +86,8 @@ def test_not_useful_demotes_but_never_security():
     assert decide(sig(SignalKind.FILE_SHARED, actor_known=True), muted=True).verdict is Verdict.LOG
     lure = decide(sig(SignalKind.FILE_SHARED, object_title="password reset"), muted=True)
     assert lure.verdict is Verdict.BRIEF and lure.security
+    matched = decide(sig(SignalKind.FILE_SHARED, actor_known=True), loop_id=7, muted=True)
+    assert matched.verdict is Verdict.BRIEF and matched.close_loop == 7  # quieter, still marked done
 
 
 def test_match_loop_needs_a_waiting_or_commitment_loop_and_real_overlap():

@@ -181,8 +181,10 @@ def decide(
     never for a security line). `asked`: the keep-or-drop question already went out for this task."""
     if s.kind is SignalKind.FILE_SHARED:
         if s.actor_known and loop_id is not None:
-            return WorkspaceDecision(Verdict.NOTIFY, 3, "matches something you were waiting for",
-                                     close_loop=loop_id)
+            why = "matches something you were waiting for"
+            if muted:  # "not useful" for this sharer: brief line instead, but the loop is still done
+                return WorkspaceDecision(Verdict.BRIEF, 0, why, close_loop=loop_id)
+            return WorkspaceDecision(Verdict.NOTIFY, 3, why, close_loop=loop_id)
         if s.actor_known:
             d = WorkspaceDecision(Verdict.BRIEF, 0, "shared by someone you know")
         elif is_lure(s.object_title):

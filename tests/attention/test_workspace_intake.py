@@ -30,15 +30,15 @@ NOW = datetime(2026, 10, 3, 4, 0, tzinfo=UTC)  # 09:30 IST
 
 
 class Exec:
-    def __init__(self, fail_compose: bool = False) -> None:
+    def __init__(self, fail_compose: Exception | None = None) -> None:
         self.notified: list = []
         self.delivered: list = []
         self.fail_compose = fail_compose
 
     async def notify(self, user, intent, context="", quiet_streak=0, untrusted=False, original_due=None,
                      origin=None, buttons=None) -> bool:
-        if self.fail_compose:
-            raise LLMError("slot busy")
+        if self.fail_compose is not None:
+            raise self.fail_compose
         self.notified.append(SimpleNamespace(intent=intent, untrusted=untrusted, buttons=buttons))
         return True
 
@@ -95,6 +95,10 @@ def button(data: str, user_id: int) -> Event:
                  source="telegram", trust=Trust.USER, payload={"data": data})
 
 
+def waiting(loop_id: int, title: str) -> Loop:
+    return Loop(id=loop_id, user_id=1, kind=LoopKind.WAITING_ON, title=title)
+
+
 OVERDUE = {"id": "t2", "title": "Renew passport", "due": "2026-09-30T00:00:00.000Z", "status": "needsAction"}
 
 
@@ -129,6 +133,39 @@ async def test_known_share_matching_a_loop_notifies_with_fixed_text_and_closes_i
     assert sent.tainted and sent.buttons[0][0].label == "Not useful"
     [row] = await repo.signals(user.id, NOW - timedelta(days=1), sources=("drive",))
     assert row.verdict == "notify" and row.delivery == "sent"
+
+
+async def test_not_useful_on_a_share_sends_the_next_one_from_that_sharer_to_the_brief(
+    user, provider, ex, rec, sent
+):
+    await baselined(user.id, contacts=["priya@example.com"])
+    provider.results["drive.list_recent"] = ToolResult(ok=True, data={"files": [
+        shared_file(fid="f1", name="Q3 Sales Deck")]})
+    loops = Loops([waiting(5, "Priya to send the Q3 sales deck"), waiting(6, "Priya budget review notes")])
+    ws = intake(provider, ex, rec, loops)
+    await ws.poll_shared(user.id)
+    data = ex.delivered[0].buttons[0][0].data
+    await ws.on_button(button(data, user.id), data)
+    assert (await ws.state(user.id))["muted"] == ["file_shared:priya@example.com"]
+    provider.results["drive.list_recent"] = ToolResult(ok=True, data={"files": [
+        shared_file(fid="f2", name="Priya budget review notes", at="2026-10-03T03:55:00Z")]})
+    await ws.poll_shared(user.id)
+    assert len(ex.delivered) == 1 and loops.closed == [5, 6]  # quieter, but the loop is still done
+    rows = await repo.signals(user.id, NOW - timedelta(days=1), sources=("drive",))
+    assert sorted(r.verdict for r in rows) == ["brief", "notify"]
+
+
+async def test_loop_match_share_seen_by_webhook_and_poll_is_spoken_once(user, provider, ex, rec):
+    await baselined(user.id, contacts=["priya@example.com"])
+    provider.results["drive.list_recent"] = ToolResult(ok=True, data={"files": [
+        shared_file(name="Q3 Sales Deck")]})
+    loops = Loops([waiting(5, "Priya to send the Q3 sales deck")])
+    ws = intake(provider, ex, rec, loops)
+    grant = {"new_permissions": [{"file_id": "f1", "permission_id": "p9"}]}
+    await ws.on_event(event("share", grant, user.id))
+    await ws.patch(user.id, shared_after=None)
+    await ws.poll_shared(user.id)
+    assert len(ex.delivered) == 1 and loops.closed == [5]
 
 
 async def test_sharer_known_from_mail_history(user, provider, ex, rec):
@@ -216,16 +253,34 @@ async def test_comment_on_someone_elses_doc_goes_to_the_brief_unless_it_mentions
     assert sum(1 for _, action, _ in provider.executed if action == "mail.profile") == 1
 
 
-async def test_comment_notify_falls_back_to_fixed_text_when_the_llm_is_busy(user, provider, rec):
+@pytest.mark.parametrize("error", [LLMError("slot busy"), RuntimeError("composer bug")])
+async def test_comment_notify_falls_back_to_fixed_text_when_composing_fails(user, provider, rec, error):
     connected(provider, user.id)
     provider.results["drive.meta"] = ToolResult(ok=True, data={"name": "Launch plan"})
     provider.results["drive.permissions"] = ToolResult(ok=True, data={"permissions": [
         {"id": "p1", "type": "user", "role": "owner"}]})
-    busy = Exec(fail_compose=True)
+    busy = Exec(fail_compose=error)
     await intake(provider, busy, rec).on_event(event("comment", comment("c1"), user.id))
     [sent] = busy.delivered
     assert sent.bubbles == ['Priya commented on your doc "Launch plan". Open it in Google Docs to reply.']
     assert sent.tainted and sent.buttons[0][0].label == "Not useful"
+    [row] = await repo.signals(user.id, NOW - timedelta(days=1), sources=("docs",))
+    assert row.delivery == "sent"
+
+
+async def test_a_comment_with_no_author_name_offers_no_catch_all_mute(user, provider, ex, rec, sent):
+    connected(provider, user.id)
+    provider.results["drive.meta"] = ToolResult(ok=True, data={"name": "Launch plan"})
+    provider.results["drive.permissions"] = ToolResult(ok=True, data={"permissions": [
+        {"id": "p1", "type": "user", "role": "owner"}]})
+    ws = intake(provider, ex, rec)
+    nameless = {**comment("c1"), "commenter": {"me": False}}
+    await ws.on_event(event("comment", nameless, user.id))
+    [note] = ex.notified
+    assert note.buttons is None
+    [row] = await repo.signals(user.id, NOW - timedelta(days=1), sources=("docs",))
+    await ws.on_button(button(f"ws:m:{row.id}", user.id), f"ws:m:{row.id}")  # a forged tap
+    assert "muted" not in await ws.state(user.id) and sent == []
 
 
 async def test_unreadable_file_is_not_treated_as_mine(user, provider, ex, rec):
@@ -270,6 +325,52 @@ async def test_drop_button_deletes_the_task_and_audits(user, provider, ex, rec, 
     assert keep.startswith(KEEP)
     await ws.on_button(button(drop, user.id + 1), drop)  # someone else's tap does nothing
     assert sum(1 for _, action, _ in provider.executed if action == "tasks.delete") == 1
+
+
+async def test_double_tapped_drop_deletes_once(user, provider, ex, rec, sent):
+    import asyncio
+
+    await baselined(user.id)
+    provider.results["tasks.list"] = ToolResult(ok=True, data={"tasks": [OVERDUE]})
+    ws = intake(provider, ex, rec)
+    await ws.poll_tasks(user.id)
+    drop = ex.delivered[0].buttons[0][1].data
+    real = provider.execute
+
+    async def slow(user_ref, action, args):
+        await asyncio.sleep(0.01)  # the first tap is mid-delete when the second arrives
+        return await real(user_ref, action, args)
+
+    provider.execute = slow
+    await asyncio.gather(ws.on_button(button(drop, user.id), drop), ws.on_button(button(drop, user.id), drop))
+    assert sum(1 for _, action, _ in provider.executed if action == "tasks.delete") == 1
+    assert [m.text for m in sent] == ["Dropped it from your list."]
+
+
+async def test_drop_survives_a_provider_exception_and_audits_it(user, provider, ex, rec, sent):
+    await baselined(user.id)
+    provider.results["tasks.list"] = ToolResult(ok=True, data={"tasks": [OVERDUE]})
+    ws = intake(provider, ex, rec)
+    await ws.poll_tasks(user.id)
+    drop = ex.delivered[0].buttons[0][1].data
+
+    async def broken(user_ref, action, args):
+        raise RuntimeError("network down")
+
+    provider.execute = broken
+    await ws.on_button(button(drop, user.id), drop)
+    [entry] = await audit.recent(user.id)
+    assert entry.action == "tasks_delete" and entry.detail["outcome"] == "error"
+    assert sent[-1].text == "I couldn't drop it just now. You can remove it in Google Tasks."
+
+
+async def test_drop_only_acts_on_task_rows(user, provider, ex, rec):
+    row, _ = await repo.insert_signal(user.id, "docs:d1:c1", source="docs", kind="comment", verdict="notify",
+                                      urgency=3, summary="Launch plan", facts={"object_id": "d1"},
+                                      received_at=NOW)
+    ws = intake(provider, ex, rec)
+    await ws.on_button(button(f"ws:d:{row.id}", user.id), f"ws:d:{row.id}")
+    assert not any(action == "tasks.delete" for _, action, _ in provider.executed)
 
 
 async def test_quiet_hours_defer_the_ask_and_the_chain_goes_on(user, provider, ex, rec):
