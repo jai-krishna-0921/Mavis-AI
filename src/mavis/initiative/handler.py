@@ -47,7 +47,12 @@ URGENT_URGENCY = 5
 IMMINENT = PREP_LEAD + timedelta(minutes=10)  # the default prep wakeup (60 min ahead) plus slack
 FOLLOW_UP_VALID_FOR = timedelta(hours=24)
 LIVE_STATUSES = (LoopStatus.OPEN, LoopStatus.AWAITING_REPLY)
-HANDLED_TYPES = tuple(t for t in EventType if t not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED))
+# WORKSPACE_SIGNAL belongs to the attention layer alone (amendment A1): third-party Drive/Docs/Tasks
+# changes never reach the reasoner.
+HANDLED_TYPES = tuple(
+    t for t in EventType
+    if t not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED, EventType.WORKSPACE_SIGNAL)
+)
 
 
 class InitiativeHandler:
