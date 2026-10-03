@@ -8,13 +8,30 @@ import hmac
 import json
 import time
 from collections.abc import Callable, Mapping
+from functools import partial
 
 from mavis.domain.errors import IntegrationError, WebhookVerificationError
 from mavis.domain.events import Event
 from mavis.domain.integrations import user_from_provider_id
-from mavis.tools.integrations.normalize import calendar_event, email_event, notion_event, slack_event
+from mavis.tools.integrations.normalize import (
+    calendar_event,
+    email_event,
+    notion_event,
+    slack_event,
+    workspace_event,
+)
 
-_BUILDERS: dict[str, Callable[[int, dict, str], Event | None]] = {
+Builder = Callable[[int, dict, str], Event | None]
+# googlesuper triggers carry one prefix for every Google service, so they are routed by full slug.
+SLUG_BUILDERS: dict[str, Builder] = {
+    "GOOGLESUPER_NEW_MESSAGE": email_event,
+    "GOOGLESUPER_GOOGLE_CALENDAR_EVENT_CHANGE_TRIGGER": calendar_event,
+    "GOOGLESUPER_FILE_SHARED_PERMISSIONS_ADDED": partial(workspace_event, kind="share"),
+    "GOOGLESUPER_COMMENT_ADDED_TRIGGER": partial(workspace_event, kind="comment"),
+    "GOOGLESUPER_NEW_TASK_CREATED_TRIGGER": partial(workspace_event, kind="task"),
+    "GOOGLESUPER_TASK_UPDATED_TRIGGER": partial(workspace_event, kind="task"),
+}
+_BUILDERS: dict[str, Builder] = {
     "GMAIL": email_event,
     "GOOGLECALENDAR": calendar_event,
     "SLACK": slack_event,
@@ -69,7 +86,7 @@ def parse_composio_webhook(
         raise IntegrationError("webhook metadata/data is not a JSON object")
     slug = str(meta.get("trigger_slug") or payload.get("trigger_name") or payload.get("type") or "").upper()
     user_id = user_from_provider_id(meta.get("user_id") or data.get("user_id"))
-    builder = _BUILDERS.get(slug.split("_", 1)[0])
+    builder = SLUG_BUILDERS.get(slug) or _BUILDERS.get(slug.split("_", 1)[0])
     if user_id is None or builder is None:
         return []
     event = builder(user_id, data, "composio")

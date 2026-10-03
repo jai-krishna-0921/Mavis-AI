@@ -21,6 +21,13 @@ class RiskClass(StrEnum):
 class Capability(StrEnum):
     GMAIL = "gmail"
     CALENDAR = "googlecalendar"
+    # Google Workspace (googlesuper). Values are Mavis names, not Composio toolkit slugs.
+    DRIVE = "drive"
+    DOCS = "docs"
+    SHEETS = "sheets"
+    TASKS = "tasks"
+    CONTACTS = "contacts"
+    MEET = "meet"
     SLACK = "slack"
     NOTION = "notion"
     SANDBOX = "sandbox"

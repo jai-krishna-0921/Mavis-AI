@@ -235,6 +235,26 @@ def notion_event(user_id: int, raw: dict, source: str) -> Event | None:
     )
 
 
+def workspace_event(user_id: int, raw: dict, source: str, *, kind: str) -> Event | None:
+    """googlesuper share/comment/task triggers -> WORKSPACE_SIGNAL. The id dedupes repeats of one change."""
+    if kind == "share":
+        perms = [p for p in raw.get("new_permissions") or [] if isinstance(p, dict)]
+        files = ",".join(sorted({str(p.get("file_id") or "") for p in perms}))
+        grants = "-".join(sorted(str(p.get("permission_id") or "") for p in perms))
+        key = f"{files}:{grants}" if perms else f"poll:{timeutil.now().isoformat(timespec='minutes')}"
+    elif kind == "comment":
+        key = str(raw.get("comment_id") or "")
+    elif kind == "task":
+        task = raw.get("task") if isinstance(raw.get("task"), dict) else {}
+        key = f"{task.get('id', '')}:{task.get('updated', '')}" if task.get("id") else ""
+    else:
+        return None
+    if not key:
+        return None
+    return _event(f"gws:{user_id}:{kind}:{key}"[:200], user_id, EventType.WORKSPACE_SIGNAL, None, source,
+                  {"kind": kind, "raw": raw})
+
+
 def extract_list(data: Any, *keys: str) -> list[dict]:
     if isinstance(data, list):
         return [x for x in data if isinstance(x, dict)]

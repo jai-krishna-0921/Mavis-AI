@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from mavis.domain.policy import Capability
 from mavis.tools.integrations.actions import (
     ACTIONS,
+    WORKSPACE_CAPABILITIES,
     CalendarCreateArgs,
     MailComposeArgs,
     MailSearchArgs,
@@ -17,12 +18,18 @@ from mavis.tools.integrations.composio_map import (
 
 
 def test_every_action_is_mapped():
-    assert set(COMPOSIO_ACTIONS) == set(ACTIONS)
+    """Every action has a Composio mapping, or runs through a Workspace custom fn that calls mapped ones."""
+    from mavis.tools.integrations.workspace_tools import CUSTOM_FNS
+
+    assert set(COMPOSIO_ACTIONS) <= set(ACTIONS)
+    assert set(ACTIONS) - set(COMPOSIO_ACTIONS) <= set(CUSTOM_FNS)
 
 
 def test_slug_toolkit_matches_action_capability():
     for name, mapping in COMPOSIO_ACTIONS.items():
-        assert toolkit_of_slug(mapping.slug) == ACTIONS[name].capability.value, name
+        capability = ACTIONS[name].capability
+        expected = "googlesuper" if capability in WORKSPACE_CAPABILITIES else capability.value
+        assert toolkit_of_slug(mapping.slug) == expected, name
 
 
 def test_mail_search_translation():

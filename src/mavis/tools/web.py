@@ -281,6 +281,15 @@ async def extract(url: str, max_chars: int = _MAX_PAGE_CHARS) -> str:
     return text[:max_chars]
 
 
+async def fetch_file(url: str, max_chars: int = _MAX_PAGE_CHARS) -> str:
+    """Public helper (Workspace drive.read): the text behind a provider's https download link. SSRF-guarded,
+    size-capped and deadline-bound like the plain GET fallback; never sent to Tavily."""
+    if urlparse(url).scheme != "https":
+        raise ValueError("only https download links are fetched")
+    async with asyncio.timeout(_FETCH_DEADLINE_S):
+        return (await _guarded_get(url))[:max_chars]
+
+
 # --- web_extract inside tainted tasks ----------------------------------------------------------------
 # A tainted task has read third-party content, which may try to send data out in a URL it makes up (an
 # exfiltration GET: evil.com/?d=<secret>, a Google Form submit URL, ...). There, only URLs this task's own

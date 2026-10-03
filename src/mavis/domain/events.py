@@ -16,6 +16,7 @@ class EventType(StrEnum):
     EVENT_ENDED = "event_ended"
     SLACK_MESSAGE = "slack_message"
     NOTION_CHANGED = "notion_changed"
+    WORKSPACE_SIGNAL = "workspace_signal"  # Phase 9: Drive share, Docs comment, Tasks change (googlesuper)
     CONNECTION_CHANGED = "connection_changed"
     WAKEUP = "wakeup"
     USER_QUIET = "user_quiet"

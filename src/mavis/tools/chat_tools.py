@@ -7,7 +7,7 @@ turn reuses the same dedupe keys, and the tool loop's `current_run` for taint.
 from __future__ import annotations
 
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from pydantic import BaseModel, Field
 
@@ -41,6 +41,14 @@ class StartTaskArgs(BaseModel):
 
 class ConnectArgs(BaseModel):
     service: str = Field(min_length=2, max_length=40, description="gmail, calendar, slack or notion")
+
+
+class GoogleConnectArgs(ConnectArgs):
+    """With Google Workspace on, one Google consent covers every Google service."""
+
+    service: str = Field(min_length=2, max_length=40,
+                         description="google (also for Gmail, Calendar, Drive, Docs, Sheets, Tasks, Contacts "
+                                     "or Meet), slack or notion")
 
 
 def _tainted() -> bool:
@@ -113,3 +121,16 @@ TOOLS = [
               "Slack, Notion) when they ask to connect one.",
               ConnectArgs, RiskClass.WRITE_SELF, connect_account, _CONV, priority=60),
 ]
+GOOGLE_CONNECT_DESCRIPTION = ("Send the user a link to connect an account when they ask to connect one: "
+                              "Google (one link for Gmail, Calendar, Drive, Docs, Sheets, Tasks, Contacts "
+                              "and Meet), Slack or Notion.")
+
+
+def current_tools() -> list[MavisTool]:
+    """TOOLS, with connect_account naming every Google service when Google Workspace is on."""
+    from mavis.tools.integrations.actions import workspace_enabled
+
+    if not workspace_enabled():
+        return list(TOOLS)
+    return [replace(t, description=GOOGLE_CONNECT_DESCRIPTION, args_model=GoogleConnectArgs)
+            if t.name == "connect_account" else t for t in TOOLS]

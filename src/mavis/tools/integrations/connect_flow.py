@@ -18,7 +18,7 @@ import structlog
 
 from mavis.bus.base import EventBus
 from mavis.domain import timeutil
-from mavis.domain.errors import IntegrationError
+from mavis.domain.errors import IntegrationError, NoSuchConnection
 from mavis.domain.events import Event, EventType, Job, JobKind, Trust
 from mavis.domain.integrations import ConnectionState, PendingStatus, UserRef
 from mavis.domain.messages import Button, Outbound
@@ -27,8 +27,14 @@ from mavis.store.repo import connections
 from mavis.tools.integrations.actions import (
     BRANDS,
     CAPABILITY_PURPOSE,
-    DISPLAY_NAMES,
-    INTEGRATION_CAPABILITIES,
+    GOOGLE_ABILITIES,
+    GOOGLE_ANCHOR,
+    GOOGLE_CAPABILITIES,
+    WORKSPACE_ROW,
+    active_capabilities,
+    display_name,
+    is_google,
+    workspace_enabled,
 )
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connections import ConnectionCache
@@ -58,9 +64,15 @@ RETRY_PREFIX = "conn:retry:"
 Notify = Callable[[Outbound], Awaitable[None]]
 Schedule = Callable[[int, datetime, str, str], Awaitable[int]]  # (user_id, at, reason, kind)
 OnActive = Callable[[int, Capability], Awaitable[None]]
+OnGoogleBegin = Callable[[int], object]  # a googlesuper fan-out starts (reset per-activation state)
+OnGoogleActive = Callable[[int], Awaitable[object]]  # once per googlesuper activation (retire old triggers)
 HasChecks = Callable[[int, int], Awaitable[bool]]  # (user_id, pending_id) -> a check is still scheduled
 CancelChecks = Callable[[int, int], Awaitable[object]]  # (user_id, pending_id): drop its scheduled checks
 FIRST_SYNC_CLAIM_TTL_S = 600
+GOOGLE_KEY = "google"  # one reconnect prompt per day for all eight Google capabilities
+NUDGE_KEY = "workspace_nudged"
+UPGRADE_TEXT = ("I can now work with your Drive, Docs, Sheets and Tasks too. "
+                "Tap to upgrade your Google connection.")
 
 
 class UserState(Protocol):
@@ -113,11 +125,15 @@ class ConnectFlow:
         has_checks: HasChecks | None = None,
         cancel_checks: CancelChecks | None = None,
         clock: Callable[[], datetime] = timeutil.now,
+        on_google_active: OnGoogleActive | None = None,
+        on_google_begin: OnGoogleBegin | None = None,
     ) -> None:
         self.provider, self.cache, self.bus = provider, cache, bus
         self.notify, self.schedule, self.state = notify, schedule, state
         self.base_url = base_url.rstrip("/")
         self.on_active = on_active
+        self.on_google_active = on_google_active
+        self.on_google_begin = on_google_begin
         self.has_checks = has_checks
         self.cancel_checks = cancel_checks
         self.clock = clock
@@ -148,7 +164,7 @@ class ConnectFlow:
         self, user_id: int, capability: Capability, reason: str = "", task_id: str | None = None,
         revoked: bool = False,
     ) -> int | None:
-        name = DISPLAY_NAMES[capability]
+        name = display_name(capability)
         if not revoked and await self.cache.is_active(user_id, capability, fresh=True):
             # The provider says ACTIVE: make sure the local side (first sync, polling) agrees.
             activated = await self.reconcile(user_id, capability, announce=task_id is None)
@@ -214,7 +230,7 @@ class ConnectFlow:
         self, user_id: int, capability: Capability, pending_id: int, *, reason: str = "",
         revoked: bool = False, again: bool = False,
     ) -> bool:
-        name = DISPLAY_NAMES[capability]
+        name = display_name(capability)
         callback = f"{self.base_url}/connect/callback?p={pending_id}"
         try:
             url = await self.provider.connect_link(UserRef(user_id=user_id), capability.value, callback)
@@ -311,7 +327,7 @@ class ConnectFlow:
         capability = Capability(event.payload["capability"])
         state = ConnectionState(event.payload["state"])
         user_id = event.user_id
-        name = DISPLAY_NAMES[capability]
+        name = display_name(capability)
         self.cache.invalidate(user_id)
         waiting = await connections.open_for(user_id, capability)
 
@@ -340,10 +356,39 @@ class ConnectFlow:
             await self._announce(user_id, capability)
 
     async def _announce(self, user_id: int, capability: Capability) -> None:
-        await self.send(user_id, f"Connected ✓ I can see your {DISPLAY_NAMES[capability]} now. "
+        if is_google(capability):
+            await self.send(user_id, f"Connected ✓ I can now work with your {GOOGLE_ABILITIES}.")
+            return
+        await self.send(user_id, f"Connected ✓ I can see your {display_name(capability)} now. "
                                  "Give me a minute to get familiar with it.")
 
+    async def _google_fan_out(self, user_id: int, capability: Capability) -> list[Capability]:
+        """The Google account is googlesuper (the anchor is ACTIVE): every Google capability activates.
+        A legacy Gmail/Calendar activation stays on its own capability."""
+        if not is_google(capability):
+            return [capability]
+        states = await self.cache.status(user_id, fresh=True)
+        if states.get(GOOGLE_ANCHOR.value) is not ConnectionState.ACTIVE:
+            return [capability]
+        if self.on_google_begin is not None:
+            self.on_google_begin(user_id)
+        return list(GOOGLE_CAPABILITIES)
+
     async def _activate(self, user_id: int, capability: Capability) -> bool:
+        """Activate `capability`, or all eight Google capabilities when the Google account is googlesuper.
+        True if a first sync ran for any of them."""
+        targets = await self._google_fan_out(user_id, capability)
+        ran = False
+        for target in targets:
+            ran = await self._activate_one(user_id, target) or ran
+        if len(targets) > 1 and ran and self.on_google_active is not None:
+            try:
+                await self.on_google_active(user_id)
+            except Exception as exc:  # noqa: BLE001 - leftover legacy triggers only duplicate events
+                log.warning("connect.google_active_hook_failed", error=type(exc).__name__)
+        return ran
+
+    async def _activate_one(self, user_id: int, capability: Capability) -> bool:
         """First sync (once), polling or triggers, and a cleared reconnect prompt. True if first sync ran."""
         st = await self.state.get(user_id)
         synced = dict(st.get("synced", {}))
@@ -358,7 +403,10 @@ class ConnectFlow:
                 synced[capability.value] = self.clock().isoformat()
                 await self.state.update(user_id, {"synced": synced})
         prompted = dict(st.get("reconnect_prompted", {}))
-        if prompted.pop(capability.value, None) is not None:
+        cleared = prompted.pop(capability.value, None) is not None
+        if is_google(capability):
+            cleared = prompted.pop(GOOGLE_KEY, None) is not None or cleared
+        if cleared:
             await self.state.update(user_id, {"reconnect_prompted": prompted})
         if self.on_active is not None:
             await self.on_active(user_id, capability)
@@ -386,11 +434,12 @@ class ConnectFlow:
         st = await self.state.get(user_id)
         today = self.clock().date().isoformat()
         prompted = dict(st.get("reconnect_prompted", {}))
-        if prompted.get(capability.value) == today:
+        key = GOOGLE_KEY if is_google(capability) else capability.value
+        if prompted.get(key) == today:
             return False
         if await self.start(user_id, capability, "", revoked=True) is None:
             return False  # no link went out: try again next time
-        prompted[capability.value] = today
+        prompted[key] = today
         await self.state.update(user_id, {"reconnect_prompted": prompted})
         return True
 
@@ -429,25 +478,35 @@ class ConnectFlow:
                 await self.decline(event.user_id, int(data.removeprefix(NOT_NOW_PREFIX)))
             elif data.startswith((START_PREFIX, RETRY_PREFIX)):
                 capability = Capability(data.rsplit(":", 1)[1])
-                if capability in INTEGRATION_CAPABILITIES:
+                if capability in active_capabilities():
                     await self.start(event.user_id, capability, "")
         except ValueError:
             log.warning("connect.bad_button", data=data)
 
     async def _reconcile_active(self, user_id: int, states: dict[str, ConnectionState]) -> None:
-        for c in INTEGRATION_CAPABILITIES:
+        for c in active_capabilities():
             if states.get(c.value) is ConnectionState.ACTIVE:
                 await self.reconcile(user_id, c)
+
+    def _menu(self) -> list[tuple[Capability, str]]:
+        """(capability, label) per menu row: with Workspace on, one Google row instead of Gmail + Calendar."""
+        if not workspace_enabled():
+            return [(c, display_name(c)) for c in active_capabilities()]
+        others = [c for c in active_capabilities() if c not in GOOGLE_CAPABILITIES]
+        return [(GOOGLE_ANCHOR, WORKSPACE_ROW), *((c, display_name(c)) for c in others)]
 
     async def offer_menu(self, user_id: int) -> None:
         states = await self.cache.status(user_id, fresh=True)
         await self._reconcile_active(user_id, states)
+        menu = self._menu()
         rows = [
-            [Button(label=f"Connect {DISPLAY_NAMES[c]}", data=f"{START_PREFIX}{c.value}")]
-            for c in INTEGRATION_CAPABILITIES if states.get(c.value) is not ConnectionState.ACTIVE
+            [Button(label=f"Connect {label}", data=f"{START_PREFIX}{c.value}")]
+            for c, label in menu if states.get(c.value) is not ConnectionState.ACTIVE
         ]
         if not rows:
-            await self.send(user_id, "Everything's already connected: Gmail, Calendar, Slack and Notion.")
+            labels = [label.replace("Google Calendar", "Calendar") for _, label in menu]
+            listed = f"{', '.join(labels[:-1])} and {labels[-1]}"
+            await self.send(user_id, f"Everything's already connected: {listed}.")
             return
         await self.send(user_id, "Which one should I hook up?", rows)
 
@@ -455,30 +514,95 @@ class ConnectFlow:
         states = await self.cache.status(user_id, fresh=True)
         await self._reconcile_active(user_id, states)
         lines = []
-        for c in INTEGRATION_CAPABILITIES:
+        for c, label in self._menu():
             state = states.get(c.value)
             if state is ConnectionState.ACTIVE:
                 mark, word = "✅", "connected"
             elif state is ConnectionState.FAILED:
                 mark, word = "⚠️", "needs reconnecting"
+            elif c is GOOGLE_ANCHOR and workspace_enabled() and any(
+                states.get(g.value) is ConnectionState.ACTIVE for g in (Capability.GMAIL, Capability.CALENDAR)
+            ):
+                mark, word = "⚪", "Gmail and Calendar only (send /connect google to add the rest)"
             else:
                 mark, word = "⚪", "not connected"
-            lines.append(f"{mark} {DISPLAY_NAMES[c]}: {word}")
+            lines.append(f"{mark} {label}: {word}")
         return "\n".join(lines)
 
+    async def maybe_nudge_upgrade(self, user_id: int) -> bool:
+        """Workspace on, Gmail/Calendar on the legacy connection only: one upgrade nudge, ever."""
+        if not workspace_enabled():
+            return False
+        st = await self.state.get(user_id)
+        if st.get(NUDGE_KEY):
+            return False
+        states = await self.cache.status(user_id)
+        if states.get(GOOGLE_ANCHOR.value) is ConnectionState.ACTIVE:
+            return False
+        legacy = (Capability.GMAIL, Capability.CALENDAR)
+        if not any(states.get(c.value) is ConnectionState.ACTIVE for c in legacy):
+            return False
+        await self.state.update(user_id, {NUDGE_KEY: self.clock().isoformat()})
+        await self.send(user_id, UPGRADE_TEXT,
+                        [[Button(label="Upgrade Google", data=f"{START_PREFIX}{GOOGLE_ANCHOR.value}")]])
+        return True
+
     async def disconnect(self, user_id: int, capability: Capability) -> None:
-        name = DISPLAY_NAMES[capability]
+        name = display_name(capability)
         try:
             await self.provider.disconnect(UserRef(user_id=user_id), capability.value)
+        except NoSuchConnection:
+            if not (workspace_enabled() and is_google(capability)):
+                await self.send(user_id, f"There's no {name} connection to remove.")
+                return
+            try:
+                removed = await self._disconnect_legacy_accounts(user_id)
+            except IntegrationError as exc:
+                log.warning("connect.disconnect_failed", capability="legacy", error=str(exc))
+                await self.send(user_id, f"I couldn't disconnect {name} just now. "
+                                         "Mind trying again in a bit?")
+                return
+            if not removed:
+                await self.send(user_id, f"There's no {name} connection to remove.")
+                return
         except IntegrationError as exc:
             log.warning("connect.disconnect_failed", capability=capability.value, error=str(exc))
             await self.send(user_id, f"I couldn't disconnect {name} just now. Mind trying again in a bit?")
             return
         self.cache.invalidate(user_id)
-        synced = dict((await self.state.get(user_id)).get("synced", {}))
-        if synced.pop(capability.value, None) is not None:
+        dropped = [c.value for c in (GOOGLE_CAPABILITIES if is_google(capability) else (capability,))]
+        st = await self.state.get(user_id)
+        synced = {k: v for k, v in st.get("synced", {}).items() if k not in dropped}
+        polling = {k: v for k, v in st.get("polling", {}).items() if k not in dropped}
+        if synced != st.get("synced", {}):
             await self.state.update(user_id, {"synced": synced})
-        polling = dict((await self.state.get(user_id)).get("polling", {}))
-        if polling.pop(capability.value, None) is not None:
+        if polling != st.get("polling", {}):
             await self.state.update(user_id, {"polling": polling})
         await self.send(user_id, f"Disconnected {name}. I can't see it anymore.")
+
+    async def _disconnect_legacy_accounts(self, user_id: int) -> int:
+        """No googlesuper account: remove the old Gmail and Calendar accounts instead. Returns how many."""
+        removed = 0
+        for alias in ("gmail-legacy", "calendar-legacy"):
+            try:
+                await self.provider.disconnect(UserRef(user_id=user_id), alias)
+            except NoSuchConnection:
+                continue
+            removed += 1
+        return removed
+
+    async def disconnect_legacy(self, user_id: int, alias: str) -> None:
+        """/disconnect gmail-legacy or calendar-legacy: remove an old pre-Workspace account only."""
+        label = "Gmail" if alias.startswith("gmail") else "Calendar"
+        try:
+            await self.provider.disconnect(UserRef(user_id=user_id), alias)
+        except NoSuchConnection:
+            await self.send(user_id, f"There's no old {label} connection to remove.")
+            return
+        except IntegrationError as exc:
+            log.warning("connect.disconnect_failed", capability=alias, error=str(exc))
+            await self.send(user_id, f"I couldn't remove the old {label} connection just now. "
+                                     "Mind trying again in a bit?")
+            return
+        self.cache.invalidate(user_id)
+        await self.send(user_id, f"Removed the old {label} connection. Your Google connection is untouched.")

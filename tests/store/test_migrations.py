@@ -47,3 +47,30 @@ def test_checkpoint_tables_are_ignored_by_autogenerate(tmp_path) -> None:
         )
     assert {d[1].name for d in raw if d[0] == "remove_table"} == {"checkpoints", "checkpoint_writes"}
     assert filtered == []
+
+
+def test_0011_downgrade_drops_workspace_rows_with_the_source_column(tmp_path) -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    from mavis.store.migrate import MIGRATIONS_DIR
+
+    db_file = tmp_path / "m.db"
+    url = f"sqlite+aiosqlite:///{db_file.as_posix()}"
+    upgrade(url, "0011_attention_source")
+    con = sqlite3.connect(db_file)
+    cols = ("user_id, message_id, thread_id, origin, status, attempts, method, sender_domain, sender_name, "
+            "kind, needs_user, verdict, urgency, score, reasons, facts, summary, action, delivery, "
+            "received_at, created_at, source")
+    for mid, source in (("m1", "mail"), ("drive:f1", "drive"), ("docs:d1:c1", "docs"), ("tasks:t1", "tasks")):
+        con.execute(f"insert into attention_observations ({cols}) values "
+                    "(1, ?, '', 'x', 'done', 0, 'x', '', '', 'x', 0, 'brief', 0, 0, '[]', '{}', 'x', '', "
+                    "'none', '2026-10-03 00:00:00', '2026-10-03 00:00:00', ?)", (mid, source))
+    con.commit()
+    con.close()
+    cfg = Config()
+    cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
+    cfg.attributes["url"] = url
+    command.downgrade(cfg, "0010_hotfix_approval_taint")
+    rows = [r[0] for r in sqlite3.connect(db_file).execute("select message_id from attention_observations")]
+    assert rows == ["m1"]  # a Workspace row would read as an email once the column is gone

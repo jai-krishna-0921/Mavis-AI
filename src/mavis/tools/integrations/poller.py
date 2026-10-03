@@ -11,6 +11,7 @@ from mavis.bus.base import EventBus
 from mavis.domain import timeutil
 from mavis.domain.integrations import ConnectionState, UserRef
 from mavis.domain.policy import Capability
+from mavis.domain.wakeups import WakeupKind
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connect_flow import Schedule, UserState
 from mavis.tools.integrations.connections import ConnectionCache, is_auth_error
@@ -25,6 +26,9 @@ from mavis.tools.integrations.normalize import (
 log = structlog.get_logger()
 
 POLL_KIND = "system_poll"
+# Workspace polls (Tasks due/overdue, Drive shared-with-me) always run while Google is synced; they are not
+# the webhook fallback chain above, so they have their own kind (reasons "tasks" and "drive").
+WORKSPACE_POLL_KIND = WakeupKind.SYSTEM_WORKSPACE_POLL.value
 POLL_INTERVAL = timedelta(minutes=2)
 POLLABLE = frozenset({Capability.GMAIL, Capability.CALENDAR})
 INITIAL_LOOKBACK = timedelta(minutes=10)
