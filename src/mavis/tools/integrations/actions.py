@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
@@ -237,6 +238,60 @@ class MeetTranscriptArgs(BaseModel):
     conference_record_id: str = Field(min_length=1, description="Conference record id, e.g. 'abc-123'")
 
 
+class FolderCreateArgs(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    parent_id: str = Field(default="", description="Parent folder id; empty puts it in My Drive")
+
+
+class DriveMoveArgs(BaseModel):
+    file_id: str = Field(min_length=1)
+    to_folder_id: str = Field(min_length=1, description="Destination folder id")
+    from_folder_id: str = Field(default="", description="Current folder id, when known")
+
+
+class DriveShareArgs(BaseModel):
+    file_id: str = Field(min_length=1)
+    email: str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", description="Email of the person to share with")
+    role: Literal["reader", "commenter", "writer"] = "reader"
+
+
+class DocCreateArgs(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    markdown: str = Field(default="", description="The document body as Markdown")
+
+
+class DocCommentArgs(BaseModel):
+    file_id: str = Field(min_length=1, description="Doc, Sheet or Slides file id")
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class SheetCreateArgs(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+
+
+class TaskAddArgs(BaseModel):
+    title: str = Field(min_length=1, max_length=1024)
+    notes: str = Field(default="", max_length=8192)
+    due: date | None = Field(default=None, description="Due date (Google Tasks keeps the date only)")
+
+
+class TaskCompleteArgs(BaseModel):
+    task_id: str = Field(min_length=1)
+    title: str = Field(min_length=1, description="The task's title exactly as tasks_list shows it")
+
+
+class TaskUpdateArgs(BaseModel):
+    task_id: str = Field(min_length=1)
+    title: str = Field(min_length=1, description="The current title, or a new one")
+    notes: str | None = None
+    due: date | None = None
+    done: bool = False
+
+
+class TaskDeleteArgs(BaseModel):
+    task_id: str = Field(min_length=1)
+
+
 # --- helpers --------------------------------------------------------------------------------------
 
 
@@ -310,6 +365,52 @@ def _preview_notion(args: NotionCreateArgs, tz: str) -> str:
     return f"🗒️ New Notion page: {args.title}\n{args.content[:400]}"
 
 
+def _preview_folder(args: FolderCreateArgs, tz: str) -> str:
+    return f"📁 New Drive folder: {args.name}"
+
+
+def _preview_move(args: DriveMoveArgs, tz: str) -> str:
+    return f"📁 Move file {args.file_id} into folder {args.to_folder_id}"
+
+
+def _preview_share(args: DriveShareArgs, tz: str) -> str:
+    return f"🔗 Share file {args.file_id} with {args.email} as {args.role}. Google emails them a link."
+
+
+def _preview_doc(args: DocCreateArgs, tz: str) -> str:
+    return f"📄 New Google Doc: {args.title}\n{args.markdown[:400]}"
+
+
+def _preview_comment(args: DocCommentArgs, tz: str) -> str:
+    return f"💬 Comment on file {args.file_id} (everyone with access sees it):\n{args.content}"
+
+
+def _preview_sheet(args: SheetCreateArgs, tz: str) -> str:
+    return f"📊 New Google Sheet: {args.title}"
+
+
+def _preview_task(args: TaskAddArgs, tz: str) -> str:
+    due = f" (due {args.due:%a %d %b})" if args.due else ""
+    return f"✅ New task: {args.title}{due}"
+
+
+def _preview_task_done(args: TaskCompleteArgs, tz: str) -> str:
+    return f"✅ Mark done: {args.title}"
+
+
+def _preview_task_update(args: TaskUpdateArgs, tz: str) -> str:
+    due = f", due {args.due:%a %d %b}" if args.due else ""
+    return f"✅ Update task: {args.title}{due}{' (done)' if args.done else ''}"
+
+
+def _preview_task_delete(args: TaskDeleteArgs, tz: str) -> str:
+    return f"🗑️ Delete task {args.task_id}"
+
+
+def _preview_meet(args: NoArgs, tz: str) -> str:
+    return "📹 New Google Meet link"
+
+
 # --- catalog --------------------------------------------------------------------------------------
 
 
@@ -381,6 +482,7 @@ _SPECS: tuple[ActionSpec, ...] = (
 
 # Workspace exposure (spec 4.4): chat gets reads plus a few self-only writes; spawned workers get all.
 _CHAT = _a("conversation", "spawn")
+_WORKERS = _a("spawn")
 _INTERNAL = frozenset[str]()  # used by other actions and polls, never offered to a model
 
 _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
@@ -412,6 +514,33 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
                "List the transcripts of a Google Meet conference; each transcript is a Google Doc to read "
                "with docs_read.",
                MeetTranscriptArgs, RiskClass.READ, _CHAT),
+    # writes: every Google WRITE_SELF needs approval after untrusted output in the run (spec 4.3)
+    ActionSpec("drive.create_folder", Capability.DRIVE, "Create a folder in the user's Google Drive.",
+               FolderCreateArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_folder, taint_approve=True),
+    ActionSpec("drive.move", Capability.DRIVE, "Move a Drive file into another folder.",
+               DriveMoveArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_move, taint_approve=True),
+    ActionSpec("drive.share", Capability.DRIVE,
+               "Share a Drive file with a person (reader, commenter or writer). The user approves first.",
+               DriveShareArgs, RiskClass.OUTWARD, _WORKERS, preview=_preview_share),
+    ActionSpec("docs.create", Capability.DOCS, "Create a new Google Doc from a title and Markdown text.",
+               DocCreateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_doc, taint_approve=True),
+    ActionSpec("docs.comment", Capability.DOCS,
+               "Add a comment to a Doc, Sheet or Slides file. Collaborators see it; the user approves first.",
+               DocCommentArgs, RiskClass.OUTWARD, _WORKERS, preview=_preview_comment),
+    ActionSpec("sheets.create", Capability.SHEETS, "Create a new, empty Google Sheet.",
+               SheetCreateArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_sheet, taint_approve=True),
+    ActionSpec("tasks.add", Capability.TASKS, "Add a task to the user's to-do list (Google Tasks).",
+               TaskAddArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_task, taint_approve=True),
+    ActionSpec("tasks.complete", Capability.TASKS,
+               "Mark a to-do task as done (task_id and title from tasks_list).",
+               TaskCompleteArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_task_done, taint_approve=True),
+    ActionSpec("tasks.update", Capability.TASKS, "Change a to-do task's title, notes or due date.",
+               TaskUpdateArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_task_update,
+               taint_approve=True),
+    ActionSpec("tasks.delete", Capability.TASKS, "Delete a to-do task. The user approves first.",
+               TaskDeleteArgs, RiskClass.DESTRUCTIVE, _WORKERS, preview=_preview_task_delete),
+    ActionSpec("meet.create", Capability.MEET, "Create a standalone Google Meet link.",
+               NoArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_meet, taint_approve=True),
     # internal: file metadata and permissions (risk escalation, allowlist), downloads, task lookup, profile
     ActionSpec("drive.meta", Capability.DRIVE, "File name and type.", FileArgs, RiskClass.READ, _INTERNAL),
     ActionSpec("drive.permissions", Capability.DRIVE, "Who can access a file.", FileArgs, RiskClass.READ,

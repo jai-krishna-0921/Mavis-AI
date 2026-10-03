@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import httpcore
 import pytest
 
 from mavis.domain.errors import ActionFailed
@@ -171,3 +172,17 @@ def test_to_do_list_question_offers_tasks_list(workspace_on):
     register_integration_tools(registry)
     chosen = [t.name for t in registry.select("conversation", 1, "what's on my to-do list", limit=6)]
     assert chosen[0] == "tasks_list"
+
+
+@pytest.mark.parametrize("exc", [httpcore.ConnectError("x"), httpcore.ReadTimeout("x"),
+                                 httpcore.RemoteProtocolError("x")])
+async def test_drive_read_httpcore_errors_are_action_failed(google, cache, exc):
+    google.results["drive.meta"] = ToolResult(ok=True, data={"name": "N", "mimeType": "text/plain"})
+    google.results["drive.download"] = ToolResult(ok=True, data={
+        "downloaded_file_content": {"s3url": "https://s3.example/f"}})
+
+    async def fetch(url: str) -> str:
+        raise exc
+
+    with pytest.raises(ActionFailed, match="could not fetch the file"):
+        await drive_read(CTX, a.FileArgs(file_id="f1"), provider=google, cache=cache, fetch=fetch)

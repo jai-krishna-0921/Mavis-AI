@@ -25,6 +25,8 @@ def test_catalog_covers_spec_actions():
         # Google Workspace reads (spec 2026-10-03 section 4) and their internal helpers
         "drive.search", "drive.list_recent", "drive.read", "docs.read", "sheets.find", "sheets.read",
         "tasks.list", "contacts.search", "meet.transcript",
+        "drive.create_folder", "drive.move", "drive.share", "docs.create", "docs.comment", "sheets.create",
+        "tasks.add", "tasks.complete", "tasks.update", "tasks.delete", "meet.create",
         "drive.meta", "drive.permissions", "drive.download", "tasks.get", "mail.profile",
     }
     assert set(ACTIONS) == expected
