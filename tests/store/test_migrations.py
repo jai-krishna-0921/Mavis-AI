@@ -95,6 +95,6 @@ def test_0012_loop_provenance_backfill(tmp_path) -> None:
     upgrade(url)
     rows = sqlite3.connect(db_file).execute("select source, trust, origin from loops")
     got = {r[0]: (r[1], r[2]) for r in rows}
-    assert got.pop("tool:track_loop") == ("user", "conversation")
+    assert got.pop("tool:track_loop") == ("untrusted", "conversation")  # trust not determinable: safe default
     assert got.pop("onboarding") == ("system", "routine")
     assert set(got.values()) == {("untrusted", "unknown")}
