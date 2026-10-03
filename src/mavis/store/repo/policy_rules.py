@@ -32,7 +32,7 @@ async def matches(user_id: int, tool: str, args: dict) -> bool:
     for rule in rules:
         if rule.field not in args:
             continue
-        haystack = json.dumps(args[rule.field], default=str).lower()
+        haystack = json.dumps(args[rule.field], default=str, ensure_ascii=False).lower()
         if rule.contains.lower() in haystack:
             return True
     return False
