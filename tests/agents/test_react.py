@@ -320,7 +320,8 @@ async def test_untainted_wake_me_runs_directly(fake_llm, taint_registry, user, m
         return 7
 
     monkeypatch.setattr(assistant.timers_service.WakeupService, "wake_me", fake_wake)
-    at = (timeutil.now() + timedelta(hours=3)).isoformat()
+    local = timeutil.to_local(timeutil.now() + timedelta(hours=3), user.timezone)
+    at = local.replace(tzinfo=None).isoformat()  # wall clock, as the user would say it (phase A7)
     fake_llm.push_ai(_call("wake_me", {"at": at, "reason": "stretch"}, "c1"))
     fake_llm.push_text("Set.")
     res = await react_loop(_tools(taint_registry, user.id), [HumanMessage("remind me")], max_steps=3)

@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from mavis.domain.errors import ActionFailed, ConnectionRequired, IntegrationError
 from mavis.domain.integrations import ToolResult, UserRef
+from mavis.domain.localtime import provider_args
 from mavis.tools.integrations.actions import (
     ACTIONS,
     CAPABILITY_PURPOSE,
@@ -52,7 +53,7 @@ async def call_action(
 ) -> ToolResult:
     spec = ACTIONS[action]
     await cache.ensure(ctx.user_id, spec.capability, CAPABILITY_PURPOSE[spec.capability])
-    result = await provider.execute(UserRef(user_id=ctx.user_id), action, args.model_dump(mode="json"))
+    result = await provider.execute(UserRef(user_id=ctx.user_id), action, provider_args(args))
     if not result.ok and not await cache.is_active(ctx.user_id, spec.capability, fresh=True):
         raise ConnectionRequired(spec.capability, REVOKED_REASON, revoked=True)
     return result
