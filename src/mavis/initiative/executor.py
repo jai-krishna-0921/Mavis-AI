@@ -12,7 +12,7 @@ from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision, NotifyIntent, WakeupRequest
 from mavis.domain.events import Event, EventType, Trust
-from mavis.domain.loops import Loop
+from mavis.domain.loops import Loop, LoopStatus
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.composer import Composer
@@ -55,9 +55,12 @@ class InitiativeExecutor:
                 log.warning("initiative.track_failed", event_id=event.id, title=upsert.title[:80],
                             error=str(exc))
         for i, w in enumerate(decision.wakeups):
-            # follow-ups happen after the loop is finished, so they are not tied to it by default
-            fallback = None if event.type is EventType.EVENT_ENDED else event_loop_id
-            loop_id = await self._wakeup_loop(user.id, w, open_loops or [], fallback)
+            ended = event.type is EventType.EVENT_ENDED
+            loop_id = await self._wakeup_loop(user.id, w, open_loops or [], None if ended else event_loop_id)
+            if ended and loop_id == event_loop_id:
+                # the ended loop is about to close (AWAITING/DONE cancels its wakeups): a follow-up check
+                # like "did the thank-you note go out" must outlive it, so it is not tied to that loop
+                loop_id = None
             if loop_id is not None and await self._covered(user.id, loop_id, w.at):
                 log.info("initiative.wakeup_merged", event_id=event.id, loop_id=loop_id, reason=w.reason[:80])
                 continue
@@ -174,6 +177,7 @@ class InitiativeExecutor:
                 )
             return False
         if intent.dedupe_key and await self._recover_partial(user, intent):
+            await self._follow_up_sent(origin)
             return False
         message = await self._composer.compose(user, intent.intent, intent.urgency,
                                                 _with_delay_note(context, original_due, user),
@@ -183,7 +187,17 @@ class InitiativeExecutor:
             return False
         await self.deliver(user, message.messages, intent.dedupe_key, intent.urgency, quiet_streak,
                            extra_keys=extra)
+        await self._follow_up_sent(origin)
         return True
+
+    async def _follow_up_sent(self, origin: dict[str, Any] | None) -> None:
+        """A "how did it go?" was delivered: its loop now waits for the user's answer."""
+        loop_id = _loop_id(origin)
+        if loop_id is None or (origin or {}).get("kind") != EventType.EVENT_ENDED.value:
+            return
+        loop = await self._loops.get(loop_id)
+        if loop is not None and loop.status is LoopStatus.OPEN:
+            await self._loops.close(loop_id, LoopStatus.AWAITING_REPLY)
 
     async def _recover_partial(self, user, intent: NotifyIntent) -> bool:
         """A prior attempt enqueued bubbles but died before log/record: finish that, send nothing new."""

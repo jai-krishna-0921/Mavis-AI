@@ -65,12 +65,15 @@ class InitiativeHandler:
             origin = event.payload.get("origin")
             if reason := await self._deferred_stale(user.id, event.payload):
                 log.info("initiative.deferred_stale", event_id=event.id, origin=origin, reason=reason)
-                return
-            original_due = event.payload.get("original_due")
-            await self._executor.notify(
-                user, NotifyIntent.model_validate(event.payload["notify"]),
-                untrusted=bool(event.payload.get("untrusted", False)),
-                original_due=datetime.fromisoformat(original_due) if original_due else None, origin=origin)
+            else:
+                original_due = event.payload.get("original_due")
+                await self._executor.notify(
+                    user, NotifyIntent.model_validate(event.payload["notify"]),
+                    untrusted=bool(event.payload.get("untrusted", False)),
+                    original_due=datetime.fromisoformat(original_due) if original_due else None,
+                    origin=origin)
+            if (origin or {}).get("kind") == EventType.EVENT_ENDED.value and origin.get("loop_id"):
+                await self._settle_follow_up(user.id, int(origin["loop_id"]))
             return
         if event.type is EventType.WAKEUP and kind == WakeupKind.ROUTINE.value:
             await self._routines.run(user, event.payload)
@@ -119,10 +122,18 @@ class InitiativeHandler:
                                   event_loop_id=_event_loop_id(event))
 
         if event.type is EventType.EVENT_ENDED and event.payload.get("loop_id"):
-            # Asked how it went: the loop stays alive until the user answers (or 24h pass), not closed
-            # the moment the question goes out.
-            status = LoopStatus.AWAITING_REPLY if decision.notify is not None else LoopStatus.DONE
-            await self._loops.close(int(event.payload["loop_id"]), status)
+            await self._settle_follow_up(user.id, int(event.payload["loop_id"]))
+
+    async def _settle_follow_up(self, user_id: int, loop_id: int) -> None:
+        """After a follow-up attempt: the executor moved the loop to AWAITING if the question was
+        delivered. If it is still OPEN and no deferred follow-up is pending, nothing will be asked, so
+        the loop is done. A pending deferred follow-up keeps it OPEN until it goes out."""
+        loop = await self._loops.get(loop_id)
+        if loop is None or loop.status is not LoopStatus.OPEN:
+            return
+        if any(w.loop_id == loop_id for w in await self._wakeups.pending(user_id, WakeupKind.DEFERRED)):
+            return
+        await self._loops.close(loop_id, LoopStatus.DONE)
 
     async def _decide(self, user, event: Event, result) -> InitiativeDecision:
         result.extra = await hooks.gather_enrichments(event)
