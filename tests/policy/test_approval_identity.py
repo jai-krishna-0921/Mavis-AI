@@ -34,43 +34,55 @@ def _invite(summary="Interview with JK", description="", start="2026-10-09T15:00
 
 
 @pytest.mark.parametrize("a,b,same", [
-    (_invite(), _invite(summary="Interview"), True),                                   # retitled
-    (_invite(), _invite(description="Looking forward!"), True),                        # reworded body
+    (_invite(), _invite(description="Looking forward!"), True),                         # not part of WHAT
     (_invite(), _invite(start="2026-10-09T09:30:00Z"), True),                          # same instant
     (_invite(), _invite(attendees=("JK@Example.com",)), True),                         # case
     (_invite(attendees=("a@x.io", "b@x.io")), _invite(attendees=("b@x.io", "a@x.io")), True),  # order
-    (_invite(), _invite(start="2026-10-09T16:00:00+05:30"), False),                    # other time
-    (_invite(), _invite(attendees=("someone@else.org",)), False),                      # other guest
-    # with no guests the declared identity is incomplete: the whole action is compared
-    (_invite(attendees=()), _invite(summary="Dentist", attendees=()), False),
-    (_invite(attendees=()), _invite(attendees=()), True),
+    (_invite(), _invite(summary="Interview"), False),                                  # retitled: content
+    (_invite(), {**_invite(), "duration_minutes": 60}, False),                         # corrected length
+    (_invite(), _invite(start="2026-10-09T16:00:00+05:30"), False),
+    (_invite(), _invite(attendees=("someone@else.org",)), False),
 ])
-def test_calendar_create_identity_is_start_and_attendees(a, b, same):
-    tool = _real("calendar_create_event")
-    assert approvals.equivalent(a, b, tool.identity) is same
+def test_calendar_create_identity_is_what_the_event_will_be(a, b, same):
+    assert approvals.equivalent(a, b, _real("calendar_create_event").identity) is same
 
 
 @pytest.mark.parametrize("a,b,same", [
     ({"to": ["raj@x.io"], "subject": "Offer", "body": "Hi Raj"},
-     {"to": ["raj@x.io"], "subject": "offer ", "body": "Hello Raj, attached."}, True),
+     {"to": ["raj@x.io"], "subject": "offer ", "body": " hi  raj"}, True),               # formatting only
     ({"to": ["raj@x.io"], "subject": "Offer", "body": "Hi"},
-     {"to": ["raj@x.io"], "subject": "Offer v2", "body": "Hi"}, False),
+     {"to": ["raj@x.io"], "subject": "Offer", "body": "Hello Raj, attached."}, False),  # body is content
+    ({"to": ["raj@x.io"], "subject": "Offer", "body": "Hi"},
+     {"to": ["raj@x.io"], "subject": "Offer", "body": "Hi", "cc": ["boss@x.io"]}, False),
     ({"to": ["raj@x.io"], "subject": "Offer", "body": "Hi"},
      {"to": ["mia@x.io"], "subject": "Offer", "body": "Hi"}, False),
 ])
-def test_mail_send_identity_is_recipients_and_subject(a, b, same):
+def test_mail_send_identity_is_the_whole_message(a, b, same):
     assert approvals.equivalent(a, b, _real("mail_send").identity) is same
 
 
 @pytest.mark.parametrize("a,b,same", [
-    ({"event_id": "e1", "start": "2026-10-09T15:00:00+05:30", "summary": "A"},
-     {"event_id": "e1", "start": "2026-10-09T15:00:00+05:30", "summary": "B"}, True),
     ({"event_id": "e1", "start": "2026-10-09T15:00:00+05:30"},
-     {"event_id": "e1", "start": "2026-10-09T17:00:00+05:30"}, False),
-    ({"event_id": "e1", "summary": "Rename"}, {"event_id": "e1", "summary": "Other"}, False),
+     {"event_id": "e1", "start": "2026-10-09T09:30:00Z"}, True),
+    ({"event_id": "e1", "start": "2026-10-09T15:00:00+05:30", "summary": "A"},
+     {"event_id": "e1", "start": "2026-10-09T15:00:00+05:30", "summary": "B"}, False),
+    ({"event_id": "e1", "summary": "Rename"}, {"event_id": "e1", "start": "2026-10-09T15:00:00Z"}, False),
 ])
-def test_calendar_update_identity_is_event_and_new_start(a, b, same):
+def test_calendar_update_identity_is_the_event_and_every_changed_field(a, b, same):
     assert approvals.equivalent(a, b, _real("calendar_update_event").identity) is same
+
+
+@pytest.mark.parametrize("target,a,b,same", [
+    (("start", "attendees"), _invite(), _invite(summary="Other", description="x"), True),
+    (("start", "attendees"), _invite(), _invite(start="2026-10-10T15:00:00+05:30"), False),
+    (("start", "attendees"), _invite(attendees=()), _invite(attendees=()), False),  # incomplete: no target
+    (("to", "subject"), {"to": ["a@x.io"], "subject": "S", "body": "1"}, {"to": ["A@x.io"], "subject": "s",
+                                                                          "body": "2"}, True),
+    ((), {"text": "a"}, {"text": "a"}, False),                                       # no target declared
+])
+def test_same_target_is_a_coarser_declared_key(target, a, b, same):
+    ka, kb = approvals.target_key(a, target), approvals.target_key(b, target)
+    assert (ka is not None and ka == kb) is same
 
 
 @pytest.mark.parametrize("identity,a,b,same", [
@@ -86,16 +98,18 @@ def test_identity_is_whatever_the_tool_declares(identity, a, b, same):
 
 def test_names_carry_no_meaning():
     """A tool that happens to be called calendar_create_event but declares nothing compares in full."""
-    assert not approvals.equivalent(_invite(), _invite(summary="Other"), ())
+    assert not approvals.equivalent(_invite(), _invite(description="Other"), ())
 
 
-def test_identity_declarations_live_on_the_tools():
+def test_identity_and_target_declarations_live_on_the_tools():
     reg = get_registry()
-    assert reg.get("calendar_create_event").identity == ("start", "attendees")
-    assert reg.get("calendar_create_event").action_time == "start"
-    assert reg.get("calendar_update_event").action_time == "start"
-    assert reg.get("mail_send").identity == ("to", "subject")
-    assert reg.get("mail_send").action_time is None
+    names = ("calendar_create_event", "calendar_update_event", "mail_send")
+    create, update, mail = (reg.get(n) for n in names)
+    assert create.identity == ("start", "duration_minutes", "attendees", "summary")
+    assert create.target == ("start", "attendees") and create.action_time == "start"
+    assert update.identity == () and update.target == ("event_id",) and update.action_time == "start"
+    assert mail.identity == ("to", "cc", "subject", "body") and mail.target == ("to", "subject")
+    assert mail.action_time is None
 
 
 # --- (a) an executed approval supersedes its siblings, whatever their wording or taint ---------------
@@ -115,7 +129,7 @@ def tools(fresh_registry):
 
     fresh_registry.register(MavisTool("pay_bill", "Pay a bill.", PayArgs, RiskClass.SPEND, _run,
                                       agents=frozenset({"conversation"}), identity=("account", "amount"),
-                                      action_time="at"))
+                                      action_time="at", target=("account",)))
     for spec in ("calendar_create_event", "mail_send", "calendar_update_event"):
         fresh_registry.register(get_registry_default().get(spec))
     return fresh_registry
@@ -139,21 +153,31 @@ async def _card(user_id, tool, args, *, tainted=False, task_status=None):
                                   tainted=tainted)
 
 
-@pytest.mark.parametrize("tool,executed,sibling,other", [
-    ("calendar_create_event", _invite(summary="Interview with JK"), _invite(summary="Interview"),
-     _invite(start="2026-10-10T15:00:00+05:30")),
+CASES = [  # tool, executed args, exact twin (formatting only), same target but other content, unrelated
+    ("calendar_create_event", _invite(), _invite(attendees=("JK@example.com",), description="see you"),
+     _invite(summary="Interview (rescheduled)"), _invite(start="2026-10-10T15:00:00+05:30")),
     ("mail_send", {"to": ["raj@x.io"], "subject": "Offer", "body": "Hi"},
-     {"to": ["raj@x.io"], "subject": "Offer", "body": "Hello Raj"},
+     {"to": ["RAJ@x.io"], "subject": "offer", "body": " Hi "},
+     {"to": ["raj@x.io"], "subject": "Offer", "body": "Hello Raj, v2"},
      {"to": ["raj@x.io"], "subject": "Contract", "body": "Hi"}),
+    ("calendar_update_event",
+     {"event_id": "e1", "start": "2026-10-09T15:00:00+05:30", "duration_minutes": 30},
+     {"event_id": "e1", "start": "2026-10-09T09:30:00Z", "duration_minutes": 30},
+     {"event_id": "e1", "start": "2026-10-09T17:00:00+05:30", "duration_minutes": 30},
+     {"event_id": "e2", "start": "2026-10-09T15:00:00+05:30", "duration_minutes": 30}),
     ("pay_bill", {"account": "A1", "amount": 50, "memo": "rent"}, {"account": "a1", "amount": 50},
-     {"account": "A1", "amount": 75}),
-])
-async def test_execution_supersedes_same_identity_across_wording_and_taint(user, rec_bus, sent, tools, tool,
-                                                                           executed, sibling, other):
+     {"account": "A1", "amount": 75}, {"account": "B2", "amount": 50}),
+]
+
+
+@pytest.mark.parametrize("tool,executed,twin,variant,other", CASES)
+async def test_execution_supersedes_exact_twins_only_and_notes_variants(user, rec_bus, sent, tools, tool,
+                                                                        executed, twin, variant, other):
     done = await _card(user.id, tool, executed)
-    clean_twin = await _card(user.id, tool, sibling)
-    tainted_twin = await _card(user.id, tool, sibling, tainted=True)
-    waiting_twin = await _card(user.id, tool, sibling, task_status=TaskStatus.AWAITING_APPROVAL)
+    clean_twin = await _card(user.id, tool, twin)
+    tainted_twin = await _card(user.id, tool, twin, tainted=True)
+    waiting_twin = await _card(user.id, tool, twin, task_status=TaskStatus.AWAITING_APPROVAL)
+    variant_card = await _card(user.id, tool, variant)
     unrelated = await _card(user.id, tool, other)
     await approvals.set_status(done, ApprovalStatus.EXECUTED, "ok")
     await flow.supersede_duplicates(await approvals.get(done), executed=True)
@@ -161,27 +185,77 @@ async def test_execution_supersedes_same_identity_across_wording_and_taint(user,
         row = await approvals.get(aid)
         assert row.status == ApprovalStatus.REJECTED and "superseded" in row.result
     assert (await approvals.get(waiting_twin)).status == ApprovalStatus.RESOLVING  # its task is resumed
+    assert (await approvals.get(variant_card)).status == ApprovalStatus.PENDING  # different content stays
+    assert any("a version of this was already sent" in m.text.lower()
+               and f"ap:{variant_card}:ok" in str(m.buttons) for m in sent)
     assert (await approvals.get(unrelated)).status == ApprovalStatus.PENDING
+    assert not any(f"ap:{unrelated}:" in str(m.buttons) for m in sent)
 
 
-async def test_rejection_only_closes_twins_of_the_same_taint(user, rec_bus, sent, tools):
-    sib = {"to": ["raj@x.io"], "subject": "Offer", "body": "x"}
-    rejected = await _card(user.id, "mail_send", sib)
-    clean = await _card(user.id, "mail_send", {**sib, "body": "y"})
-    tainted = await _card(user.id, "mail_send", {**sib, "body": "z"}, tainted=True)
+async def test_rejection_only_closes_exact_twins_of_the_same_taint(user, rec_bus, sent, tools):
+    msg = {"to": ["raj@x.io"], "subject": "Offer", "body": "x"}
+    rejected = await _card(user.id, "mail_send", msg)
+    clean = await _card(user.id, "mail_send", {**msg, "body": " X "})
+    tainted = await _card(user.id, "mail_send", {**msg, "body": "x"}, tainted=True)
+    variant = await _card(user.id, "mail_send", {**msg, "body": "y"})
     await approvals.set_status(rejected, ApprovalStatus.REJECTED)
     await flow.supersede_duplicates(await approvals.get(rejected), executed=False)
     assert (await approvals.get(clean)).status == ApprovalStatus.REJECTED
     assert (await approvals.get(tainted)).status == ApprovalStatus.PENDING
+    assert (await approvals.get(variant)).status == ApprovalStatus.PENDING
 
 
-async def test_queue_time_dedupe_uses_the_declared_identity(user, tools):
-    existing = await _card(user.id, "pay_bill", {"account": "A1", "amount": 50, "memo": "rent"})
-    [lc] = [t for t in tools.for_agent("conversation", user.id) if t.name == "pay_bill"]
-    out = await lc.ainvoke({"account": "a1", "amount": 50, "memo": "October rent"})
+@pytest.mark.parametrize("tool,executed,twin,variant,other", CASES)
+async def test_queue_reports_exact_twins_and_updates_same_target_cards(user, rec_bus, sent, tools, tool,
+                                                                       executed, twin, variant, other):
+    """An exact twin is reported as already waiting; a corrected version of a waiting card UPDATES that
+    card (args, preview, re-sent with buttons, audited) instead of a duplicate or a second card."""
+    from sqlalchemy import select
+
+    from mavis.store.db import Session
+    from mavis.store.models import AuditLog
+
+    existing = await _card(user.id, tool, executed)
+    agent = sorted(tools.get(tool).agents)[0]
+    [lc] = [t for t in tools.for_agent(agent, user.id) if t.name == tool]
+    out = await lc.ainvoke(twin)
     assert out.startswith(f"ALREADY_AWAITING_APPROVAL #{existing}")
-    out = await lc.ainvoke({"account": "A1", "amount": 99})
+    out = await lc.ainvoke(variant)
+    assert out.startswith(f"UPDATED_WAITING_APPROVAL #{existing}")
+    row = await approvals.get(existing)
+    assert row.status == ApprovalStatus.PENDING
+    assert approvals.equivalent(row.arguments, tools.get(tool).args_model.model_validate(variant).model_dump(
+        mode="json"), ())
+    assert any(f"ap:{existing}:ok" in str(m.buttons) for m in sent)  # the corrected card is shown again
+    async with Session() as s:
+        actions = [a.action for a in await s.scalars(select(AuditLog))]
+    assert "approval.updated" in actions
+    out = await lc.ainvoke(other)
     assert out.startswith("QUEUED_FOR_APPROVAL #")
+    assert len(await approvals.open_for_user(user.id)) == 2
+
+
+async def test_a_card_being_edited_is_not_overwritten_by_a_same_target_request(user, rec_bus, sent, tools):
+    existing = await _card(user.id, "pay_bill", {"account": "A1", "amount": 50})
+    await approvals.claim(existing, {ApprovalStatus.PENDING}, ApprovalStatus.AWAITING_EDIT)
+    [lc] = [t for t in tools.for_agent("conversation", user.id) if t.name == "pay_bill"]
+    out = await lc.ainvoke({"account": "A1", "amount": 80})
+    assert out.startswith("QUEUED_FOR_APPROVAL #")
+    assert (await approvals.get(existing)).arguments["amount"] == 50
+
+
+async def test_a_tainted_request_never_updates_a_clean_card(user, rec_bus, sent, tools):
+    from mavis.tools.registry import ToolRun, current_run
+
+    existing = await _card(user.id, "pay_bill", {"account": "A1", "amount": 50})
+    token = current_run.set(ToolRun(tainted=True))
+    try:
+        [lc] = [t for t in tools.for_agent("conversation", user.id) if t.name == "pay_bill"]
+        out = await lc.ainvoke({"account": "A1", "amount": 9999})
+    finally:
+        current_run.reset(token)
+    assert out.startswith("QUEUED_FOR_APPROVAL #")
+    assert (await approvals.get(existing)).arguments["amount"] == 50
 
 
 # --- (b) an action whose own time has passed expires; approving it is refused ------------------------

@@ -71,6 +71,33 @@ def equivalence_key(arguments: dict, identity: Sequence[str] = ()) -> str:
     return json.dumps(canon, sort_keys=True, default=str, ensure_ascii=False)
 
 
+def target_key(arguments: dict, target: Sequence[str]) -> str | None:
+    """The coarser "same target" key (canonical, like equivalence_key), or None when the tool declares
+    no target or a target field is empty in this call (then nothing is matched by target)."""
+    canon = _canon(arguments or {})
+    if not target or not all(field in canon for field in target):
+        return None
+    return json.dumps({f: canon[f] for f in target}, sort_keys=True, default=str, ensure_ascii=False)
+
+
+async def waiting_same_target(user_id: int, tool: str, arguments: dict, *, target: Sequence[str],
+                              tainted: bool | None, statuses: Sequence[ApprovalStatus],
+                              exclude_id: int | None = None) -> list[PendingApproval]:
+    """Open approvals of this user and tool with the same target key (see target_key), oldest first."""
+    want = target_key(arguments, target)
+    if want is None:
+        return []
+    async with Session() as s:
+        rows = await s.scalars(
+            select(PendingApproval)
+            .where(PendingApproval.user_id == user_id, PendingApproval.tool == tool,
+                   PendingApproval.status.in_([x.value for x in statuses]))
+            .order_by(PendingApproval.id)
+        )
+        return [r for r in rows if r.id != exclude_id and (tainted is None or bool(r.tainted) == tainted)
+                and target_key(r.arguments or {}, target) == want]
+
+
 def equivalent(a: dict, b: dict, identity: Sequence[str] = ()) -> bool:
     return equivalence_key(a, identity) == equivalence_key(b, identity)
 
