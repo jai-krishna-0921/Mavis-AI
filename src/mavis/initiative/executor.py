@@ -63,8 +63,10 @@ class InitiativeExecutor:
                 continue
             key = f"agent:{loop_id}:{w.reason[:60]}" if loop_id else f"agent:{event.id}:{i}"
             try:
+                # spec 8.3: a wakeup an untrusted event asked for fires as untrusted too (scrubbed, capped)
                 await self._wakeups.wake_me(user.id, w.at, w.reason, loop_id, WakeupKind.AGENT,
-                                            dedupe_key=key)
+                                            dedupe_key=key,
+                                            payload={"untrusted": True} if untrusted else None)
             except ValueError as exc:
                 log.warning("initiative.wakeup_failed", event_id=event.id, reason=w.reason[:80],
                             error=str(exc))
