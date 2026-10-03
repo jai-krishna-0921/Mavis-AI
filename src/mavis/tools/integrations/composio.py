@@ -11,6 +11,7 @@ scripts/composio_mcp_server.py):
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import httpx
@@ -19,8 +20,18 @@ from pydantic import ValidationError
 from mavis.domain.errors import IntegrationError
 from mavis.domain.events import Event
 from mavis.domain.integrations import ConnectionState, Toolkit, ToolResult, UserRef
-from mavis.tools.integrations.actions import ACTIONS
-from mavis.tools.integrations.composio_map import COMPOSIO_ACTIONS, COMPOSIO_TRIGGERS, toolkit_of_slug
+from mavis.domain.policy import Capability
+from mavis.tools.integrations.actions import ACTIONS, GOOGLE_CAPABILITIES, WORKSPACE_CAPABILITIES
+from mavis.tools.integrations.composio_map import (
+    COMPOSIO_ACTIONS,
+    COMPOSIO_TRIGGERS,
+    GOOGLESUPER,
+    GOOGLESUPER_TRIGGERS,
+    LEGACY_ALIASES,
+    LEGACY_TOOLKITS,
+    slug_for,
+    toolkit_of_slug,
+)
 
 CATALOG: tuple[Toolkit, ...] = (
     Toolkit(slug="gmail", name="Gmail", description="Read, triage and draft email."),
@@ -31,6 +42,14 @@ CATALOG: tuple[Toolkit, ...] = (
     Toolkit(slug="notion", name="Notion", description="Pages and notes."),
 )
 _SLUGS = {t.slug for t in CATALOG}
+GOOGLE_TOOLKIT = Toolkit(
+    slug=GOOGLESUPER, name="Google Workspace",
+    description="Gmail, Calendar, Drive, Docs, Sheets, Tasks, Contacts and Meet with one consent.",
+)
+# Names that mean "the one Google account" when Workspace is on (connect and disconnect).
+_GOOGLE_NAMES = frozenset({"google", GOOGLESUPER, *(c.value for c in GOOGLE_CAPABILITIES)})
+_LEGACY_TRIGGER_PREFIXES = ("GMAIL_", "GOOGLECALENDAR_")
+ROUTE_TTL_S = 30.0  # execute() re-reads account states at most this often per user
 _STATE_MAP = {
     "ACTIVE": ConnectionState.ACTIVE,
     "INITIATED": ConnectionState.INITIATED,
@@ -48,8 +67,11 @@ class ComposioProvider:
         base_url: str = "https://backend.composio.dev/api/v3",
         webhook_secret: str = "",
         timeout_s: float = 30.0,
+        workspace: bool = False,
     ) -> None:
         self._api_key = api_key.strip()
+        self._workspace = workspace
+        self._routes: dict[str, tuple[float, dict[str, str]]] = {}  # provider id -> (expiry, toolkit->status)
         self._base_url = base_url.rstrip("/")
         self._webhook_secret = webhook_secret
         self._timeout = timeout_s
@@ -99,6 +121,8 @@ class ComposioProvider:
     # --- connections -------------------------------------------------------------------------------
 
     async def catalog(self) -> list[Toolkit]:
+        if self._workspace:
+            return [GOOGLE_TOOLKIT, *(t for t in CATALOG if t.slug not in LEGACY_TOOLKITS.values())]
         return list(CATALOG)
 
     async def _auth_config(self, toolkit: str) -> str:
@@ -139,18 +163,58 @@ class ComposioProvider:
                 best[slug] = item
         return best
 
+    def _remember(self, user: UserRef, accounts: dict[str, dict[str, Any]]) -> None:
+        statuses = {slug: str(item.get("status")) for slug, item in accounts.items()}
+        self._routes[user.provider_id] = (time.monotonic() + ROUTE_TTL_S, statuses)
+
+    async def _route_statuses(self, user: UserRef) -> dict[str, str]:
+        hit = self._routes.get(user.provider_id)
+        if hit is not None and time.monotonic() < hit[0]:
+            return hit[1]
+        accounts = await self._accounts(user)
+        self._remember(user, accounts)
+        return self._routes[user.provider_id][1]
+
     async def status(self, user: UserRef) -> dict[str, ConnectionState]:
         states = {t.slug: ConnectionState.NONE for t in CATALOG}
+        if self._workspace:
+            states.update({c.value: ConnectionState.NONE for c in WORKSPACE_CAPABILITIES})
         if not self.configured:
             return states
-        for slug, item in (await self._accounts(user)).items():
+        accounts = await self._accounts(user)
+        self._remember(user, accounts)
+        for slug, item in accounts.items():
             if slug in states:
                 states[slug] = _STATE_MAP.get(str(item.get("status")), ConnectionState.NONE)
+        if not self._workspace:
+            return states
+        google = ConnectionState.NONE
+        if GOOGLESUPER in accounts:
+            google = _STATE_MAP.get(str(accounts[GOOGLESUPER].get("status")), ConnectionState.NONE)
+        for capability in GOOGLE_CAPABILITIES:
+            legacy = states.get(capability.value) if capability in LEGACY_TOOLKITS else None
+            if google is ConnectionState.ACTIVE or legacy in (None, ConnectionState.NONE):
+                states[capability.value] = google  # one Google account: all eight share its state
+            else:
+                states[capability.value] = legacy  # Gmail/Calendar keep working on the old connection
         return states
+
+    async def _toolkit_for(self, user: UserRef, capability: Capability, legacy_slug: str) -> str:
+        if not self._workspace or capability not in GOOGLE_CAPABILITIES:
+            return toolkit_of_slug(legacy_slug)
+        if capability not in LEGACY_TOOLKITS:
+            return GOOGLESUPER
+        statuses = await self._route_statuses(user)
+        if statuses.get(GOOGLESUPER) == "ACTIVE":
+            return GOOGLESUPER
+        legacy = LEGACY_TOOLKITS[capability]
+        return legacy if statuses.get(legacy) == "ACTIVE" else GOOGLESUPER
 
     async def connect_link(self, user: UserRef, toolkit: str, callback_url: str) -> str:
         toolkit = (toolkit or "").strip().lower()
-        if toolkit not in _SLUGS:
+        if self._workspace and toolkit in _GOOGLE_NAMES:
+            toolkit = GOOGLESUPER  # every Google capability (and "google") opens the one consent
+        elif toolkit not in _SLUGS:
             raise IntegrationError(
                 f"{toolkit!r} is not one of the services Mavis connects: {sorted(_SLUGS)}."
             )
@@ -165,7 +229,13 @@ class ComposioProvider:
         return url
 
     async def disconnect(self, user: UserRef, toolkit: str) -> None:
-        row = (await self._accounts(user)).get((toolkit or "").strip().lower())
+        name = (toolkit or "").strip().lower()
+        if self._workspace and name in _GOOGLE_NAMES:
+            name = GOOGLESUPER  # every Google capability drops at once; legacy accounts stay
+        elif self._workspace and name in LEGACY_ALIASES:
+            name = LEGACY_ALIASES[name]
+        self._routes.pop(user.provider_id, None)
+        row = (await self._accounts(user)).get(name)
         if not row:
             raise IntegrationError(f"there is no {toolkit} connection to remove.")
         await self._request("DELETE", f"/connected_accounts/{row.get('id')}")
@@ -183,8 +253,9 @@ class ComposioProvider:
             fields = ", ".join(".".join(str(p) for p in e["loc"]) for e in exc.errors())
             return ToolResult(ok=False, error=f"invalid arguments for {action}: {fields}")
         try:
+            slug = slug_for(action, await self._toolkit_for(user, spec.capability, mapping.slug))
             answer = await self._request(
-                "POST", f"/tools/execute/{mapping.slug}",
+                "POST", f"/tools/execute/{slug}",
                 body={"user_id": user.provider_id, "arguments": mapping.translate(parsed)},
             )
         except IntegrationError as exc:
@@ -195,10 +266,17 @@ class ComposioProvider:
         return ToolResult(ok=True, data=answer.get("data"))
 
     async def subscribe(self, user: UserRef, trigger: str, config: dict) -> str:
-        slug = COMPOSIO_TRIGGERS.get(trigger)
-        if slug is None:
+        google_slug = GOOGLESUPER_TRIGGERS.get(trigger) if self._workspace else None
+        legacy = COMPOSIO_TRIGGERS.get(trigger)
+        if google_slug is None and legacy is None:
             raise IntegrationError(f"unknown trigger {trigger!r}")
-        account = (await self._accounts(user)).get(toolkit_of_slug(slug))
+        accounts = await self._accounts(user)
+        google = accounts.get(GOOGLESUPER)
+        if google_slug is not None and (legacy is None or (google and google.get("status") == "ACTIVE")):
+            slug, account = google_slug, google  # workspace-only triggers exist on googlesuper alone
+        else:
+            assert legacy is not None
+            slug, account = legacy, accounts.get(toolkit_of_slug(legacy))
         if not account or account.get("status") != "ACTIVE":
             raise IntegrationError(f"no ACTIVE {toolkit_of_slug(slug)} connection to attach {trigger} to.")
         answer = await self._request(
@@ -209,6 +287,22 @@ class ComposioProvider:
         if not trigger_id:
             raise IntegrationError(f"Composio accepted {trigger} but returned no trigger id.")
         return trigger_id
+
+    async def retire_legacy_triggers(self, user: UserRef) -> int:
+        """After the Google upgrade: delete this user's Gmail/Calendar trigger instances on the legacy
+        accounts, so every email arrives once (from googlesuper). Returns how many were deleted."""
+        answer = await self._request(
+            "GET", "/trigger_instances/active", params={"user_ids": user.provider_id, "limit": 100}
+        )
+        deleted = 0
+        for item in answer.get("items") or []:
+            name = str(item.get("trigger_name") or item.get("triggerName") or "").upper()
+            if str(item.get("user_id") or user.provider_id) != user.provider_id:
+                continue
+            if name.startswith(_LEGACY_TRIGGER_PREFIXES) and item.get("id"):
+                await self._request("DELETE", f"/trigger_instances/manage/{item['id']}")
+                deleted += 1
+        return deleted
 
     def parse_webhook(self, headers: dict[str, str], body: bytes) -> list[Event]:
         from mavis.tools.integrations.composio_webhooks import parse_composio_webhook

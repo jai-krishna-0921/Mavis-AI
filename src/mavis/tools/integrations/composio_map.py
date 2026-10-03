@@ -22,6 +22,11 @@ class SlugMapping:
     slug: str
     translate: Callable[[Any], dict[str, Any]]
 
+    @property
+    def suffix(self) -> str:
+        """The slug without its toolkit prefix: GMAIL_FETCH_EMAILS -> FETCH_EMAILS."""
+        return self.slug.split("_", 1)[1]
+
 
 def _wall_and_tz(dt: datetime) -> tuple[str, str]:
     """Composio's start_datetime must be naive (no offset or Z), paired with an IANA timezone.
@@ -126,8 +131,56 @@ COMPOSIO_TRIGGERS: dict[str, str] = {
     "notion.page_changed": "NOTION_PAGE_UPDATED_TRIGGER",
 }
 
+# --- Google Workspace routing (spec 2026-10-03 section 3.2) -----------------------------------------
+# Every Google capability resolves to googlesuper; Gmail and Calendar fall back to their legacy toolkits.
+GOOGLESUPER = "googlesuper"
+GOOGLESUPER_PREFIX = "GOOGLESUPER_"
+LEGACY_TOOLKITS: dict[Capability, str] = {Capability.GMAIL: "gmail", Capability.CALENDAR: "googlecalendar"}
+# /disconnect names for the legacy accounts, which a googlesuper disconnect leaves untouched
+LEGACY_ALIASES: dict[str, str] = {
+    "gmail-legacy": "gmail", "calendar-legacy": "googlecalendar", "googlecalendar-legacy": "googlecalendar",
+}
+
+GOOGLESUPER_TRIGGERS: dict[str, str] = {
+    "mail.new_message": "GOOGLESUPER_NEW_MESSAGE",
+    "calendar.event_changed": "GOOGLESUPER_GOOGLE_CALENDAR_EVENT_CHANGE_TRIGGER",
+    "drive.file_shared": "GOOGLESUPER_FILE_SHARED_PERMISSIONS_ADDED",
+    "docs.comment_added": "GOOGLESUPER_COMMENT_ADDED_TRIGGER",
+    "tasks.created": "GOOGLESUPER_NEW_TASK_CREATED_TRIGGER",
+    "tasks.updated": "GOOGLESUPER_TASK_UPDATED_TRIGGER",
+}
+WORKSPACE_TRIGGERS: dict[Capability, tuple[str, ...]] = {
+    Capability.DRIVE: ("drive.file_shared",),
+    Capability.DOCS: ("docs.comment_added",),
+    Capability.TASKS: ("tasks.created", "tasks.updated"),
+}
+# Composio polls these itself; slower than its 2-minute default to spare the user's Drive quota.
+TRIGGER_CONFIGS: dict[str, dict[str, Any]] = {
+    "drive.file_shared": {"interval": 5},
+    "docs.comment_added": {"interval": 10, "max_files": 25},
+    "tasks.created": {"interval": 15, "tasklist_id": "@default"},
+    "tasks.updated": {"interval": 15, "tasklist_id": "@default"},
+}
+
+
+def triggers_for(capability: Capability, *, workspace: bool) -> tuple[str, ...]:
+    """Mavis trigger names to subscribe when `capability` becomes active."""
+    if workspace and capability in WORKSPACE_TRIGGERS:
+        return WORKSPACE_TRIGGERS[capability]
+    return MAVIS_TRIGGERS.get(capability, ())
+
+
+def slug_for(action: str, toolkit: str) -> str:
+    """The Composio slug for `action` on `toolkit`. Nothing outside this module knows the prefixes."""
+    mapping = COMPOSIO_ACTIONS[action]
+    if toolkit == GOOGLESUPER:
+        return GOOGLESUPER_PREFIX + mapping.suffix
+    return mapping.slug
+
+
 _TOOLKIT_PREFIX = {
     "GMAIL": "gmail", "GOOGLECALENDAR": "googlecalendar", "SLACK": "slack", "NOTION": "notion",
+    "GOOGLESUPER": GOOGLESUPER,
 }
 
 
