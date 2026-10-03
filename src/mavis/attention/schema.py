@@ -3,6 +3,7 @@ facts; free text (counterparty, action_requested) stays untrusted wherever it fl
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -109,7 +110,56 @@ CURRENCY_ALIASES = {
     "£": "GBP",
 }
 _ISO = re.compile(r"^[A-Z]{3}$")
-_NUMBER = re.compile(r"[^\d.]")
+_PLAIN_NUMBER = re.compile(r"^(?:\d+|\d{1,3}(?:,\d{3})+|\d{1,2}(?:,\d{2})*,\d{3})(?:\.\d+)?$")
+_AMOUNT = re.compile(r"^(?P<num>[\d.,]+)\s*(?P<unit>[a-z]*)$")
+_CURRENCY_MARK = re.compile(r"^(?:₹|rs\.?|inr|usd|us\$|\$|eur|€|gbp|£)\s*|\s*(?:/-|only)$")
+_UNITS = {
+    "k": 1e3,
+    "lakh": 1e5,
+    "lakhs": 1e5,
+    "lac": 1e5,
+    "lacs": 1e5,
+    "crore": 1e7,
+    "crores": 1e7,
+    "cr": 1e7,
+    "million": 1e6,
+}
+_SPLIT_LIST = re.compile(r"[,;\s]+")
+
+
+def parse_amount(value: Any) -> float | None:
+    """A plain positive amount, or None. Never guesses: sign, exponent, odd grouping, unknown words reject."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        number = float(value)
+        return number if math.isfinite(number) and number > 0 else None
+    if not isinstance(value, str):
+        return None
+    text = value.strip().casefold()
+    for _ in range(2):
+        text = _CURRENCY_MARK.sub("", text).strip()
+    match = _AMOUNT.match(text) if text else None
+    if not match and text:
+        match = re.match(r"^(?P<num>[\d.,]+)\s+(?P<unit>[a-z]+)$", text)
+    if not match or not _PLAIN_NUMBER.match(match["num"]):
+        return None
+    unit = match["unit"]
+    if unit and unit not in _UNITS:
+        return None
+    number = float(match["num"].replace(",", "")) * _UNITS.get(unit, 1)
+    return number if math.isfinite(number) and 0 < number <= 1e11 else None
+
+
+def parse_when(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
 
 
 def _enum(enum: type[StrEnum], value: Any, default: StrEnum) -> Any:
@@ -120,7 +170,7 @@ def _enum(enum: type[StrEnum], value: Any, default: StrEnum) -> Any:
 
 
 class Money(BaseModel):
-    amount: float = Field(ge=0, le=1e11, description="Plain number, no currency symbol or separators")
+    amount: float = Field(gt=0, le=1e11, description="Plain number, no currency symbol or separators")
     currency: str = Field(default="", description="ISO 4217 code such as INR or USD; empty if not stated")
     direction: Direction = Field(default=Direction.UNKNOWN, description="debit means money left the user")
     counterparty: str = Field(default="", description="Who the money went to or came from, as written")
@@ -130,7 +180,15 @@ class Money(BaseModel):
     @field_validator("amount", mode="before")
     @classmethod
     def _amount(cls, v: Any) -> Any:
-        return _NUMBER.sub("", v) or "0" if isinstance(v, str) else v
+        parsed = parse_amount(v)
+        if parsed is None:
+            raise ValueError("unparseable amount")
+        return parsed
+
+    @field_validator("occurred_at", mode="before")
+    @classmethod
+    def _occurred(cls, v: Any) -> datetime | None:
+        return parse_when(v)
 
     @field_validator("currency", mode="before")
     @classmethod
@@ -169,6 +227,30 @@ class EmailUnderstanding(BaseModel):
     people: list[str] = Field(default_factory=list, description="Names of real people involved, at most 5")
     risk_flags: list[RiskFlag] = Field(default_factory=list, description="Only flags that apply")
 
+    @field_validator("money", mode="before")
+    @classmethod
+    def _money(cls, v: Any) -> Money | None:
+        if isinstance(v, Money):
+            return v
+        if not isinstance(v, dict):
+            return None
+        try:
+            return Money.model_validate(v)
+        except ValueError:
+            return None
+
+    @field_validator("deadline", mode="before")
+    @classmethod
+    def _deadline(cls, v: Any) -> datetime | None:
+        return parse_when(v)
+
+    @field_validator("needs_user", mode="before")
+    @classmethod
+    def _needs_user(cls, v: Any) -> bool:
+        if isinstance(v, str):
+            return v.strip().lower() in {"true", "yes", "1"}
+        return bool(v)
+
     @field_validator("kind", mode="before")
     @classmethod
     def _kind(cls, v: Any) -> Any:
@@ -187,16 +269,18 @@ class EmailUnderstanding(BaseModel):
     @field_validator("people", mode="before")
     @classmethod
     def _people(cls, v: Any) -> list[str]:
-        if not isinstance(v, list):
+        items = [v] if isinstance(v, str) else v
+        if not isinstance(items, list):
             return []
-        return [str(p)[:MAX_PERSON] for p in v if str(p).strip()][:MAX_PEOPLE]
+        return [p.strip()[:MAX_PERSON] for p in items if isinstance(p, str) and p.strip()][:MAX_PEOPLE]
 
     @field_validator("risk_flags", mode="before")
     @classmethod
     def _flags(cls, v: Any) -> list[str]:
         known = {f.value for f in RiskFlag}
         out: list[str] = []
-        for item in v if isinstance(v, list) else []:
+        items = _SPLIT_LIST.split(v) if isinstance(v, str) else v
+        for item in items if isinstance(items, list) else []:
             value = str(item).strip().lower()
             if value in known and value not in out:
                 out.append(value)
