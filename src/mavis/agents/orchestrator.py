@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import structlog
@@ -44,6 +44,36 @@ async def _reap_stale(user_id: int) -> None:
     for stale in await tasks.stale_running(user_id, cutoff):
         log.warning("task.stale_running", task_id=stale.id)
         await _fail(stale.id, user_id, "that task stalled and was stopped")
+
+
+async def recover_tasks(user_id: int | None = None, *, restarted_at: datetime | None = None) -> int:
+    """Self-heal the task queue so a lost worker can never block a user's tasks. Safe to run repeatedly.
+
+    1. A RUNNING task whose run began more than the wall-clock limit plus a margin ago lost its worker.
+       With `restarted_at` (worker start), every RUNNING task that began before it lost its worker too:
+       there is one worker, and a run never outlives its process. Each is failed through `tasks.claim`,
+       which tells the user and closes its approvals.
+    2. Every user with QUEUED tasks gets its next one re-enqueued when a slot is free (a deferred task
+       has no job of its own; a duplicate RUN_TASK is harmless, run_task claims QUEUED once).
+    Returns the number of tasks failed."""
+    cutoff = utcnow() - timedelta(seconds=get_settings().task_timeout_s + _STALE_MARGIN_S)
+    if restarted_at is not None:
+        cutoff = max(cutoff, restarted_at)
+    failed = 0
+    for stale in await tasks.running_started_before(cutoff, user_id):
+        log.warning("task.recovered_stuck_running", task_id=stale.id, restart=restarted_at is not None)
+        reason = ("I was restarted partway through it" if restarted_at is not None
+                  else "that task stalled and was stopped")
+        await _fail(stale.id, stale.user_id, reason)
+        failed += 1
+    for uid in await tasks.users_with_queued(user_id):
+        await _kick_next_queued(uid)
+    return failed
+
+
+async def recover_tasks_on_start() -> None:
+    """Worker start hook (registered before the approval sweep, so kicked tasks can take answers)."""
+    await recover_tasks(restarted_at=utcnow())
 
 
 async def run_task(task_id: int) -> None:

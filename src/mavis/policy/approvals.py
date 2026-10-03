@@ -316,7 +316,11 @@ async def sweep(user_id: int | None = None, *, skip: frozenset[str] = frozenset(
     Runs at worker start, with the morning check-in, and whenever an approval reminder or expiry
     wakeup fires. Each step is isolated so one failure does not hide the rest. `skip` names steps
     to leave out."""
+    from mavis.agents import orchestrator  # lazy: the runner imports this module
+
     steps = {
+        # first: a task stuck RUNNING or QUEUED without a job holds up the approvals behind it
+        "tasks": lambda: orchestrator.recover_tasks(user_id),
         "expired": lambda: _sweep_overdue(user_id),
         "stuck": lambda: _sweep_stuck_resolving(utcnow() - STALE_AFTER, user_id),
         "may_have_run": lambda: _sweep_may_have_run(user_id),
