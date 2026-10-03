@@ -674,3 +674,61 @@ async def test_direct_reply_to_another_ping_does_not_close_awaiting(user, clock,
     await messages.log(user.id, Role.USER, "sure")
     assert await init.loops.on_user_message(user.id, "sure") == 0
     assert (await init.loops.get(loop.id)).status is LoopStatus.AWAITING_REPLY
+
+
+# re-review R1 ------------------------------------------------------------------------------------
+
+def _security_mail(user, i: int, **extra) -> Event:
+    return Event(id=f"gmail:msg:r{i}", user_id=user.id, type=EventType.EMAIL_RECEIVED,
+                 occurred_at=timeutil.now(), source="composio", trust=Trust.UNTRUSTED,
+                 payload={"from": "deals@shop.example", "subject": f"Unusual activity? Offer {i}",
+                          "snippet": "", "message_id": f"r{i}", **extra})
+
+
+async def _over_budget(init, user, settings, monkeypatch):
+    from mavis.domain.messages import Role
+    from mavis.initiative import hooks
+    from mavis.initiative.email_triage import EmailTriage
+    from mavis.store.repo import messages
+
+    async def no_names(uid):
+        return set()
+
+    hooks.DECISION_POLICIES.append(EmailTriage(no_names).apply_policy)
+    monkeypatch.setattr(settings, "ping_daily_budget", 1)
+    await messages.log(user.id, Role.ASSISTANT, "earlier ping", proactive=True)
+
+
+async def test_promo_security_wording_does_not_bypass_budget(user, clock, recording_bus, fake_memory,
+                                                             fake_llm, settings, monkeypatch):
+    from mavis.store.repo import messages
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 14, 0))
+    await _over_budget(init, user, settings, monkeypatch)
+    for i in range(8):
+        fake_llm.push_structured(InitiativeDecision(ignore_reason="promo"))  # nothing reaches the composer
+        await init.handler.handle(_security_mail(user, i, labels=["CATEGORY_PROMOTIONS"]))
+    assert [m.content for m in await messages.recent(user.id) if m.proactive] == ["earlier ping"]
+
+
+async def test_security_bypass_is_capped_at_two_then_deferred(user, clock, recording_bus, fake_memory,
+                                                              fake_llm, settings, monkeypatch):
+    from mavis.domain.decisions import ComposedMessage
+    from mavis.domain.wakeups import WakeupKind
+    from mavis.store.repo import messages
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 14, 0))
+    await _over_budget(init, user, settings, monkeypatch)
+    for i in range(4):
+        fake_llm.push_structured(InitiativeDecision(ignore_reason="?"))
+        if i < 2:  # only the capped two reach the composer
+            fake_llm.push_structured(ComposedMessage(send=True, messages=[f"alert {i}"]))
+        await init.handler.handle(_security_mail(user, i))
+    sent = [m.content for m in await messages.recent(user.id) if m.proactive]
+    assert sent == ["earlier ping", "alert 0", "alert 1"]
+    deferred = await init.wakeups.pending(user.id, WakeupKind.DEFERRED)
+    assert len(deferred) == 2
+    assert all(w.due_at == ist(28, 7, 0) for w in deferred)
+    assert all(datetime.fromisoformat(w.payload["valid_until"]) > w.due_at for w in deferred)
