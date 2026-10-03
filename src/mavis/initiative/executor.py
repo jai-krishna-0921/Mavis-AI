@@ -10,8 +10,9 @@ import structlog
 from mavis.bus.base import EventBus
 from mavis.config import get_settings
 from mavis.domain import timeutil
-from mavis.domain.decisions import InitiativeDecision, NotifyIntent
-from mavis.domain.events import Event, Trust
+from mavis.domain.decisions import InitiativeDecision, NotifyIntent, WakeupRequest
+from mavis.domain.events import Event, EventType, Trust
+from mavis.domain.loops import Loop
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.composer import Composer
@@ -20,6 +21,7 @@ from mavis.loops.service import LoopService
 from mavis.policy.pings import PingPolicy, in_quiet_hours, loop_ping_key
 from mavis.store.db import Session
 from mavis.store.repo import messages, outbox
+from mavis.store.repo.loops import title_tokens
 from mavis.timers.service import WakeupService
 
 log = structlog.get_logger()
@@ -28,6 +30,8 @@ MAX_UNTRUSTED_URGENCY = 4  # only a trusted origin may bypass quiet hours (urgen
 DELAY_NOTE_AFTER = timedelta(minutes=30)
 RELEASE_DELAY = timedelta(seconds=20)  # let the user's reply go out first
 DEFERRED_TTL = timedelta(hours=12)  # a deferred ping with no better bound goes stale after this
+MERGE_WINDOW = timedelta(minutes=30)  # a model wakeup this close to one already set for the loop merges
+LOOP_WAKEUP_KINDS = (WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED, WakeupKind.AGENT)
 
 
 class InitiativeExecutor:
@@ -37,7 +41,8 @@ class InitiativeExecutor:
         self._policy, self._composer, self._quiet = policy, composer, quiet
 
     async def apply(self, user, decision: InitiativeDecision, event: Event, context: str = "",
-                    quiet_streak: int = 0, origin: dict[str, Any] | None = None) -> None:
+                    quiet_streak: int = 0, origin: dict[str, Any] | None = None,
+                    open_loops: list[Loop] | None = None, event_loop_id: int | None = None) -> None:
         untrusted = event.trust is Trust.UNTRUSTED  # spec 8.3: third-party content may not create work
         for upsert in decision.track:
             if untrusted and not await self._owns_existing_loop(user.id, upsert.id):
@@ -50,9 +55,15 @@ class InitiativeExecutor:
                 log.warning("initiative.track_failed", event_id=event.id, title=upsert.title[:80],
                             error=str(exc))
         for i, w in enumerate(decision.wakeups):
-            key = f"agent:{w.loop_id}:{w.reason[:60]}" if w.loop_id else f"agent:{event.id}:{i}"
+            # follow-ups happen after the loop is finished, so they are not tied to it by default
+            fallback = None if event.type is EventType.EVENT_ENDED else event_loop_id
+            loop_id = await self._wakeup_loop(user.id, w, open_loops or [], fallback)
+            if loop_id is not None and await self._covered(user.id, loop_id, w.at):
+                log.info("initiative.wakeup_merged", event_id=event.id, loop_id=loop_id, reason=w.reason[:80])
+                continue
+            key = f"agent:{loop_id}:{w.reason[:60]}" if loop_id else f"agent:{event.id}:{i}"
             try:
-                await self._wakeups.wake_me(user.id, w.at, w.reason, w.loop_id, WakeupKind.AGENT,
+                await self._wakeups.wake_me(user.id, w.at, w.reason, loop_id, WakeupKind.AGENT,
                                             dedupe_key=key)
             except ValueError as exc:
                 log.warning("initiative.wakeup_failed", event_id=event.id, reason=w.reason[:80],
@@ -92,6 +103,41 @@ class InitiativeExecutor:
         if moved:
             log.info("initiative.deferred_released", user=user.id, count=moved)
         return moved
+
+    async def _wakeup_loop(self, user_id: int, w: WakeupRequest, open_loops: list[Loop],
+                           fallback: int | None) -> int | None:
+        """The loop a model wakeup is about, so closing that loop cancels it: the id the model gave (if
+        it is really this user's), else an open loop the reason clearly names, else the event's loop."""
+        if w.loop_id is not None and await self._owns_existing_loop(user_id, w.loop_id):
+            return w.loop_id
+        said = set(title_tokens(w.reason))
+        best, best_score = None, 0.0
+        for lp in open_loops:
+            words = set(title_tokens(lp.title))
+            shared = len(words & said)
+            if not words or not (shared >= 2 or shared == len(words)):
+                continue
+            score = shared / len(words)
+            if score > best_score:
+                best, best_score = lp.id, score
+            elif score == best_score:
+                best = None  # two loops fit equally well: do not guess
+        if best is not None:
+            return best
+        if fallback is not None and await self._owns_existing_loop(user_id, fallback):
+            return fallback
+        return None
+
+    async def _covered(self, user_id: int, loop_id: int, at: datetime) -> bool:
+        """A pending wakeup for the same loop within MERGE_WINDOW already covers this one."""
+        at = timeutil.ensure_utc(at)
+        now = timeutil.now()
+        if at > now:
+            at = now + timeutil.scale_offset(at - now)  # compare like wake_me stores it
+        return any(
+            p.loop_id == loop_id and p.kind in LOOP_WAKEUP_KINDS and abs(p.due_at - at) <= MERGE_WINDOW
+            for p in await self._wakeups.pending(user_id)
+        )
 
     async def _owns_existing_loop(self, user_id: int, loop_id: int | None) -> bool:
         if loop_id is None:

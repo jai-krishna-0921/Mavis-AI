@@ -170,3 +170,75 @@ async def test_old_deferred_payload_without_valid_until_expires(user, clock, rec
                                         occurred_at=timeutil.now(), source="timer",
                                         payload={**base, "original_due": due}))
     assert len(calls) == 1
+
+
+# F3 ----------------------------------------------------------------------------------------------
+
+async def test_defaults_always_scheduled_and_near_llm_wakeup_merges(user, clock, recording_bus, fake_memory,
+                                                                    fake_llm):
+    from mavis.domain.decisions import WakeupRequest
+    from mavis.domain.wakeups import WakeupKind
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 9, 0))
+    due = ist(28, 10, 0)
+    loop = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT,
+                                                       title="Interview with Jawahar", due_at=due,
+                                                       importance=5))
+    [created] = recording_bus.take()
+    fake_llm.push_structured(InitiativeDecision(wakeups=[
+        WakeupRequest(at=due - timedelta(minutes=50), reason="Final prep before the interview with Jawahar"),
+        WakeupRequest(at=due - timedelta(hours=14), reason="Evening review of interview notes",
+                      loop_id=loop.id),
+    ]))
+    await init.handler.handle(created)
+    pending = await init.wakeups.pending(user.id)
+    kinds = sorted((w.kind.value, w.due_at) for w in pending)
+    assert kinds == sorted([
+        (WakeupKind.AGENT.value, due - timedelta(hours=14)),
+        (WakeupKind.EVENT_STARTING.value, due - timedelta(hours=1)),  # absorbed the 50-min LLM wakeup
+        (WakeupKind.EVENT_ENDED.value, due + timedelta(hours=2)),
+    ])
+    assert all(w.loop_id == loop.id for w in pending)
+
+
+async def test_llm_wakeup_gets_loop_id_and_closing_cancels_it(user, clock, recording_bus, fake_memory,
+                                                              fake_llm):
+    from mavis.domain.decisions import WakeupRequest
+    from mavis.domain.loops import LoopStatus
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 9, 0))
+    loop = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.WAITING_ON, title="Reply from Jawahar"))
+    [created] = recording_bus.take()
+    fake_llm.push_structured(InitiativeDecision(wakeups=[
+        WakeupRequest(at=ist(29, 10, 0), reason="Nudge if still nothing", loop_id=999),  # invented id
+    ]))
+    await init.handler.handle(created)
+    [w] = await init.wakeups.pending(user.id)
+    assert w.loop_id == loop.id  # the event's loop, not the id the model made up
+    await init.loops.close(loop.id, LoopStatus.DONE)
+    [updated] = recording_bus.take()
+    await init.handler.handle(updated)
+    assert await init.wakeups.pending(user.id) == []
+
+
+async def test_wakeup_reason_naming_another_loop_attaches_to_it(user, clock, recording_bus, fake_memory,
+                                                                fake_llm):
+    from mavis.domain.decisions import WakeupRequest
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 9, 0))
+    interview = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT,
+                                                            title="Fractal interview", due_at=ist(30, 10, 0),
+                                                            importance=2))
+    concern = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.CONCERN, title="Nervous about money"))
+    recording_bus.take()
+    created = Event(id=f"loop:{concern.id}:created", user_id=user.id, type=EventType.LOOP_CREATED,
+                    occurred_at=timeutil.now(), source="agent", payload=concern.model_dump(mode="json"))
+    fake_llm.push_structured(InitiativeDecision(wakeups=[
+        WakeupRequest(at=ist(29, 18, 0), reason="Check prep for the Fractal interview"),
+    ]))
+    await init.handler.handle(created)
+    agent = [w for w in await init.wakeups.pending(user.id) if w.kind.value == "agent"]
+    assert [w.loop_id for w in agent] == [interview.id]
