@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import difflib
 import re
+import unicodedata
 from collections.abc import Iterable
 
 MAX_KEY = 60
 FUZZY_CUTOFF = 0.88
-_NON_ALNUM = re.compile(r"[^a-z0-9 ]+")
+_NON_ALNUM = re.compile(r"[^\w ]+|_")
+PHONE_DIGITS = 7  # a run of numeric tokens this long is a phone or account number
+MIN_FUZZY = 5
 LEADING = frozenset({"to", "from", "by", "mr", "mrs", "ms", "dr", "shri", "smt"})
 TRAILING = frozenset(
     {
@@ -39,11 +42,35 @@ TRAILING = frozenset(
 )
 
 
+def _fold(raw: str) -> str:
+    text = unicodedata.normalize("NFKD", unicodedata.normalize("NFKC", str(raw or "")))
+    return "".join(c for c in text if not unicodedata.combining(c)).casefold().strip()
+
+
+def _drop_numbers(words: list[str]) -> list[str]:
+    out: list[str] = []
+    run: list[str] = []
+
+    def flush() -> None:
+        if sum(map(len, run)) < PHONE_DIGITS:
+            out.extend(w for w in run if len(w) < 4)
+        run.clear()
+
+    for w in words:
+        if w.isdigit():
+            run.append(w)
+        else:
+            flush()
+            out.append(w)
+    flush()
+    return out
+
+
 def normalize_counterparty(raw: str) -> str:
-    s = str(raw or "").casefold().strip()
+    s = _fold(raw)
     if "@" in s:  # payment handles and addresses: the part before @ names the party
         s = s.split("@", 1)[0]
-    words = [w for w in _NON_ALNUM.sub(" ", s).split() if not (w.isdigit() and len(w) >= 4)]
+    words = _drop_numbers(_NON_ALNUM.sub(" ", s).split())
     while words and words[0] in LEADING:
         words.pop(0)
     while len(words) > 1 and words[-1] in TRAILING:
@@ -52,12 +79,17 @@ def normalize_counterparty(raw: str) -> str:
 
 
 def match_key(key: str, known: Iterable[str], cutoff: float = FUZZY_CUTOFF) -> str:
+    """Exact match, else a typo join for long single-word alphabetic keys only. Payees that differ in a
+    trailing token, digit or letter ("seller a" vs "seller b", "flipkart 1" vs "flipkart 2") stay apart."""
     if not key:
         return ""
     pool = [k for k in known if k]
     if key in pool:
         return key
-    close = difflib.get_close_matches(key, pool, n=1, cutoff=cutoff)
+    if " " in key or len(key) < MIN_FUZZY or not key.isalpha():
+        return key
+    singles = [k for k in pool if " " not in k and len(k) >= MIN_FUZZY and k.isalpha()]
+    close = difflib.get_close_matches(key, singles, n=1, cutoff=cutoff)
     return close[0] if close else key
 
 
