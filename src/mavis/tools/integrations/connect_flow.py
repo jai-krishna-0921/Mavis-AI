@@ -44,8 +44,9 @@ CHECK_DELAYS = (
     PENDING_TTL + timedelta(minutes=1),  # the last one is past the TTL, so the expiry is reachable
 )
 REUSE_WINDOW = timedelta(minutes=10)
-# A task that needs a capability while a connect prompt for it is still open (and this recent) joins
-# that request silently instead of sending another prompt; the user can always ask for a fresh link.
+# A task that needs a capability while a connect prompt for it is still open (its link sent this
+# recently) joins that request silently instead of sending another prompt; the user can always ask
+# for a fresh link.
 TASK_JOIN_WINDOW = timedelta(hours=2)
 NOT_NOW_PREFIX = "conn:no:"
 START_PREFIX = "conn:start:"
@@ -161,7 +162,10 @@ class ConnectFlow:
             # A link went out moments ago: remember this run, hand the link over again, and make sure
             # something is still watching for the sign-in to finish.
             if task_id:
-                await connections.create_pending(user_id, capability, reason, task_id, now=now)
+                # Dated like the link it waits on, so joining never extends the prompt's window
+                # (TASK_JOIN_WINDOW counts from when the link actually went out).
+                await connections.create_pending(user_id, capability, reason, task_id,
+                                                 now=_aware(recent.created_at))
             await self._ensure_checks(user_id, recent.id, now)
             if task_id is None:
                 await self._send_link(user_id, capability, recent.id, again=True)
