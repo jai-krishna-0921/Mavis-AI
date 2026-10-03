@@ -455,12 +455,9 @@ def _reset_attention():
     from mavis.agents import context_hooks
     from mavis.attention import wiring as attention_wiring
     from mavis.timers import system
-    from mavis.tools.integrations import wiring as integrations_wiring
-
     for getter in attention_wiring.ATTENTION_GETTERS:
         getter.cache_clear()
     attention_wiring._private_clients.clear()  # in-memory clients only; nothing on disk to release
     context_hooks.clear_context_providers()
-    integrations_wiring.FIRST_SYNC_NOTICE_OWNERS.clear()
     for kind in attention_wiring.SYSTEM_KINDS:
         system.SYSTEM_WAKEUP_HANDLERS.pop(kind.value, None)

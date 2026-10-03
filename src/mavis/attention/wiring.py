@@ -32,10 +32,10 @@ from mavis.initiative import hooks, routines
 from mavis.initiative import wiring as initiative_wiring
 from mavis.memory import embeddings
 from mavis.policy.pings import PingPolicy
+from mavis.store.repo import attention as repo
 from mavis.store.repo import users
 from mavis.timers.service import WakeupService
 from mavis.timers.system import register_system_wakeup
-from mavis.tools.integrations.wiring import own_first_sync_notice
 from mavis.worker.runner import register_event_handler, register_startup_hook
 
 log = structlog.get_logger(__name__)
@@ -156,22 +156,43 @@ ATTENTION_GETTERS = (
 )
 
 
+async def watched(user_id: int) -> bool:
+    """Daily attention chains only for users whose Gmail is watched or who still have observations."""
+    polling = (await users.get_state(user_id)).get("polling") or {}
+    return bool(polling.get(Capability.GMAIL.value)) or await repo.has_any(user_id)
+
+
+async def _ensure_daily(user_id: int) -> None:
+    if not await watched(user_id):
+        return
+    for name, chain in (("evening", get_evening()), ("retention", get_retention())):
+        try:
+            await chain.ensure(user_id)
+        except Exception as exc:  # noqa: BLE001 - one chain must not block the other
+            log.warning("attention.heal_failed", chain=name, user_id=user_id, error=type(exc).__name__)
+
+
 async def morning_maintenance(user_id: int) -> None:
-    """Rides on the daily check-in: self-heal the evening wrap, drain/backfill and retention chains."""
-    await get_evening().ensure(user_id)
-    await get_intake().heal(user_id)
-    await get_retention().ensure(user_id)
+    """Rides on the daily check-in: self-heal the drain/backfill, evening wrap and retention chains.
+    Each step is isolated, so one failure never skips the others."""
+    try:
+        await get_intake().heal(user_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("attention.heal_failed", chain="intake", user_id=user_id, error=type(exc).__name__)
+    try:
+        await _ensure_daily(user_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("attention.heal_failed", chain="daily", user_id=user_id, error=type(exc).__name__)
 
 
 async def heal_all() -> None:
     """Worker startup: everything attention keeps in the wakeups table is re-armed."""
     await get_intake().heal_all()
     for user_id in await users.all_ids():
-        for name, chain in (("evening", get_evening()), ("retention", get_retention())):
-            try:
-                await chain.ensure(user_id)
-            except Exception as exc:  # noqa: BLE001 - one user must not block the rest
-                log.warning("attention.heal_failed", chain=name, user_id=user_id, error=type(exc).__name__)
+        try:
+            await _ensure_daily(user_id)
+        except Exception as exc:  # noqa: BLE001 - one user must not block the rest
+            log.warning("attention.heal_failed", chain="daily", user_id=user_id, error=type(exc).__name__)
 
 
 async def close_attention() -> None:
@@ -207,4 +228,3 @@ def register_attention() -> None:
     if "attention" not in {s.name for s in routines.brief_sources()}:
         routines.register_brief_source(AttentionBrief())
     context_hooks.register_context_provider(get_digest().context)
-    own_first_sync_notice(Capability.GMAIL)  # the first look (after the backfill) replaces it

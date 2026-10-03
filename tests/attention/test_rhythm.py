@@ -241,3 +241,13 @@ async def test_expire_pending_closes_old_unread_mail_and_drops_the_snippet(user,
     await purge(stack.index, user.id)
     row = await repo.get(obs.id)
     assert row.status == repo.DONE and row.method == "expired" and row.pending_payload is None
+
+
+async def test_quiet_night_says_nothing_needs_you_only_when_gmail_is_watched(user, clock):
+    from mavis.store.repo import users
+
+    clock.set(MORNING)
+    assert await AttentionBrief().items(user.id, MORNING, MORNING) == []  # no Gmail: nothing at all
+    await users.update_state(user.id, {"polling": {"gmail": True}})
+    assert await AttentionBrief().items(user.id, MORNING, MORNING) == [BriefItem(NOTHING, True)]
+    assert NOTHING == "Inbox: nothing new that needs you."

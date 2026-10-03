@@ -14,6 +14,7 @@ from mavis.attention.scheduling import schedule_once
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import NotifyIntent
+from mavis.domain.policy import Capability
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.routines import BriefItem
 from mavis.initiative.untrusted import wrap_untrusted
@@ -54,8 +55,9 @@ class AttentionBrief:
 
     async def items(self, user_id: int, start: datetime, end: datetime) -> list[BriefItem]:
         rows = await repo.recent(user_id, timeutil.now() - BRIEF_LOOKBACK, origin=repo.ORIGIN_LIVE, limit=100)
-        if not rows:
-            return []
+        if not rows:  # a quiet night: say so, but only to users whose Gmail is actually watched
+            polling = (await users.get_state(user_id)).get("polling") or {}
+            return [BriefItem(NOTHING, True)] if polling.get(Capability.GMAIL.value) else []
         waiting = _waiting(rows)
         items = [BriefItem(f"Email: {_line(r)}", False) for r in waiting[:MAX_BRIEF]]
         if not waiting:
