@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from datetime import datetime
 
@@ -175,13 +176,41 @@ async def active_for_user(user_id: int) -> list[Task]:
         return list(rows)
 
 
-async def find_active_duplicate(user_id: int, goal: str) -> Task | None:
-    """A non-terminal planned task whose goal is the same thing said differently (token Jaccard >= 0.8
-    or subset, the loop dedupe rule), so one request never runs as two tasks."""
-    from mavis.store.repo.loops import similar_titles  # same rule as loop dedupe
+GOAL_DUPLICATE_SIMILARITY = 0.8
+_WEEKDAYS = frozenset("monday tuesday wednesday thursday friday saturday sunday "
+                      "mon tue tues wed thu thur thurs fri sat sun".split())
 
+
+def _goal_tokens(goal: str) -> set[str]:
+    """Lowercased words with punctuation removed. Digits, days and times stay (unlike loop titles)."""
+    return set(re.sub(r"[^\w\s]", " ", goal.casefold()).split())
+
+
+def same_goal(a: str, b: str) -> bool:
+    """Task goals are one request when their tokens match exactly or by Jaccard >= 0.8, and their
+    numbers/times (any token with a digit) and weekdays are the same. No subset rule: "Book flights
+    to Paris" is not "Book flights and hotels to Paris". Unlike loop dedupe there is no due-time
+    guard, so days and times must count here. Decided for the incident pair ("...for today at 3 PM
+    IST and send an interview invite to x@y" vs "...for the 3 PM IST interview and send the invite to
+    x@y"): Jaccard 0.8 with the same numbers, so one task."""
+    ta, tb = _goal_tokens(a), _goal_tokens(b)
+    if not ta or not tb:
+        return " ".join(a.casefold().split()) == " ".join(b.casefold().split())
+    if ta == tb:
+        return True
+
+    def anchors(t: set[str]) -> set[str]:
+        return {w for w in t if any(c.isdigit() for c in w) or w in _WEEKDAYS}
+
+    if anchors(ta) != anchors(tb):
+        return False
+    return len(ta & tb) / len(ta | tb) >= GOAL_DUPLICATE_SIMILARITY
+
+
+async def find_active_duplicate(user_id: int, goal: str) -> Task | None:
+    """A non-terminal planned task with the same goal (same_goal), so one request never runs twice."""
     for task in await active_for_user(user_id):
-        if task.kind == TaskKind.TASK.value and similar_titles(task.goal, goal):
+        if task.kind == TaskKind.TASK.value and same_goal(task.goal, goal):
             return task
     return None
 

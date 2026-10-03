@@ -275,3 +275,38 @@ async def test_queue_keeps_two_slack_messages_to_one_channel(user, fresh_registr
     out = await lc.ainvoke({"channel": "#team", "text": "Lunch is on me"})
     assert out.startswith("QUEUED_FOR_APPROVAL #")
     assert len(await approvals.open_for_user(user.id)) == 2
+
+
+# --- review round 2 (I2): a task-specific goal rule (days, times and numbers count) ----------------
+import pytest  # noqa: E402
+
+from mavis.store.repo.tasks import same_goal  # noqa: E402
+
+INCIDENT_A = ("Create a calendar event for today at 3 PM IST and send an interview invite to "
+              "jai261003@gmail.com")
+INCIDENT_B = ("Create a calendar event for the 3 PM IST interview and send the invite to "
+              "jai261003@gmail.com")
+
+
+@pytest.mark.parametrize("a,b", [
+    ("Schedule interview with Raj on Monday at 10am", "Schedule interview with Raj on Tuesday at 3pm"),
+    ("Book flights to Paris", "Book flights and hotels to Paris"),
+    ("Compare the best laptops under 1000", "Compare the best laptops under 1500"),
+    ("Draft the weekly report for the marketing team at 3pm",
+     "Draft the weekly report for the marketing team at 4pm"),
+])
+def test_different_goals_are_not_duplicates(a, b) -> None:
+    assert not same_goal(a, b)
+
+
+def test_identical_and_reworded_incident_goals_are_duplicates() -> None:
+    assert same_goal(GOAL, GOAL) and same_goal(GOAL, "  send an interview invite to jane for friday 3pm!")
+    assert same_goal(INCIDENT_A, INCIDENT_B)  # token Jaccard exactly 0.8, same numbers: one task
+
+
+async def test_dispatch_starts_monday_and_tuesday_interviews_separately(user, rec_bus) -> None:
+    ids = await task_dispatch.dispatch_task_requests(user.id, [
+        TaskRequest(goal="Schedule interview with Raj on Monday at 10am"),
+        TaskRequest(goal="Schedule interview with Raj on Tuesday at 3pm"),
+    ], TaskOrigin.USER)
+    assert len(set(ids)) == 2
