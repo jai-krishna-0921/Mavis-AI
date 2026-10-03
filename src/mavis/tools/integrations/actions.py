@@ -292,6 +292,20 @@ class TaskDeleteArgs(BaseModel):
     task_id: str = Field(min_length=1)
 
 
+class DriveUploadArgs(BaseModel):
+    artifact_id: int = Field(description="Id of a file this task produced (deck, report, sheet)")
+    folder_id: str = Field(default="", description="Drive folder id; empty puts it in My Drive")
+
+
+class DriveUploadFileArgs(BaseModel):
+    """Internal: a local artifact the provider stages and uploads (built by drive.upload, not a model)."""
+
+    path: str
+    name: str
+    mime: str
+    folder_id: str = ""
+
+
 # --- helpers --------------------------------------------------------------------------------------
 
 
@@ -405,6 +419,11 @@ def _preview_task_update(args: TaskUpdateArgs, tz: str) -> str:
 
 def _preview_task_delete(args: TaskDeleteArgs, tz: str) -> str:
     return f"🗑️ Delete task {args.task_id}"
+
+
+def _preview_upload(args: DriveUploadArgs, tz: str) -> str:
+    where = f"folder {args.folder_id}" if args.folder_id else "My Drive"
+    return f"⬆️ Upload file #{args.artifact_id} from this task to {where}"
 
 
 def _preview_meet(args: NoArgs, tz: str) -> str:
@@ -539,6 +558,9 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
                taint_approve=True),
     ActionSpec("tasks.delete", Capability.TASKS, "Delete a to-do task. The user approves first.",
                TaskDeleteArgs, RiskClass.DESTRUCTIVE, _WORKERS, preview=_preview_task_delete),
+    ActionSpec("drive.upload", Capability.DRIVE,
+               "Upload a file this task produced (deck, report, spreadsheet) to the user's Google Drive.",
+               DriveUploadArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_upload, taint_approve=True),
     ActionSpec("meet.create", Capability.MEET, "Create a standalone Google Meet link.",
                NoArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_meet, taint_approve=True),
     # internal: file metadata and permissions (risk escalation, allowlist), downloads, task lookup, profile
@@ -548,6 +570,8 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("drive.download", Capability.DRIVE, "Export or download a file.", DriveDownloadArgs,
                RiskClass.READ, _INTERNAL),
     ActionSpec("tasks.get", Capability.TASKS, "One task by id.", TaskRefArgs, RiskClass.READ, _INTERNAL),
+    ActionSpec("drive.upload_file", Capability.DRIVE, "Upload a staged local file.", DriveUploadFileArgs,
+               RiskClass.WRITE_SELF, _INTERNAL),
     ActionSpec("mail.profile", Capability.GMAIL, "The user's own email address.", NoArgs, RiskClass.READ,
                _INTERNAL),
 )

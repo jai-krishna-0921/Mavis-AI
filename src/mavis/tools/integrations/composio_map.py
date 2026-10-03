@@ -21,6 +21,7 @@ from mavis.domain.policy import Capability
 class SlugMapping:
     slug: str
     translate: Callable[[Any], dict[str, Any]]
+    file_arg: str | None = None  # the provider stages args.path and sends it under this key (uploads)
 
     @property
     def suffix(self) -> str:
@@ -254,6 +255,12 @@ COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
         "GOOGLESUPER_DELETE_TASK", lambda a: {"tasklist_id": TASKLIST, "task_id": a.task_id}
     ),
     "meet.create": SlugMapping("GOOGLESUPER_CREATE_MEET", lambda a: {}),
+    # drive.upload has no mapping: workspace_tools.drive_upload resolves the artifact, then calls this
+    "drive.upload_file": SlugMapping(
+        "GOOGLESUPER_UPLOAD_FILE",
+        lambda a: {"folder_to_upload_to": a.folder_id} if a.folder_id else {},
+        file_arg="file_to_upload",
+    ),
     "drive.meta": SlugMapping("GOOGLESUPER_GET_FILE_METADATA", lambda a: {"fileId": a.file_id}),
     "drive.permissions": SlugMapping("GOOGLESUPER_LIST_PERMISSIONS", lambda a: {"fileId": a.file_id}),
     "drive.download": SlugMapping("GOOGLESUPER_DOWNLOAD_FILE", _download),
