@@ -14,11 +14,20 @@ from pydantic import BaseModel
 
 from mavis.domain.errors import ActionFailed, ConnectionRequired, IntegrationError
 from mavis.domain.integrations import ToolResult, UserRef
-from mavis.tools.integrations.actions import ACTIONS, CAPABILITY_PURPOSE, ActionSpec, display_name, localize
+from mavis.tools.integrations.actions import (
+    ACTIONS,
+    CAPABILITY_PURPOSE,
+    WORKSPACE_CAPABILITIES,
+    ActionSpec,
+    display_name,
+    localize,
+    workspace_enabled,
+)
 from mavis.tools.integrations.base import IntegrationProvider, render_result
 from mavis.tools.integrations.connections import ConnectionCache
 from mavis.tools.integrations.mail_render import RENDERERS
-from mavis.tools.registry import MavisTool, ToolContext, ToolRegistry, contextual
+from mavis.tools.integrations.workspace_render import RENDERERS as WORKSPACE_RENDERERS
+from mavis.tools.registry import MavisTool, TaintPolicy, ToolContext, ToolRegistry, contextual
 
 REVOKED_REASON = "access expired or was revoked"
 
@@ -54,8 +63,8 @@ async def gated(
     *,
     provider: IntegrationProvider | None = None,
     cache: ConnectionCache | None = None,
-    render: Callable[[Any], str] | None = None,
-) -> str:
+    render: Callable[[Any], Any] | None = None,
+) -> Any:
     """Run one integration action. Raises ConnectionRequired, or ActionFailed when it did not happen.
 
     `render` turns successful data into model-facing text (default: truncated JSON).
@@ -76,9 +85,30 @@ async def gated(
     return render_result(result)
 
 
+async def action_data(
+    ctx: ToolContext,
+    action: str,
+    args: BaseModel,
+    *,
+    provider: IntegrationProvider | None = None,
+    cache: ConnectionCache | None = None,
+) -> Any:
+    """Like `gated`, but returns the provider's raw data: for actions that need several calls and for
+    pre-steps (file metadata). Same errors as `gated`."""
+    return await gated(ctx, action, args, provider=provider, cache=cache, render=lambda data: data)
+
+
 def _make_tool(spec: ActionSpec) -> MavisTool:
+    from mavis.tools.integrations import workspace_tools  # lazy: it imports this module
+
+    custom = workspace_tools.CUSTOM_FNS.get(spec.name)
+    render = RENDERERS.get(spec.name) or WORKSPACE_RENDERERS.get(spec.name)
+
     async def fn(ctx: ToolContext, args: BaseModel) -> str:
-        return await gated(ctx, spec.name, localize(args, ctx.timezone), render=RENDERERS.get(spec.name))
+        localized = localize(args, ctx.timezone)
+        if custom is not None:
+            return await custom(ctx, localized)
+        return await gated(ctx, spec.name, localized, render=render)
 
     def preview(args: BaseModel, ctx: ToolContext) -> str:
         localized = localize(args, ctx.timezone)
@@ -100,12 +130,19 @@ def _make_tool(spec: ActionSpec) -> MavisTool:
         untrusted_output=True,  # email bodies and event text are third-party content
         risk_fn=risk_fn,
         priority=spec.priority,
+        on_taint=TaintPolicy.APPROVE if spec.taint_approve else TaintPolicy.ALLOW,
+        prepare=workspace_tools.PREPARES.get(spec.name),
     )
 
 
 def register_integration_tools(registry: ToolRegistry) -> list[str]:
     names = []
+    workspace = workspace_enabled()
     for spec in ACTIONS.values():
+        if not spec.agents:
+            continue  # internal: used by other actions and polls, never offered to a model
+        if spec.capability in WORKSPACE_CAPABILITIES and not workspace:
+            continue  # GOOGLE_WORKSPACE_ENABLED=false: the catalog is exactly the pre-Workspace one
         tool = _make_tool(spec)
         registry.register(tool)
         names.append(tool.name)

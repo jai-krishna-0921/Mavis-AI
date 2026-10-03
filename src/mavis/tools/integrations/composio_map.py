@@ -81,6 +81,69 @@ def _update_event(a: Any) -> dict[str, Any]:
     return out
 
 
+# --- Google Workspace translations (argument keys verified live 2026-10-03; plan appendix A) ---------------
+TASKLIST = "@default"  # Google's alias for the user's primary task list (the trigger config default too)
+FILE_FIELDS = (
+    "nextPageToken,files(id,name,mimeType,modifiedTime,sharedWithMeTime,"
+    "owners(displayName,emailAddress,me),sharingUser(displayName,emailAddress))"
+)
+
+
+def rfc3339(dt: datetime) -> str:
+    """Tasks wants RFC 3339 in UTC with a Z."""
+    return dt.astimezone(UTC).replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
+
+
+def _drive_query(query: str) -> str:
+    q = query.strip()
+    return f"({q}) and trashed = false" if q else "trashed = false"
+
+
+def _drive_search(a: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {"q": _drive_query(a.query), "pageSize": a.max_results, "fields": FILE_FIELDS}
+    if "fulltext" not in a.query.lower():  # Drive refuses orderBy together with fullText terms
+        out["orderBy"] = "modifiedTime desc"
+    return out
+
+
+def _drive_recent(a: Any) -> dict[str, Any]:
+    if a.shared_with_me:
+        return {"q": "sharedWithMe and trashed = false", "orderBy": "sharedWithMeTime desc",
+                "pageSize": a.max_results, "fields": FILE_FIELDS}
+    return {"q": "trashed = false", "orderBy": "modifiedTime desc", "pageSize": a.max_results,
+            "fields": FILE_FIELDS}
+
+
+def _download(a: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {"file_id": a.file_id}
+    if a.mime_type:
+        out["mime_type"] = a.mime_type
+    return out
+
+
+def _sheets_find(a: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {"max_results": a.max_results}
+    if a.query.strip():
+        out["query"] = a.query.strip()
+    return out
+
+
+def _sheets_read(a: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {"spreadsheet_id": a.spreadsheet_id}
+    if a.range.strip():
+        out["ranges"] = [a.range.strip()]
+    return out
+
+
+def _tasks_list(a: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "tasklist_id": TASKLIST, "showCompleted": a.show_completed, "maxResults": a.max_results,
+    }
+    if a.due_before is not None:
+        out["dueMax"] = rfc3339(a.due_before)
+    return out
+
+
 COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
     "mail.search": SlugMapping(
         "GMAIL_FETCH_EMAILS", lambda a: {"query": a.query, "max_results": a.max_results}
@@ -114,6 +177,28 @@ COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
         # NOTION_ADD_PAGE_CONTENT call (not built; Notion is outside the Gmail slice).
         lambda a: {"parent_id": a.parent_id, "title": a.title},
     ),
+    # Google Workspace: googlesuper only, so the stored slug already carries the GOOGLESUPER_ prefix.
+    # drive.read has no mapping: workspace_tools.drive_read calls drive.meta and drive.download.
+    "drive.search": SlugMapping("GOOGLESUPER_FIND_FILE", _drive_search),
+    "drive.list_recent": SlugMapping("GOOGLESUPER_LIST_FILES", _drive_recent),
+    "docs.read": SlugMapping("GOOGLESUPER_GET_DOCUMENT_BY_ID", lambda a: {"id": a.document_id}),
+    "sheets.find": SlugMapping("GOOGLESUPER_SEARCH_SPREADSHEETS", _sheets_find),
+    "sheets.read": SlugMapping("GOOGLESUPER_BATCH_GET", _sheets_read),
+    "tasks.list": SlugMapping("GOOGLESUPER_LIST_TASKS", _tasks_list),
+    "contacts.search": SlugMapping(
+        "GOOGLESUPER_SEARCH_PEOPLE", lambda a: {"query": a.query, "pageSize": a.max_results}
+    ),
+    "meet.transcript": SlugMapping(
+        "GOOGLESUPER_GET_TRANSCRIPTS_BY_CONFERENCE_RECORD_ID",
+        lambda a: {"conferenceRecord_id": a.conference_record_id},
+    ),
+    "drive.meta": SlugMapping("GOOGLESUPER_GET_FILE_METADATA", lambda a: {"fileId": a.file_id}),
+    "drive.permissions": SlugMapping("GOOGLESUPER_LIST_PERMISSIONS", lambda a: {"fileId": a.file_id}),
+    "drive.download": SlugMapping("GOOGLESUPER_DOWNLOAD_FILE", _download),
+    "tasks.get": SlugMapping(
+        "GOOGLESUPER_GET_TASK", lambda a: {"tasklist_id": TASKLIST, "task_id": a.task_id}
+    ),
+    "mail.profile": SlugMapping("GMAIL_GET_PROFILE", lambda a: {}),
 }
 
 # Provider-agnostic trigger names Mavis subscribes to per capability.

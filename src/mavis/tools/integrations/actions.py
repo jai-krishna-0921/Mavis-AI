@@ -172,6 +172,71 @@ class NotionCreateArgs(BaseModel):
     content: str = Field(default="", description="Markdown body")
 
 
+# --- Google Workspace argument models (spec 2026-10-03 section 4) ---------------------------------------
+
+
+class NoArgs(BaseModel):
+    pass
+
+
+class DriveSearchArgs(BaseModel):
+    query: str = Field(
+        default="",
+        description="Drive search syntax, e.g. \"name contains 'budget'\", \"fullText contains 'Priya'\", "
+                    "\"'priya@example.com' in owners\", \"modifiedTime > '2026-10-01T00:00:00'\"",
+    )
+    max_results: int = Field(default=10, ge=1, le=25)
+
+
+class DriveRecentArgs(BaseModel):
+    shared_with_me: bool = Field(default=False, description="Only files other people shared with the user")
+    max_results: int = Field(default=10, ge=1, le=25)
+
+
+class FileArgs(BaseModel):
+    file_id: str = Field(min_length=1, description="Drive file id (from drive_search or drive_list_recent)")
+
+
+class DriveDownloadArgs(BaseModel):
+    file_id: str = Field(min_length=1)
+    mime_type: str = Field(default="", description="Export type for Google Docs, Sheets and Slides")
+
+
+class DocArgs(BaseModel):
+    document_id: str = Field(min_length=1, description="Google Doc id (a Drive file id)")
+
+
+class SheetsFindArgs(BaseModel):
+    query: str = Field(default="", description="e.g. \"name contains 'budget'\"; empty lists recent sheets")
+    max_results: int = Field(default=10, ge=1, le=25)
+
+
+class SheetsReadArgs(BaseModel):
+    spreadsheet_id: str = Field(min_length=1)
+    range: str = Field(default="", description="A1 range like 'Sheet1!A1:F50'; empty reads the first sheet")
+
+
+class TasksListArgs(BaseModel):
+    due_before: datetime | None = Field(
+        default=None, description="Only tasks due before this time (now = overdue, end of today = due today)"
+    )
+    show_completed: bool = False
+    max_results: int = Field(default=50, ge=1, le=100)
+
+
+class TaskRefArgs(BaseModel):
+    task_id: str = Field(min_length=1, description="Task id from tasks_list")
+
+
+class ContactsSearchArgs(BaseModel):
+    query: str = Field(min_length=2, description="A name, email or phone number")
+    max_results: int = Field(default=10, ge=1, le=30)
+
+
+class MeetTranscriptArgs(BaseModel):
+    conference_record_id: str = Field(min_length=1, description="Conference record id, e.g. 'abc-123'")
+
+
 # --- helpers --------------------------------------------------------------------------------------
 
 
@@ -259,6 +324,7 @@ class ActionSpec:
     risk_fn: Callable[[BaseModel], RiskClass] | None = None
     preview: Callable[[BaseModel, str], str] | None = None  # (args, timezone) -> text
     priority: int = 50  # registry.select tie-break when a chat message shares no words with any tool
+    taint_approve: bool = False  # after untrusted output in the run, queue for approval (Workspace spec 4.3)
 
     def risk_for(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn else self.risk
@@ -313,4 +379,48 @@ _SPECS: tuple[ActionSpec, ...] = (
                NotionCreateArgs, RiskClass.WRITE_SELF, _a("knowledge"), preview=_preview_notion),
 )
 
-ACTIONS: dict[str, ActionSpec] = {s.name: s for s in _SPECS}
+# Workspace exposure (spec 4.4): chat gets reads plus a few self-only writes; spawned workers get all.
+_CHAT = _a("conversation", "spawn")
+_INTERNAL = frozenset[str]()  # used by other actions and polls, never offered to a model
+
+_WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
+    ActionSpec("drive.search", Capability.DRIVE,
+               "Search the user's Google Drive files (docs, sheets, slides, decks, PDFs) by name, text, "
+               "owner or date. Returns file ids, titles, owners and dates.",
+               DriveSearchArgs, RiskClass.READ, _CHAT, priority=55),
+    ActionSpec("drive.list_recent", Capability.DRIVE,
+               "List recently changed Google Drive files, or files recently shared with the user.",
+               DriveRecentArgs, RiskClass.READ, _CHAT),
+    ActionSpec("drive.read", Capability.DRIVE,
+               "Read the text of a Drive file by file id: Google Docs, Sheets (as CSV), Slides, text files.",
+               FileArgs, RiskClass.READ, _CHAT),
+    ActionSpec("docs.read", Capability.DOCS, "Read a Google Doc by document id: title and text.",
+               DocArgs, RiskClass.READ, _CHAT),
+    ActionSpec("sheets.find", Capability.SHEETS, "Find Google Sheets spreadsheets by name or content.",
+               SheetsFindArgs, RiskClass.READ, _CHAT),
+    ActionSpec("sheets.read", Capability.SHEETS,
+               "Read cells from a Google Sheet by spreadsheet id and optional A1 range (first 50 rows).",
+               SheetsReadArgs, RiskClass.READ, _CHAT),
+    ActionSpec("tasks.list", Capability.TASKS,
+               "Show the user's to-do list (Google Tasks): open tasks and due dates. Set due_before to now "
+               "for overdue tasks, or to the end of today for what is due today.",
+               TasksListArgs, RiskClass.READ, _CHAT, priority=57),
+    ActionSpec("contacts.search", Capability.CONTACTS,
+               "Look up a person in the user's Google Contacts: name to email address and phone number.",
+               ContactsSearchArgs, RiskClass.READ, _CHAT),
+    ActionSpec("meet.transcript", Capability.MEET,
+               "List the transcripts of a Google Meet conference; each transcript is a Google Doc to read "
+               "with docs_read.",
+               MeetTranscriptArgs, RiskClass.READ, _CHAT),
+    # internal: file metadata and permissions (risk escalation, allowlist), downloads, task lookup, profile
+    ActionSpec("drive.meta", Capability.DRIVE, "File name and type.", FileArgs, RiskClass.READ, _INTERNAL),
+    ActionSpec("drive.permissions", Capability.DRIVE, "Who can access a file.", FileArgs, RiskClass.READ,
+               _INTERNAL),
+    ActionSpec("drive.download", Capability.DRIVE, "Export or download a file.", DriveDownloadArgs,
+               RiskClass.READ, _INTERNAL),
+    ActionSpec("tasks.get", Capability.TASKS, "One task by id.", TaskRefArgs, RiskClass.READ, _INTERNAL),
+    ActionSpec("mail.profile", Capability.GMAIL, "The user's own email address.", NoArgs, RiskClass.READ,
+               _INTERNAL),
+)
+
+ACTIONS: dict[str, ActionSpec] = {s.name: s for s in (*_SPECS, *_WORKSPACE_SPECS)}

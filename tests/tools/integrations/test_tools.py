@@ -3,7 +3,7 @@ import pytest
 from mavis.domain.errors import ActionFailed, ConnectionRequired, IntegrationError
 from mavis.domain.integrations import ConnectionState, ToolResult
 from mavis.domain.policy import Capability, RiskClass
-from mavis.tools.integrations.actions import ACTIONS, MailSearchArgs
+from mavis.tools.integrations.actions import ACTIONS, WORKSPACE_CAPABILITIES, MailSearchArgs
 from mavis.tools.integrations.connections import ConnectionCache
 from mavis.tools.integrations.tools import gated, register_integration_tools, tool_name
 from mavis.tools.registry import ToolContext, ToolRegistry
@@ -65,7 +65,7 @@ async def test_integration_error_returns_sentence(cache):
 def test_register_integration_tools():
     registry = ToolRegistry()
     names = register_integration_tools(registry)
-    assert len(names) == len(ACTIONS)
+    assert names == names_all(registry)  # flag off: no Workspace tools, and internal actions never
     assert tool_name("calendar.create_event") == "calendar_create_event" and "calendar_create_event" in names
     tool = registry.get("calendar_create_event")
     assert tool.requires is Capability.CALENDAR and tool.preview_needs_ctx is True
@@ -93,7 +93,8 @@ def test_chat_can_send_mail_with_approval():
 
 
 def names_all(registry):
-    return [tool_name(a) for a in ACTIONS]
+    return [tool_name(a) for a, spec in ACTIONS.items()
+            if spec.agents and spec.capability not in WORKSPACE_CAPABILITIES]
 
 
 def test_load_builtin_tools_registers_integration_tools():
