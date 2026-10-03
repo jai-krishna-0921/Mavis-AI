@@ -209,11 +209,16 @@ class AttentionObservation(Base):
     normalized snippet only until the email is understood, then it is cleared."""
 
     __tablename__ = "attention_observations"
-    __table_args__ = (UniqueConstraint("user_id", "message_id", name="uq_attention_observations_user_msg"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "message_id", name="uq_attention_observations_user_msg"),
+        Index("ix_attention_observations_user_source", "user_id", "source"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     message_id: Mapped[str] = mapped_column(String(200))
+    # "mail" for email; "drive", "docs", "tasks", "calendar" for Google Workspace signals (spec 2026-10-03)
+    source: Mapped[str] = mapped_column(String(12), default="mail", server_default="mail")
     thread_id: Mapped[str] = mapped_column(String(200), default="")
     origin: Mapped[str] = mapped_column(String(12), default="live")
     status: Mapped[str] = mapped_column(String(12), default="pending", index=True)
