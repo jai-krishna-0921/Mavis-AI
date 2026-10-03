@@ -458,7 +458,7 @@ class WorkspaceIntake:
                 urgency=0, summary=signal.object_title,
                 facts={**signal.model_dump(mode="json"), "reason": "baseline"}, received_at=when,
             )
-        await self.patch(user_id, shared_after=now.isoformat())
+        await self._advance_cursor(user_id, now)
         return []
 
     async def first_sync_contacts(self, user_id: int) -> list[str]:

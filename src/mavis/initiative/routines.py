@@ -45,7 +45,8 @@ class BriefItem:
 class BriefSource(Protocol):
     """A source may also define `async delivered(user_id, at)`: called once the brief carrying its items
     went out (not when it was blocked or deferred), so "since the last brief" state is stamped only then.
-    `at` is when the items were gathered."""
+    `at` is when the items were gathered. A brief sent later (from a quiet-hours deferral, or recovered
+    after a crash) does not stamp, so its items may repeat in the next brief: by design, never lost."""
 
     name: str
 

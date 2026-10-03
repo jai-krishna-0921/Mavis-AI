@@ -115,6 +115,8 @@ async def test_evening_wrap_adds_overdue_tasks_and_waiting_comments(user, clock)
               owned_by_me=True, at=EVENING - timedelta(hours=5))
     await row(user.id, "docs:d2:c1", source="docs", kind="comment", verdict="brief", title="Old plan",
               owned_by_me=True, at=EVENING - timedelta(days=4))
+    await row(user.id, "docs:d3:c1", source="docs", kind="comment", verdict="log", title="Muted plan",
+              owned_by_me=True, at=EVENING - timedelta(hours=2))
     register_evening_source(workspace_evening)
     ex = Exec()
     assert await EveningWrap(lambda: ex, WakeupService())._send(user.id) is True
@@ -123,6 +125,7 @@ async def test_evening_wrap_adds_overdue_tasks_and_waiting_comments(user, clock)
     assert "Overdue task: Renew passport" in sent.intent.intent
     assert "Comment waiting on your doc: Launch plan" in sent.intent.intent
     assert "Old plan" not in sent.intent.intent  # comments older than 3 days are left out
+    assert "Muted plan" not in sent.intent.intent  # a muted (log) comment never comes back
 
 
 async def test_evening_wrap_without_sources_still_skips_a_quiet_day(user, clock):
