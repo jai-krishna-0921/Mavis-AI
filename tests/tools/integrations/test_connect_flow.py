@@ -454,3 +454,15 @@ async def test_a_stale_open_prompt_gets_a_fresh_one(db, provider, cache, fake_bu
     now[0] = NOW + timedelta(hours=3)
     await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="9")
     assert len(rec.sent) == 2
+
+
+async def test_joining_does_not_extend_the_prompt_window(db, provider, cache, fake_bus, rec, state):
+    now = [NOW]
+    flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="3")
+    now[0] = NOW + timedelta(minutes=90)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="6")  # joins
+    assert len(rec.sent) == 1
+    now[0] = NOW + timedelta(hours=2, minutes=10)  # 2h after the link went out, 40 min after the join
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="9")
+    assert len(rec.sent) == 2  # a fresh link: the old one was sent more than 2h ago
