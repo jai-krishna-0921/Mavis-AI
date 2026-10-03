@@ -6,12 +6,14 @@ Both pre-check PingPolicy so attention owns its own deferral and keeps its butto
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable
 from typing import Any
 
 import structlog
 
 from mavis.attention.counterparty import display_name
+from mavis.attention.policy import LOOKALIKE, NOTIFY_SECURITY
 from mavis.attention.sanitize import REMOVED, clean, domain_label
 from mavis.attention.scheduling import schedule_once
 from mavis.attention.schema import FLAG_LABELS, METHOD_LABELS, AttentionDecision, EmailKind, Verdict
@@ -30,6 +32,29 @@ PREFIX = "at:"
 YES, NO, MUTE, ALWAYS = "at:y:", "at:n:", "at:m:", "at:a:"
 SENT, DEFERRED, DROPPED = "sent", "deferred", "dropped"
 QUESTION = "Was this you?"
+MAX_NOTIFY_URGENCY = 4  # composed notifies are untrusted: the executor caps them here
+BULK_MARKERS = ("promotional", "social", "forums", "list_unsubscribe")
+_ISO_CURRENCY = re.compile(r"[A-Z]{3}")
+
+
+def is_bulk(obs: Any) -> bool:
+    """Promotional, social or forums mail, or mail with List-Unsubscribe: never a security notice.
+    Ingest records these markers in facts["bulk"]; a log-only DROPPED observation is bulk by definition."""
+    facts = obs.facts or {}
+    return obs.status == "dropped" or any(m in (facts.get("bulk") or []) for m in BULK_MARKERS)
+
+
+def is_security_obs(obs: Any) -> bool:
+    """Deterministic security notice (mirrors the policy's classification): the kind, any notifying risk
+    flag, or the lookalike code; never for bulk mail, which could otherwise abuse the budget bypass."""
+    facts = obs.facts or {}
+    flags = {str(f) for f in facts.get("risk_flags") or []}
+    security = (
+        obs.kind == EmailKind.SECURITY.value
+        or bool(flags & {str(f) for f in NOTIFY_SECURITY})
+        or LOOKALIKE in (facts.get("codes") or [])
+    )
+    return security and not is_bulk(obs)
 
 
 def ask_buttons(obs_id: int) -> list[list[Button]]:
@@ -76,7 +101,7 @@ def join_reasons(reasons: Iterable[str]) -> str:
 
 
 def dedupe_key(obs: Any) -> str:
-    return f"attn:{obs.message_id}"[:200]
+    return f"attn:{obs.message_id}"[:150]  # the outbox key appends :date:index
 
 
 def _when(occurred: Any, received: Any, tz: str) -> str:
@@ -84,6 +109,12 @@ def _when(occurred: Any, received: Any, tz: str) -> str:
     local = timeutil.to_local(dt, tz)
     today = timeutil.to_local(timeutil.now(), tz).date()
     return f"{local:%H:%M}" if local.date() == today else f"{local:%a %d %b}, {local:%H:%M}"
+
+
+def _currency(raw: Any) -> str:
+    """Only a plain 3-letter ISO code is shown; anything else is dropped, never scrubbed into the amount."""
+    code = str(raw or "").strip().upper()
+    return code if _ISO_CURRENCY.fullmatch(code) else ""
 
 
 def _payee(key: Any) -> str:
@@ -98,7 +129,7 @@ def ask_text(obs: Any, tz: str) -> list[str]:
     if money and obs.kind != EmailKind.SECURITY.value:
         method = str(money.get("method") or "other")
         via = f" via {METHOD_LABELS[method]}" if method in METHOD_LABELS and method != "other" else ""
-        amount = format_amount(float(money["amount"]), clean(money.get("currency") or "", 8))
+        amount = format_amount(float(money["amount"]), _currency(money.get("currency")))
         payee = _payee(money.get("counterparty_key"))
         when = _when(money.get("occurred_at"), obs.received_at, tz)
         first = f"Quick check: an email says {amount} was debited to {payee}{via}, at {when}."
@@ -126,7 +157,7 @@ def notify_intent(obs: Any, decision: AttentionDecision) -> str:
             "open links, reply or call numbers from it."
         )
     if obs.action:
-        parts.append(f"What it asks of them: {obs.action}.")
+        parts.append(f"What it asks of them: {clean(obs.action, 120)}.")
     if why:
         parts.append(f"Why it matters: {why}.")
     parts.append("Suggest they open Gmail directly for the details.")
@@ -139,7 +170,10 @@ class Speaker:
 
     async def speak(self, user: Any, obs: Any, decision: AttentionDecision) -> str:
         key = dedupe_key(obs)
-        verdict = await self._policy.check(user, decision.urgency, key, timeutil.now())
+        ask = decision.verdict is Verdict.ASK
+        urgency = decision.urgency if ask else min(decision.urgency, MAX_NOTIFY_URGENCY)
+        sec = not ask and is_security_obs(obs)  # security notices bypass the daily budget (capped 2/day)
+        verdict = await self._policy.check(user, urgency, key, timeutil.now(), bypass_budget=sec)
         if not verdict.allow:
             if verdict.reason == "duplicate":
                 return SENT
@@ -155,14 +189,17 @@ class Speaker:
                 return DEFERRED
             return DROPPED
         executor = self._executor_of()
-        if decision.verdict is Verdict.ASK:
+        if ask:
             await executor.deliver(
                 user, ask_text(obs, user.timezone), key, decision.urgency, buttons=ask_buttons(obs.id)
             )
             log.info("attention.spoke", obs_id=obs.id, verdict="ask", urgency=decision.urgency)
             return SENT
         intent = NotifyIntent(
-            urgency=max(1, min(decision.urgency, 4)), intent=notify_intent(obs, decision), dedupe_key=key
+            urgency=max(1, urgency),
+            intent=notify_intent(obs, decision),
+            dedupe_key=key,
+            security=sec,
         )
         buttons = None if obs.kind == EmailKind.SECURITY.value else mute_buttons(obs.id)
         sent = await executor.notify(user, intent, context=obs.summary, untrusted=True, buttons=buttons)

@@ -221,3 +221,91 @@ def test_ask_text_scrubs_payee_and_rounds_amount(clock):
     assert "an unknown payee" in first and "evil" not in first and "9876543210" not in first
     assert "₹100" in first
     assert len(f"at:n:{10**12}".encode()) <= 64
+
+
+async def _spent_budget(user, settings, monkeypatch):
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    monkeypatch.setattr(settings, "ping_daily_budget", 1)
+    await messages.log(user.id, Role.ASSISTANT, "earlier ping", proactive=True)
+
+
+async def test_security_notify_survives_exhausted_budget(
+    user, clock, settings, monkeypatch, recording_bus, fake_memory, fake_llm
+):
+    from sqlalchemy import select
+
+    from mavis.domain.decisions import ComposedMessage
+    from mavis.initiative.wiring import build_initiative
+    from mavis.store.db import Session
+    from mavis.store.models import OutboxMessage
+
+    async def no_embed(texts):
+        return [[1.0, 0.0] for _ in texts]
+
+    clock.set(NOON)
+    await _spent_budget(user, settings, monkeypatch)
+    init = build_initiative(recording_bus, fake_memory, embed=no_embed)
+    sp = Speaker(lambda: init.executor, PingPolicy(), WakeupService())
+    decision = AttentionDecision(Verdict.NOTIFY, 4, 0.8, ("it mentions a new sign-in",))
+
+    plain = await make_obs(
+        user.id, "b1", kind="deadline_or_bill", verdict="notify", urgency=3, received_at=NOON
+    )
+    assert await sp.speak(user, plain, AttentionDecision(Verdict.NOTIFY, 3, 0.8)) == "dropped"
+
+    sec = await make_obs(
+        user.id,
+        "b2",
+        kind="security",
+        verdict="notify",
+        urgency=4,
+        received_at=NOON,
+        facts={"risk_flags": ["new_signin"]},
+    )
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["Was that sign-in you?"]))
+    assert await sp.speak(user, sec, decision) == "sent"
+    async with Session() as s:
+        assert [o.text for o in await s.scalars(select(OutboxMessage))] == ["Was that sign-in you?"]
+
+    bulk = await make_obs(
+        user.id,
+        "b3",
+        kind="security",
+        verdict="notify",
+        urgency=4,
+        received_at=NOON,
+        facts={"risk_flags": ["new_signin"], "bulk": ["list_unsubscribe"]},
+    )
+    assert await sp.speak(user, bulk, decision) == "dropped"
+
+
+async def test_notify_flags_and_caps(user, clock):
+    clock.set(NOON)
+    ex = FakeExecutor()
+    sec = await make_obs(
+        user.id, "c1", kind="account_update", received_at=NOON, facts={"codes": ["lookalike_domain"]}
+    )
+    await speaker(ex).speak(user, sec, AttentionDecision(Verdict.NOTIFY, 5, 0.9))
+    assert ex.notified[0][0].security is True and ex.notified[0][0].urgency == 4
+    plain = await make_obs(
+        user.id, "c2", kind="deadline_or_bill", received_at=NOON, action="see pay.evil.com now"
+    )
+    await speaker(ex).speak(user, plain, AttentionDecision(Verdict.NOTIFY, 3, 0.9))
+    assert ex.notified[1][0].security is False and "evil" not in ex.notified[1][0].intent
+
+
+def test_currency_allowlist_and_dedupe_length(clock):
+    clock.set(T0)
+
+    class Obs:
+        id, kind, sender_domain, received_at = 11, "money_movement", "examplebank.in", T0
+        facts = {"money": {**MONEY, "currency": "x.com", "amount": 5}}
+        reasons: list[str] = []
+        message_id = "m" * 400
+
+    assert "5 was debited" in ask_text(Obs, "Asia/Kolkata")[0] and "[removed]" not in ask_text(Obs, "UTC")[0]
+    from mavis.attention.speaker import dedupe_key
+
+    assert len(dedupe_key(Obs)) == 150
