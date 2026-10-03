@@ -17,8 +17,10 @@ import structlog
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
+from mavis.config import get_settings
 from mavis.domain.errors import ApprovalRequired, BudgetExceeded, ConnectionRequired
 from mavis.llm import models as llm
+from mavis.policy.risk import wrap_untrusted
 from mavis.tools.registry import ToolRun, current_run
 
 log = structlog.get_logger(__name__)
@@ -32,7 +34,7 @@ class ReactResult:
     text: str
     steps: int
     messages: list[BaseMessage] = field(default_factory=list)
-    tools_called: list[str] = field(default_factory=list)  # tools that ran, in call order
+    tools_called: list[str] = field(default_factory=list)  # tools that ran to a result, in call order
     queued_approvals: list[int] = field(default_factory=list)  # pending_approvals ids queued this run
     # ApprovalRequired raised by a tool outside the registry: nothing was queued or done.
     unqueued_approvals: list[ApprovalRequired] = field(default_factory=list)
@@ -45,18 +47,25 @@ def _text_of(content: Any) -> str:
     return "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
 
 
-def _with_call_ids(ai: AIMessage, step: int) -> AIMessage:
-    """Every tool call (valid or not) needs an id so each one can be answered with a ToolMessage."""
+def _sanitized(ai: AIMessage, step: int) -> AIMessage:
+    """Make the AI message safe to send back to the provider on the next turn.
+
+    Every tool call (valid or not) gets an id so each one can be answered with a ToolMessage, and
+    malformed calls carry `args="{}"`: echoing the broken argument string back makes OpenAI-style
+    servers (Ollama included) reject the whole request with a 400. The parse error is kept in
+    `error` and reported to the model in that call's ToolMessage.
+    """
     calls = [dict(c) for c in ai.tool_calls]
-    bad = [dict(c) for c in ai.invalid_tool_calls]
+    bad = [{**c, "args": "{}"} for c in ai.invalid_tool_calls]
     missing = False
     for i, call in enumerate([*calls, *bad]):
         if not call.get("id"):
             call["id"] = f"call_{step}_{i}"
             missing = True
-    if not missing:
+    if not missing and not bad:
         return ai
-    return ai.model_copy(update={"tool_calls": calls, "invalid_tool_calls": bad})
+    extra = {k: v for k, v in ai.additional_kwargs.items() if k != "tool_calls"}  # raw provider copy
+    return ai.model_copy(update={"tool_calls": calls, "invalid_tool_calls": bad, "additional_kwargs": extra})
 
 
 async def react_loop(
@@ -91,7 +100,7 @@ async def react_loop(
         while True:
             ai = await llm.invoke_tools(history, list(tools), tier=tier, temperature=temperature,
                                         name=name, priority=priority, fallback=fallback)
-            ai = _with_call_ids(ai, steps)
+            ai = _sanitized(ai, steps)
             history.append(ai)
             calls, bad = ai.tool_calls, ai.invalid_tool_calls
             if not calls and not bad:
@@ -103,7 +112,12 @@ async def react_loop(
             steps += 1
             if steps > max_steps:
                 raise BudgetExceeded(f"more than {max_steps} tool rounds")
-            history.extend(await _run_step(calls, bad, by_name, tools_called, unqueued))
+            messages_out, connection = await _run_step(calls, bad, by_name, tools_called, unqueued)
+            if connection is not None:
+                connection.partial_messages = messages_out
+                connection.queued_approvals = run.queued_approvals[first_approval:]
+                raise connection
+            history.extend(messages_out)
             run.end_step()
     finally:
         current_run.reset(token)
@@ -115,19 +129,22 @@ async def _run_step(
     by_name: dict[str, BaseTool],
     tools_called: list[str],
     unqueued: list[ApprovalRequired],
-) -> list[ToolMessage]:
-    """Run one AI message's tool calls concurrently; answer every call id, in call order."""
+) -> tuple[list[ToolMessage], ConnectionRequired | None]:
+    """Run one AI message's tool calls concurrently; answer every call id, in call order.
+
+    Returns the ToolMessages and the first ConnectionRequired (raised by the caller once all calls
+    have settled). `tools_called` gains only the calls that actually ran to a result.
+    """
     runnable = calls[:MAX_CALLS_PER_STEP]
-    for call in runnable:
-        if call["name"] in by_name:
-            tools_called.append(call["name"])
     results = await asyncio.gather(*(_run_call(c, by_name) for c in runnable), return_exceptions=True)
 
     out: list[ToolMessage] = []
     connection: ConnectionRequired | None = None
     for call, res in zip(runnable, results, strict=True):
-        if isinstance(res, str):
-            content = res
+        if isinstance(res, tuple):
+            ran, content = res
+            if ran:
+                tools_called.append(call["name"])
         elif isinstance(res, ConnectionRequired):
             connection = connection or res
             content = "Needs an account connected first. The user is being asked to connect it."
@@ -154,16 +171,36 @@ async def _run_step(
             content=f"Malformed tool call for {name!r}: {error}. Call it again with valid JSON arguments.",
             tool_call_id=call["id"], name=name,
         ))
-    if connection is not None:
-        raise connection
-    return out
+    return out, connection
 
 
-async def _run_call(call: Any, by_name: dict[str, BaseTool]) -> str:
-    tool = by_name.get(call["name"])
+def _timeout_for(tool: BaseTool) -> float | None:
+    """`get_settings().tool_timeout_s`, unless the tool sets `metadata["timeout_s"]` (<= 0: none).
+    Long-running tools such as a spawned worker loop must raise their own limit this way."""
+    value = (tool.metadata or {}).get("timeout_s")
+    limit = get_settings().tool_timeout_s if value is None else float(value)
+    return limit if limit > 0 else None
+
+
+async def _run_call(call: Any, by_name: dict[str, BaseTool]) -> tuple[bool, str]:
+    """(ran, content): ran is False when the call never reached a tool or the tool timed out."""
+    name = call["name"]
+    tool = by_name.get(name)
     if tool is None:
-        return f"Unknown tool {call['name']!r}. Available: {', '.join(by_name) or 'none'}."
+        return False, f"Unknown tool {name!r}. Available: {', '.join(by_name) or 'none'}."
     args = call.get("args")
     if not isinstance(args, dict):
-        return f"Malformed tool call for {call['name']!r}: arguments must be a JSON object."
-    return str(await tool.ainvoke(args))
+        return False, f"Malformed tool call for {name!r}: arguments must be a JSON object."
+    limit = _timeout_for(tool)
+    deadline = asyncio.timeout(limit)
+    try:
+        async with deadline:
+            return True, str(await tool.ainvoke(args))
+    except TimeoutError:
+        if not deadline.expired():
+            raise  # the tool's own timeout: reported like any other tool error
+        log.warning("react.tool_timeout", tool=name, timeout_s=limit)
+        return False, wrap_untrusted(
+            f"Tool error: TimeoutError: {name} took longer than {limit:g}s and was stopped. "
+            "Do not retry it in this turn.", name,
+        )

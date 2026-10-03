@@ -19,18 +19,21 @@ from mavis.memory import service as memory_service
 from mavis.policy.risk import wrap_untrusted
 from mavis.store.repo import approvals, policy_rules, tasks, users
 from mavis.timers import service as timers_service
-from mavis.tools.registry import MavisTool, TaintPolicy
+from mavis.tools.registry import MavisTool, TaintPolicy, ToolContext
+
+
+def _local_tz(name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return ZoneInfo(get_settings().default_timezone)
 
 
 async def to_utc(user_id: int, dt: datetime) -> datetime:
     """Naive datetimes are interpreted in the user's timezone."""
     if dt.tzinfo is None:
         user = await users.get(user_id)
-        try:
-            tz = ZoneInfo(user.timezone)
-        except (ZoneInfoNotFoundError, ValueError, OSError):
-            tz = ZoneInfo(get_settings().default_timezone)
-        dt = dt.replace(tzinfo=tz)
+        dt = dt.replace(tzinfo=_local_tz(user.timezone))
     return dt.astimezone(UTC)
 
 
@@ -98,8 +101,10 @@ async def remember_untrusted(user_id: int, args: RememberArgs) -> str:
     )
 
 
-def _preview_wake(args: WakeMeArgs) -> str:
-    return f"Set a reminder for {args.at:%a %d %b %Y, %H:%M}: {args.reason}"
+def _preview_wake(args: WakeMeArgs, ctx: ToolContext) -> str:
+    """The approval card shows the user's local time (a naive `at` is already local, like wake_me)."""
+    at = args.at if args.at.tzinfo is None else args.at.astimezone(_local_tz(ctx.timezone))
+    return f"Set a reminder for {at:%a %d %b %Y, %H:%M}: {args.reason}"
 
 
 def _preview_loop(args: TrackLoopArgs) -> str:
@@ -175,14 +180,15 @@ TOOLS = [
     MavisTool("wake_me", "Schedule a reminder at a specific FUTURE time. Use ISO-8601; "
               "a time without an offset is the user's local time.",
               WakeMeArgs, RiskClass.WRITE_SELF, wake_me, _CONV, priority=65,
-              preview=_preview_wake, on_taint=TaintPolicy.APPROVE),
+              preview=_preview_wake, preview_needs_ctx=True, on_taint=TaintPolicy.APPROVE),
     MavisTool("track_loop", "Track an open loop: commitment, waiting-on, goal, concern, routine or watch.",
               TrackLoopArgs, RiskClass.WRITE_SELF, track_loop, _CONV, priority=55,
               preview=_preview_loop, on_taint=TaintPolicy.APPROVE),
     MavisTool("list_tasks", "List background tasks Mavis is working on.", NoArgs,
               RiskClass.READ, list_tasks, _CONV, priority=40),
     MavisTool("cancel_task", "Cancel a background task by id. Call list_tasks first to find the id.",
-              CancelTaskArgs, RiskClass.WRITE_SELF, cancel_task, _CONV, priority=35),
+              CancelTaskArgs, RiskClass.WRITE_SELF, cancel_task, _CONV, priority=35,
+              preview=lambda a: f"Cancel background task #{a.task_id}", on_taint=TaintPolicy.APPROVE),
     MavisTool("what_do_you_know", "Recall what Mavis knows about the user or a person/topic.", KnowArgs,
               RiskClass.READ, what_do_you_know, _CONV, priority=50),
     MavisTool("add_policy_rule", "Save a standing rule so a kind of action no longer needs approval.",

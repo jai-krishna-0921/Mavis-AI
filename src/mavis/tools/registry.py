@@ -140,6 +140,7 @@ class MavisTool:
     preview_needs_ctx: bool = False  # True => preview(args, ctx: ToolContext)
     on_taint: TaintPolicy = TaintPolicy.ALLOW
     tainted_fn: ToolFn | None = None  # required for TaintPolicy.DOWNGRADE
+    timeout_s: float | None = None  # react_loop per-call limit; None = tool_timeout_s, <= 0 = none
 
     def effective_risk(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn is not None else self.risk
@@ -320,7 +321,8 @@ class ToolRegistry:
                 )
 
         return StructuredTool.from_function(
-            coroutine=_call, name=tool.name, description=tool.description, args_schema=tool.args_model
+            coroutine=_call, name=tool.name, description=tool.description, args_schema=tool.args_model,
+            metadata=None if tool.timeout_s is None else {"timeout_s": tool.timeout_s},
         )
 
 
