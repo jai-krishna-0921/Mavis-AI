@@ -24,8 +24,7 @@ from mavis.initiative.untrusted import wrap_untrusted
 from mavis.loops.service import TRUSTED_SOURCE_PREFIXES, LoopService
 from mavis.policy.pings import normalize_dedupe_key
 from mavis.store.repo import decisions as decisions_repo
-from mavis.store.repo import messages, users
-from mavis.store.repo.loops import title_tokens
+from mavis.store.repo import users
 from mavis.timers import system
 from mavis.timers.service import WakeupService
 from mavis.worker.runner import register_event_handler
@@ -35,7 +34,6 @@ MAX_WAKEUP_LATENESS = timedelta(hours=2)
 MAX_LLM_URGENCY = 4
 URGENT_URGENCY = 5
 IMMINENT = timedelta(minutes=15)
-POST_TURN_QUIET = timedelta(minutes=10)
 FOLLOW_UP_VALID_FOR = timedelta(hours=24)
 LIVE_STATUSES = (LoopStatus.OPEN, LoopStatus.AWAITING_REPLY)
 HANDLED_TYPES = tuple(t for t in EventType if t not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED))
@@ -109,7 +107,6 @@ class InitiativeHandler:
         else:
             log.info("initiative.decision_reused", event_id=event.id)
 
-        decision = await self._quiet_after_turn(event, decision)
         if event.type is EventType.LOOP_CREATED:
             # Always: the model's own wakeups are deduped against these by the executor, not instead of them
             await schedule_default_signals(self._wakeups, Loop.model_validate(event.payload))
@@ -127,24 +124,6 @@ class InitiativeHandler:
             status = LoopStatus.AWAITING_REPLY if decision.notify is not None else LoopStatus.DONE
             await self._loops.close(int(event.payload["loop_id"]), status)
 
-    async def _quiet_after_turn(self, event: Event, decision: InitiativeDecision) -> InitiativeDecision:
-        """A loop extracted from a chat turn the assistant just answered must not trigger a ping right
-        away: the user is mid-conversation and was just told. Tracking and wakeups still apply. Only an
-        urgent (5) notice about something else may go out."""
-        if event.type is not EventType.LOOP_CREATED or decision.notify is None:
-            return decision
-        if not str(event.payload.get("source", "")).startswith(TRUSTED_SOURCE_PREFIXES):
-            return decision
-        last = await messages.last_user_message_at(event.user_id)
-        if last is None or timeutil.now() - last > POST_TURN_QUIET:
-            return decision
-        about_loop = bool(set(title_tokens(str(event.payload.get("title", ""))))
-                          & set(title_tokens(decision.notify.intent)))
-        if decision.notify.urgency >= URGENT_URGENCY and not about_loop:
-            return decision
-        log.info("initiative.post_turn_suppressed", event_id=event.id, intent=decision.notify.intent[:80])
-        return decision.model_copy(update={"notify": None, "ignore_reason": "just discussed in chat"})
-
     async def _decide(self, user, event: Event, result) -> InitiativeDecision:
         result.extra = await hooks.gather_enrichments(event)
         try:
@@ -154,6 +133,7 @@ class InitiativeHandler:
             decision = fallback_decision(event, result)
         decision = await hooks.apply_decision_policies(event, decision)
         decision = _imminent_floor(event, decision, result.matched_loops)
+        decision = _quiet_after_turn(event, decision)  # before persisting: a retry must not undo it
         return _with_default_dedupe(decision, event)
 
     async def _deferred_stale(self, user_id: int, payload: dict) -> str | None:
@@ -212,6 +192,18 @@ class InitiativeHandler:
             derived = [WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED]
             await self._wakeups.cancel_where(loop.user_id, derived, loop_id=loop.id)
             await schedule_default_signals(self._wakeups, loop)
+
+
+def _quiet_after_turn(event: Event, decision: InitiativeDecision) -> InitiativeDecision:
+    """A loop extracted from a chat turn never triggers a ping at creation: the user just talked about
+    it and got an answer. Tracking, default wakeups and the model's wakeups still apply; those do the
+    follow-through later. (No time window: LEARN can run late under LLM load.)"""
+    if event.type is not EventType.LOOP_CREATED or decision.notify is None:
+        return decision
+    if not str(event.payload.get("source", "")).startswith(TRUSTED_SOURCE_PREFIXES):
+        return decision
+    log.info("initiative.post_turn_suppressed", event_id=event.id, intent=decision.notify.intent[:80])
+    return decision.model_copy(update={"notify": None, "ignore_reason": "just discussed in chat"})
 
 
 def _cap_llm_urgency(decision: InitiativeDecision) -> InitiativeDecision:
