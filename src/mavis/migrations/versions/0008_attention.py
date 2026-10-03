@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0008_attention"
-down_revision = "0005_integrations"
+down_revision = "0006_initiative_decisions"
 branch_labels = None
 depends_on = None
 

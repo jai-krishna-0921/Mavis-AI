@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import re
 from datetime import datetime, timedelta
 
@@ -13,6 +14,7 @@ from mavis.store.db import Session
 from mavis.store.models import LoopRow
 
 STALE_AFTER = timedelta(days=2)
+AWAITING_FOR = timedelta(hours=24)  # a follow-up nobody answered closes its loop after this
 EXPIRING_KINDS = (LoopKind.COMMITMENT.value, LoopKind.WAITING_ON.value, LoopKind.WATCH.value)
 
 
@@ -65,10 +67,13 @@ async def update(user_id: int, loop_id: int, data: LoopUpsert) -> tuple[Loop, bo
         if row is None or row.user_id != user_id:
             return None
         before = to_domain(row)
+        status = data.status.value
+        if row.status == LoopStatus.AWAITING_REPLY.value and data.status is LoopStatus.OPEN:
+            status = row.status  # OPEN is just the upsert default: an update must not reopen it silently
         row.kind, row.title, row.status, row.importance = (
             data.kind.value,
             data.title,
-            data.status.value,
+            status,
             data.importance,
         )
         if data.due_at is not None:
@@ -103,12 +108,86 @@ async def list_open(user_id: int) -> list[Loop]:
         return [to_domain(r) for r in rows]
 
 
+DUPLICATE_DUE_WINDOW = timedelta(hours=2)
+DUPLICATE_SIMILARITY = 0.8
+_TIME_TOKEN = re.compile(r"^\d+(?:[:.]\d+)?(?:am|pm|h|hrs?|st|nd|rd|th)?$")
+_DUP_STOPWORDS = frozenset(
+    "a an the at on by in to for of with and or my me i is it this that next coming about from "
+    "am pm today tomorrow tonight tmrw tmr morning afternoon evening night noon midnight "
+    "monday tuesday wednesday thursday friday saturday sunday mon tue tues wed thu thur thurs fri sat sun "
+    "january february march april may june july august september october november december "
+    "jan feb mar apr jun jul aug sep sept oct nov dec".split()
+)
+
+
+def title_tokens(title: str) -> list[str]:
+    """Title words that identify the thing: no times, dates, weekdays or filler."""
+    return [t for t in normalise_title(title).split() if t not in _DUP_STOPWORDS and not _TIME_TOKEN.match(t)]
+
+
+TYPO_MIN_LEN = 6
+TYPO_RATIO = 0.9
+
+
+def _names(title: str, entities: list[str] | None) -> set[str]:
+    """Words that look like names: capitalised after the first word, or listed as entities."""
+    words = re.findall(r"[^\W\d_]+", title)
+    names = {w.casefold() for w in words[1:] if w[:1].isupper()}
+    for e in entities or []:
+        names |= set(normalise_title(e).split())
+    return names
+
+
+def similar_titles(a: str, b: str, entities_a: list[str] | None = None,
+                   entities_b: list[str] | None = None) -> bool:
+    """Same thing said differently: token Jaccard >= 0.8, or one token set (of 2+) inside the other.
+    Typos are forgiven only on long, non-name words ("appointmnet"), never on short words or names,
+    so "call mom"/"call tom" and "flight to Delhi"/"flight to Dubai" stay apart."""
+    ta, tb = title_tokens(a), title_tokens(b)
+    if not ta or not tb:
+        return normalise_title(a) == normalise_title(b)
+    sa, sb = set(ta), set(tb)
+    names = _names(a, entities_a) | _names(b, entities_b)
+    only_a, only_b = sa - sb, sb - sa
+    for x in sorted(only_a):
+        if len(x) < TYPO_MIN_LEN or x in names:
+            continue
+        for y in sorted(only_b):
+            if len(y) >= TYPO_MIN_LEN and y not in names and \
+                    difflib.SequenceMatcher(None, x, y).ratio() >= TYPO_RATIO:
+                sb = (sb - {y}) | {x}  # treat the typo as the same word
+                only_b = only_b - {y}
+                break
+    shared = sa & sb
+    if len(shared) / len(sa | sb) >= DUPLICATE_SIMILARITY:
+        return True
+    smaller, larger = (sa, sb) if len(sa) <= len(sb) else (sb, sa)
+    # a subset merges only when the extra words add no person or name ("Email Raj and Priya" is not
+    # "Email Raj"); the caller keeps the more specific title
+    return len(smaller) >= 2 and smaller <= larger and not ((larger - smaller) & names)
+
+
+def _due_close(a: datetime | None, b: datetime | None) -> bool:
+    if a is None or b is None:
+        return True
+    return abs(timeutil.ensure_utc(a) - timeutil.ensure_utc(b)) <= DUPLICATE_DUE_WINDOW
+
+
 async def find_open_duplicate(user_id: int, data: LoopUpsert) -> Loop | None:
+    """An open loop of the same kind that is the same thing said differently (one utterance often
+    yields "Dentist appointment" and "Dentist appointment at 4pm"): similar title and due within 2h,
+    or either due missing. An exact match wins over a fuzzy one."""
     due = timeutil.ensure_utc(data.due_at)
+    fuzzy: Loop | None = None
     for loop in await list_open(user_id):
-        if loop.kind is data.kind and loop.title.casefold() == data.title.casefold() and loop.due_at == due:
+        if loop.kind is not data.kind:
+            continue
+        if loop.title.casefold() == data.title.casefold() and loop.due_at == due:
             return loop
-    return None
+        if fuzzy is None and _due_close(loop.due_at, due) and similar_titles(
+                loop.title, data.title, loop.entities, data.entities):
+            fuzzy = loop
+    return fuzzy
 
 
 def normalise_title(title: str) -> str:
@@ -116,9 +195,9 @@ def normalise_title(title: str) -> str:
 
 
 async def find_recently_closed(user_id: int, title: str, since: datetime) -> Loop | None:
-    """A DONE/DROPPED loop with the same normalised title closed after `since`."""
+    """A DONE/DROPPED (or awaiting-reply) loop with the same normalised title closed after `since`."""
     wanted = normalise_title(title)
-    closed = (LoopStatus.DONE.value, LoopStatus.DROPPED.value)
+    closed = (LoopStatus.DONE.value, LoopStatus.DROPPED.value, LoopStatus.AWAITING_REPLY.value)
     async with Session() as s:
         rows = await s.scalars(
             select(LoopRow).where(
@@ -146,22 +225,44 @@ async def set_status(user_id: int, loop_id: int, status: LoopStatus) -> tuple[Lo
         return to_domain(row), True
 
 
+_EXPIRY_STATUSES = (LoopStatus.OPEN.value, LoopStatus.AWAITING_REPLY.value)
+
+
 async def open_user_ids() -> list[int]:
     async with Session() as s:
         rows = await s.scalars(
-            select(LoopRow.user_id).where(LoopRow.status == LoopStatus.OPEN.value).distinct()
+            select(LoopRow.user_id).where(LoopRow.status.in_(_EXPIRY_STATUSES)).distinct()
         )
         return list(rows)
 
 
+async def list_awaiting(user_id: int, since: datetime) -> list[tuple[Loop, datetime]]:
+    """Loops waiting on the user's reply to a follow-up sent after `since`, with when they started waiting."""
+    async with Session() as s:
+        rows = await s.scalars(
+            select(LoopRow).where(LoopRow.user_id == user_id,
+                                  LoopRow.status == LoopStatus.AWAITING_REPLY.value,
+                                  LoopRow.updated_at >= since)
+        )
+        return [(to_domain(r), timeutil.ensure_utc(r.updated_at)) for r in rows]
+
+
 async def expire(user_id: int, now) -> list[Loop]:
-    """Mark one user's stale OPEN loops EXPIRED; returns the loops that changed."""
+    """Mark one user's stale OPEN loops EXPIRED, and close loops whose follow-up got no reply within
+    AWAITING_FOR; returns the loops that changed."""
     expired: list[Loop] = []
     async with Session() as s:
         rows = await s.scalars(
-            select(LoopRow).where(LoopRow.user_id == user_id, LoopRow.status == LoopStatus.OPEN.value)
+            select(LoopRow).where(LoopRow.user_id == user_id, LoopRow.status.in_(_EXPIRY_STATUSES))
         )
         for row in rows:
+            if row.status == LoopStatus.AWAITING_REPLY.value:
+                if timeutil.ensure_utc(row.updated_at) < now - AWAITING_FOR:
+                    row.status = LoopStatus.DONE.value
+                    row.updated_at = now
+                    row.version = (row.version or 1) + 1
+                    expired.append(to_domain(row))
+                continue
             due = timeutil.ensure_utc(row.due_at)
             deadline = (
                 timeutil.ensure_utc(WatchSpec.model_validate(row.watch).deadline) if row.watch else None

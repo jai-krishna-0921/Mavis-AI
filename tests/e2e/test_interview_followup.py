@@ -18,8 +18,10 @@ from mavis.domain.decisions import ComposedMessage, InitiativeDecision, NotifyIn
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import LoopStatus
 from mavis.domain.memory import ExtractedEvent, Extraction
+from mavis.domain.messages import Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative import wiring
+from mavis.store.repo import messages
 from mavis.worker.handlers import register_default_handlers
 from mavis.worker.runner import handle_event, handle_job
 
@@ -127,7 +129,11 @@ async def test_interview_prep_pep_talk_then_follow_up(user, world, clock, bus, f
     await deliver_pending(channel)
     assert FOLLOW_UP_TEXT in channel.texts
 
+    # QA: asking is not closing; the loop waits for the user's answer, which closes it.
     assert all(lp.id != loop_id for lp in await init.loops.active(user.id))
+    assert (await init.loops.get(loop_id)).status is LoopStatus.AWAITING_REPLY
+    await messages.log(user.id, Role.USER, "it went really well!")
+    assert await init.loops.on_user_message(user.id, "it went really well!") == 1
     closed = await init.loops.get(loop_id)
     assert closed is not None and closed.status is LoopStatus.DONE
     # F3: proactive messages never arm a went-quiet nudge, even when they end with a question.
