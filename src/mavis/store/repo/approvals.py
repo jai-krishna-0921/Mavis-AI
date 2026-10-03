@@ -118,6 +118,21 @@ async def claim(approval_id: int, from_statuses: Iterable[ApprovalStatus], to: A
         return (res.rowcount or 0) == 1
 
 
+async def mark_started(approval_id: int) -> bool:
+    """Record that an approved tool is about to run. Only for a row the caller claimed as EXECUTED
+    and not already started, so a replay can tell "claimed, never run" from "may have run"."""
+    async with Session() as s:
+        res = await s.execute(
+            update(PendingApproval)
+            .where(PendingApproval.id == approval_id,
+                   PendingApproval.status == ApprovalStatus.EXECUTED.value,
+                   PendingApproval.started_at.is_(None))
+            .values(started_at=utcnow())
+        )
+        await s.commit()
+        return (res.rowcount or 0) == 1
+
+
 async def set_status(
     approval_id: int,
     status: ApprovalStatus,

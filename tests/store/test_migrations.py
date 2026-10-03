@@ -26,3 +26,24 @@ def test_migrations_match_models(tmp_path) -> None:
         ctx = MigrationContext.configure(conn, opts={"compare_type": False})
         diff = compare_metadata(ctx, Base.metadata)
     assert diff == []
+
+
+def test_checkpoint_tables_are_ignored_by_autogenerate(tmp_path) -> None:
+    from mavis.store.migrate import include_object
+
+    db_file = tmp_path / "m.db"
+    upgrade(f"sqlite+aiosqlite:///{db_file.as_posix()}")
+    con = sqlite3.connect(db_file)
+    con.execute("create table checkpoints (thread_id text, checkpoint_id text)")
+    con.execute("create table checkpoint_writes (thread_id text)")
+    con.commit()
+    con.close()
+    engine = create_engine(f"sqlite:///{db_file.as_posix()}")
+    with engine.connect() as conn:
+        raw = compare_metadata(MigrationContext.configure(conn, opts={"compare_type": False}), Base.metadata)
+        filtered = compare_metadata(
+            MigrationContext.configure(conn, opts={"compare_type": False, "include_object": include_object}),
+            Base.metadata,
+        )
+    assert {d[1].name for d in raw if d[0] == "remove_table"} == {"checkpoints", "checkpoint_writes"}
+    assert filtered == []

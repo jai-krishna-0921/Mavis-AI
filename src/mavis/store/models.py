@@ -251,6 +251,10 @@ class PendingApproval(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     expires_at: Mapped[datetime]
     prompted_at: Mapped[datetime | None]
+    # Execution marker: set right before an approved tool runs. EXECUTED with started_at but no
+    # resolved_at means "may have run" (crash mid-execution); EXECUTED without started_at means
+    # "claimed, never run".
+    started_at: Mapped[datetime | None]
     resolved_at: Mapped[datetime | None]
 
 

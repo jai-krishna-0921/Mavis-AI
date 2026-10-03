@@ -31,6 +31,19 @@ class ApprovalRequired(MavisError):
         self.arguments = arguments
 
 
+class ActionFailed(MavisError):
+    """A tool ran but its action did not happen (provider refused or was unreachable).
+
+    `str(exc)` is the sentence for the model; `reason` is the short cause safe to show the user.
+    The registry turns it back into a tool result for model-driven calls and lets it propagate from
+    `execute_approved`, so an approved action that failed is never recorded as executed.
+    """
+
+    def __init__(self, message: str, reason: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason or message
+
+
 class BudgetExceeded(MavisError):
     """A task exceeded its step/token/time budget."""
 

@@ -383,6 +383,8 @@ async def test_connect_gate_declined_continues_without(user, fake_llm, rec_bus, 
     final = await graph.ainvoke(Command(resume=DECLINED), cfg)
     assert attempts == ["s1"]
     assert any("chose not to connect gmail" in a for a in final["action_results"])
+    note = next(a for a in final["action_results"] if "chose not to connect" in a)
+    assert "check my inbox" in note and "s1" not in note  # no internal step ids for the responder
     assert (await tasks.get(tid)).status == TaskStatus.DONE
 
 
@@ -463,6 +465,7 @@ async def test_ok_is_at_most_once(user, fake_llm, rec_bus, note_tool):
     assert note_tool == ["hi"]
     a = await approvals.get(aid)
     assert a.status == ApprovalStatus.EXECUTED and a.result == "sent: hi"
+    assert a.started_at is not None and a.resolved_at is not None  # execution marker, then outcome
     assert out_a["final_messages"] == ["Done ✓\nsent: hi"]
     assert out_b["final_messages"] == [og.NOTHING_TO_APPROVE_TEXT]
     assert fake_llm.structured_calls == []  # approval responder is deterministic (F22)
@@ -581,3 +584,45 @@ def test_user_facing_and_prompt_text_has_no_dashes():
     assert not [t for t in texts if any(d in t for d in DASHES)]
     msgs = og._approval_messages([{"status": "failed", "detail": "bad \u2014 thing"}])
     assert not any(d in m for m in msgs for d in DASHES)
+
+
+async def test_approved_integration_failure_is_failed_not_done(user, fake_llm, rec_bus, fresh_registry,
+                                                               provider, cache, monkeypatch):
+    """A provider that answers ok=False must not be recorded as EXECUTED or reported as Done."""
+    from mavis.domain.integrations import ConnectionState, ToolResult
+    from mavis.tools.integrations import tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_deps", lambda p, c: (provider, cache))
+    tools_mod.register_integration_tools(fresh_registry)
+    provider.set_state(user.id, Capability.GMAIL, ConnectionState.ACTIVE)
+    provider.results["mail.send"] = ToolResult(ok=False, error="Recipient address rejected")
+    tid = await tasks.create(user.id, goal="approve", kind=TaskKind.APPROVAL)
+    aid = await approvals.create(user.id, tid, "mail_send",
+                                 {"to": ["jawahar@example.com"], "subject": "Late", "body": "10 min late"},
+                                 "Email Jawahar", utcnow() + timedelta(hours=48))
+    graph = _graph()
+    await graph.ainvoke(og.initial_state(await tasks.get(tid)), _cfg(tid))
+    await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
+    out = await graph.ainvoke(Command(resume={"approval_id": aid, "decision": "ok"}), _cfg(tid))
+    a = await approvals.get(aid)
+    assert a.status == ApprovalStatus.FAILED
+    assert out["final_messages"] == ["Tried, but it failed: Recipient address rejected"]
+    assert [e[1] for e in provider.executed] == ["mail.send"]
+
+
+async def test_stale_reject_is_not_reported(user, fake_llm, rec_bus, note_tool):
+    tid, aid = await _approval_task(user.id)
+    graph = _graph()
+    await graph.ainvoke(og.initial_state(await tasks.get(tid)), _cfg(tid))
+    await approvals.set_status(aid, ApprovalStatus.EXPIRED)  # resolved elsewhere first
+    out = await graph.ainvoke(Command(resume={"approval_id": aid, "decision": "no"}), _cfg(tid))
+    assert (await approvals.get(aid)).status == ApprovalStatus.EXPIRED
+    assert out["final_messages"] == [og.NOTHING_TO_APPROVE_TEXT]
+
+
+def test_clip_result_keeps_the_untrusted_wrapper_closed():
+    wrapped = '<untrusted source="mail_send">\n' + "x" * 900 + "\n</untrusted>"
+    clipped = og._clip_result(wrapped, 100)
+    assert clipped.startswith('<untrusted source="mail_send">\n') and clipped.endswith("\n</untrusted>")
+    assert clipped.count("x") == 100
+    assert og._clip_result("plain " * 200, 10) == "plain plai"

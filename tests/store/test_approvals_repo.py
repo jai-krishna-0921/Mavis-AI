@@ -122,3 +122,12 @@ async def test_attach_skips_resolved_approvals(user):
     await approvals.attach([open_id, done_id], tid)
     assert (await approvals.get(open_id)).task_id == tid
     assert (await approvals.get(done_id)).task_id is None
+
+
+async def test_mark_started_only_for_claimed_unstarted_rows(user):
+    aid = await _approval(user.id)
+    assert await approvals.mark_started(aid) is False  # still PENDING
+    await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.EXECUTED)
+    assert await approvals.mark_started(aid) is True
+    assert await approvals.mark_started(aid) is False
+    assert (await approvals.get(aid)).started_at is not None
