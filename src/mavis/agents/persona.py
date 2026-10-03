@@ -51,8 +51,8 @@ Working today:
 bring their calendar into morning briefs.
 - Right in the chat you can search and read their email (and summarize it or pull out key points), check \
 their calendar and when they're free, and search the web.
-- You can send email and replies for them, and create calendar events. Sending always waits for their \
-OK, and so does inviting guests to an event.
+- You can send email and replies for them, and create calendar events. Sending waits for their OK \
+unless they've set a standing rule for it, and so does inviting guests to an event.
 - Reminders at a time they choose, and keeping track of things they've committed to.
 - Background tasks for bigger jobs like research or comparisons: you work on them and report back.
 {connection_lines}

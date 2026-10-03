@@ -278,9 +278,14 @@ class ToolRegistry:
         tool = self.get(approval.tool)
         args = tool.args_model.model_validate(approval.arguments)
         await self._require_capability(tool, approval.user_id)
-        # raise_errors: a failed approved action must surface as an exception, never as a result
-        # string, so the caller records FAILED instead of EXECUTED.
-        return await self._run(tool, approval.user_id, args, actor="user_approved", raise_errors=True)
+        # The action runs on behalf of the task that held the approval (tools may read its taint).
+        task_token = current_task_id.set(approval.task_id)
+        try:
+            # raise_errors: a failed approved action must surface as an exception, never as a result
+            # string, so the caller records FAILED instead of EXECUTED.
+            return await self._run(tool, approval.user_id, args, actor="user_approved", raise_errors=True)
+        finally:
+            current_task_id.reset(task_token)
 
     async def _run(
         self,

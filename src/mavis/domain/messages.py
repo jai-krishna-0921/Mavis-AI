@@ -4,6 +4,11 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+# An assistant message written from third-party content (an email, a web page, a tainted task's approval
+# preview) is logged with this event_id suffix. Learn text that includes it is learned as untrusted, and a
+# turn that sees it in its recent history runs tainted.
+TAINT_SUFFIX = ":tainted"
+
 
 class Role(StrEnum):
     USER = "user"

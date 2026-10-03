@@ -6,6 +6,7 @@ turn reuses the same dedupe keys, and the tool loop's `current_run` for taint.
 
 from __future__ import annotations
 
+import zlib
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -15,8 +16,8 @@ from mavis.domain.decisions import TaskRequest
 from mavis.domain.messages import Role
 from mavis.domain.policy import RiskClass
 from mavis.domain.tasks import TaskOrigin
-from mavis.store.repo import messages
-from mavis.tools.registry import MavisTool, current_run
+from mavis.store.repo import messages, tasks
+from mavis.tools.registry import MavisTool, TaintPolicy, current_run, current_task_id
 
 
 @dataclass(frozen=True)
@@ -45,12 +46,28 @@ def _tainted() -> bool:
     return run is not None and run.tainted
 
 
+async def _approved_from_tainted_task() -> bool:
+    """Run by the approval gate (execute_approved sets current_task_id to the APPROVAL task)."""
+    task_id = current_task_id.get()
+    if task_id is None:
+        return False
+    task = await tasks.get(task_id)
+    return bool(task is not None and task.tainted)
+
+
 async def start_task(user_id: int, args: StartTaskArgs) -> str:
     from mavis.agents.task_dispatch import dispatch_task_requests  # lazy: agents import the registry
 
-    # A task started after the model read third-party content stays tainted for every step it runs.
+    # After third-party content this tool needs the user's approval first (on_taint=APPROVE); once
+    # approved, the task is still tainted for every step it runs. The user saw and approved the goal,
+    # so hosts named in it count as theirs (web_extract's allowlist in tainted tasks).
+    tainted = _tainted() or await _approved_from_tainted_task()
+    turn = current_turn.get()
+    # A redelivered turn (crash before the reply went out) gets the same task back, not a second one.
+    ref = f"turn:{turn.event_id}:{zlib.crc32(args.goal.encode())}" if turn else None
     [task_id] = await dispatch_task_requests(
-        user_id, [TaskRequest(goal=args.goal, context=args.context)], TaskOrigin.USER, tainted=_tainted(),
+        user_id, [TaskRequest(goal=args.goal, context=args.context)], TaskOrigin.USER, tainted=tainted,
+        source_ref=ref,
     )
     return START_TASK_RESULT.format(id=task_id)
 
@@ -77,7 +94,8 @@ _CONV = frozenset({"conversation"})
 TOOLS = [
     MavisTool("start_task", "Start a background task for multi-step work that takes more than a few "
               "seconds: research, comparisons, plans, drafting documents. You report back when it is done.",
-              StartTaskArgs, RiskClass.WRITE_SELF, start_task, _CONV, priority=80),
+              StartTaskArgs, RiskClass.WRITE_SELF, start_task, _CONV, priority=80,
+              preview=lambda a: f"Start a background task: {a.goal}", on_taint=TaintPolicy.APPROVE),
     MavisTool("connect_account", "Send the user a link to connect an account (Gmail, Google Calendar, "
               "Slack, Notion) when they ask to connect one.",
               ConnectArgs, RiskClass.WRITE_SELF, connect_account, _CONV, priority=60),

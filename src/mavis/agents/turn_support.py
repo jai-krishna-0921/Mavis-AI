@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from mavis.agents import clarify
 from mavis.bus import get_bus
 from mavis.domain.events import Event, Job, JobKind, Trust
-from mavis.domain.messages import Role
+from mavis.domain.messages import TAINT_SUFFIX, Role
 from mavis.initiative import wiring
 from mavis.memory.service import get_memory
 from mavis.store.models import Message
@@ -71,9 +71,8 @@ async def build_context(user_id: int, text: str, hint: str = "") -> str:
     return "\n\n".join(p for p in parts if p.strip())
 
 
-# A reply written after the model read untrusted tool output (an email, a web page) is logged with this
-# event_id suffix (no schema change). Learn text that includes it is learned at untrusted trust.
-TAINT_SUFFIX = ":tainted"
+# TAINT_SUFFIX (domain.messages): a reply written after the model read untrusted tool output is logged
+# with it (no schema change). Learn text that includes it is learned at untrusted trust.
 
 
 def reply_event_id(event_id: str, tainted: bool) -> str:
@@ -98,8 +97,17 @@ def previous_reply(history: list[Message]) -> str | None:
 
 
 def previous_tainted(history: list[Message]) -> bool:
-    prev = previous_message(history)
-    return prev is not None and is_tainted(prev)
+    """Any assistant message since the previous user message is tainted (a tainted reply followed by an
+    approval prompt, a proactive ping, ...): the current turn sees it in its prompt."""
+    last_user = max((i for i, m in enumerate(history) if m.role == Role.USER.value), default=None)
+    if last_user is None:
+        return False
+    for m in reversed(history[:last_user]):
+        if m.role == Role.USER.value:
+            break
+        if is_tainted(m):
+            return True
+    return False
 
 
 def clarified_request(history: list[Message]) -> str | None:
