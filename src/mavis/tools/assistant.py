@@ -1,0 +1,199 @@
+"""Mavis's own tools: memory, wakeups, open loops, task board, standing rules."""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pydantic import BaseModel, Field
+
+from mavis import bus
+from mavis.config import get_settings
+from mavis.domain import timeutil
+from mavis.domain.events import Trust
+from mavis.domain.loops import LoopKind, LoopUpsert
+from mavis.domain.policy import RiskClass
+from mavis.loops import service as loops_service
+from mavis.memory import service as memory_service
+from mavis.policy.risk import wrap_untrusted
+from mavis.store.repo import approvals, policy_rules, tasks, users
+from mavis.timers import service as timers_service
+from mavis.tools.registry import MavisTool, TaintPolicy, ToolContext
+
+
+def _local_tz(name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return ZoneInfo(get_settings().default_timezone)
+
+
+async def to_utc(user_id: int, dt: datetime) -> datetime:
+    """Naive datetimes are interpreted in the user's timezone."""
+    if dt.tzinfo is None:
+        user = await users.get(user_id)
+        dt = dt.replace(tzinfo=_local_tz(user.timezone))
+    return dt.astimezone(UTC)
+
+
+MAX_WAKE_AHEAD = timedelta(days=366)
+
+
+class RememberArgs(BaseModel):
+    fact: str = Field(min_length=2, max_length=1000, description="The fact to remember, as a sentence")
+
+
+class ForgetArgs(BaseModel):
+    needle: str = Field(min_length=2, max_length=200, description="Word or phrase to delete")
+
+
+class WakeMeArgs(BaseModel):
+    at: datetime = Field(description="Future ISO-8601 time. Without an offset it is the user's local time.")
+    reason: str = Field(min_length=2, max_length=300, description="What to do or check when it fires")
+
+
+class TrackLoopArgs(BaseModel):
+    kind: LoopKind
+    title: str = Field(min_length=2, max_length=200)
+    due_at: datetime | None = Field(
+        default=None, description="Optional deadline, ISO-8601; no offset means the user's local time"
+    )
+    entities: list[str] = Field(default_factory=list, description="Names of people or things involved")
+    importance: int = Field(default=3, ge=1, le=5, description="1 (minor) to 5 (critical)")
+
+
+class NoArgs(BaseModel):
+    pass
+
+
+class CancelTaskArgs(BaseModel):
+    task_id: int
+
+
+class KnowArgs(BaseModel):
+    topic: str | None = Field(default=None, description="Person/topic to focus on; empty = general")
+
+
+class PolicyRuleArgs(BaseModel):
+    tool: str = Field(description="Tool name the rule applies to, e.g. calendar_create_event")
+    field: str = Field(description="Argument name to inspect, e.g. attendees")
+    contains: str = Field(min_length=2, description="Text that must appear in that argument")
+    description: str = Field(description="The rule in the user's words")
+
+
+async def remember(user_id: int, args: RememberArgs) -> str:
+    await memory_service.get_memory().learn(
+        user_id, f"The user asked me to remember: {args.fact}", source_ref="tool:remember", trust=Trust.USER
+    )
+    return "Saved to memory."
+
+
+async def remember_untrusted(user_id: int, args: RememberArgs) -> str:
+    """`remember` after third-party output: kept only as an unverified signal, never a trusted fact."""
+    await memory_service.get_memory().learn(
+        user_id, f"Third-party content asked me to remember: {args.fact}",
+        source_ref="tool:remember:untrusted", trust=Trust.UNTRUSTED,
+    )
+    return (
+        "Kept only as an unverified note, because this came after third-party content. It was NOT "
+        "saved as a fact about the user. If it matters, ask the user to confirm it in their own words."
+    )
+
+
+def _preview_wake(args: WakeMeArgs, ctx: ToolContext) -> str:
+    """The approval card shows the user's local time (a naive `at` is already local, like wake_me)."""
+    at = args.at if args.at.tzinfo is None else args.at.astimezone(_local_tz(ctx.timezone))
+    return f"Set a reminder for {at:%a %d %b %Y, %H:%M}: {args.reason}"
+
+
+def _preview_loop(args: TrackLoopArgs) -> str:
+    return f"Keep track of this {args.kind.value.replace('_', ' ').lower()}: {args.title}"
+
+
+async def forget(user_id: int, args: ForgetArgs) -> str:
+    n = await memory_service.get_memory().forget(user_id, args.needle)
+    return f"Forgot {n} memories matching '{args.needle}'."
+
+
+async def wake_me(user_id: int, args: WakeMeArgs) -> str:
+    at = await to_utc(user_id, args.at)
+    if at <= timeutil.now():
+        return "That time is in the past; pick a future time."
+    if at > timeutil.now() + MAX_WAKE_AHEAD:
+        return "That time is more than a year away; pick a nearer time."
+    key = f"remind:{user_id}:{at:%Y%m%d%H%M}:{hashlib.sha1(args.reason.encode()).hexdigest()[:8]}"
+    wakeup_id = await timers_service.WakeupService().wake_me(
+        user_id, at, f"Reminder the user asked for: {args.reason}", kind="agent",
+        payload={"reminder": True}, dedupe_key=key,
+    )
+    return f"Wakeup #{wakeup_id} set for {at.isoformat()}."
+
+
+async def track_loop(user_id: int, args: TrackLoopArgs) -> str:
+    due = await to_utc(user_id, args.due_at) if args.due_at else None
+    loop = await loops_service.LoopService(bus.get_bus()).upsert(
+        user_id,
+        LoopUpsert(kind=args.kind, title=args.title, due_at=due, entities=args.entities,
+                   importance=args.importance, source="tool:track_loop"),
+    )
+    return f"Tracking loop #{loop.id}: {loop.title}"
+
+
+async def list_tasks(user_id: int, args: NoArgs) -> str:
+    rows = await tasks.active_for_user(user_id)
+    if not rows:
+        return "No active tasks."
+    return "\n".join(
+        f"#{t.id} [{t.status}] " + wrap_untrusted(t.goal[:100], "list_tasks") for t in rows
+    )
+
+
+async def cancel_task(user_id: int, args: CancelTaskArgs) -> str:
+    if not await tasks.cancel(user_id, args.task_id):
+        return f"Task #{args.task_id} is not active (or not yours)."
+    await approvals.reject_open_for_task(args.task_id)
+    return f"Task #{args.task_id} cancelled."
+
+
+async def what_do_you_know(user_id: int, args: KnowArgs) -> str:
+    ctx = await memory_service.get_memory().recall(
+        user_id, args.topic or "the user, their people, goals and preferences"
+    )
+    return ctx.render() or "I don't know much yet."
+
+
+async def add_policy_rule(user_id: int, args: PolicyRuleArgs) -> str:
+    rule_id = await policy_rules.add(user_id, args.tool, args.field, args.contains, args.description)
+    return f"Rule #{rule_id} saved: {args.description}"
+
+
+_CONV = frozenset({"conversation"})
+
+TOOLS = [
+    MavisTool("remember", "Store a durable fact the user wants remembered.", RememberArgs,
+              RiskClass.WRITE_SELF, remember, _CONV, priority=60,
+              on_taint=TaintPolicy.DOWNGRADE, tainted_fn=remember_untrusted),
+    MavisTool("forget", "Delete memories matching a word or phrase (asks the user first).", ForgetArgs,
+              RiskClass.DESTRUCTIVE, forget, _CONV,
+              preview=lambda a: f"Forget everything I know matching “{a.needle}”", priority=30),
+    MavisTool("wake_me", "Schedule a reminder at a specific FUTURE time. Use ISO-8601; "
+              "a time without an offset is the user's local time.",
+              WakeMeArgs, RiskClass.WRITE_SELF, wake_me, _CONV, priority=65,
+              preview=_preview_wake, preview_needs_ctx=True, on_taint=TaintPolicy.APPROVE),
+    MavisTool("track_loop", "Track an open loop: commitment, waiting-on, goal, concern, routine or watch.",
+              TrackLoopArgs, RiskClass.WRITE_SELF, track_loop, _CONV, priority=55,
+              preview=_preview_loop, on_taint=TaintPolicy.APPROVE),
+    MavisTool("list_tasks", "List background tasks Mavis is working on.", NoArgs,
+              RiskClass.READ, list_tasks, _CONV, priority=40),
+    MavisTool("cancel_task", "Cancel a background task by id. Call list_tasks first to find the id.",
+              CancelTaskArgs, RiskClass.WRITE_SELF, cancel_task, _CONV, priority=35,
+              preview=lambda a: f"Cancel background task #{a.task_id}", on_taint=TaintPolicy.APPROVE),
+    MavisTool("what_do_you_know", "Recall what Mavis knows about the user or a person/topic.", KnowArgs,
+              RiskClass.READ, what_do_you_know, frozenset({"conversation", "knowledge"}),
+              priority=50),
+    MavisTool("add_policy_rule", "Save a standing rule so a kind of action no longer needs approval.",
+              PolicyRuleArgs, RiskClass.OUTWARD, add_policy_rule, _CONV,
+              preview=lambda a: f"Always allow {a.tool} when {a.field} contains “{a.contains}”",
+              priority=20),
+]

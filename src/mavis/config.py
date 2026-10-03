@@ -73,6 +73,17 @@ class Settings(BaseSettings):
     integration_provider: Literal["composio"] = "composio"
     tavily_api_key: str = ""
 
+    # --- orchestration (Phase 4) ----------------------------------------------
+    task_timeout_s: float = 480
+    task_max_concurrency: int = 1
+    task_progress_after_s: float = 30
+    approval_ttl_hours: int = 48
+    react_max_steps: int = 8
+    tool_timeout_s: float = 45  # per tool call inside react_loop; a tool may override via metadata
+    task_step_parallelism: int = 1
+    spawn_max_per_step: int = 3  # spawned workers one model step may start
+    initiative_act_enabled: bool = True
+
     # --- sandbox --------------------------------------------------------------
     sandbox_backend: Literal["auto", "docker", "agentcore", "local"] = "auto"
     # Phase 6 adds the rest (sandbox_runtime, sandboxd_socket, agentcore_*, aws_profile, ...).

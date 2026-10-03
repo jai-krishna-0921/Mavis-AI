@@ -40,6 +40,11 @@ async def log(
         return True
 
 
+async def exists(event_id: str) -> bool:
+    async with Session() as s:
+        return await s.scalar(select(Message.id).where(Message.event_id == event_id)) is not None
+
+
 async def recent(user_id: int, limit: int = 20) -> list[Message]:
     """The last `limit` messages, oldest first."""
     async with Session() as s:

@@ -10,9 +10,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from mavis.channels.formatting import sanitize_line
 from mavis.config import get_settings
 
-_BUBBLE_SPLIT = re.compile(r"\n\s*\n")
+_FENCE = re.compile(r"^\s*```")
 
 PERSONA = """You are {agent}, a personal assistant who lives in {who}'s chat. \
 Think of yourself as a sharp, warm friend with a phone and a laptop who has their back.
@@ -48,10 +49,14 @@ Working today:
 - Gmail and Google Calendar: they link them by sending /connect (/connections shows what is linked, \
 /disconnect removes one). Once linked, you watch their inbox for what matters, flag what is urgent and \
 bring their calendar into morning briefs.
+- Right in the chat you can search and read their email (and summarize it or pull out key points), check \
+their calendar and when they're free, and search the web and read pages.
 {connection_lines}
+Coming next: sending email or replies and creating calendar events for them. Those will always need \
+their OK first; if they ask now, say it needs their OK and is coming next.
 On the way, not built yet (if they ask, say it is coming soon, with no date and no promises):
-- Sending email or replies for them, Slack and Notion.
-- Web search and research.
+- Slack and Notion.
+- Deeper research tasks that run in the background.
 - A sandbox for writing code, docs, decks and reports.
 If they ask for something outside all of this, say you can't do that yet.
 
@@ -167,8 +172,30 @@ def system_prompt(
 
 
 def split_bubbles(text: str, max_bubbles: int = 3) -> list[str]:
-    """Split a reply on blank lines into at most `max_bubbles` chat bubbles (extras merge into the last)."""
-    parts = [p.strip() for p in _BUBBLE_SPLIT.split(text.strip()) if p.strip()]
+    """Split a reply on blank lines into at most `max_bubbles` chat bubbles (extras merge into the last).
+
+    Telegram-safe: a ``` code block is never cut across bubbles (an unclosed fence runs to the end),
+    and em or en dashes are rewritten outside code. Over-long bubbles are left to the channel's
+    own 4096-char splitter.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    in_fence = False
+    for line in text.strip().replace("\r\n", "\n").split("\n"):
+        if _FENCE.match(line):
+            in_fence = not in_fence
+            current.append(line)
+        elif in_fence:
+            current.append(line)
+        elif not line.strip():
+            if current:
+                parts.append("\n".join(current).strip())
+                current = []
+        else:
+            current.append(sanitize_line(line))
+    if current:
+        parts.append("\n".join(current).strip())
+    parts = [p for p in parts if p]
     if len(parts) <= max_bubbles:
         return parts
     return parts[: max_bubbles - 1] + ["\n\n".join(parts[max_bubbles - 1 :])]
