@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from mavis.attention.index import PrefHit
 from mavis.attention.learning import Thresholds, learn
-from mavis.attention.policy import PolicyInputs, decide, pref_shift
+from mavis.attention.policy import PolicyInputs, attention_score, decide, pref_shift
 from mavis.attention.schema import (
     NO_ANOMALY,
     AnomalyResult,
@@ -74,7 +74,12 @@ def test_security_notifies_and_credential_change_from_known_sender_asks(settings
     assert sign.verdict is Verdict.NOTIFY and sign.urgency == 4
     cred = u(EmailKind.SECURITY, risk_flags=[RiskFlag.CREDENTIAL_CHANGE])
     asked = decide(inputs(cred, sender_established=True), settings)
-    assert asked.verdict is Verdict.ASK and asked.urgency == 5
+    assert asked.verdict is Verdict.ASK and asked.urgency == 4
+    full = decide(
+        inputs(cred, sender_established=True, sender_authenticated=True, sender_prior_security=True),
+        settings,
+    )
+    assert full.verdict is Verdict.ASK and full.urgency == 5
     assert decide(inputs(cred), settings).verdict is Verdict.NOTIFY
 
 
@@ -104,7 +109,8 @@ def test_offsets_raise_the_bar(settings):
     mid = AnomalyResult(0.65, ("large_amount",), ("a",))
     money = u(EmailKind.MONEY_MOVEMENT, money=DEBIT)
     assert decide(inputs(money, mid), settings).verdict is Verdict.ASK
-    assert decide(inputs(money, mid, offset=0.1), settings).verdict is Verdict.BRIEF
+    # offsets apply to the score only: a money anomaly at the raw ask bar still asks
+    assert decide(inputs(money, mid, offset=0.3), settings).verdict is Verdict.ASK
 
 
 def test_pref_shift():
@@ -160,7 +166,11 @@ def test_urgency_five_gate_needs_every_condition(settings):
     credit = u(EmailKind.MONEY_MOVEMENT, money=DEBIT.model_copy(update={"direction": Direction.CREDIT}))
     assert decide(inputs(credit, HIGH, sender_established=True), settings).urgency <= 4
     cred = u(EmailKind.SECURITY, risk_flags=[RiskFlag.CREDENTIAL_CHANGE])
-    assert decide(inputs(cred, sender_established=True, urgent_used_today=True), settings).urgency == 4
+    ok = {"sender_established": True, "sender_authenticated": True, "sender_prior_security": True}
+    assert decide(inputs(cred, **ok), settings).urgency == 5
+    for missing in ok:
+        assert decide(inputs(cred, **{**ok, missing: False}), settings).urgency == 4
+    assert decide(inputs(cred, **ok, urgent_used_today=True), settings).urgency == 4
     # non-ask verdicts never exceed 4
     for kind in EmailKind:
         d = decide(inputs(u(kind), HIGH, sender_established=True), settings)
@@ -188,3 +198,49 @@ def test_learning_never_leaves_bounds_for_any_sequence():
     for fb in itertools.islice(itertools.cycle(list(Feedback)), 200):
         offs = learn(offs, "other", fb)
         assert -0.2 <= offs["other"] <= 0.3
+
+
+def test_offset_and_mute_cannot_silence_a_money_anomaly(settings):
+    money = u(EmailKind.MONEY_MOVEMENT, money=DEBIT)
+    mute = (PrefHit("mute", "money_movement", 0.95),)
+    d = decide(inputs(money, HIGH, offset=0.3, prefs=mute), settings)
+    assert d.verdict is Verdict.ASK
+    mid = AnomalyResult(0.5, ("large_amount",), ("a",))
+    d = decide(inputs(money, mid, offset=0.3, prefs=mute), settings)
+    assert d.verdict in (Verdict.BRIEF, Verdict.NOTIFY, Verdict.ASK)
+    # a money-looking mail typed as a newsletter gets no free pass either
+    news = u(EmailKind.NEWSLETTER, money=DEBIT)
+    assert decide(inputs(news, HIGH, offset=0.3, prefs=mute), settings).verdict is Verdict.ASK
+
+
+def test_flag_escalation_needs_security_kind(settings):
+    ok = {"sender_established": True, "sender_authenticated": True, "sender_prior_security": True}
+    money = u(EmailKind.MONEY_MOVEMENT, money=DEBIT, risk_flags=[RiskFlag.MFA_CHANGE])
+    mid = AnomalyResult(0.6, ("large_amount",), ("a",))
+    d = decide(inputs(money, mid, **ok), settings)
+    assert d.verdict is Verdict.ASK and d.urgency == 4
+
+
+def test_security_flags_count_whatever_the_kind(settings):
+    for kind in (EmailKind.NEWSLETTER, EmailKind.ACCOUNT_UPDATE, EmailKind.OTHER):
+        for flag in (RiskFlag.ACCOUNT_LOCKED, RiskFlag.NEW_SIGNIN):
+            d = decide(inputs(u(kind, risk_flags=[flag]), offset=0.3), settings)
+            assert d.verdict is Verdict.NOTIFY and d.urgency == 4
+            mute = (PrefHit("mute", kind.value, 0.95),)
+            assert decide(inputs(u(kind, risk_flags=[flag]), prefs=mute), settings).verdict is Verdict.NOTIFY
+
+
+def test_sensitive_offsets_are_capped_in_policy_and_learning(settings):
+    offs: dict[str, float] = {}
+    for _ in range(10):
+        offs = learn(offs, "money_movement", Feedback.CONFIRMED)
+        offs = learn(offs, "security", Feedback.MUTE)
+    assert offs == {"money_movement": 0.1, "security": 0.1}
+    assert learn({}, "not-a-kind", Feedback.MUTE) == {}
+    sec = u(EmailKind.SECURITY)
+    assert attention_score(inputs(sec, offset=0.3)) == attention_score(inputs(sec, offset=0.1))
+
+
+def test_pref_shift_is_order_independent():
+    hits = [PrefHit("mute", "x", 0.1), PrefHit("mute", "x", 0.2), PrefHit("always", "x", 0.3)]
+    assert pref_shift(hits) == pref_shift(list(reversed(hits)))

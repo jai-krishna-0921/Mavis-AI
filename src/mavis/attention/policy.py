@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -40,6 +41,7 @@ NOTIFY_SECURITY = frozenset(
     {RiskFlag.NEW_SIGNIN, RiskFlag.CREDENTIAL_CHANGE, RiskFlag.MFA_CHANGE, RiskFlag.ACCOUNT_LOCKED}
 )
 LOOKALIKE = "lookalike_domain"
+SENSITIVE_OFFSET_CAP = 0.1  # money and security kinds can never be tuned down further than this
 
 
 @dataclass(frozen=True)
@@ -52,12 +54,30 @@ class PolicyInputs:
     offset: float = 0.0  # learned per-kind offset: positive means "tell me less"
     sender_established: bool = False
     urgent_used_today: bool = False
+    sender_authenticated: bool = False  # DMARC or DKIM pass for the From domain, captured at ingest
+    sender_prior_security: bool = False  # this sender has sent SECURITY-kind mail before
+
+
+def is_security(u: EmailUnderstanding) -> bool:
+    """The kind and flags come from a model reading untrusted text: either one marks it security."""
+    return u.kind is EmailKind.SECURITY or bool(set(u.risk_flags) & NOTIFY_SECURITY)
+
+
+def _is_money(u: EmailUnderstanding) -> bool:
+    return u.kind is EmailKind.MONEY_MOVEMENT or u.money is not None
+
+
+def effective_offset(i: PolicyInputs) -> float:
+    off = i.offset
+    if off > SENSITIVE_OFFSET_CAP and (is_security(i.understanding) or _is_money(i.understanding)):
+        return SENSITIVE_OFFSET_CAP
+    return off
 
 
 def pref_shift(hits: Iterable[PrefHit]) -> int:
     hits = list(hits)
-    mute = sum(h.score for h in hits if h.sentiment == Feedback.MUTE)
-    always = sum(h.score for h in hits if h.sentiment == Feedback.ALWAYS)
+    mute = math.fsum(sorted(h.score for h in hits if h.sentiment == Feedback.MUTE))
+    always = math.fsum(sorted(h.score for h in hits if h.sentiment == Feedback.ALWAYS))
     return -1 if mute > always else 1 if always > mute else 0
 
 
@@ -72,7 +92,7 @@ def attention_score(i: PolicyInputs) -> float:
         s -= 0.05
     if u.deadline is not None and timedelta(0) <= u.deadline - i.now <= SOON:
         s += 0.2
-    return round(max(0.0, min(1.0, s - i.offset)), 3)
+    return round(max(0.0, min(1.0, s - effective_offset(i))), 3)
 
 
 def _shift(verdict: Verdict, step: int) -> Verdict:
@@ -87,16 +107,20 @@ def decide(i: PolicyInputs, s: Settings) -> AttentionDecision:
     debit = u.money is not None and u.money.direction is Direction.DEBIT and u.money.amount > 0
     flags = set(u.risk_flags)
     lookalike = LOOKALIKE in a.codes
+    security = is_security(u)
     shift = pref_shift(i.prefs)
-    if u.kind is EmailKind.NEWSLETTER and not lookalike:
+    # Money anomalies are judged on the RAW anomaly: offsets and preferences never lower them (C1).
+    money_ask = debit and a.score >= s.attention_ask_threshold
+    money_floor = _is_money(u) and a.score >= s.attention_brief_threshold
+    if u.kind is EmailKind.NEWSLETTER and not lookalike and not security and not money_floor:
         return AttentionDecision(Verdict.BRIEF if shift > 0 else Verdict.LOG, 0, score, a.reasons)
     if lookalike:
         verdict = Verdict.NOTIFY  # imitation of a known sender: warn, never ask "was this you?"
-    elif debit and a.score >= s.attention_ask_threshold + i.offset:
+    elif money_ask:
         verdict = Verdict.ASK
     elif u.kind is EmailKind.SECURITY and flags & URGENT_SECURITY and i.sender_established:
         verdict = Verdict.ASK
-    elif u.kind is EmailKind.SECURITY and (flags & NOTIFY_SECURITY or u.needs_user):
+    elif security and (flags & NOTIFY_SECURITY or u.needs_user):
         verdict = Verdict.NOTIFY
     elif score >= s.attention_notify_threshold:
         verdict = Verdict.NOTIFY
@@ -104,13 +128,13 @@ def decide(i: PolicyInputs, s: Settings) -> AttentionDecision:
         verdict = Verdict.BRIEF
     else:
         verdict = Verdict.LOG
-    protected = verdict is Verdict.ASK or u.kind is EmailKind.SECURITY or lookalike
+    protected = verdict is Verdict.ASK or security or lookalike or money_floor
     if shift < 0 and not protected:
         verdict = _shift(verdict, -1)
     elif shift > 0:
         verdict = _shift(verdict, +1)
-    if u.kind is EmailKind.SECURITY and verdict is Verdict.LOG:
-        verdict = Verdict.BRIEF  # floor: a security email is never silently logged, whatever the offset
+    if (security or money_floor) and verdict is Verdict.LOG:
+        verdict = Verdict.BRIEF  # floor: never silently logged, whatever the offset or preferences
     return AttentionDecision(verdict, _urgency(verdict, i, debit, flags, lookalike, s), score, a.reasons)
 
 
@@ -118,14 +142,19 @@ def _urgency(
     verdict: Verdict, i: PolicyInputs, debit: bool, flags: set[RiskFlag], lookalike: bool, s: Settings
 ) -> int:
     if verdict is Verdict.NOTIFY:
-        return 4 if (i.understanding.kind is EmailKind.SECURITY or lookalike) else 3
+        return 4 if (is_security(i.understanding) or lookalike) else 3
     if verdict is not Verdict.ASK:
         return 0
     # Spec 8.4: urgency 5 (quiet hours bypass) only from deterministic facts, an established sender,
     # never a lookalike, at most once per local day.
     risky = (
         debit and i.anomaly.score >= ESCALATE_SCORE and len(i.anomaly.codes) >= ESCALATE_MIN_REASONS
-    ) or bool(flags & URGENT_SECURITY)
+    ) or (
+        i.understanding.kind is EmailKind.SECURITY
+        and bool(flags & URGENT_SECURITY)
+        and i.sender_authenticated
+        and i.sender_prior_security
+    )
     escalate = (
         s.attention_allow_urgent
         and i.sender_established
