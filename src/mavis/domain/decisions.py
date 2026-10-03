@@ -4,6 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
 
 from mavis.domain.loops import LoopUpsert
 
@@ -28,6 +29,9 @@ class NotifyIntent(BaseModel):
     urgency: int = Field(ge=1, le=5)
     intent: str = Field(description="What the message should accomplish, not the wording")
     dedupe_key: str | None = None
+    # Set only by deterministic code (the email security floor); hidden from the model's schema and
+    # reset on model output. A security notice is never dropped by the daily budget.
+    security: SkipJsonSchema[bool] = False
 
 
 class TaskRequest(BaseModel):

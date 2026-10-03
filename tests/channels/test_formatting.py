@@ -110,3 +110,30 @@ def test_no_italic_inside_bare_url() -> None:
     url = "https://x.io/a_b_c/*d*"
     assert H(f"go {url} ok") == f"go {url} ok"
     assert to_plain(f"go {url} ok") == f"go {url} ok"
+
+
+def test_dash_lookalikes() -> None:
+    assert sanitize_typography("wait―what") == "wait, what"
+    assert sanitize_typography("call 555‒0132") == "call 555-0132"
+    assert sanitize_typography("a ‒ b") == "a, b"
+    assert sanitize_typography("it was −5 degrees") == "it was -5 degrees"
+    assert sanitize_typography("fine -- see you then") == "fine, see you then"
+    assert sanitize_typography("run it with --verbose") == "run it with --verbose"
+    assert sanitize_typography("a--b") == "a--b"
+
+
+def test_sanitize_stored_keeps_code() -> None:
+    from mavis.channels.formatting import sanitize_stored
+
+    out = sanitize_stored("sure — here `a—b`\n```\nx -- y\n```\nok -- done")
+    assert out == "sure, here `a—b`\n```\nx -- y\n```\nok, done"
+
+
+async def test_assistant_messages_stored_sanitized(user) -> None:
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    await messages.log(user.id, Role.ASSISTANT, "Good luck — you've got this")
+    await messages.log(user.id, Role.USER, "a — b")
+    rows = await messages.recent(user.id)
+    assert [r.content for r in rows] == ["Good luck, you've got this", "a — b"]

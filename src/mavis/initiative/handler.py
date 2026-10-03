@@ -14,14 +14,21 @@ from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import Loop, LoopKind, LoopStatus
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative import hooks
-from mavis.initiative.executor import InitiativeExecutor
+from mavis.initiative.executor import DEFERRED_TTL, UNTRUSTED_SOURCE_PREFIX, InitiativeExecutor
 from mavis.initiative.filters import EventFilter
-from mavis.initiative.planner import fallback_decision, schedule_default_signals
+from mavis.initiative.planner import (
+    PREP_LEAD,
+    PREP_MIN_IMPORTANCE,
+    fallback_decision,
+    schedule_default_signals,
+)
 from mavis.initiative.quiet import QuietTracker
 from mavis.initiative.reasoner import Reasoner
 from mavis.initiative.routines import Routines
 from mavis.initiative.untrusted import wrap_untrusted
-from mavis.loops.service import LoopService
+from mavis.loops.service import TRUSTED_SOURCE_PREFIXES, LoopService
+from mavis.policy.pings import normalize_dedupe_key
+from mavis.store.repo import decisions as decisions_repo
 from mavis.store.repo import users
 from mavis.timers import system
 from mavis.timers.service import WakeupService
@@ -29,6 +36,11 @@ from mavis.worker.runner import register_event_handler
 
 log = structlog.get_logger()
 MAX_WAKEUP_LATENESS = timedelta(hours=2)
+MAX_LLM_URGENCY = 4
+URGENT_URGENCY = 5
+IMMINENT = PREP_LEAD + timedelta(minutes=10)  # the default prep wakeup (60 min ahead) plus slack
+FOLLOW_UP_VALID_FOR = timedelta(hours=24)
+LIVE_STATUSES = (LoopStatus.OPEN, LoopStatus.AWAITING_REPLY)
 HANDLED_TYPES = tuple(t for t in EventType if t not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED))
 
 
@@ -56,14 +68,17 @@ class InitiativeHandler:
             return
         if event.type is EventType.WAKEUP and kind == WakeupKind.DEFERRED.value:
             origin = event.payload.get("origin")
-            if origin and not await self._origin_still_valid(user.id, origin):
-                log.info("initiative.deferred_stale", event_id=event.id, origin=origin)
-                return
-            original_due = event.payload.get("original_due")
-            await self._executor.notify(
-                user, NotifyIntent.model_validate(event.payload["notify"]),
-                untrusted=bool(event.payload.get("untrusted", False)),
-                original_due=datetime.fromisoformat(original_due) if original_due else None, origin=origin)
+            if reason := await self._deferred_stale(user.id, event.payload):
+                log.info("initiative.deferred_stale", event_id=event.id, origin=origin, reason=reason)
+            else:
+                original_due = event.payload.get("original_due")
+                await self._executor.notify(
+                    user, NotifyIntent.model_validate(event.payload["notify"]),
+                    untrusted=bool(event.payload.get("untrusted", False)),
+                    original_due=datetime.fromisoformat(original_due) if original_due else None,
+                    origin=origin)
+            if (origin or {}).get("kind") == EventType.EVENT_ENDED.value and origin.get("loop_id"):
+                await self._settle_follow_up(user.id, int(origin["loop_id"]))
             return
         if event.type is EventType.WAKEUP and kind == WakeupKind.ROUTINE.value:
             await self._routines.run(user, event.payload)
@@ -91,29 +106,85 @@ class InitiativeHandler:
         if not result.matched_loops and (reason := await hooks.run_prefilters(event)):
             log.info("initiative.prefiltered", event_id=event.id, reason=reason)
             return
-        result.extra = await hooks.gather_enrichments(event)
-        try:
-            decision = await self._reasoner.decide(user, event, result)
-        except LLMError as exc:
-            log.warning("initiative.reasoner_failed", event_id=event.id, error=str(exc))
-            decision = fallback_decision(event, result)
+        # A retry (the executor failed part way) re-applies the first decision: asking the model again
+        # could decide differently after half of the first decision's side effects already happened.
+        decision = await decisions_repo.get(event.id)
+        if decision is None:
+            decision = await self._decide(user, event, result)
+            await decisions_repo.save(user.id, event.id, decision)
+        else:
+            log.info("initiative.decision_reused", event_id=event.id)
 
         if event.type is EventType.LOOP_CREATED:
-            loop = Loop.model_validate(event.payload)
-            if not any(w.loop_id == loop.id for w in decision.wakeups):
-                await schedule_default_signals(self._wakeups, loop)
-
-        decision = await hooks.apply_decision_policies(event, decision)
-        decision = _with_default_dedupe(decision, event)
+            # Always: the model's own wakeups are deduped against these by the executor, not instead of them
+            await schedule_default_signals(self._wakeups, Loop.model_validate(event.payload))
         context = result.summary
         if event.trust is Trust.UNTRUSTED:
             context = wrap_untrusted(result.summary, event.type.value)
         streak = int(event.payload.get("streak", 0)) + 1 if event.type is EventType.USER_QUIET else 0
         await self._executor.apply(user, decision, event, context=context, quiet_streak=streak,
-                                  origin=_origin_for(event))
+                                  origin=await self._origin_for(event), open_loops=open_loops,
+                                  event_loop_id=_event_loop_id(event))
 
         if event.type is EventType.EVENT_ENDED and event.payload.get("loop_id"):
-            await self._loops.close(int(event.payload["loop_id"]), LoopStatus.DONE)
+            await self._settle_follow_up(user.id, int(event.payload["loop_id"]))
+
+    async def _settle_follow_up(self, user_id: int, loop_id: int) -> None:
+        """After a follow-up attempt: the executor moved the loop to AWAITING if the question was
+        delivered. If it is still OPEN and no deferred follow-up is pending, nothing will be asked, so
+        the loop is done. A pending deferred follow-up keeps it OPEN until it goes out."""
+        loop = await self._loops.get(loop_id)
+        if loop is None or loop.status is not LoopStatus.OPEN:
+            return
+        if any(w.loop_id == loop_id for w in await self._wakeups.pending(user_id, WakeupKind.DEFERRED)):
+            return
+        await self._loops.close(loop_id, LoopStatus.DONE)
+
+    async def _decide(self, user, event: Event, result) -> InitiativeDecision:
+        result.extra = await hooks.gather_enrichments(event)
+        try:
+            decision = _normalize_llm_key(_cap_llm_urgency(await self._reasoner.decide(user, event, result)))
+        except LLMError as exc:
+            log.warning("initiative.reasoner_failed", event_id=event.id, error=str(exc))
+            decision = fallback_decision(event, result)
+        decision = await hooks.apply_decision_policies(event, decision)
+        decision = _imminent_floor(event, decision, result.matched_loops)
+        decision = _quiet_after_turn(event, decision)  # before persisting: a retry must not undo it
+        return _with_default_dedupe(decision, event)
+
+    async def _deferred_stale(self, user_id: int, payload: dict) -> str | None:
+        """Send-time revalidation of a deferred ping: why it should no longer go out, or None."""
+        origin = payload.get("origin") or {}
+        valid_until = payload.get("valid_until") or origin.get("valid_until")
+        if valid_until is None and payload.get("original_due"):  # deferred before valid_until existed
+            valid_until = (datetime.fromisoformat(payload["original_due"]) + DEFERRED_TTL).isoformat()
+        if valid_until and timeutil.now() > timeutil.ensure_utc(datetime.fromisoformat(valid_until)):
+            return "expired"
+        loop_id = payload.get("loop_id") or origin.get("loop_id")
+        if loop_id is not None:
+            loop = await self._loops.get(int(loop_id))
+            if loop is None or loop.user_id != user_id or loop.status not in LIVE_STATUSES:
+                return "loop closed"
+        if origin and not await self._origin_still_valid(user_id, origin):
+            return "origin stale"
+        return None
+
+    async def _origin_for(self, event: Event) -> dict | None:
+        """Why a ping is being sent, carried with it if it is deferred so it can be revalidated."""
+        if event.type is EventType.USER_QUIET:
+            return {"kind": event.type.value, "asked_at": event.payload.get("asked_at")}
+        loop_id = _event_loop_id(event)
+        if loop_id is None:
+            return None
+        origin: dict = {"kind": event.type.value, "loop_id": loop_id}
+        loop = await self._loops.get(loop_id)
+        if loop is not None and loop.due_at is not None:
+            due = timeutil.ensure_utc(loop.due_at)
+            if event.type is EventType.EVENT_ENDED:
+                origin["valid_until"] = (due + FOLLOW_UP_VALID_FOR).isoformat()
+            elif due > timeutil.now():  # a reminder about something is stale once it has started
+                origin["valid_until"] = due.isoformat()
+        return origin
 
     async def _origin_still_valid(self, user_id: int, origin: dict) -> bool:
         """Send-time revalidation: has the reason for this message gone stale?"""
@@ -129,24 +200,76 @@ class InitiativeHandler:
     async def _on_loop_updated(self, loop: Loop) -> None:
         if loop.status is not LoopStatus.OPEN:
             kinds = [k for k in WakeupKind if not k.value.startswith(system.SYSTEM_PREFIX)]
+            if loop.status is LoopStatus.AWAITING_REPLY:  # the follow-up itself may still be deferred
+                kinds = [k for k in kinds if k is not WakeupKind.DEFERRED]
             await self._wakeups.cancel_where(loop.user_id, kinds, loop_id=loop.id)
             return
         if loop.due_at is not None:  # due date may have moved: re-plan derived signals
             derived = [WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED]
             await self._wakeups.cancel_where(loop.user_id, derived, loop_id=loop.id)
-            await schedule_default_signals(self._wakeups, loop)
+            # last touched by third-party content: the re-planned signals fire as untrusted (capped at 4)
+            await schedule_default_signals(self._wakeups, loop,
+                                           untrusted=loop.source.startswith(UNTRUSTED_SOURCE_PREFIX))
+
+
+def _quiet_after_turn(event: Event, decision: InitiativeDecision) -> InitiativeDecision:
+    """A loop extracted from a chat turn never triggers a ping at creation: the user just talked about
+    it and got an answer. Tracking, default wakeups and the model's wakeups still apply; those do the
+    follow-through later. (No time window: LEARN can run late under LLM load.)"""
+    if event.type is not EventType.LOOP_CREATED or decision.notify is None:
+        return decision
+    if not str(event.payload.get("source", "")).startswith(TRUSTED_SOURCE_PREFIXES):
+        return decision
+    log.info("initiative.post_turn_suppressed", event_id=event.id, intent=decision.notify.intent[:80])
+    return decision.model_copy(update={"notify": None, "ignore_reason": "just discussed in chat"})
+
+
+def _cap_llm_urgency(decision: InitiativeDecision) -> InitiativeDecision:
+    """The model tends to call every pre-event nudge a 5. Only deterministic rules may produce 5
+    (it bypasses quiet hours), so a model-proposed urgency is capped at 4."""
+    if decision.notify is None:
+        return decision
+    notify = decision.notify.model_copy(update={"urgency": min(decision.notify.urgency, MAX_LLM_URGENCY),
+                                                "security": False})  # only code may mark security
+    return decision.model_copy(update={"notify": notify})
+
+
+def _imminent_floor(event: Event, decision: InitiativeDecision, loops: list[Loop]) -> InitiativeDecision:
+    """Deterministic rule: the prep nudge for a commitment starting within the prep lead is urgent."""
+    if event.type is not EventType.EVENT_STARTING or decision.notify is None:
+        return decision
+    if event.trust is Trust.UNTRUSTED:  # a signal re-planned from third-party content never earns 5
+        return decision
+    loop_id = event.payload.get("loop_id")
+    loop = next((lp for lp in loops if lp.id == loop_id), None)
+    if loop is None or loop.due_at is None or loop.importance < PREP_MIN_IMPORTANCE:
+        return decision
+    if not timedelta(0) < timeutil.ensure_utc(loop.due_at) - timeutil.now() <= IMMINENT:
+        return decision
+    notify = decision.notify.model_copy(update={"urgency": URGENT_URGENCY})
+    return decision.model_copy(update={"notify": notify})
 
 
 def _too_late(event: Event) -> bool:
     return timeutil.now() - timeutil.ensure_utc(event.occurred_at) > MAX_WAKEUP_LATENESS
 
 
-def _origin_for(event: Event) -> dict | None:
-    if event.type is EventType.USER_QUIET:
-        return {"kind": event.type.value, "asked_at": event.payload.get("asked_at")}
-    if event.type is EventType.EVENT_STARTING:
-        return {"kind": event.type.value, "loop_id": event.payload.get("loop_id")}
-    return None
+def _event_loop_id(event: Event) -> int | None:
+    """The loop this event is about, if any."""
+    raw = event.payload.get("loop_id")
+    if raw is None and event.type in (EventType.LOOP_CREATED, EventType.LOOP_UPDATED):
+        raw = event.payload.get("id")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_llm_key(decision: InitiativeDecision) -> InitiativeDecision:
+    if decision.notify is None or not decision.notify.dedupe_key:
+        return decision
+    key = normalize_dedupe_key(decision.notify.dedupe_key)
+    return decision.model_copy(update={"notify": decision.notify.model_copy(update={"dedupe_key": key})})
 
 
 def _with_default_dedupe(decision: InitiativeDecision, event: Event) -> InitiativeDecision:
