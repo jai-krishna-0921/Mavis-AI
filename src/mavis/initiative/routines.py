@@ -14,7 +14,8 @@ from sqlalchemy import func, select
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import NotifyIntent
-from mavis.domain.loops import LoopKind, LoopUpsert
+from mavis.domain.events import Trust
+from mavis.domain.loops import LoopKind, LoopOrigin, LoopUpsert
 from mavis.domain.messages import Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.executor import InitiativeExecutor
@@ -117,7 +118,8 @@ class Routines:
                 await self._schedule_morning(user, existing[0].id, next_day=True)
             return
         loop = await self._loops.upsert(user.id, LoopUpsert(kind=LoopKind.ROUTINE, title=MORNING_TITLE,
-                                                            importance=2, source="onboarding"))
+                                                            importance=2, source="onboarding",
+                                                            trust=Trust.SYSTEM, origin=LoopOrigin.ROUTINE))
         await self._schedule_morning(user, loop.id, next_day=True)
 
     async def run(self, user, payload: dict[str, Any]) -> None:
@@ -159,7 +161,7 @@ class Routines:
         start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
         items = [
-            BriefItem(f"{lp.title} at {timeutil.to_local(lp.due_at, user.timezone):%H:%M}", True)
+            BriefItem(f"{lp.title} at {timeutil.to_local(lp.due_at, user.timezone):%H:%M}", lp.trusted)
             for lp in await self._loops.active(user.id)
             if lp.kind is not LoopKind.ROUTINE and lp.due_at is not None
             and start.astimezone(UTC) <= lp.due_at < end.astimezone(UTC)

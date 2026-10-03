@@ -29,8 +29,8 @@ def friend_extraction(mood=None):
 async def test_learn_writes_graph_vector_profile_and_calls_hooks(memory, user, fake_llm):
     calls = []
 
-    async def hook(uid, extraction, source_ref):
-        calls.append((uid, extraction, source_ref))
+    async def hook(uid, extraction, prov):
+        calls.append((uid, extraction, prov.source_ref))
 
     memory.on_extraction.append(hook)
     fake_llm.push_structured(friend_extraction(mood="tense"))
@@ -92,6 +92,7 @@ async def test_recall_uses_spotted_entities_profile_and_loops(memory, user, fake
                     id=1,
                     user_id=user_id,
                     kind=LoopKind.COMMITMENT,
+                    trust=Trust.USER,
                     title="Interview prep with Jawahar",
                     due_at=datetime(2026, 10, 5, 4, 30, tzinfo=UTC),
                 )
@@ -199,7 +200,7 @@ async def test_learn_propagates_llm_error(memory, user, monkeypatch):
 async def test_untrusted_learn_writes_no_edges_no_profile_but_signal_and_hooks(memory, user, fake_llm):
     calls = []
 
-    async def hook(uid, extraction, source_ref):
+    async def hook(uid, extraction, prov):
         calls.append(extraction)
 
     memory.on_extraction.append(hook)

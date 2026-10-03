@@ -8,6 +8,7 @@ from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision
 from mavis.domain.events import Event, Trust
+from mavis.domain.loops import Loop
 from mavis.domain.messages import Role
 from mavis.initiative.filters import FilterResult
 from mavis.initiative.untrusted import wrap_untrusted
@@ -50,6 +51,12 @@ def _fmt_history(rows) -> str:
     return "\n".join(f"{'User' if r.role == Role.USER else 'Mavis'}: {r.content}" for r in rows) or "(none)"
 
 
+def _loop_line(lp: Loop, tz: str) -> str:
+    due = f"due {timeutil.to_local(lp.due_at, tz):%a %d %b %H:%M}" if lp.due_at else "no due date"
+    title = lp.title if lp.trusted else wrap_untrusted(lp.title, "loop")  # third-party derived: data only
+    return f"- [{lp.id}] {lp.kind.value} '{title}' {due} importance {lp.importance}"
+
+
 class Reasoner:
     def __init__(self, memory, policy: PingPolicy) -> None:
         self._memory, self._policy = memory, policy
@@ -73,19 +80,7 @@ class Reasoner:
             if event.trust is Trust.UNTRUSTED
             else result.summary
         )
-        loops = (
-            "\n".join(
-                f"- [{lp.id}] {lp.kind.value} '{lp.title}' "
-                + (
-                    f"due {timeutil.to_local(lp.due_at, user.timezone):%a %d %b %H:%M}"
-                    if lp.due_at
-                    else "no due date"
-                )
-                + f" importance {lp.importance}"
-                for lp in result.matched_loops
-            )
-            or "- none"
-        )
+        loops = "\n".join(_loop_line(lp, user.timezone) for lp in result.matched_loops) or "- none"
         recall = (await self._memory.recall(user.id, result.summary)).render()
         history = _fmt_history(await messages.recent(user.id, 10))
         prompt = (

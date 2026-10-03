@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from mavis.domain.events import Job, JobKind
 from mavis.domain.memory import Entity, Extraction, Relation
 from mavis.memory import jobs
@@ -84,8 +86,8 @@ async def test_handle_learn_is_idempotent_per_source_ref(memory, user, fake_llm,
     monkeypatch.setattr(jobs, "maybe_summarize", noop)
     calls = []
 
-    async def hook(uid, extraction, source_ref):
-        calls.append(source_ref)
+    async def hook(uid, extraction, prov):
+        calls.append(prov.source_ref)
 
     memory.on_extraction.append(hook)
     fake_llm.push_structured(Extraction())
@@ -95,6 +97,31 @@ async def test_handle_learn_is_idempotent_per_source_ref(memory, user, fake_llm,
     await jobs.handle_learn(job)
     await jobs.handle_learn(job)
     assert calls == ["tg:77"]
+
+
+@pytest.mark.parametrize("payload_extra,trust,conversation", [
+    ({"trust": "user", "conversation": True}, "user", True),
+    ({"trust": "untrusted", "conversation": True}, "untrusted", True),
+    ({"trust": "untrusted", "conversation": False}, "untrusted", False),
+])
+async def test_handle_learn_hands_the_jobs_provenance_to_hooks(memory, user, fake_llm, monkeypatch,
+                                                               payload_extra, trust, conversation):
+    async def noop(uid):
+        return False
+
+    monkeypatch.setattr(jobs, "maybe_summarize", noop)
+    seen = []
+
+    async def hook(uid, extraction, prov):
+        seen.append(prov)
+
+    memory.on_extraction.append(hook)
+    fake_llm.push_structured(Extraction())
+    job = Job(id="learn:x:1", user_id=user.id, kind=JobKind.LEARN,
+              payload={"text": "some text worth learning", "source_ref": "x:1", **payload_extra})
+    await jobs.handle_learn(job)
+    [prov] = seen
+    assert (prov.trust.value, prov.conversation, prov.source_ref) == (trust, conversation, "x:1")
     assert len(fake_llm.structured_calls) == 1
 
 

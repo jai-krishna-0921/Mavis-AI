@@ -19,11 +19,11 @@ FOLLOW_UP_MIN_IMPORTANCE = 3
 SIGNAL_NOTIFY_RELEVANCE = 0.9
 
 
-async def schedule_default_signals(wakeups: WakeupService, loop: Loop, untrusted: bool = False) -> list[int]:
-    """`untrusted`: the loop was last changed by third-party content, so the signals fire as untrusted."""
+async def schedule_default_signals(wakeups: WakeupService, loop: Loop) -> list[int]:
+    """Signals derived from a loop carry its trust: an untrusted loop's signals fire as untrusted."""
     if loop.kind is not LoopKind.COMMITMENT or loop.due_at is None:
         return []
-    payload = {"untrusted": True} if untrusted else None
+    payload = None if loop.trusted else {"untrusted": True}
     now = timeutil.now()
     ids: list[int] = []
     if loop.importance >= PREP_MIN_IMPORTANCE and loop.due_at - PREP_LEAD > now:

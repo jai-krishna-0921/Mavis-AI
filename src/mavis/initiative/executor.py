@@ -12,7 +12,7 @@ from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision, NotifyIntent, WakeupRequest
 from mavis.domain.events import Event, EventType, Trust
-from mavis.domain.loops import Loop, LoopStatus, LoopUpsert
+from mavis.domain.loops import Loop, LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.messages import TAINT_SUFFIX, Button, Outbound, Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.composer import Composer
@@ -30,7 +30,6 @@ MAX_UNTRUSTED_URGENCY = 4  # only a trusted origin may bypass quiet hours (urgen
 DELAY_NOTE_AFTER = timedelta(minutes=30)
 RELEASE_DELAY = timedelta(seconds=20)  # let the user's reply go out first
 DEFERRED_TTL = timedelta(hours=12)  # a deferred ping with no better bound goes stale after this
-UNTRUSTED_SOURCE_PREFIX = "untrusted:"  # loop.source after an update driven by third-party content
 SECURITY_DEFER_GRACE = timedelta(hours=2)
 MERGE_WINDOW = timedelta(minutes=30)  # a model wakeup this close to one already set for the loop merges
 LOOP_WAKEUP_KINDS = (WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED, WakeupKind.AGENT)
@@ -68,8 +67,10 @@ class InitiativeExecutor:
                     upsert = await self._limit_untrusted_update(upsert, event)
                     if upsert is None:
                         continue
-                source = upsert.source or event.id
-                await self._loops.upsert(user.id, upsert.model_copy(update={"source": source}))
+                # Provenance is set here, never taken from the model. The reasoner's prompt carries
+                # untrusted history, memory and mail, so what it tracks is untrusted content.
+                await self._loops.upsert(user.id, upsert.model_copy(update={
+                    "source": event.id[:200], "trust": Trust.UNTRUSTED, "origin": LoopOrigin.REASONER}))
             except ValueError as exc:  # e.g. the LLM named a loop id that does not exist: not retryable
                 log.warning("initiative.track_failed", event_id=event.id, title=upsert.title[:80],
                             error=str(exc))
@@ -85,10 +86,12 @@ class InitiativeExecutor:
                 continue
             key = f"agent:{loop_id}:{w.reason[:60]}" if loop_id else f"agent:{event.id}:{i}"
             try:
-                # spec 8.3: a wakeup an untrusted event asked for fires as untrusted too (scrubbed, capped)
+                # spec 8.3: a wakeup an untrusted event asked for, or one about an untrusted loop, fires
+                # as untrusted too (scrubbed, capped)
+                tainted = untrusted or not await self._loop_trusted(loop_id)
                 await self._wakeups.wake_me(user.id, w.at, w.reason, loop_id, WakeupKind.AGENT,
                                             dedupe_key=key,
-                                            payload={"untrusted": True} if untrusted else None)
+                                            payload={"untrusted": True} if tainted else None)
             except ValueError as exc:
                 log.warning("initiative.wakeup_failed", event_id=event.id, reason=w.reason[:80],
                             error=str(exc))
@@ -196,13 +199,20 @@ class InitiativeExecutor:
     async def _limit_untrusted_update(self, upsert: LoopUpsert, event: Event) -> LoopUpsert | None:
         """Third-party content may change a loop's status, entities and watch, never when it is due or how
         important it is (that would let an email schedule a trusted, quiet-hours-bypassing nudge). The
-        source is marked so wakeups re-planned from this update fire as untrusted."""
+        write carries untrusted trust, so a content change taints the loop and its re-planned wakeups."""
         current = await self._loops.get(upsert.id) if upsert.id is not None else None
         if current is None:
             return None
         return upsert.model_copy(update={
             "kind": current.kind, "title": current.title, "due_at": current.due_at,
-            "importance": current.importance, "source": f"{UNTRUSTED_SOURCE_PREFIX}{event.id}"[:200]})
+            "importance": current.importance, "source": event.id[:200], "trust": Trust.UNTRUSTED})
+
+    async def _loop_trusted(self, loop_id: int | None) -> bool:
+        """A wakeup with no loop has no loop provenance to inherit."""
+        if loop_id is None:
+            return True
+        loop = await self._loops.get(loop_id)
+        return loop is None or loop.trusted
 
     async def _owns_existing_loop(self, user_id: int, loop_id: int | None) -> bool:
         if loop_id is None:

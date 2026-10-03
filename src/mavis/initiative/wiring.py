@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from mavis.bus.base import EventBus
 from mavis.bus.leader import LeaderLock, make_leader
 from mavis.config import get_settings
+from mavis.domain.events import Provenance
 from mavis.initiative.composer import Composer
 from mavis.initiative.executor import InitiativeExecutor
 from mavis.initiative.filters import Embed, EventFilter
@@ -34,8 +35,8 @@ class Initiative:
     handler: InitiativeHandler
     timer: TimerRunner
 
-    async def loops_from_extraction(self, user_id: int, extraction, source_ref: str) -> None:
-        await loops_from_extraction(self.loops, user_id, extraction, source_ref)
+    async def loops_from_extraction(self, user_id: int, extraction, prov: Provenance) -> None:
+        await loops_from_extraction(self.loops, user_id, extraction, prov)
 
 
 def build_initiative(bus: EventBus, memory, *, leader: LeaderLock | None = None,

@@ -207,7 +207,7 @@ async def test_two_users_first_sync_learn_markers_do_not_collide(db, monkeypatch
     learned = []
 
     class FakeMemoryService:
-        async def learn(self, user_id, text, source_ref="", trust=Trust.USER):
+        async def learn(self, user_id, text, source_ref="", trust=Trust.USER, conversation=True):
             learned.append((user_id, source_ref))
 
     monkeypatch.setattr(jobs, "get_memory", lambda: FakeMemoryService())
