@@ -109,10 +109,12 @@ async def save_plan(task_id: int, plan: dict) -> bool:
 
 
 async def running_count(user_id: int) -> int:
+    """RUNNING planned tasks. APPROVAL tasks only show a prompt and wait, so they take no task slot."""
     async with Session() as s:
         n = await s.scalar(
             select(func.count(Task.id)).where(
-                Task.user_id == user_id, Task.status == TaskStatus.RUNNING.value
+                Task.user_id == user_id, Task.status == TaskStatus.RUNNING.value,
+                Task.kind != TaskKind.APPROVAL.value,
             )
         )
         return int(n or 0)
@@ -146,11 +148,22 @@ async def users_with_queued(user_id: int | None = None) -> list[int]:
 
 
 async def next_queued(user_id: int) -> Task | None:
+    """The oldest QUEUED planned task (APPROVAL tasks never wait for a slot)."""
     async with Session() as s:
         return await s.scalar(
-            select(Task).where(Task.user_id == user_id, Task.status == TaskStatus.QUEUED.value)
+            select(Task).where(Task.user_id == user_id, Task.status == TaskStatus.QUEUED.value,
+                               Task.kind != TaskKind.APPROVAL.value)
             .order_by(Task.id).limit(1)
         )
+
+
+async def queued_approval_tasks(user_id: int) -> list[Task]:
+    async with Session() as s:
+        rows = await s.scalars(
+            select(Task).where(Task.user_id == user_id, Task.status == TaskStatus.QUEUED.value,
+                               Task.kind == TaskKind.APPROVAL.value).order_by(Task.id)
+        )
+        return list(rows)
 
 
 async def active_for_user(user_id: int) -> list[Task]:

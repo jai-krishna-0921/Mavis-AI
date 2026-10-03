@@ -525,3 +525,27 @@ async def test_periodic_sweep_fails_only_tasks_past_the_wall_clock(user, rec_bus
     assert await orchestrator.recover_tasks(user.id) == 1
     assert (await tasks.get(old)).status == TaskStatus.FAILED
     assert (await tasks.get(fresh)).status == TaskStatus.RUNNING
+
+
+async def test_approval_task_does_not_wait_for_the_task_slot(user, rec_bus, sent, monkeypatch):
+    """I2: a chat approval prompt appears at once even while a research task holds the one slot."""
+    from mavis.domain.tasks import TaskKind
+
+    driven: list[int] = []
+
+    async def fake_drive(task_id, user_id, graph_input):
+        driven.append(task_id)
+
+    monkeypatch.setattr(orchestrator, "_drive", fake_drive)
+    research = await tasks.create(user.id, goal="research laptops")
+    await tasks.claim(research, TaskStatus.QUEUED, TaskStatus.RUNNING)
+    other = await tasks.create(user.id, goal="another research")
+    await orchestrator.run_task(other)
+    assert driven == [] and (await tasks.get(other)).status == TaskStatus.QUEUED  # still slot-bound
+    ap_task = await tasks.create(user.id, goal="send email", kind=TaskKind.APPROVAL)
+    await orchestrator.run_task(ap_task)
+    assert driven == [ap_task] and (await tasks.get(ap_task)).status == TaskStatus.RUNNING
+    # a running approval task takes no slot either
+    await tasks.claim(research, TaskStatus.RUNNING, TaskStatus.DONE)
+    await orchestrator.run_task(other)
+    assert driven == [ap_task, other]
