@@ -18,6 +18,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # without the column a Workspace row would read as an email: drop them first
+    op.execute("DELETE FROM attention_observations WHERE source <> 'mail'")
     op.drop_index("ix_attention_observations_user_source", table_name="attention_observations")
     with op.batch_alter_table("attention_observations") as batch:
         batch.drop_column("source")
