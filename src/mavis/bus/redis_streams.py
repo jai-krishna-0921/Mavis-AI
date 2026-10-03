@@ -17,6 +17,8 @@ from mavis.domain.events import Event, Job
 
 log = structlog.get_logger(__name__)
 MAXLEN = 100_000
+EVENTS_READ_COUNT = 10  # events are short; batching them is unchanged
+JOBS_READ_COUNT = 1  # see consume_jobs
 
 
 class RedisStreamsBus:
@@ -66,7 +68,10 @@ class RedisStreamsBus:
             job = Job.model_validate_json(data)
             await handler(job.model_copy(update={"attempts": attempts}))
 
-        await self._consume(Stream.JOBS, group, consumer, handle)
+        # One job per read: a job can run for minutes (RUN_TASK, RESUME_TASK), and a batch is processed in
+        # order, so a short job read in the same batch (an approval tap's resume) would wait behind it
+        # while the other job loops sit idle. With count=1 every idle loop can pick up the next job.
+        await self._consume(Stream.JOBS, group, consumer, handle, count=JOBS_READ_COUNT)
 
     async def close(self) -> None:
         self._closed = True
@@ -82,15 +87,15 @@ class RedisStreamsBus:
 
     async def _consume(
         self, stream: Stream, group: str, consumer: str, handle: Callable[[str, int], Awaitable[None]],
-        inline_retries: bool = True,
+        inline_retries: bool = True, count: int = EVENTS_READ_COUNT,
     ) -> None:
         await self._ensure_group(stream.value, group)
         backoff = 0.0
         while not self._closed:
             try:
-                entries = await self._claim_stale(stream.value, group, consumer)
+                entries = await self._claim_stale(stream.value, group, consumer, count)
                 if not entries:
-                    resp = await self._r.xreadgroup(group, consumer, {stream.value: ">"}, count=10,
+                    resp = await self._r.xreadgroup(group, consumer, {stream.value: ">"}, count=count,
                                                     block=self._block_ms)
                     entries = [entry for _name, items in (resp or []) for entry in items]
                 for msg_id, fields in entries:
@@ -115,9 +120,11 @@ class RedisStreamsBus:
                 log.exception("bus.consume_loop_error", stream=stream.value)
                 await asyncio.sleep(1)
 
-    async def _claim_stale(self, stream: str, group: str, consumer: str) -> list[tuple[str, dict[str, Any]]]:
+    async def _claim_stale(
+        self, stream: str, group: str, consumer: str, count: int = EVENTS_READ_COUNT,
+    ) -> list[tuple[str, dict[str, Any]]]:
         res = await self._r.xautoclaim(stream, group, consumer, min_idle_time=self._claim_idle_ms,
-                                       start_id="0-0", count=10)
+                                       start_id="0-0", count=count)
         messages = res[1] if len(res) > 1 else []
         return [(mid, fields) for mid, fields in messages if fields]
 
