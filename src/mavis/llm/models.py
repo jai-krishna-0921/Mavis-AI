@@ -265,6 +265,14 @@ class _OllamaState:
 _ollama = _OllamaState()
 
 
+def unavailable_s() -> float:
+    """Seconds until the primary provider is usable again (429 backoff or timeout cooldown); <= 0 if ready.
+
+    Background work (the attention drain) checks this before starting a call, so it never queues
+    behind a saturated account while a chat reply might need the slot."""
+    return _ollama.unavailable_s()
+
+
 def _is_rate_limited(exc: BaseException) -> bool:
     return (
         isinstance(exc, openai.RateLimitError)

@@ -57,6 +57,11 @@ class QdrantVectorStore:
         else:
             self._client = AsyncQdrantClient(path=path)
 
+    @property
+    def client(self) -> AsyncQdrantClient:
+        """The underlying client, shared with the attention index (embedded Qdrant locks its directory)."""
+        return self._client
+
     @staticmethod
     def point_id(user_id: int, text: str) -> str:
         return str(uuid.uuid5(uuid.NAMESPACE_URL, f"mavis:{user_id}:{_norm(text)}"))

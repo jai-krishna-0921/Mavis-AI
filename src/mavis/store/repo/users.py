@@ -51,10 +51,7 @@ async def get_state(user_id: int) -> dict[str, Any]:
 
 
 async def set_state(user_id: int, **kv: Any) -> None:
-    async with Session() as s:
-        user = await s.get_one(User, user_id)
-        user.state = {**(user.state or {}), **kv}
-        await s.commit()
+    await update_state(user_id, kv)
 
 
 async def all_ids() -> list[int]:
@@ -65,7 +62,9 @@ async def all_ids() -> list[int]:
 async def update_state(user_id: int, patch: dict) -> dict:
     """Shallow merge `patch` into users.state and return the merged dict."""
     async with Session() as s:
-        u = await s.get_one(User, user_id)
+        # Row lock: concurrent writers of different keys (poller cursors, attention, connect flow)
+        # must not overwrite each other's read-modify-write. No-op on SQLite (single writer).
+        u = await s.get_one(User, user_id, with_for_update=True, populate_existing=True)
         merged = {**(u.state or {}), **patch}
         u.state = merged
         await s.commit()
