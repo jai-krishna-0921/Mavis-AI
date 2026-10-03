@@ -26,6 +26,7 @@ _FAR_FUTURE = datetime.max.replace(tzinfo=UTC)
 MIN_EVENT_IMPORTANCE = 3
 TITLE_MAX = 300
 REOPEN_GUARD = timedelta(days=7)
+FOLLOW_UP_MATCH = timedelta(minutes=2)  # follow-up logged, then the loop marked AWAITING right after
 # Loops are created only from conversation turns the user typed (spec 8.3). LEARN's source_ref is the
 # originating event id: "tg:update:N" (Telegram) or "cli:<uuid>" (`mavis chat`). Anything else
 # (email, web, task output) is untrusted data and never creates loops here.
@@ -101,8 +102,8 @@ class LoopService:
         return loop
 
     async def on_user_message(self, user_id: int, text: str) -> int:
-        """Close loops whose follow-up the user is answering: the message names the loop, or it is the
-        user's first message since a proactive message sent after the loop started waiting."""
+        """Close loops whose follow-up the user is answering: the message names the loop, or it directly
+        follows that loop's follow-up message (not just any proactive message)."""
         now = timeutil.now()
         awaiting = await repo.list_awaiting(user_id, now - repo.AWAITING_FOR)
         if not awaiting:
@@ -112,7 +113,11 @@ class LoopService:
         closed = 0
         for loop, waiting_since in awaiting:
             named = said & set(repo.title_tokens(" ".join([loop.title, *loop.entities])))
-            if named or (replying_since is not None and replying_since >= waiting_since):
+            # the message right before this one is this loop's follow-up: AWAITING is set the moment the
+            # follow-up is delivered, so that proactive message was logged just before waiting_since
+            direct = replying_since is not None and \
+                timedelta(0) <= waiting_since - replying_since <= FOLLOW_UP_MATCH
+            if named or direct:
                 await self.close(loop.id, LoopStatus.DONE)
                 closed += 1
         if closed:

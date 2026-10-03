@@ -430,9 +430,8 @@ async def test_first_reply_to_the_follow_up_closes_it(user, clock, recording_bus
 
     init = build(recording_bus, fake_memory)
     clock.set(ist(27, 12, 0))
-    loop = await _awaiting_loop(init, user, recording_bus)
-    clock.advance(seconds=5)
-    await messages.log(user.id, Role.ASSISTANT, "How did it go?", proactive=True)
+    await messages.log(user.id, Role.ASSISTANT, "How did it go?", proactive=True)  # the follow-up
+    loop = await _awaiting_loop(init, user, recording_bus)  # marked right after delivery
     clock.advance(minutes=20)
     await messages.log(user.id, Role.USER, "pretty good actually")
     assert await init.loops.on_user_message(user.id, "pretty good actually") == 1
@@ -564,3 +563,114 @@ async def test_untrusted_ping_does_not_use_the_loop_slot(user, clock, recording_
                                         payload={"kind": "agent", "loop_id": loop.id, "reason": "r",
                                                  "wakeup_id": 95 + i}))
     assert [m.content for m in await messages.recent(user.id) if m.proactive] == ["nudge 0", "nudge 1"]
+
+
+# review I1/I2 ------------------------------------------------------------------------------------
+
+def ended_event(user, loop_id: int, eid: str = "wakeup:120") -> Event:
+    return Event(id=eid, user_id=user.id, type=EventType.EVENT_ENDED, occurred_at=timeutil.now(),
+                 source="timer", payload={"kind": "event_ended", "loop_id": loop_id, "wakeup_id": 120,
+                                          "reason": "Follow up"})
+
+
+async def _ended_loop(init, user, recording_bus):
+    data = LoopUpsert(kind=LoopKind.COMMITMENT, title="Interview with Jawahar", due_at=ist(27, 10, 0),
+                      importance=5)
+    loop = await init.loops.upsert(user.id, data)
+    recording_bus.take()
+    return loop
+
+
+async def _drain(init, recording_bus):
+    for event in recording_bus.take():
+        await init.handler.handle(event)
+
+
+async def test_follow_up_wakeup_survives_the_awaiting_transition(user, clock, recording_bus, fake_memory,
+                                                                 fake_llm):
+    from mavis.domain.decisions import ComposedMessage, WakeupRequest
+    from mavis.domain.loops import LoopStatus
+    from mavis.domain.wakeups import WakeupKind
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 12, 0))
+    loop = await _ended_loop(init, user, recording_bus)
+    fake_llm.push_structured(InitiativeDecision(
+        notify=NotifyIntent(urgency=3, intent="ask how it went"),
+        wakeups=[WakeupRequest(at=ist(28, 10, 0), reason="Check the thank-you note to Jawahar went out",
+                               loop_id=loop.id)]))
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["How did the interview go?"]))
+    await init.handler.handle(ended_event(user, loop.id))
+    await _drain(init, recording_bus)  # LOOP_UPDATED for AWAITING cancels the loop's own wakeups
+    assert (await init.loops.get(loop.id)).status is LoopStatus.AWAITING_REPLY
+    agent = await init.wakeups.pending(user.id, WakeupKind.AGENT)
+    assert [w.reason for w in agent] == ["Check the thank-you note to Jawahar went out"]
+    assert agent[0].loop_id is None
+
+
+async def test_undelivered_follow_up_closes_the_loop(user, clock, recording_bus, fake_memory, fake_llm):
+    from mavis.domain.decisions import ComposedMessage
+    from mavis.domain.loops import LoopStatus
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 12, 0))
+    loop = await _ended_loop(init, user, recording_bus)
+    fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="ask how it went")))
+    fake_llm.push_structured(ComposedMessage(send=False))  # composer decided it is no longer relevant
+    await init.handler.handle(ended_event(user, loop.id))
+    assert (await init.loops.get(loop.id)).status is LoopStatus.DONE
+
+
+async def test_deferred_follow_up_survives_a_reply_to_another_ping(user, clock, recording_bus, fake_memory,
+                                                                   fake_llm):
+    from mavis.domain.decisions import ComposedMessage
+    from mavis.domain.loops import LoopStatus
+    from mavis.domain.messages import Role
+    from mavis.domain.wakeups import WakeupKind
+    from mavis.store.repo import messages
+    from mavis.timers.runner import wakeup_event
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 23, 30))  # quiet hours: the follow-up is deferred to 07:00
+    data = LoopUpsert(kind=LoopKind.COMMITMENT, title="Interview with Jawahar", due_at=ist(27, 21, 0),
+                      importance=5)
+    loop = await init.loops.upsert(user.id, data)
+    recording_bus.take()
+    fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="ask how it went")))
+    await init.handler.handle(ended_event(user, loop.id))
+    await _drain(init, recording_bus)
+    assert (await init.loops.get(loop.id)).status is LoopStatus.OPEN
+    [deferred] = await init.wakeups.pending(user.id, WakeupKind.DEFERRED)
+
+    clock.set(ist(28, 6, 50))  # an unrelated proactive check-in, and the user answers it
+    await messages.log(user.id, Role.ASSISTANT, "Morning! Big day?", proactive=True)
+    clock.advance(minutes=2)
+    await messages.log(user.id, Role.USER, "yes")
+    assert await init.loops.on_user_message(user.id, "yes") == 0
+    assert (await init.loops.get(loop.id)).status is LoopStatus.OPEN
+
+    clock.set(deferred.due_at)
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["How did last night's interview go?"]))
+    await init.handler.handle(wakeup_event(deferred))
+    await _drain(init, recording_bus)
+    assert (await init.loops.get(loop.id)).status is LoopStatus.AWAITING_REPLY
+    clock.advance(minutes=5)
+    await messages.log(user.id, Role.USER, "really well")
+    assert await init.loops.on_user_message(user.id, "really well") == 1
+
+
+async def test_direct_reply_to_another_ping_does_not_close_awaiting(user, clock, recording_bus, fake_memory):
+    from mavis.domain.loops import LoopStatus
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    init = build(recording_bus, fake_memory)
+    clock.set(ist(27, 12, 0))
+    await messages.log(user.id, Role.ASSISTANT, "How did it go?", proactive=True)
+    loop = await _awaiting_loop(init, user, recording_bus)
+    clock.advance(hours=3)
+    await messages.log(user.id, Role.ASSISTANT, "Lunch plans?", proactive=True)
+    clock.advance(minutes=1)
+    await messages.log(user.id, Role.USER, "sure")
+    assert await init.loops.on_user_message(user.id, "sure") == 0
+    assert (await init.loops.get(loop.id)).status is LoopStatus.AWAITING_REPLY
