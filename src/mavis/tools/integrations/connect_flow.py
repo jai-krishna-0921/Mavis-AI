@@ -411,7 +411,9 @@ class ConnectFlow:
         rows = await connections.open_for(user_id, Capability(p.capability))
         resumed = False
         for row in rows:
-            await self._close(user_id, row.id, PendingStatus.DECLINED)
+            # resolve, not _close: the prompt's scheduled checks stay, so a sign-in finished after
+            # "Not now" is still found (check() accepts ACTIVE on a declined row).
+            await connections.resolve(row.id, PendingStatus.DECLINED, now=self.clock())
             if row.task_id:
                 await self._resume(row.task_id, user_id, False, f"declined:{row.id}")
                 resumed = True
