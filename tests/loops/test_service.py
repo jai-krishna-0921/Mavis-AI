@@ -235,3 +235,36 @@ def test_similar_titles_ignores_times_dates_and_filler():
     assert similar_titles("Interview with Jawahar at Fractal", "Fractal interview, Jawahar, Monday 10am")
     assert similar_titles("Send thank-you email to Jawahar", "send thank you email to jawahar")
     assert not similar_titles("Interview with Jawahar", "Thank-you email to Jawahar")
+
+
+@pytest.mark.parametrize("a, b", [
+    ("call mom", "call tom"),
+    ("email Raj", "email Ram"),
+    ("flight to Delhi", "flight to Dubai"),
+    ("invoice to Acme", "invoice to Apex"),
+    ("pay rent", "pay rest"),
+    ("Reply to John", "Reply to Joan"),
+    ("call mom", "call bank"),
+])
+def test_similar_titles_keeps_short_or_name_differences_apart(a, b):
+    from mavis.store.repo.loops import similar_titles
+
+    assert not similar_titles(a, b)
+
+
+def test_similar_titles_merges_rephrasings_and_long_typos():
+    from mavis.store.repo.loops import similar_titles
+
+    assert similar_titles("Dentist appointment", "Dentist appointment at 4pm")
+    assert similar_titles("Dentist appointment", "dentist appointmnet")  # long non-name word typo
+    assert similar_titles("Prepare slides", "Prepare quarterly review slides")  # subset of 2+ words
+    assert not similar_titles("Interview with Jawahar", "Interview with Jawahr")  # names never fuzzed
+
+
+async def test_dentist_phrasings_still_merge_in_service(user, recording_bus, clock):
+    svc = LoopService(recording_bus)
+    a = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Dentist appointment",
+                                             due_at=DUE))
+    b = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Dentist appointment at 4pm",
+                                             due_at=DUE))
+    assert a.id == b.id

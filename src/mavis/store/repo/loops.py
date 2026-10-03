@@ -122,15 +122,44 @@ def title_tokens(title: str) -> list[str]:
     return [t for t in normalise_title(title).split() if t not in _DUP_STOPWORDS and not _TIME_TOKEN.match(t)]
 
 
-def similar_titles(a: str, b: str) -> bool:
+TYPO_MIN_LEN = 6
+TYPO_RATIO = 0.9
+
+
+def _names(title: str, entities: list[str] | None) -> set[str]:
+    """Words that look like names: capitalised after the first word, or listed as entities."""
+    words = re.findall(r"[^\W\d_]+", title)
+    names = {w.casefold() for w in words[1:] if w[:1].isupper()}
+    for e in entities or []:
+        names |= set(normalise_title(e).split())
+    return names
+
+
+def similar_titles(a: str, b: str, entities_a: list[str] | None = None,
+                   entities_b: list[str] | None = None) -> bool:
+    """Same thing said differently: token Jaccard >= 0.8, or one token set (of 2+) inside the other.
+    Typos are forgiven only on long, non-name words ("appointmnet"), never on short words or names,
+    so "call mom"/"call tom" and "flight to Delhi"/"flight to Dubai" stay apart."""
     ta, tb = title_tokens(a), title_tokens(b)
     if not ta or not tb:
         return normalise_title(a) == normalise_title(b)
     sa, sb = set(ta), set(tb)
-    if len(sa & sb) / len(sa | sb) >= DUPLICATE_SIMILARITY:
+    names = _names(a, entities_a) | _names(b, entities_b)
+    only_a, only_b = sa - sb, sb - sa
+    for x in sorted(only_a):
+        if len(x) < TYPO_MIN_LEN or x in names:
+            continue
+        for y in sorted(only_b):
+            if len(y) >= TYPO_MIN_LEN and y not in names and \
+                    difflib.SequenceMatcher(None, x, y).ratio() >= TYPO_RATIO:
+                sb = (sb - {y}) | {x}  # treat the typo as the same word
+                only_b = only_b - {y}
+                break
+    shared = sa & sb
+    if len(shared) / len(sa | sb) >= DUPLICATE_SIMILARITY:
         return True
-    ratio = difflib.SequenceMatcher(None, " ".join(sorted(sa)), " ".join(sorted(sb))).ratio()
-    return ratio >= DUPLICATE_SIMILARITY
+    smaller = min(sa, sb, key=len)
+    return len(smaller) >= 2 and smaller <= (sa if smaller is sb else sb)
 
 
 def _due_close(a: datetime | None, b: datetime | None) -> bool:
@@ -150,7 +179,8 @@ async def find_open_duplicate(user_id: int, data: LoopUpsert) -> Loop | None:
             continue
         if loop.title.casefold() == data.title.casefold() and loop.due_at == due:
             return loop
-        if fuzzy is None and _due_close(loop.due_at, due) and similar_titles(loop.title, data.title):
+        if fuzzy is None and _due_close(loop.due_at, due) and similar_titles(
+                loop.title, data.title, loop.entities, data.entities):
             fuzzy = loop
     return fuzzy
 
