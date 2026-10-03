@@ -6,6 +6,7 @@ from mavis.memory.extractor import wrap_untrusted
 from mavis.tools.integrations.actions import (
     ACTIONS,
     CalendarCreateArgs,
+    CalendarUpdateArgs,
     MailComposeArgs,
     localize,
 )
@@ -89,3 +90,20 @@ def test_render_result_error():
 def test_render_result_error_keeps_closing_tag_when_truncated():
     out = render_result(ToolResult(ok=False, error="x" * 20_000))
     assert out.endswith("</untrusted>") and len(out) <= MAX_RESULT_CHARS
+
+
+def test_calendar_update_is_always_outward():
+    """I7: any update can notify or remove existing guests, which the arguments cannot show."""
+    from mavis.tools.integrations.tools import _make_tool
+
+    spec = ACTIONS["calendar.update_event"]
+    cases = [
+        CalendarUpdateArgs(event_id="e1", attendees=[]),  # removes every guest
+        CalendarUpdateArgs(event_id="e1", attendees=["a@example.com"]),
+        CalendarUpdateArgs(event_id="e1", description="private notes"),
+        CalendarUpdateArgs(event_id="e1", start=START),
+    ]
+    tool = _make_tool(spec)
+    for args in cases:
+        assert spec.risk_for(args) is RiskClass.OUTWARD
+        assert tool.effective_risk(args).needs_approval

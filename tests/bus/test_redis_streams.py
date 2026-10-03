@@ -329,3 +329,37 @@ async def test_always_failing_handler_stays_pending_after_inline_retries(rbus, m
     assert slept == [2, 5, 10] and calls == 4
     assert (await client.xpending(Stream.EVENTS.value, "workers"))["pending"] == 1
     assert await client.xlen(f"{Stream.EVENTS.value}:dlq") == 0
+
+
+async def test_long_job_does_not_hold_back_the_next_job() -> None:
+    """I3: jobs are read one at a time, so a resume enqueued behind a long RUN_TASK is taken by an idle
+    loop at once instead of waiting in the long job's batch."""
+    client = FakeAsyncRedis(decode_responses=True)
+    real_xreadgroup = client.xreadgroup
+
+    async def xreadgroup(*args, **kwargs):
+        result = await real_xreadgroup(*args, **kwargs)
+        await asyncio.sleep(0.005)
+        return result
+
+    client.xreadgroup = xreadgroup
+    bus = RedisStreamsBus(client, claim_idle_ms=600_000, block_ms=10)
+    release = asyncio.Event()
+    done: list[str] = []
+
+    async def handler(j: Job) -> None:
+        if j.id == "long":
+            await release.wait()
+        done.append(j.id)
+
+    await bus.enqueue(Job(id="long", user_id=1, kind=JobKind.RUN_TASK, payload={}))
+    await bus.enqueue(Job(id="resume", user_id=1, kind=JobKind.RESUME_TASK, payload={}))
+    loops = [asyncio.create_task(bus.consume_jobs("workers", f"w{i}", handler)) for i in range(2)]
+    try:
+        await wait_until(lambda: done == ["resume"])
+    finally:
+        release.set()
+        await wait_until(lambda: len(done) == 2)
+        for t in loops:
+            t.cancel()
+        await bus.close()

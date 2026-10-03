@@ -47,6 +47,7 @@ from mavis.agents.turn_support import (
     reply_event_id,
     to_langchain,
     user_text,
+    window_tainted,
 )
 from mavis.channels import presence
 from mavis.channels.formatting import sanitize_stored
@@ -322,10 +323,12 @@ async def run_turn(event: Event) -> None:
         (context, hooked), connections, card_name = await asyncio.gather(
             build_context_ex(user.id, text, hint), connection_states(user.id), known_name(user.id)
         )
-        # Start tainted when third-party content is already in the prompt: the previous reply was written
-        # from it, or hook context (the inbox digest) was added. The react loop then applies the taint
-        # rules (outward tools and start_task need approval, a started task is tainted).
-        carried_taint = previous_tainted(history) or hooked
+        # Start tainted when third-party content is already in the prompt: any replayed assistant message
+        # was written from it, or hook context (the inbox digest) was added. The react loop then applies
+        # the taint rules (outward tools and start_task need approval, a started task is tainted).
+        carried_taint = window_tainted(history) or hooked
+        # LEARN sees only the user's text and the previous reply, so its trust keeps the per-turn rule.
+        learn_taint = previous_tainted(history) or hooked
         now = utcnow()
         name = user.name or card_name
         recent = persona.recent_messages(history, now)
@@ -358,7 +361,7 @@ async def run_turn(event: Event) -> None:
             await messages.log(user.id, Role.ASSISTANT, "\n\n".join(connect_texts),
                                event_id=f"reply:{event.id}")
             await enqueue_learn(user.id, event, text, previous, clarified_request(history),
-                                tainted=carried_taint)
+                                tainted=learn_taint)
             # Anything the same step queued (an email to send, say) still gets its prompt.
             await attach_queued_approvals(user.id, text, tainted=carried_taint)
             await initiative_hook("quiet.after_assistant_message",
@@ -382,7 +385,7 @@ async def run_turn(event: Event) -> None:
     await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles),
                        event_id=reply_event_id(event.id, read_untrusted))
     await enqueue_learn(user.id, event, text, previous, clarified_request(history),
-                        tainted=read_untrusted or carried_taint)
+                        tainted=read_untrusted or learn_taint)
     await attach_queued_approvals(user.id, text, tainted=result.tainted)
     await initiative_hook("quiet.after_assistant_message",
                           lambda i: i.quiet.after_assistant_message(user.id, bubbles[-1]))

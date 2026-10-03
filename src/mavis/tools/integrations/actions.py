@@ -154,6 +154,14 @@ def _attendee_risk(args: BaseModel) -> RiskClass:
     return RiskClass.OUTWARD if getattr(args, "attendees", None) else RiskClass.WRITE_SELF
 
 
+def _update_risk(args: BaseModel) -> RiskClass:
+    """An update is OUTWARD whatever it changes. The arguments cannot show whether the event already has
+    guests, and Google tells every guest about a change (time, title, description) or a removal; an
+    empty `attendees` list removes them all and sends cancellations. Checking the live event would need a
+    read before the risk decision, so every update waits for the user's OK."""
+    return RiskClass.OUTWARD
+
+
 def _preview_mail(args: MailComposeArgs, tz: str) -> str:
     cc = f"\nCc: {', '.join(args.cc)}" if args.cc else ""
     return f"✉️ To: {', '.join(args.to)}{cc}\nSubject: {args.subject}\n\n{args.body}"
@@ -245,9 +253,9 @@ _SPECS: tuple[ActionSpec, ...] = (
                CalendarCreateArgs, RiskClass.WRITE_SELF, _a("calendar", "conversation"),
                risk_fn=_attendee_risk, preview=_preview_create),
     ActionSpec("calendar.update_event", Capability.CALENDAR,
-               "Change an event. Changing guests needs the user's approval.",
+               "Change an event. The user is asked to approve first (guests may be notified).",
                CalendarUpdateArgs, RiskClass.WRITE_SELF, _a("calendar"),
-               risk_fn=_attendee_risk, preview=_preview_update),
+               risk_fn=_update_risk, preview=_preview_update),
     ActionSpec("slack.channels", Capability.SLACK, "List Slack channels.",
                SlackChannelsArgs, RiskClass.READ, _a("comms")),
     ActionSpec("slack.history", Capability.SLACK, "Recent messages in a Slack channel.",
