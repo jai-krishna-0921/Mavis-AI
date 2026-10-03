@@ -76,7 +76,11 @@ def scrub_untrusted_origin(text: str) -> str:
     that came from third parties."""
     text = _WIDE_DOT.sub(".", text)
     text = _OBF_COLON.sub(":", _OBF_AT.sub("@", _OBF_DOT.sub(".", text)))
-    text = _SPELLED_DOT.sub(r"\1.\2", text)
+    for _ in range(4):  # "acme dot co dot uk": join one label per pass
+        joined = _SPELLED_DOT.sub(r"\1.\2", text)
+        if joined == text:
+            break
+        text = joined
     for pattern in (_URL, _EMAIL, _UPI, _DOMAIN, _HANDLE):
         text = pattern.sub(CHECK_DIRECTLY, text)
     text = _PHONE.sub(_phone, text)

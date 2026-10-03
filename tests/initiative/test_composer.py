@@ -132,6 +132,7 @@ async def test_composer_without_history_or_name_never_asks_or_greets(
     ("482913 is your OTP", "482913"),
     ("PIN: 1234", "1234"),
     ("visit acme dot com today", "acme"),
+    ("visit acme dot co dot uk today", "dot uk"),
     ("visit acme\u3002com today", "acme"),
     ("visit acme\uff0ecom today", "acme"),
     ("DM @acme_support for a refund", "acme_support"),
