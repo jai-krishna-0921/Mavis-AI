@@ -47,5 +47,11 @@ async def _connect_unavailable(task_id: int, user_id: int, payload: dict[str, An
     ))
 
 
-register_interrupt_handler("approval", _approval)
-register_interrupt_handler("connect", _connect_unavailable)
+def reset_defaults() -> None:
+    """Restore the built-in handlers (integrations wiring overrides "connect" with ConnectFlow)."""
+    INTERRUPT_HANDLERS.clear()
+    register_interrupt_handler("approval", _approval)
+    register_interrupt_handler("connect", _connect_unavailable)
+
+
+reset_defaults()

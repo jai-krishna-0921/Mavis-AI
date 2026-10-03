@@ -13,7 +13,7 @@ from pathlib import Path
 import structlog
 
 from mavis.domain.events import Event
-from mavis.domain.messages import Outbound, Role
+from mavis.domain.messages import TAINT_SUFFIX, Outbound, Role
 from mavis.domain.tasks import TaskOrigin, TaskStatus
 from mavis.initiative.composer import scrub_untrusted_origin
 from mavis.policy import pings
@@ -27,7 +27,14 @@ PROGRESS_TEXT = "Still on it, this one's taking a bit. I'll send it over as soon
 DELIVERY_URGENCY = 3
 
 
-async def _send(user_id: int, task_id: int, texts: list[str], artifacts: list[str], proactive: bool) -> None:
+def history_event_id(task_id: int, index: int, tainted: bool) -> str:
+    """History key for a delivered result line. A tainted task's lines carry the taint marker, so the
+    next chat turn runs tainted and learns from them as untrusted. The key also dedupes a redelivery."""
+    return f"task:{task_id}:m{index}{TAINT_SUFFIX if tainted else ''}"
+
+
+async def _send(user_id: int, task_id: int, texts: list[str], artifacts: list[str], proactive: bool,
+                tainted: bool = False) -> None:
     async with Session() as s:
         for i, text in enumerate(texts):
             await outbox.enqueue(s, Outbound(user_id=user_id, text=text, proactive=proactive,
@@ -36,8 +43,9 @@ async def _send(user_id: int, task_id: int, texts: list[str], artifacts: list[st
             await outbox.enqueue(s, Outbound(user_id=user_id, text=Path(path).name, document_path=path,
                                              proactive=proactive, dedupe_key=f"task:{task_id}:a{j}"))
         await s.commit()
-    for text in texts:
-        await messages.log(user_id, Role.ASSISTANT, text, proactive=proactive)
+    for i, text in enumerate(texts):
+        await messages.log(user_id, Role.ASSISTANT, text, proactive=proactive,
+                           event_id=history_event_id(task_id, i, tainted))
 
 
 def _clean(texts: list, tainted: bool) -> list[str]:
@@ -68,7 +76,7 @@ async def deliver_task_result(event: Event) -> None:
     # DB rows include artefacts recorded directly by tools/specialists, not only those in the payload.
     recorded = [a.path for a in await tasks.artifacts_for(task_id)]
     artifacts = list(dict.fromkeys([*p.get("artifacts", []), *recorded]))
-    await _send(event.user_id, task_id, texts, artifacts, proactive)
+    await _send(event.user_id, task_id, texts, artifacts, proactive, tainted)
     if proactive:
         await pings.PingPolicy().record(user, f"task:{task_id}", DELIVERY_URGENCY, utcnow())
 
@@ -78,9 +86,10 @@ async def redeliver(user_id: int, task_id: int) -> None:
     task = await tasks.get(task_id)
     if task is None or task.user_id != user_id or task.status != TaskStatus.DONE:
         return
-    texts = _clean((task.result_text or "").split("\n\n"), bool(getattr(task, "tainted", False)))
+    tainted = bool(task.tainted)
+    texts = _clean((task.result_text or "").split("\n\n"), tainted)
     artifacts = [a.path for a in await tasks.artifacts_for(task_id)]
-    await _send(user_id, task_id, texts, artifacts, proactive=True)
+    await _send(user_id, task_id, texts, artifacts, proactive=True, tainted=tainted)
     await pings.PingPolicy().record(await users.get(user_id), f"task:{task_id}", DELIVERY_URGENCY, utcnow())
 
 
@@ -94,4 +103,4 @@ async def on_progress(event: Event) -> None:
         await outbox.enqueue(s, Outbound(user_id=event.user_id, text=PROGRESS_TEXT,
                                          dedupe_key=f"task:{task_id}:progress"))
         await s.commit()
-    await messages.log(event.user_id, Role.ASSISTANT, PROGRESS_TEXT)
+    await messages.log(event.user_id, Role.ASSISTANT, PROGRESS_TEXT, event_id=f"task:{task_id}:progress")

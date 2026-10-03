@@ -557,7 +557,12 @@ async def finish(state: OrchestratorState) -> dict:
         )
     # Terminal transition by claim: a concurrent cancel wins and nothing is delivered.
     active = (TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL)
-    if not await tasks.claim(task_id, active, TaskStatus.DONE, result_text="\n\n".join(messages)):
+    fields: dict[str, Any] = {"result_text": "\n\n".join(messages)}
+    if _any_tainted(state):
+        # Taint picked up mid-run (a step read an email) lives only in the graph state: store it on the
+        # row too, so delivery, redelivery and the next chat turn treat the result as untrusted.
+        fields["tainted"] = True
+    if not await tasks.claim(task_id, active, TaskStatus.DONE, **fields):
         log.info("orchestrator.finish_skipped", task_id=task_id)
         return {}
     task = await tasks.get(task_id)
