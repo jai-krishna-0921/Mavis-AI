@@ -11,7 +11,7 @@ import unicodedata
 import pytest
 
 from mavis.channels.formatting import (
-    SPACE_SEPARATORS,
+    DASHES,
     normalize_dashes,
     strip_verbatim,
     to_plain,
@@ -20,61 +20,60 @@ from mavis.channels.formatting import (
 )
 from mavis.channels.text import split_text
 
-NNBSP, NBSP, THIN = " ", " ", " "
+NNBSP, NBSP, THIN = "\u202f", "\u00a0", "\u2009"
+
+# Fix round 1 (I5): one simple rule. ASCII hyphen-minus is never touched; every other Unicode dash
+# (category Pd) is normalised: between two digits with no or thin spacing it becomes "-", directly
+# after a **bold** label at a line or bullet start ":", spaced elsewhere ", ", unspaced elsewhere "-".
+UNCHANGED = [
+    "Final score 3-2 tonight",
+    "5 - 3 = 2",
+    "Open 24-7",
+    "Due Jan-2026",
+    "Free Sat - may be late",
+    "Budget $10 - $20",
+    "Deadline - Friday noon",
+    "a well-known e-mail about COVID-19",
+    "Due 2026-10-03, call 555-0132",
+    "run it with --verbose, a--b",
+    "it was \u22125 degrees",                       # minus sign is not a dash (category Sm)
+    'Subject: "Q3 \u2013 final review"',            # quoted text
+    "They wrote \u2018Mon\u2013Fri only\u2019 in the note",
+    "The \u201cBudget \u2014 draft\u201d sheet",
+    "use `a\u2014b` here",
+    "see https://my-site.example/2-3/a\u2013b now",
+    "- a bullet\n  - nested bullet",
+    "",
+]
 
 GOLDEN = [
-    # labels at a line or bullet start become "Label: text"
-    ("**Operator change** — Meetup will host from now on",
-     "**Operator change**: Meetup will host from now on"),
-    ("Deadline - Friday noon", "Deadline: Friday noon"),
-    ("Heads up – the venue moved", "Heads up: the venue moved"),
-    ("- Flights — booked for Tuesday", "- Flights: booked for Tuesday"),
-    ("  * Hotel – still pending", "  * Hotel: still pending"),
-    ("1. Visa — submitted", "1. Visa: submitted"),
-    ("Next step—call the bank", "Next step: call the bank"),
-    ("I checked — nothing new came in.", "I checked: nothing new came in."),
-    # ranges of numbers, times, days and months become "X to Y"
-    ("Free 15:00–16:00 today", "Free 15:00 to 16:00 today"),
-    (f"Free 15:00{NNBSP}–{NNBSP}16:00 today", "Free 15:00 to 16:00 today"),
-    (f"Standup 3{NNBSP}PM – 4{NNBSP}PM", "Standup 3 PM to 4 PM"),
-    ("Open Mon–Fri", "Open Mon to Fri"),
-    ("Open Mon-Fri", "Open Mon to Fri"),
-    ("Office hours 9am-5pm", "Office hours 9am to 5pm"),
-    ("Takes 2-3 days", "Takes 2 to 3 days"),
-    ("Pages 3–5", "Pages 3 to 5"),
-    ("From 2020–2024", "From 2020 to 2024"),
-    ("Trip Oct 3–5", "Trip Oct 3 to 5"),
-    ("Trip 3–5 Oct", "Trip 3 to 5 Oct"),
-    ("Monday – Wednesday works", "Monday to Wednesday works"),
-    ("10:30 - 11:00 is open", "10:30 to 11:00 is open"),
-    # a range at a line start is a range, not a label
-    ("3 PM – 4 PM works for me", "3 PM to 4 PM works for me"),
-    # a dash between clauses becomes a comma
-    # (a label starts with a capital and is short; anything else is a clause)
-    ("Looked through everything I could find — nothing new came in.",
-     "Looked through everything I could find, nothing new came in."),
-    ("wait—what happened", "wait, what happened"),
-    ("fine -- see you then", "fine, see you then"),
-    ("we went - it was great", "we went, it was great"),
-    ("- flights — booked", "- flights, booked"),
-    ("wait —, what", "wait, what"),
-    ("end. — next", "end. next"),
-    ("so we are done —", "so we are done"),
-    ("— a note on top", "- a note on top"),
-    # hyphens that are not dashes stay as they are
-    ("Due 2026-10-03 at noon", "Due 2026-10-03 at noon"),
-    ("call 555-0132", "call 555-0132"),
-    ("call 555‒0132", "call 555-0132"),
-    ("a well-known e-mail about COVID-19", "a well-known e-mail about COVID-19"),
-    ("run it with --verbose", "run it with --verbose"),
-    ("a--b", "a--b"),
-    ("it was −5 degrees", "it was -5 degrees"),
-    ("see https://my-site.example/2-3/a–b now", "see https://my-site.example/2-3/a–b now"),
-    ("use `a—b` here", "use `a—b` here"),
-    # every space separator counts as a space
-    (f"Lunch{NBSP}—{NBSP}at noon", "Lunch: at noon"),
-    (f"ok{THIN}—{THIN}later", "ok, later"),
+    ("**Operator change** \u2014 Meetup will host", "**Operator change**: Meetup will host"),
+    ("- **Flights** \u2013 booked for Tuesday", "- **Flights**: booked for Tuesday"),
+    ("1. __Visa__\u2014submitted", "1. __Visa__: submitted"),
+    ("Free 15:00\u201316:00 today", "Free 15:00-16:00 today"),
+    (f"Free 15:00{THIN}\u2013{THIN}16:00 today", f"Free 15:00{THIN}-{THIN}16:00 today"),
+    (f"Pages 3{NNBSP}\u2013{NNBSP}5", f"Pages 3{NNBSP}-{NNBSP}5"),
+    ("From 2020\u20132024", "From 2020-2024"),
+    ("Open Mon\u2013Fri", "Open Mon-Fri"),
+    ("I checked \u2014 nothing new came in.", "I checked, nothing new came in."),
+    ("Heads up \u2013 the venue moved", "Heads up, the venue moved"),
+    ("Standup 3 PM \u2013 4 PM", "Standup 3 PM, 4 PM"),
+    (f"Lunch{NBSP}\u2014{NBSP}at noon", "Lunch, at noon"),
+    ("wait \u2014, what", "wait, what"),
+    ("end. \u2014 next", "end. next"),
+    ("so we are done \u2014", "so we are done"),
+    ("\u2014 a note on top", "- a note on top"),
+    ("wait\u2014what", "wait-what"),
+    ("call 555\u20120132", "call 555-0132"),
+    ("x \u2015 y \u2e3a z", "x, y, z"),
+    ("e.g., \u2014 fine", "e.g., fine"),
+    ("\u300c\u5b9a\u4f8b\u300d 10\u301c12", "\u300c\u5b9a\u4f8b\u300d 10-12"),
 ]
+
+
+@pytest.mark.parametrize("raw", UNCHANGED)
+def test_text_without_unicode_dashes_or_inside_quotes_is_unchanged(raw):
+    assert normalize_dashes(raw) == raw
 
 
 @pytest.mark.parametrize("raw,expected", GOLDEN)
@@ -82,31 +81,28 @@ def test_golden(raw, expected):
     assert normalize_dashes(raw) == expected
 
 
-@pytest.mark.parametrize("raw", [g[0] for g in GOLDEN])
+@pytest.mark.parametrize("raw", [g[0] for g in GOLDEN] + UNCHANGED)
 def test_idempotent(raw):
     once = normalize_dashes(raw)
     assert normalize_dashes(once) == once
 
 
 @pytest.mark.parametrize("raw", [g[0] for g in GOLDEN])
-def test_no_long_dash_survives_outside_code_and_links(raw):
-    import re
-
-    out = re.sub(r"https?://\S+|`[^`]*`|a—b", "", to_plain(raw))  # code and links keep their text
-    assert "—" not in out and "–" not in out
+def test_no_unicode_dash_survives_outside_held_spans(raw):
+    assert not any(d in normalize_dashes(raw) for d in DASHES)
 
 
-def test_space_separators_are_all_unicode_zs():
-    zs = {chr(c) for c in range(sys.maxunicode + 1) if unicodedata.category(chr(c)) == "Zs"} - {" "}
-    assert set(SPACE_SEPARATORS) == zs
+def test_dash_set_is_all_unicode_pd_except_hyphen_minus():
+    pd = {chr(c) for c in range(sys.maxunicode + 1) if unicodedata.category(chr(c)) == "Pd"} - {"-"}
+    assert set(DASHES) == pd
 
 
 def test_multiline_message_keeps_structure():
-    raw = ("Here's the plan:\n\n**Flights** — booked\n**Hotel** – pending\n\n- Mon–Fri: work\n"
-           "- Sat: 10:00–12:00 brunch\n\nAll good — ping me if anything changes.")
+    raw = ("Here's the plan:\n\n**Flights** \u2014 booked\n**Hotel** \u2013 pending\n\n- Mon\u2013Fri: work\n"
+           "- Sat: 10:00\u201312:00 brunch\n\nAll good \u2014 ping me if anything changes.")
     assert normalize_dashes(raw) == (
-        "Here's the plan:\n\n**Flights**: booked\n**Hotel**: pending\n\n- Mon to Fri: work\n"
-        "- Sat: 10:00 to 12:00 brunch\n\nAll good: ping me if anything changes.")
+        "Here's the plan:\n\n**Flights**: booked\n**Hotel**: pending\n\n- Mon-Fri: work\n"
+        "- Sat: 10:00-12:00 brunch\n\nAll good, ping me if anything changes.")
 
 
 # --- verbatim spans (quoted email text, approval previews) are never rewritten --------------------------
@@ -122,10 +118,10 @@ PREVIEWS = [
 
 @pytest.mark.parametrize("preview", PREVIEWS)
 def test_verbatim_span_reaches_the_user_unchanged(preview):
-    msg = f"Ready when you are. All set — want me to go ahead?\n\n{verbatim(preview)}"
+    msg = f"Ready when you are \u2014 want me to go ahead?\n\n{verbatim(preview)}"
     plain = to_plain(msg)
     assert preview in plain
-    assert plain.startswith("Ready when you are. All set, want me to go ahead?")
+    assert plain.startswith("Ready when you are, want me to go ahead?")
     import html
 
     assert html.escape(preview, quote=False) in to_telegram_html(msg)
@@ -134,14 +130,14 @@ def test_verbatim_span_reaches_the_user_unchanged(preview):
 @pytest.mark.parametrize("preview", PREVIEWS)
 def test_verbatim_survives_chunking(preview):
     """A preview cut across Telegram chunks stays verbatim in each chunk."""
-    long = "Intro — line\n" * 30 + verbatim(preview + "\n" + "word – " * 300)
+    long = "Intro \u2014 line\n" * 30 + verbatim(preview + "\n" + "word \u2013 " * 300)
     chunks = split_text(long, 300)
     assert len(chunks) > 2
     for chunk in chunks:
         assert chunk.count("\x0e") == chunk.count("\x0f") <= 1  # balanced in every chunk
     rendered = "\n".join(to_plain(c) for c in chunks)
     assert preview.splitlines()[-1] in rendered and "word – word" in rendered
-    assert "Intro: line" in rendered
+    assert "Intro, line" in rendered
 
 
 def test_verbatim_markup_is_not_parsed():
@@ -186,7 +182,7 @@ def test_persona_explains_the_marker_and_the_formatter_owns_dashes():
 
     assert "---" in PERSONA
     assert "Separate bubbles with a blank line" not in PERSONA
-    assert "use a comma" not in PERSONA
+    assert "Never use dashes as punctuation" in PERSONA and "colon after a label" in PERSONA
 
 
 # --- the approval card equals the payload ---------------------------------------------------------------
@@ -219,4 +215,25 @@ async def test_composer_bubbles_are_not_rewritten_before_the_boundary(user, fake
     fake_llm.push_structured(ComposedMessage(send=True, messages=["Prep — 3–4 PM today"]))
     msg = await Composer(fake_memory).compose(user, "prep", 3)
     assert msg.messages == ["Prep — 3–4 PM today"]
-    assert to_plain(msg.messages[0]) == "Prep: 3 to 4 PM today"
+    assert to_plain(msg.messages[0]) == "Prep, 3-4 PM today"
+
+
+# --- fix round 1, M11: chunking ignores fences inside verbatim spans ------------------------------------
+
+
+@pytest.mark.parametrize("inner", ["```", "```python", "  ```"])
+def test_split_text_ignores_fence_lines_inside_verbatim(inner):
+    preview = f"Note body:\n{inner}\nnot code, just text in a preview\n" + "line of preview text\n" * 60
+    text = "Ready when you are.\n" + verbatim(preview) + "\nafter"
+    chunks = split_text(text, 400)
+    assert len(chunks) > 1
+    joined = "".join(strip_verbatim(c) for c in chunks)
+    assert "```\n```" not in joined and joined.count("```") == text.count("```")  # nothing added
+    for c in chunks:
+        assert c.count("\x0e") == c.count("\x0f")
+
+
+def test_split_text_still_balances_real_fences_outside_verbatim():
+    text = verbatim("```inside```") + "\n```\n" + "code line\n" * 80 + "```"
+    chunks = split_text(text, 300)
+    assert all(c.count("```") % 2 == 0 for c in chunks if "\x0e" not in c)

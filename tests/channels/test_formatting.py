@@ -75,9 +75,9 @@ def test_plain_strips_markup() -> None:
 
 
 def test_dashes() -> None:
-    assert normalize_dashes("assistant—think") == "assistant, think"
+    assert normalize_dashes("assistant—think") == "assistant-think"  # unspaced: a joining dash
     assert normalize_dashes("a — b") == "a, b"
-    assert normalize_dashes("pages 3–5") == "pages 3 to 5"  # a range (phase A4)
+    assert normalize_dashes("pages 3–5") == "pages 3-5"
     assert normalize_dashes("fast – very fast") == "fast, very fast"
     assert normalize_dashes("wait —, what") == "wait, what"
     assert normalize_dashes("end. — next") == "end. next"
@@ -91,7 +91,7 @@ def test_no_dashes_survive(fn) -> None:
 
 @pytest.mark.parametrize("fn", [H, to_plain])
 def test_dashes_kept_in_code(fn) -> None:
-    out = fn("a—b `c—d`\n```\ne — f\n```")
+    out = fn("a — b `c—d`\n```\ne — f\n```")
     assert "c—d" in out and "e — f" in out and "a, b" in out
 
 
@@ -113,15 +113,14 @@ def test_no_italic_inside_bare_url() -> None:
 
 
 def test_dash_lookalikes() -> None:
-    assert normalize_dashes("wait―what") == "wait, what"
+    assert normalize_dashes("wait ― what") == "wait, what"
     assert normalize_dashes("call 555‒0132") == "call 555-0132"
     assert normalize_dashes("a ‒ b") == "a, b"
-    assert normalize_dashes("it was −5 degrees") == "it was -5 degrees"
-    assert normalize_dashes("fine -- see you then") == "fine, see you then"
-    assert normalize_dashes("run it with --verbose") == "run it with --verbose"
-    assert normalize_dashes("a--b") == "a--b"
+    assert normalize_dashes("it was −5 degrees") == "it was −5 degrees"  # minus sign: not a dash
+    for ascii_only in ("fine -- see you then", "run it with --verbose", "a--b", "x - y"):
+        assert normalize_dashes(ascii_only) == ascii_only  # ASCII hyphen-minus is never touched
 
 
 def test_normalize_dashes_keeps_code() -> None:
-    out = normalize_dashes("sure — here `a—b`\n```\nx -- y\n```\nok -- done")
-    assert out == "sure, here `a—b`\n```\nx -- y\n```\nok, done"
+    out = normalize_dashes("sure — here `a—b`\n```\nx — y\n```\nok — done")
+    assert out == "sure, here `a—b`\n```\nx — y\n```\nok, done"
