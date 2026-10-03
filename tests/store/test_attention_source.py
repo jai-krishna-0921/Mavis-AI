@@ -62,3 +62,38 @@ async def test_has_any_counts_only_mail(user):
     assert mail.source == "mail"
     assert await repo.has_any(user.id)
 
+
+
+async def _mail(user_id: int, mid: str, **fields):
+    row, _ = await repo.insert_pending(user_id, mid, thread_id="", origin=repo.ORIGIN_LIVE,
+                                       sender_domain="x.in", sender_name="", received_at=NOW, payload={})
+    await repo.finish(row.id, verdict="brief", summary="Mail", **fields)
+    return row
+
+
+async def test_mail_redelivery_and_drain_never_pick_up_workspace_rows(user):
+    ws, _ = await _signal(user.id, "drive:f1:e1")
+    await repo.set_fields(ws.id, delivery=repo.QUEUED)
+    later = datetime.now(UTC) + timedelta(days=1)
+    assert await repo.undelivered(user.id, later) == []
+    assert await repo.users_needing_drain() == []
+    mail = await _mail(user.id, "m1", delivery=repo.QUEUED)
+    assert [r.id for r in await repo.undelivered(user.id, later)] == [mail.id]
+    assert await repo.users_needing_drain() == [user.id]
+
+
+async def test_money_and_security_readers_ignore_workspace_rows(user):
+    debit = {"money": {"direction": "debit", "counterparty_key": "acme"}, "baselined": True,
+             "authenticated": True}
+    ws, _ = await _signal(user.id, "drive:f1:e1")
+    await repo.set_fields(ws.id, facts=debit, kind="security", sender_domain="x.in")
+    since = NOW - timedelta(hours=1)
+    assert await repo.recent_debits(user.id, since, exclude_id=0) == 0
+    assert not await repo.prior_security(user.id, "x.in", exclude_id=0)
+    assert await repo.baselined_on(user.id, "acme", since, NOW + timedelta(hours=1)) == 0
+    assert await repo.by_ids(user.id, [ws.id]) == []
+    mail = await _mail(user.id, "m1", facts=debit, kind="security")
+    assert await repo.recent_debits(user.id, since, exclude_id=0) == 1
+    assert await repo.prior_security(user.id, "x.in", exclude_id=0)
+    assert await repo.baselined_on(user.id, "acme", since, NOW + timedelta(hours=1)) == 1
+    assert [r.id for r in await repo.by_ids(user.id, [ws.id, mail.id])] == [mail.id]
