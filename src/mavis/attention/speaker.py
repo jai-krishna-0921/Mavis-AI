@@ -42,7 +42,8 @@ def is_bulk(obs: Any) -> bool:
     """Promotional, social or forums mail, or mail with List-Unsubscribe: never a security notice.
     Ingest records these markers in facts["bulk"]; a log-only DROPPED observation is bulk by definition."""
     facts = obs.facts or {}
-    return obs.status == "dropped" or any(m in (facts.get("bulk") or []) for m in BULK_MARKERS)
+    dropped = obs.verdict == Verdict.DROPPED.value or obs.status == "dropped"
+    return dropped or any(m in (facts.get("bulk") or []) for m in BULK_MARKERS)
 
 
 def is_security_obs(obs: Any) -> bool:

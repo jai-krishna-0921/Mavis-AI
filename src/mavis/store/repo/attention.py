@@ -200,6 +200,44 @@ async def recent_debits(user_id: int, since: datetime, exclude_id: int) -> int:
         return sum(1 for f in facts if ((f or {}).get("money") or {}).get("direction") == "debit")
 
 
+async def prior_security(user_id: int, sender_domain: str, exclude_id: int) -> bool:
+    """This sender domain has sent authenticated SECURITY-kind mail before (urgency 5 gate, ruling I1).
+    Only authenticated earlier notices count: a spoofed one cannot pave the way for a later one."""
+    if not sender_domain:
+        return False
+    async with Session() as s:
+        facts = await s.scalars(
+            select(_Obs.facts)
+            .where(
+                _Obs.user_id == user_id,
+                _Obs.status == DONE,
+                _Obs.kind == "security",
+                _Obs.sender_domain == sender_domain,
+                _Obs.id != exclude_id,
+            )
+            .order_by(_Obs.id.desc())
+            .limit(20)
+        )
+        return any((f or {}).get("authenticated") is True for f in facts)
+
+
+async def baselined_since(user_id: int, counterparty_key: str, since: datetime) -> int:
+    """Debits recorded into the money baseline for this payee since `since` (per-payee daily cap)."""
+    async with Session() as s:
+        facts = await s.scalars(
+            select(_Obs.facts)
+            .where(_Obs.user_id == user_id, _Obs.status == DONE, _Obs.processed_at >= since)
+            .order_by(_Obs.id.desc())
+            .limit(200)
+        )
+        return sum(
+            1
+            for f in facts
+            if (f or {}).get("baselined")
+            and ((f or {}).get("money") or {}).get("counterparty_key") == counterparty_key
+        )
+
+
 async def add_pref(user_id: int, observation_id: int | None, kind: str, sentiment: str, summary: str) -> int:
     async with Session() as s:
         row = AttentionPref(

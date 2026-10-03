@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 
 from mavis.attention.schema import EmailKind, Feedback
@@ -39,6 +42,15 @@ def state_lock(user_id: int):
     return lock(f"attention-state:{user_id}")
 
 
+@dataclass
+class UrgentSlot:
+    free: bool  # no urgency-5 message has gone out yet on this local day
+    claimed: bool = False
+
+    def claim(self) -> None:
+        self.claimed = True
+
+
 class Thresholds:
     """Read-modify-write of one users.state key under the per-user state lock, so concurrent writers
     (ingest marking the urgent day, a button press learning an offset) never lose each other's update."""
@@ -70,3 +82,14 @@ class Thresholds:
 
     async def mark_urgent(self, user_id: int, local_day: str) -> None:
         await self.patch(user_id, urgent_day=local_day)
+
+    @asynccontextmanager
+    async def urgent_slot(self, user_id: int, local_day: str) -> AsyncIterator[UrgentSlot]:
+        """Check, send and mark the one urgency-5 message per local day as one step under the state lock:
+        two concurrent asks can never both bypass quiet hours. The day is marked only if the caller
+        claims the slot (the message actually went out)."""
+        async with state_lock(user_id):
+            slot = UrgentSlot(free=(await self.load(user_id)).get("urgent_day") != local_day)
+            yield slot
+            if slot.free and slot.claimed:
+                await self._patch(user_id, urgent_day=local_day)

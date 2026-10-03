@@ -80,6 +80,20 @@ def _headers(d: dict) -> dict[str, str]:
     }
 
 
+def _first_auth_results(d: dict) -> dict[str, str]:
+    """The topmost Authentication-Results header only: the receiving server prepends its own, so a copy
+    lower down was written by the sender and must never override it (the `_headers` dict keeps the last)."""
+    raw = pick(d, "payload.headers", "headers", default=[])
+    if isinstance(raw, dict):
+        items = [{"name": k, "value": v} for k, v in raw.items()]
+    else:
+        items = [h for h in raw if isinstance(h, dict) and "name" in h]
+    for h in items:
+        if str(h["name"]).lower() == "authentication-results":
+            return {"authentication-results": str(h.get("value", ""))}
+    return {}
+
+
 def normalize_email(d: dict) -> dict[str, Any]:
     headers = _headers(d)
     sender = str(pick(d, "sender", "from", default=headers.get("from", "")))
@@ -104,6 +118,8 @@ def normalize_email(d: dict) -> dict[str, Any]:
         ),
         "headers": {k: v for k, v in headers.items() if k in HEADER_KEYS},
         "from_me": "SENT" in label_list,
+        # parsed to a bool here: the raw Authentication-Results header is never stored
+        "sender_authenticated": sender_authenticated(_first_auth_results(d), address.lower()),
     }
 
 
