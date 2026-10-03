@@ -483,9 +483,12 @@ class ToolRegistry:
                     if corrected is not None:
                         # A corrected version of a card still waiting on a tap: update that card rather
                         # than report a "duplicate" whose card shows the old content, or queue a second.
-                        await approvals.update_args(corrected.id, req.arguments, req.preview)
-                        await audit.record(user_id, actor="agent", action="approval.updated",
-                                           detail={"approval_id": corrected.id, "tool": tool.name})
+                        if await approvals.update_args(corrected.id, req.arguments, req.preview):
+                            await audit.record(user_id, actor="agent", action="approval.updated",
+                                               detail={"approval_id": corrected.id, "tool": tool.name})
+                        else:  # lost a race with a tap: the card was not changed, so never say it was
+                            log.info("tool.approval_update_lost", tool=tool.name, approval_id=corrected.id)
+                            return ALREADY_WAITING_RESULT.format(id=corrected.id)
                     if existing is not None:
                         approval_id = existing.id
                     elif corrected is not None:

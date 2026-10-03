@@ -91,9 +91,9 @@ class InitiativeExecutor:
                 continue
             key = f"agent:{loop_id}:{w.reason[:60]}" if loop_id else f"agent:{event.id}:{i}"
             try:
-                # spec 8.3: a wakeup an untrusted event asked for, or one about an untrusted loop, fires
-                # as untrusted too (scrubbed, capped)
-                tainted = untrusted or not await self._loop_trusted(loop_id)
+                # spec 8.3: a wakeup asked for by an untrusted event or by a run whose prompt carried
+                # untrusted content, or one about an untrusted loop, fires as untrusted (scrubbed, capped)
+                tainted = write_trust is Trust.UNTRUSTED or not await self._loop_trusted(loop_id)
                 await self._wakeups.wake_me(user.id, w.at, w.reason, loop_id, WakeupKind.AGENT,
                                             dedupe_key=key,
                                             payload={"untrusted": True} if tainted else None)

@@ -391,3 +391,14 @@ async def test_reasoner_marks_its_decision_tainted_from_its_actual_inputs(user, 
     fake_memory.recall_result = RecallContext()
     await messages.log(user.id, Role.ASSISTANT, "summary of an email", event_id=f"say:1{TAINT_SUFFIX}")
     assert (await reasoner.decide(user, ev, clean)).tainted is True
+
+
+@pytest.mark.parametrize("tainted_run,expected", [(False, None), (True, True)])
+async def test_scheduled_wakeup_follows_the_runs_taint_on_a_trusted_event(user, clock, recording_bus,
+                                                                         fake_memory, tainted_run, expected):
+    init = build_initiative(recording_bus, fake_memory, embed=no_embed)
+    request = WakeupRequest(at=clock.t + timedelta(hours=2), reason="check the thing")
+    await init.executor.apply(user, InitiativeDecision(wakeups=[request], tainted=tainted_run),
+                              _wakeup(user.id, clock))
+    [w] = await init.wakeups.pending(user.id)
+    assert (w.payload or {}).get("untrusted") is expected
