@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mavis.attention.workspace import BASELINE_KEY, KEEP, SPEAK, WorkspaceIntake
+from mavis.attention.workspace import BASELINE_KEY, KEEP, SPEAK, WORKSPACE_NOTIFY_CAP, WorkspaceIntake
 from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.integrations import ConnectionState, ToolResult
@@ -289,6 +289,71 @@ async def test_unreadable_file_is_not_treated_as_mine(user, provider, ex, rec):
     await intake(provider, ex, rec).on_event(event("comment", comment("c1"), user.id))
     [row] = await repo.signals(user.id, NOW - timedelta(days=1), sources=("docs",))
     assert row.verdict == "brief" and row.facts["owned_by_me"] is False and ex.notified == []
+
+
+
+def owned_doc(provider, user_id: int) -> None:
+    connected(provider, user_id)
+    provider.results["drive.meta"] = ToolResult(ok=True, data={"name": "Launch plan"})
+    provider.results["drive.permissions"] = ToolResult(ok=True, data={"permissions": [
+        {"id": "p1", "type": "user", "role": "owner"}]})
+
+
+def comment_on(fid: str, cid: str) -> dict:
+    return {**comment(cid), "file_id": fid}
+
+
+async def test_one_comment_ping_per_file_per_day_later_ones_go_to_the_brief(user, provider, ex, rec):
+    owned_doc(provider, user.id)
+    ws = intake(provider, ex, rec)
+    await ws.on_event(event("comment", comment("c1"), user.id))
+    await ws.on_event(event("comment", comment("c2"), user.id))
+    [note] = ex.notified
+    assert note.intent.dedupe_key == "ws:comment:d1:2026-10-03"
+    rows = await repo.signals(user.id, NOW - timedelta(days=1), sources=("docs",))
+    assert sorted((r.verdict, r.delivery) for r in rows) == [("brief", "none"), ("notify", "sent")]
+    # the next local day the same file may ping again
+    tomorrow = intake(provider, ex, rec, at=NOW + timedelta(days=1))
+    await tomorrow.on_event(event("comment", comment("c3"), user.id))
+    assert len(ex.notified) == 2
+
+
+async def test_workspace_notifies_are_capped_per_day_excess_goes_to_the_brief(user, provider, ex, rec):
+    owned_doc(provider, user.id)
+    ws = intake(provider, ex, rec)
+    for i in range(4):
+        await ws.on_event(event("comment", comment_on(f"d{i}", f"c{i}"), user.id))
+    assert len(ex.notified) == WORKSPACE_NOTIFY_CAP == 2
+    rows = await repo.signals(user.id, NOW - timedelta(days=1), sources=("docs",))
+    assert sorted(r.verdict for r in rows) == ["brief", "brief", "notify", "notify"]
+
+
+async def test_deferred_comment_becomes_a_brief_row_if_another_workspace_ping_went_out(
+    user, provider, ex, rec
+):
+    owned_doc(provider, user.id)
+    night = datetime(2026, 10, 3, 18, 0, tzinfo=UTC)  # 23:30 IST: quiet hours
+    await intake(provider, ex, rec, at=night).on_event(event("comment", comment_on("d1", "c1"), user.id))
+    [speak] = [r for r in rec.scheduled if r[2].startswith(SPEAK)]
+    assert ex.notified == []
+    morning = datetime(2026, 10, 4, 3, 0, tzinfo=UTC)
+    ws = intake(provider, ex, rec, at=morning)
+    await ws.on_event(event("comment", comment_on("d2", "c2"), user.id))
+    assert len(ex.notified) == 1
+    await ws.on_wakeup(user.id, speak[2])
+    assert len(ex.notified) == 1
+    [row] = [r for r in await repo.signals(user.id, night - timedelta(hours=1), sources=("docs",))
+             if r.facts["object_id"] == "d1"]
+    assert row.verdict == "brief" and row.delivery == "none"
+
+
+async def test_deferred_comment_still_pings_on_a_quiet_morning(user, provider, ex, rec):
+    owned_doc(provider, user.id)
+    night = datetime(2026, 10, 3, 18, 0, tzinfo=UTC)
+    await intake(provider, ex, rec, at=night).on_event(event("comment", comment_on("d1", "c1"), user.id))
+    [speak] = [r for r in rec.scheduled if r[2].startswith(SPEAK)]
+    await intake(provider, ex, rec, at=datetime(2026, 10, 4, 3, 0, tzinfo=UTC)).on_wakeup(user.id, speak[2])
+    assert len(ex.notified) == 1
 
 
 # --- Google Tasks ----------------------------------------------------------------------------------------

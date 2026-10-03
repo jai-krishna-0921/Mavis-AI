@@ -7,6 +7,9 @@ attention's own Speaker; a deferred one is re-spoken by a one-off wakeup. Ask: f
 Share that closes a loop: fixed text (amendment A8). Comment: one line composed by the executor (untrusted,
 background LLM priority), fixed text when the LLM is busy. Brief and log rows feed the morning brief and
 evening wrap. Polls stay quiet (brief rows only) until first sync has set BASELINE_KEY (amendment A3).
+Daily limits keep Workspace from eating the ping budget: one comment ping per file per local day, at most
+WORKSPACE_NOTIFY_CAP notifies a day, and a comment deferred past quiet hours speaks only if no other
+Workspace ping went out that day. A notify held by these limits becomes a brief row.
 """
 
 from __future__ import annotations
@@ -73,6 +76,8 @@ NEW, DUPLICATE = "new", "duplicate"
 SENT, DEFERRED, DROPPED, NONE = "sent", "deferred", "dropped", "none"
 POLL_REASONS: dict[str, Capability] = {"tasks": Capability.TASKS, "drive": Capability.DRIVE}
 WORKSPACE_SOURCES = frozenset(SOURCE_OF.values())
+WORKSPACE_NOTIFY_CAP = 2  # Workspace notifies per user per local day; the rest go to the brief
+PINGS_KEY = "pings"  # users.state["workspace"]: {"day", "sent", "notifies", "comment_files"} for today
 Schedule = Callable[[int, datetime, str, str], Awaitable[int]]
 OnAuthFailed = Callable[[int, Capability], Awaitable[object]]  # the daily-deduped reconnect prompt
 
@@ -271,28 +276,97 @@ class WorkspaceIntake:
             await self._speak(user, obs, s, d.verdict, d.urgency, facts["loop_title"])
         return NEW
 
-    def _ping_key(self, obs: Any, s: Signal, verdict: Verdict) -> str:
+    def _ping_key(self, obs: Any, s: Signal, verdict: Verdict, today: str) -> str:
         # one keep-or-drop question per task per day, whichever day's row carries it
-        key = f"ws:ask:{s.object_id}" if verdict is Verdict.ASK else f"ws:{obs.message_id}"
+        if verdict is Verdict.ASK:
+            key = f"ws:ask:{s.object_id}"
+        elif s.kind is SignalKind.COMMENT:
+            key = f"ws:comment:{s.object_id}:{today}"  # one comment ping per file per local day
+        else:
+            key = f"ws:{obs.message_id}"
         return key[:150]
 
+    @staticmethod
+    def _held_by_daily_limits(rec: dict, s: Signal, verdict: Verdict, deferred: bool) -> str:
+        """Why today's Workspace pings so far hold this one back ("" when they don't). Only notifies are
+        limited: at most WORKSPACE_NOTIFY_CAP a day, one comment ping per file, and a comment deferred past
+        quiet hours only if no other Workspace ping went out that day."""
+        if verdict is not Verdict.NOTIFY:
+            return ""
+        if int(rec.get("notifies") or 0) >= WORKSPACE_NOTIFY_CAP:
+            return "workspace notify cap"
+        if s.kind is SignalKind.COMMENT:
+            if s.object_id in (rec.get("comment_files") or []):
+                return "file already pinged today"
+            if deferred and int(rec.get("sent") or 0) > 0:
+                return "deferred after another workspace ping"
+        return ""
+
+    async def _pings_today(self, user_id: int, today: str) -> dict:
+        rec = (await self.state(user_id)).get(PINGS_KEY) or {}
+        return rec if isinstance(rec, dict) and rec.get("day") == today else {}
+
+    async def _reserve_ping(
+        self, user_id: int, s: Signal, verdict: Verdict, today: str, deferred: bool
+    ) -> str:
+        """Atomically count this ping against today's Workspace limits (inside the users row lock, so two
+        comments at once cannot both pass). Returns the hold reason, "" when the ping may go out."""
+        held = ""
+
+        def change(st: dict) -> dict:
+            nonlocal held
+            current = st.get(PINGS_KEY)
+            fresh = not (isinstance(current, dict) and current.get("day") == today)
+            rec = {"day": today} if fresh else dict(current)
+            held = self._held_by_daily_limits(rec, s, verdict, deferred)
+            if held:
+                return st
+            rec["sent"] = int(rec.get("sent") or 0) + 1
+            if verdict is Verdict.NOTIFY:
+                rec["notifies"] = int(rec.get("notifies") or 0) + 1
+            if s.kind is SignalKind.COMMENT:
+                rec["comment_files"] = _appended(rec.get("comment_files"), s.object_id)
+            return {**st, PINGS_KEY: rec}
+
+        await modify_workspace_state(user_id, change)
+        return held
+
+    async def _to_brief(self, obs: Any, reason: str) -> None:
+        """A notify held back by the Workspace daily limits still reaches the user: as a brief row."""
+        await repo.set_fields(obs.id, verdict=Verdict.BRIEF.value, delivery=NONE)
+        log.info("workspace.to_brief", obs_id=obs.id, reason=reason)
+
     async def _speak(
-        self, user: Any, obs: Any, s: Signal, verdict: Verdict, urgency: int, loop_title: str
+        self, user: Any, obs: Any, s: Signal, verdict: Verdict, urgency: int, loop_title: str,
+        *, deferred: bool = False,
     ) -> None:
         """Amendment A2: the ping policy decides first (quiet hours, daily budget, dedupe); a deferral
-        becomes a one-off wakeup that speaks this row later, so the buttons survive."""
+        becomes a one-off wakeup that speaks this row later, so the buttons survive. Workspace's own daily
+        limits (see _held_by_daily_limits) turn an excess notify into a brief row."""
         if verdict is Verdict.ASK and s.object_id in ((await self.state(user.id)).get("asked") or []):
             await repo.set_fields(obs.id, delivery=NONE)
             return
-        key = self._ping_key(obs, s, verdict)
+        today = self._today(user.timezone).isoformat()
+        held = self._held_by_daily_limits(await self._pings_today(user.id, today), s, verdict, deferred)
+        if held:
+            await self._to_brief(obs, held)
+            return
+        key = self._ping_key(obs, s, verdict, today)
         allowed = await self.policy.check(user, max(1, urgency), key, self.clock())
         if not allowed.allow:
             if allowed.defer_until is not None:
                 await repo.set_fields(obs.id, delivery=DEFERRED)
                 await self.schedule(user.id, allowed.defer_until, f"{SPEAK}{obs.id}", WORKSPACE_POLL_KIND)
+            elif s.kind is SignalKind.COMMENT and verdict is Verdict.NOTIFY:
+                await self._to_brief(obs, allowed.reason)  # never lost: the brief counts it
+                return
             else:
                 await repo.set_fields(obs.id, delivery=NONE if allowed.reason == "duplicate" else DROPPED)
             log.info("workspace.held", obs_id=obs.id, reason=allowed.reason)
+            return
+        held = await self._reserve_ping(user.id, s, verdict, today, deferred)
+        if held:
+            await self._to_brief(obs, held)
             return
         if verdict is Verdict.ASK:
             await self._ask(user, obs, s, key)
@@ -373,7 +447,8 @@ class WorkspaceIntake:
             await repo.set_fields(obs.id, delivery=NONE)
             return
         user = await users.get(user_id)
-        await self._speak(user, obs, s, verdict, obs.urgency, str((obs.facts or {}).get("loop_title") or ""))
+        await self._speak(user, obs, s, verdict, obs.urgency, str((obs.facts or {}).get("loop_title") or ""),
+                          deferred=True)
 
     async def _task_still_open(self, user_id: int, task_id: str) -> bool:
         """A deferred keep-or-drop question is dropped if the task was finished or removed meanwhile."""
