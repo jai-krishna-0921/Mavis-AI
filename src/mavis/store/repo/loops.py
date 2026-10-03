@@ -67,10 +67,13 @@ async def update(user_id: int, loop_id: int, data: LoopUpsert) -> tuple[Loop, bo
         if row is None or row.user_id != user_id:
             return None
         before = to_domain(row)
+        status = data.status.value
+        if row.status == LoopStatus.AWAITING_REPLY.value and data.status is LoopStatus.OPEN:
+            status = row.status  # OPEN is just the upsert default: an update must not reopen it silently
         row.kind, row.title, row.status, row.importance = (
             data.kind.value,
             data.title,
-            data.status.value,
+            status,
             data.importance,
         )
         if data.due_at is not None:
