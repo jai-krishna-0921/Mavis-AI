@@ -6,6 +6,7 @@ from typing import Any
 
 from mavis.attention.schema import EmailKind, Feedback
 from mavis.store.repo import users
+from mavis.worker.locks import lock
 
 STATE_KEY = "attention"
 OFFSET_STEP: dict[Feedback, float] = {
@@ -32,24 +33,36 @@ def offset_for(state: dict[str, Any], kind: str) -> float:
     return float((state.get("offsets") or {}).get(kind, 0.0))
 
 
+def state_lock(user_id: int):
+    """One writer at a time for users.state["attention"] (in-process FIFO, Redis across workers). A key of
+    its own, not `user:{id}`: button turns already hold that one, so this cannot self-deadlock."""
+    return lock(f"attention-state:{user_id}")
+
+
 class Thresholds:
-    """Read-modify-write of one users.state key; other keys (polling cursors) are left alone."""
+    """Read-modify-write of one users.state key under the per-user state lock, so concurrent writers
+    (ingest marking the urgent day, a button press learning an offset) never lose each other's update."""
 
     async def load(self, user_id: int) -> dict[str, Any]:
         return dict((await users.get_state(user_id)).get(STATE_KEY) or {})
 
-    async def patch(self, user_id: int, **kv: Any) -> dict[str, Any]:
+    async def _patch(self, user_id: int, **kv: Any) -> dict[str, Any]:
         state = await self.load(user_id)
         state.update(kv)
         await users.update_state(user_id, {STATE_KEY: state})
         return state
 
+    async def patch(self, user_id: int, **kv: Any) -> dict[str, Any]:
+        async with state_lock(user_id):
+            return await self._patch(user_id, **kv)
+
     async def offset(self, user_id: int, kind: str) -> float:
         return offset_for(await self.load(user_id), kind)
 
     async def learn(self, user_id: int, kind: str, feedback: Feedback) -> dict[str, float]:
-        offsets = learn((await self.load(user_id)).get("offsets") or {}, kind, feedback)
-        await self.patch(user_id, offsets=offsets)
+        async with state_lock(user_id):
+            offsets = learn((await self.load(user_id)).get("offsets") or {}, kind, feedback)
+            await self._patch(user_id, offsets=offsets)
         return offsets
 
     async def urgent_used(self, user_id: int, local_day: str) -> bool:
