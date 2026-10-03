@@ -181,15 +181,37 @@ _WEEKDAYS = frozenset("monday tuesday wednesday thursday friday saturday sunday 
                       "mon tue tues wed thu thur thurs fri sat sun".split())
 
 
+_RELATIVE_DAYS = frozenset("today tonight tomorrow yesterday weekend".split())
+_PERIOD_LEADS = frozenset("this next last".split())
+_PERIODS = frozenset("week month year weekend".split())
+_NUMBER_WORDS = frozenset(
+    "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+    "sixteen seventeen eighteen nineteen twenty dozen couple".split())
+
+
+def _goal_words(goal: str) -> list[str]:
+    return re.sub(r"[^\w\s]", " ", goal.casefold()).split()
+
+
 def _goal_tokens(goal: str) -> set[str]:
     """Lowercased words with punctuation removed. Digits, days and times stay (unlike loop titles)."""
-    return set(re.sub(r"[^\w\s]", " ", goal.casefold()).split())
+    return set(_goal_words(goal))
+
+
+def _relative_words(goal: str) -> set[str]:
+    """Relative days ("today"), periods ("next week") and number words ("two") a goal names."""
+    words = _goal_words(goal)
+    out = {w for w in words if w in _RELATIVE_DAYS or w in _NUMBER_WORDS}
+    out |= {f"{a} {b}" for a, b in zip(words, words[1:], strict=False)
+            if a in _PERIOD_LEADS and b in _PERIODS}
+    return out
 
 
 def same_goal(a: str, b: str) -> bool:
     """Task goals are one request when their tokens match exactly or by Jaccard >= 0.8, and their
     numbers/times (any token with a digit) and weekdays are the same. No subset rule: "Book flights
-    to Paris" is not "Book flights and hotels to Paris". Unlike loop dedupe there is no due-time
+    to Paris" is not "Book flights and hotels to Paris". Relative days, periods and number words must
+    match when both goals name one. Unlike loop dedupe there is no due-time
     guard, so days and times must count here. Decided for the incident pair ("...for today at 3 PM
     IST and send an interview invite to x@y" vs "...for the 3 PM IST interview and send the invite to
     x@y"): Jaccard 0.8 with the same numbers, so one task."""
@@ -203,6 +225,12 @@ def same_goal(a: str, b: str) -> bool:
         return {w for w in t if any(c.isdigit() for c in w) or w in _WEEKDAYS}
 
     if anchors(ta) != anchors(tb):
+        return False
+    # When BOTH name a relative day, period or number word, those must match ("today" vs "tomorrow",
+    # "two" vs "four", "this week" vs "next week"). Named on one side only (the incident pair's
+    # "today"), the word does not split them.
+    ra, rb = _relative_words(a), _relative_words(b)
+    if ra and rb and ra != rb:
         return False
     return len(ta & tb) / len(ta | tb) >= GOAL_DUPLICATE_SIMILARITY
 

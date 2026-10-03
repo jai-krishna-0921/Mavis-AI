@@ -373,3 +373,22 @@ async def test_tainted_run_records_taint_and_dedupes_only_with_tainted_twins(use
     assert second.startswith("ALREADY_AWAITING_APPROVAL #")  # absorbed by the tainted twin, not the clean one
     rows = await approvals.open_for_user(user.id)
     assert [r.tainted for r in rows] == [False, True]
+
+
+# --- review round 4: relative days, periods and number words count when both goals name one -------
+@pytest.mark.parametrize("a,b", [
+    ("Book a table at Toit Indiranagar for a team lunch today at 3 PM with a window seat",
+     "Book a table at Toit Indiranagar for a team lunch tomorrow at 3 PM with a window seat"),
+    ("Book a table for two at Toit Indiranagar for dinner on Friday at 8pm near the window",
+     "Book a table for four at Toit Indiranagar for dinner on Friday at 8pm near the window"),
+    ("Plan my gym workouts, meals and grocery list for this week around my office schedule",
+     "Plan my gym workouts, meals and grocery list for next week around my office schedule"),
+])
+def test_relative_day_period_and_number_words_keep_goals_apart(a, b) -> None:
+    assert not same_goal(a, b)
+
+
+def test_a_relative_word_on_one_side_only_does_not_split_the_incident_pair() -> None:
+    assert "today" in INCIDENT_A.lower() and "today" not in INCIDENT_B.lower()
+    assert same_goal(INCIDENT_A, INCIDENT_B)
+    assert same_goal("Book a table for two at Toit tonight", "book a table for two at Toit tonight!")
