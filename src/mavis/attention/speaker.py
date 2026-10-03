@@ -17,6 +17,7 @@ from mavis.attention.policy import LOOKALIKE, NOTIFY_SECURITY
 from mavis.attention.sanitize import REMOVED, clean, domain_label
 from mavis.attention.scheduling import schedule_once
 from mavis.attention.schema import FLAG_LABELS, METHOD_LABELS, AttentionDecision, EmailKind, Verdict
+from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import NotifyIntent
 from mavis.domain.messages import Button
@@ -55,6 +56,19 @@ def is_security_obs(obs: Any) -> bool:
         or LOOKALIKE in (facts.get("codes") or [])
     )
     return security and not is_bulk(obs)
+
+
+def can_mute(obs: Any) -> bool:
+    """"Don't tell me about these" is never offered or honoured for security notices or for money items
+    that stood out (an ask, any anomaly code, or a stored anomaly score at the brief threshold or above)."""
+    if is_security_obs(obs) or obs.kind == EmailKind.SECURITY.value:
+        return False
+    facts = obs.facts or {}
+    if not facts.get("money"):
+        return True
+    anomaly = float(facts.get("anomaly") or 0.0)
+    stood_out = bool(facts.get("codes")) or anomaly >= get_settings().attention_brief_threshold
+    return obs.verdict != Verdict.ASK.value and not stood_out
 
 
 def ask_buttons(obs_id: int) -> list[list[Button]]:
@@ -201,7 +215,7 @@ class Speaker:
             dedupe_key=key,
             security=sec,
         )
-        buttons = None if obs.kind == EmailKind.SECURITY.value else mute_buttons(obs.id)
+        buttons = mute_buttons(obs.id) if can_mute(obs) else None
         sent = await executor.notify(user, intent, context=obs.summary, untrusted=True, buttons=buttons)
         log.info("attention.spoke", obs_id=obs.id, verdict="notify", urgency=intent.urgency, sent=sent)
         return SENT if sent else DROPPED
