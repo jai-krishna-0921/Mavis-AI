@@ -54,6 +54,9 @@ def test_tool_sets_per_specialist():
     assert agent_actions("conversation") == {
         "mail.search", "mail.read", "mail.draft", "mail.send", "mail.reply",
         "calendar.list", "calendar.find", "calendar.free_slots", "calendar.create_event",
+        # Google Workspace reads (spec 2026-10-03 section 4.4); registered only when the flag is on
+        "drive.search", "drive.list_recent", "drive.read", "docs.read", "sheets.find", "sheets.read",
+        "tasks.list", "contacts.search", "meet.transcript",
     }
 
 
