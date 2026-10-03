@@ -213,6 +213,8 @@ class Task(Base):
     context: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
     notify_on_complete: Mapped[bool] = mapped_column(default=True)
+    # True when created from a turn that saw untrusted tool output; every step loop then runs tainted.
+    tainted: Mapped[bool] = mapped_column(default=False)
     plan: Mapped[dict | None] = mapped_column(JSON)
     result_text: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)

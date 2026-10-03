@@ -77,3 +77,48 @@ async def test_audit_record(user):
     await audit.record(user.id, actor="user", action="approval.ok", detail={"approval_id": 1})
     rows = await audit.recent(user.id, limit=5)
     assert rows[0].action == "approval.ok"
+
+
+async def test_set_status_never_reopens_a_resolved_approval(user):
+    aid = await _approval(user.id)
+    assert await approvals.set_status(aid, ApprovalStatus.REJECTED) is True
+    assert await approvals.set_status(aid, ApprovalStatus.EXPIRED) is False
+    assert await approvals.set_status(aid, ApprovalStatus.PENDING) is False
+    assert (await approvals.get(aid)).status == ApprovalStatus.REJECTED
+
+
+async def test_set_status_from_claimed_state_records_outcome(user):
+    aid = await _approval(user.id)
+    await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.EXECUTED)
+    ok = await approvals.set_status(aid, ApprovalStatus.FAILED, result="boom",
+                                    from_statuses={ApprovalStatus.EXECUTED})
+    a = await approvals.get(aid)
+    assert ok and a.status == ApprovalStatus.FAILED and a.result == "boom" and a.resolved_at is not None
+
+
+async def test_update_args_ignores_resolved_approval(user):
+    aid = await _approval(user.id)
+    await approvals.set_status(aid, ApprovalStatus.EXECUTED, result="done")
+    assert await approvals.update_args(aid, {"text": "new"}, "Send note: new") is False
+    a = await approvals.get(aid)
+    assert a.status == ApprovalStatus.EXECUTED and a.arguments == {"text": "hi"}
+
+
+async def test_reject_open_for_task_leaves_resolving_alone(user):
+    tid = await tasks.create(user.id, goal="g")
+    pending = await _approval(user.id, tid)
+    resolving = await _approval(user.id, tid, preview="Send note: other")
+    await approvals.claim(resolving, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
+    assert await approvals.reject_open_for_task(tid) == 1
+    assert (await approvals.get(pending)).status == ApprovalStatus.REJECTED
+    assert (await approvals.get(resolving)).status == ApprovalStatus.RESOLVING
+
+
+async def test_attach_skips_resolved_approvals(user):
+    open_id = await _approval(user.id)
+    done_id = await _approval(user.id, preview="Send note: done")
+    await approvals.set_status(done_id, ApprovalStatus.REJECTED)
+    tid = await tasks.create(user.id, goal="g")
+    await approvals.attach([open_id, done_id], tid)
+    assert (await approvals.get(open_id)).task_id == tid
+    assert (await approvals.get(done_id)).task_id is None
