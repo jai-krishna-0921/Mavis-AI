@@ -430,6 +430,10 @@ async def revise_approval(approval: Any, instructions: str) -> None:
     await approvals.update_args(
         approval.id, revised.model_dump(mode="json"), tool.render_preview(revised, ctx)
     )
+    from mavis.policy import approvals as approval_flow  # lazy: policy.approvals imports the runner
+
+    if (updated := await approvals.get(approval.id)) is not None:
+        await approval_flow.sync_action_time_expiry(updated)  # the edit may have moved the action time
 
 
 async def notify_revise_failed(user_id: int, approval_id: int, attempt: int) -> None:
