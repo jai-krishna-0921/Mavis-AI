@@ -51,7 +51,7 @@ def test_warm_baseline_ratio_and_new_payee():
         MoneyContext(48000, Direction.DEBIT, "UPI", 13, _snap(overall=overall), large_amount=10000)
     )
     assert "amount_ratio" in r.codes and "new_counterparty" in r.codes and "large_amount" not in r.codes
-    assert r.score == 1.0 and any("120x your usual" in x for x in r.reasons)
+    assert r.score == 1.0 and any("far above your usual" in x for x in r.reasons)
 
 
 def test_routine_payment_is_quiet():
@@ -83,3 +83,72 @@ def test_security_and_combine():
     both = combine(s, score_sender(SenderStats(), "example.com", set()))
     assert both.score == 0.68 and both.codes == ("risk:credential_change", "new_sender")
     assert combine().score == 0.0
+
+
+def test_empty_counterparty_never_flags_new_payee():
+    overall = MoneyStats(count=8, median=400.0, hours=tuple([1] * 8 + [0] * 16))
+    snap = MoneySnapshot(key="", overall=overall)
+    r = score_money(MoneyContext(400, Direction.DEBIT, "UPI", 3, snap))
+    assert "new_counterparty" not in r.codes
+    cold = score_money(MoneyContext(400, Direction.DEBIT, "UPI", 13, MoneySnapshot(key="")))
+    assert "new_counterparty" not in cold.codes
+
+
+def test_ratio_text_scopes_and_cap():
+    method = MoneyStats(count=5, median=100.0)
+    r = score_money(
+        MoneyContext(600, Direction.DEBIT, "UPI", 13, _snap(cp=MoneyStats(count=1), method=method))
+    )
+    assert r.reasons[0] == "about 6x your usual UPI payment"
+    overall = MoneyStats(count=5, median=100.0)
+    r = score_money(
+        MoneyContext(600, Direction.DEBIT, "UPI", 13, _snap(cp=MoneyStats(count=1), overall=overall))
+    )
+    assert r.reasons[0] == "about 6x your usual payment"
+    cp = MoneyStats(count=3, median=100.0)
+    r = score_money(MoneyContext(2000, Direction.DEBIT, "UPI", 13, _snap(cp=cp)))
+    assert r.reasons == ("about 20x your usual for this payee",)
+    r = score_money(MoneyContext(2100, Direction.DEBIT, "UPI", 13, _snap(cp=cp)))
+    assert r.reasons == ("far above your usual for this payee",)
+    tiny = MoneyStats(count=3, median=1e-9)
+    r = score_money(MoneyContext(500, Direction.DEBIT, "UPI", 13, _snap(cp=tiny)))
+    assert r.reasons == ("far above your usual for this payee",) and r.score == 1.0
+
+
+def test_equal_amounts_mad_zero_and_ratio_boundary():
+    assert robust([5, 5, 5, 5, 5]) == (5.0, 0.0)
+    cp = MoneyStats(count=5, median=500.0, mad=0.0)
+    quiet = score_money(MoneyContext(999, Direction.DEBIT, "UPI", 13, _snap(cp=cp)))
+    assert quiet.codes == ()
+    edge = score_money(MoneyContext(1000, Direction.DEBIT, "UPI", 13, _snap(cp=cp)))
+    assert edge.codes == ("amount_ratio",) and edge.score == 0.301
+
+
+def test_count_and_hour_thresholds():
+    ctx = lambda cp, method, overall, amt=1000: score_money(  # noqa: E731
+        MoneyContext(amt, Direction.DEBIT, "UPI", 13, _snap(cp, method, overall))
+    )
+    seen = MoneyStats(count=1)
+    two = MoneyStats(count=2, median=100.0)
+    three = MoneyStats(count=3, median=100.0)
+    assert "amount_ratio" not in ctx(two, MoneyStats(), MoneyStats()).codes
+    assert "amount_ratio" in ctx(three, MoneyStats(), MoneyStats()).codes
+    four, five = MoneyStats(count=4, median=100.0), MoneyStats(count=5, median=100.0)
+    assert "amount_ratio" not in ctx(seen, four, four).codes
+    assert "amount_ratio" in ctx(seen, five, MoneyStats()).codes
+    assert "amount_ratio" in ctx(seen, MoneyStats(), five).codes
+    # hour switch: 9 samples use the night rule, 10 use the rare hour share
+    nine = MoneyStats(count=9, median=100.0, hours=tuple([0] * 12 + [9] + [0] * 11))
+    ten = MoneyStats(count=10, median=100.0, hours=tuple([0] * 12 + [10] + [0] * 11))
+    cp = MoneyStats(count=3, median=100.0)
+    at = lambda h, overall: score_money(  # noqa: E731
+        MoneyContext(100, Direction.DEBIT, "UPI", h, _snap(cp=cp, overall=overall))
+    )
+    assert at(3, nine).codes == ("odd_hour",) and at(3, ten).codes == ("odd_hour",)
+    assert at(7, nine).codes == () and at(7, ten).codes == ("odd_hour",)
+    assert at(12, ten).codes == ()
+
+
+def test_lookalike_needs_established_domains():
+    assert score_sender(SenderStats(count=1), "examp1ebank.in", set()).codes == ()
+    assert score_sender(SenderStats(count=1), "", {"examplebank.in"}).codes == ()
