@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     llm_timeout_smart_s: float = 60.0
     # after a client-side timeout the request still runs server-side and holds the account's slot
     llm_timeout_cooldown_s: float = 45.0
-    # sent as reasoning_effort to FAST-tier models only, when non-empty (gpt-oss: low/medium/high)
+    # sent as reasoning_effort to FAST-tier gpt-oss models only, when non-empty (low/medium/high)
     llm_reasoning_effort_fast: str = "low"
     # optional secondary OpenAI-compatible provider (e.g. Groq); off while base url / model are empty
     llm_secondary_base_url: str = ""

@@ -39,6 +39,9 @@ class Tier(StrEnum):
     SMART = "smart"
 
 
+REASONING_EFFORT_PREFIX = "gpt-oss"  # models that accept reasoning_effort
+
+
 @lru_cache(maxsize=32)
 def _build(model: str, base_url: str, api_key: str, temperature: float, timeout: float,
            reasoning_effort: str = "") -> ChatOpenAI:
@@ -53,14 +56,16 @@ def _build(model: str, base_url: str, api_key: str, temperature: float, timeout:
 def chat_model(tier: Tier = Tier.FAST, temperature: float = 0.6, model: str | None = None) -> BaseChatModel:
     s = get_settings()
     fast = tier is Tier.FAST
+    name = model or (s.model_fast if fast else s.model_smart)
     return _build(
-        model or (s.model_fast if fast else s.model_smart),
+        name,
         s.ollama_base_url,
         s.ollama_api_key,
         temperature,
         s.llm_timeout_fast_s if fast else s.llm_timeout_smart_s,
-        # gpt-oss emits ~60% fewer tokens at "low": shorter calls hold the single slot for less time
-        s.llm_reasoning_effort_fast if fast else "",
+        # gpt-oss emits ~60% fewer tokens at "low": shorter calls hold the single slot for less time.
+        # Only gpt-oss takes it; other models (gemma fallback) may reject an unknown parameter.
+        s.llm_reasoning_effort_fast if fast and name.startswith(REASONING_EFFORT_PREFIX) else "",
     )
 
 
