@@ -29,6 +29,8 @@ async def test_turn_injects_recall_and_enqueues_learn(db, channel, fake_llm, mem
     assert "Jawahar is Jai's friend." in fake_llm.calls[-1][0].content
     [job] = jobs_seen
     assert job.kind is JobKind.LEARN and job.id == "learn:tg:update:42"
+    not_before = job.payload.pop("not_before")  # parked past the LLM interactive grace window
+    assert not_before
     assert job.payload == {"text": "is Jawahar free?", "source_ref": "tg:update:42", "trust": "user",
                            "conversation": True}
 

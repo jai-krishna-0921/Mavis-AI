@@ -106,7 +106,7 @@ from mavis.bus.base import run_handler  # noqa: E402
 from mavis.domain.errors import LLMError  # noqa: E402
 
 
-async def test_learn_llm_failure_is_dropped_not_retried(memory, user, monkeypatch):
+async def test_learn_llm_failure_is_not_retried_inline_or_redelivered(memory, user, monkeypatch):
     calls = []
 
     async def busy_learn(*a, **k):
@@ -119,7 +119,7 @@ async def test_learn_llm_failure_is_dropped_not_retried(memory, user, monkeypatc
     with capture_logs() as logs:
         await run_handler(jobs.handle_learn, job, what="jobs", ref=job.id)  # acked: no raise
     assert calls == [1]  # no inline retries
-    assert [e["event"] for e in logs].count("memory.learn_dropped_llm_busy") == 1
+    assert [e["event"] for e in logs].count("memory.learn_deferred_llm_busy") == 1  # later, not now
 
 
 async def test_learn_non_llm_failure_still_raises(memory, user, monkeypatch):
@@ -140,3 +140,71 @@ async def test_consolidate_llm_failure_is_dropped(memory, user, monkeypatch):
     with capture_logs() as logs:
         await jobs.handle_consolidate(Job(id="c1", user_id=user.id, kind=JobKind.CONSOLIDATE))
     assert any(e["event"] == "memory.consolidate_dropped_llm_busy" for e in logs)
+
+
+# --- hotfix3 round 1: LEARN runs after the chat grace window and retries a busy LLM twice ------------
+from datetime import datetime, timedelta  # noqa: E402
+
+from mavis.domain import timeutil  # noqa: E402
+from mavis.domain.events import Event, EventType, Trust  # noqa: E402
+from mavis.domain.wakeups import WakeupKind  # noqa: E402
+from mavis.llm import models as llm_models  # noqa: E402
+from mavis.timers.service import WakeupService  # noqa: E402
+
+
+async def _learn_wakeups(user_id):
+    return await WakeupService().pending(user_id, WakeupKind.SYSTEM_LEARN)
+
+
+async def test_chat_learn_is_not_before_the_interactive_grace_window(user, rec_bus, clock):
+    from mavis.agents.turn_support import enqueue_learn
+
+    ev = Event(id="tg:update:1", user_id=user.id, type=EventType.USER_MESSAGE, occurred_at=clock.t,
+               source="telegram", payload={"text": "hi"}, trust=Trust.USER)
+    await enqueue_learn(user.id, ev, "Jawahar is my friend", None)
+    [job] = [j for j in rec_bus.jobs if j.kind is JobKind.LEARN]
+    not_before = datetime.fromisoformat(job.payload["not_before"])
+    assert timedelta(seconds=llm_models.INTERACTIVE_GRACE_S) < not_before - clock.t <= timedelta(seconds=30)
+
+
+async def test_early_learn_job_is_parked_on_a_wakeup_not_run(memory, user, monkeypatch, clock):
+    async def never(*a, **k):
+        raise AssertionError("must not run before not_before")
+
+    monkeypatch.setattr(memory, "learn", never)
+    due = clock.t + timedelta(seconds=28)
+    payload = {"text": "x", "source_ref": "tg:2", "trust": "user", "not_before": due.isoformat()}
+    await jobs.handle_learn(Job(id="learn:tg:2", user_id=user.id, kind=JobKind.LEARN, payload=payload))
+    [w] = await _learn_wakeups(user.id)
+    assert timeutil.ensure_utc(w.due_at) == due and w.payload["learn"]["source_ref"] == "tg:2"
+
+
+async def test_learn_wakeup_enqueues_the_job_again(user, rec_bus, clock):
+    payload = {"text": "x", "source_ref": "tg:3", "trust": "user", "not_before": clock.t.isoformat()}
+    await jobs.on_learn_wakeup(user.id, "learn", {"learn": payload})
+    [job] = [j for j in rec_bus.jobs if j.kind is JobKind.LEARN]
+    assert job.payload["source_ref"] == "tg:3"
+
+
+async def test_busy_learn_is_retried_twice_on_wakeups_then_dropped(memory, user, monkeypatch, clock):
+    async def busy(*a, **k):
+        raise LLMError("LLM slot reserved for interactive work")
+
+    monkeypatch.setattr(memory, "learn", busy)
+    payload = {"text": "x", "source_ref": "tg:4", "trust": "user"}
+    await jobs.handle_learn(Job(id="learn:tg:4", user_id=user.id, kind=JobKind.LEARN, payload=payload))
+    [w1] = await _learn_wakeups(user.id)
+    assert timeutil.ensure_utc(w1.due_at) - clock.t == timedelta(minutes=3)
+    assert w1.payload["learn"]["retry"] == 1
+
+    await jobs.handle_learn(Job(id="learn:tg:4:r1", user_id=user.id, kind=JobKind.LEARN,
+                                payload=w1.payload["learn"]))
+    w2 = [w for w in await _learn_wakeups(user.id) if w.id != w1.id]
+    assert [timeutil.ensure_utc(w.due_at) - clock.t for w in w2] == [timedelta(minutes=10)]
+    assert w2[0].payload["learn"]["retry"] == 2
+
+    with capture_logs() as logs:
+        await jobs.handle_learn(Job(id="learn:tg:4:r2", user_id=user.id, kind=JobKind.LEARN,
+                                    payload=w2[0].payload["learn"]))
+    assert len(await _learn_wakeups(user.id)) == 2  # no third retry
+    assert any(e["event"] == "memory.learn_dropped_llm_busy" for e in logs)
