@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -75,9 +75,14 @@ def created_by(task_id: int) -> set[str]:
 
 
 async def update_workspace_state(user_id: int, patch: dict) -> dict:
-    """The only writer of users.state["workspace"]: merges `patch` inside the users row lock, so a webhook,
-    a poll and a prepare step running at once never drop each other's keys."""
+    """Writer of users.state["workspace"] (with modify_workspace_state): merges `patch` inside the users
+    row lock, so a webhook, a poll and a prepare step running at once never drop each other's keys."""
     return await users.update_nested(user_id, STATE_KEY, patch)
+
+
+async def modify_workspace_state(user_id: int, change: Callable[[dict], dict]) -> dict:
+    """Read-modify-write of users.state["workspace"] inside the same row lock (list appends, cursors)."""
+    return await users.modify_nested(user_id, STATE_KEY, change)
 
 
 async def my_email(

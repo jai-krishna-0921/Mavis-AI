@@ -75,7 +75,8 @@ def dispute_title(obs: Any, tz: str) -> str:
     return f"Unrecognised security change on your {domain_label(obs.sender_domain)} account: secure it"
 
 
-async def _reply(event: Event, bubbles: list[str]) -> None:
+async def reply(event: Event, bubbles: list[str]) -> None:
+    """A direct answer to a button tap: not proactive, so it never counts against the ping budget."""
     async with Session() as s:
         for i, text in enumerate(bubbles):
             await outbox.enqueue(
@@ -116,7 +117,7 @@ class FeedbackHandler:
             if obs is None or obs.user_id != event.user_id:
                 log.warning("attention.button_ignored", action=action, obs_id=obs_id)
                 return
-            await _reply(event, await fn(event, obs))
+            await reply(event, await fn(event, obs))
         log.info("attention.feedback", obs_id=obs.id, action=action, kind=obs.kind)
 
     async def _remember(self, obs: Any, sentiment: Feedback) -> None:

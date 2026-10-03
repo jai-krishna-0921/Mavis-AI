@@ -24,6 +24,8 @@ from mavis.attention.pipeline import AttentionPipeline
 from mavis.attention.rhythm import AttentionBrief, EveningWrap, FirstLook, Retention
 from mavis.attention.speaker import PREFIX, Speaker
 from mavis.attention.understand import Understander
+from mavis.attention.workspace import PREFIX as WORKSPACE_PREFIX
+from mavis.attention.workspace import WorkspaceIntake
 from mavis.config import get_settings
 from mavis.domain.events import Event, EventType
 from mavis.domain.policy import Capability
@@ -36,6 +38,8 @@ from mavis.store.repo import attention as repo
 from mavis.store.repo import users
 from mavis.timers.service import WakeupService
 from mavis.timers.system import register_system_wakeup
+from mavis.tools.integrations.actions import workspace_enabled
+from mavis.tools.integrations.poller import WORKSPACE_POLL_KIND
 from mavis.worker.runner import register_event_handler, register_startup_hook
 
 log = structlog.get_logger(__name__)
@@ -142,6 +146,16 @@ def get_retention() -> Retention:
     return Retention(get_index, WakeupService())
 
 
+@lru_cache
+def get_workspace() -> WorkspaceIntake:
+    from mavis.tools.integrations import get_connection_cache, get_provider
+    from mavis.tools.integrations.wiring import wakeup_schedule
+
+    return WorkspaceIntake(provider=get_provider(), executor_of=_executor,
+                           loops=initiative_wiring.current().loops, schedule=wakeup_schedule,
+                           cache=get_connection_cache(), policy=PingPolicy())
+
+
 ATTENTION_GETTERS = (
     get_index,
     get_thresholds,
@@ -153,6 +167,7 @@ ATTENTION_GETTERS = (
     get_digest,
     get_evening,
     get_retention,
+    get_workspace,
 )
 
 
@@ -195,6 +210,25 @@ async def heal_all() -> None:
             log.warning("attention.heal_failed", chain="daily", user_id=user_id, error=type(exc).__name__)
 
 
+async def heal_workspace() -> None:
+    """Worker startup: every Google-synced user has its Tasks and Drive poll chains armed."""
+    for user_id in await users.all_ids():
+        try:
+            await get_workspace().ensure_chains(user_id)
+        except Exception as exc:  # noqa: BLE001 - one user must not block the rest
+            log.warning("workspace.heal_failed", user_id=user_id, error=type(exc).__name__)
+
+
+def register_workspace() -> None:
+    """Drive shares, Docs comments and Google Tasks (GOOGLE_WORKSPACE_ENABLED and ATTENTION_ENABLED)."""
+    workspace = get_workspace()
+    register_event_handler(EventType.WORKSPACE_SIGNAL, workspace.on_event, replace=True)
+    register_button_handler(WORKSPACE_PREFIX, workspace.on_button)
+    register_system_wakeup(WORKSPACE_POLL_KIND, workspace.on_wakeup)
+    register_startup_hook(heal_workspace)
+    routines.register_morning_hook(workspace.ensure_chains)
+
+
 async def close_attention() -> None:
     """Shutdown: close a Qdrant client this module opened itself (the shared one belongs to memory)."""
     while _private_clients:
@@ -228,3 +262,5 @@ def register_attention() -> None:
     if "attention" not in {s.name for s in routines.brief_sources()}:
         routines.register_brief_source(AttentionBrief())
     context_hooks.register_context_provider(get_digest().context)
+    if workspace_enabled():
+        register_workspace()

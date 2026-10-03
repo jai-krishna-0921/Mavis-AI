@@ -485,3 +485,4 @@ def _reset_attention():
     context_hooks.clear_context_providers()
     for kind in attention_wiring.SYSTEM_KINDS:
         system.SYSTEM_WAKEUP_HANDLERS.pop(kind.value, None)
+    system.SYSTEM_WAKEUP_HANDLERS.pop("system_workspace_poll", None)

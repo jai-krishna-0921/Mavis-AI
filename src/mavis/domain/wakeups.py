@@ -28,6 +28,7 @@ class WakeupKind(StrEnum):
     SYSTEM_EVENING_WRAP = "system_evening_wrap"  # Phase 8
     SYSTEM_ATTENTION_RETENTION = "system_attn_retention"  # Phase 8 (kind column is 24 chars)
     SYSTEM_LEARN = "system_learn"  # a LEARN job parked until after the chat grace window, or retried
+    SYSTEM_WORKSPACE_POLL = "system_workspace_poll"  # Phase 9: Tasks/Drive polls and deferred Workspace pings
 
 
 class WakeupStatus(StrEnum):
@@ -69,4 +70,5 @@ EVENT_TYPE_FOR_KIND: dict[WakeupKind, EventType] = {
     WakeupKind.SYSTEM_EVENING_WRAP: EventType.WAKEUP,
     WakeupKind.SYSTEM_ATTENTION_RETENTION: EventType.WAKEUP,
     WakeupKind.SYSTEM_LEARN: EventType.WAKEUP,
+    WakeupKind.SYSTEM_WORKSPACE_POLL: EventType.WAKEUP,
 }
