@@ -17,6 +17,9 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy import (
+    false as sa_false,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from mavis.store.db import Base, utcnow
@@ -347,6 +350,9 @@ class PendingApproval(Base):
     # Set when a decision moves the row to RESOLVING; the sweep uses it to spot a lost resume.
     resolving_at: Mapped[datetime | None]
     resolved_at: Mapped[datetime | None]
+    # Queued by a run that saw third-party content: its arguments may be attacker-shaped, so it is
+    # never merged with an untainted request for the same action (approval dedupe), nor vice versa.
+    tainted: Mapped[bool] = mapped_column(default=False, server_default=sa_false())
 
 
 class PolicyRule(Base):

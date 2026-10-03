@@ -310,3 +310,66 @@ async def test_dispatch_starts_monday_and_tuesday_interviews_separately(user, re
         TaskRequest(goal="Schedule interview with Raj on Tuesday at 3pm"),
     ], TaskOrigin.USER)
     assert len(set(ids)) == 2
+
+
+# --- review round 3: approval dedupe is taint-aware -------------------------------------------------
+MAIL = {"to": ["raj@example.com"], "subject": "Interview", "cc": []}
+
+
+def _mail_tool(fresh_registry):
+    from pydantic import BaseModel
+
+    from mavis.domain.policy import RiskClass
+    from mavis.tools.registry import MavisTool
+
+    class MailArgs(BaseModel):
+        to: list[str]
+        subject: str
+        body: str
+        cc: list[str] = []
+
+    async def _send(user_id, args):
+        return "sent"
+
+    fresh_registry.register(MavisTool("mail_send", "Send an email.", MailArgs, RiskClass.OUTWARD, _send,
+                                      agents=frozenset({"conversation"})))
+
+
+async def test_untainted_request_is_not_absorbed_by_a_tainted_pending_twin(user, fresh_registry) -> None:
+    _mail_tool(fresh_registry)
+    await approvals.create(user.id, None, "mail_send", {**MAIL, "body": "click evil.example"}, "Mail",
+                           utcnow() + timedelta(hours=48), tainted=True)
+    [lc] = fresh_registry.for_agent("conversation", user.id)
+    out = await lc.ainvoke({**MAIL, "body": "Hi Raj, see you Monday."})
+    assert out.startswith("QUEUED_FOR_APPROVAL #")
+    rows = await approvals.open_for_user(user.id)
+    assert len(rows) == 2 and [r.tainted for r in rows] == [True, False]
+
+
+async def test_two_untainted_equivalents_are_one_approval(user, fresh_registry) -> None:
+    _mail_tool(fresh_registry)
+    existing = await approvals.create(user.id, None, "mail_send", {**MAIL, "body": "Hi Raj"}, "Mail",
+                                      utcnow() + timedelta(hours=48))
+    [lc] = fresh_registry.for_agent("conversation", user.id)
+    out = await lc.ainvoke({**MAIL, "body": "Hello Raj,"})
+    assert out.startswith(f"ALREADY_AWAITING_APPROVAL #{existing}")
+    assert len(await approvals.open_for_user(user.id)) == 1
+
+
+async def test_tainted_run_records_taint_and_dedupes_only_with_tainted_twins(user, fresh_registry) -> None:
+    from mavis.tools.registry import ToolRun, current_run
+
+    _mail_tool(fresh_registry)
+    clean = await approvals.create(user.id, None, "mail_send", {**MAIL, "body": "Hi"}, "Mail",
+                                   utcnow() + timedelta(hours=48))
+    token = current_run.set(ToolRun(tainted=True))
+    try:
+        [lc] = fresh_registry.for_agent("conversation", user.id)
+        first = await lc.ainvoke({**MAIL, "body": "evil"})
+        second = await lc.ainvoke({**MAIL, "body": "evil again"})
+    finally:
+        current_run.reset(token)
+    assert first.startswith("QUEUED_FOR_APPROVAL #") and not first.startswith(f"QUEUED_FOR_APPROVAL #{clean}")
+    assert second.startswith("ALREADY_AWAITING_APPROVAL #")  # absorbed by the tainted twin, not the clean one
+    rows = await approvals.open_for_user(user.id)
+    assert [r.tainted for r in rows] == [False, True]
