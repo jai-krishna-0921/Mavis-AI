@@ -40,11 +40,14 @@ def approval_buttons(approval_id: int) -> list[list[Button]]:
 async def say(user_id: int, text: str, buttons: list[list[Button]] | None = None,
               dedupe_key: str | None = None) -> None:
     async with Session() as s:
+        # A deduped send is not a new message: it must not be logged to history a second time.
+        is_new = not (dedupe_key and await outbox.exists_with_key(s, dedupe_key))
         await outbox.enqueue(
             s, Outbound(user_id=user_id, text=text, buttons=buttons or [], dedupe_key=dedupe_key)
         )
         await s.commit()
-    await messages.log(user_id, Role.ASSISTANT, text)
+    if is_new:
+        await messages.log(user_id, Role.ASSISTANT, text)
 
 
 async def send_approval_prompt(user_id: int, payload: dict) -> None:
@@ -78,8 +81,9 @@ INTERPRET_PROMPT = """The user was shown a pending action and asked to approve i
 - edit: they want changes; put the requested change in `instructions`
 - unrelated: the reply is about something else entirely"""
 
-# A decision or an action that has been in flight longer than this lost its worker.
-STALE_AFTER = timedelta(minutes=10)
+# A decision in flight longer than this lost its resume job. It must exceed the bus claim idle time
+# (15 min), so the startup sweep never fails a row whose RESUME_TASK job is still queued or redelivered.
+STALE_AFTER = timedelta(minutes=20)
 _AFTER_STOP_WINDOW = timedelta(days=1)
 
 

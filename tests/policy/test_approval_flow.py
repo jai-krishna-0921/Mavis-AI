@@ -244,7 +244,7 @@ async def test_sweep_leaves_fresh_resolving_alone_and_fails_stale_one(user, rec_
     await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
     await flow.sweep()
     assert (await approvals.get(aid)).status == ApprovalStatus.RESOLVING
-    clock.advance(minutes=11)
+    clock.advance(minutes=21)
     assert (await flow.sweep())["stuck"] == 1
     assert (await approvals.get(aid)).status == ApprovalStatus.FAILED
     assert (await tasks.get(tid)).status == TaskStatus.FAILED
@@ -256,7 +256,7 @@ async def test_sweep_stuck_resolving_of_a_cancelled_task_tells_the_user(user, re
     tid, aid = await _pending(user.id)
     await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
     await tasks.cancel(user.id, tid)
-    clock.advance(minutes=11)
+    clock.advance(minutes=21)
     await flow.sweep()
     assert (await approvals.get(aid)).status == ApprovalStatus.FAILED
     assert "nothing was done" in sent[-1].text and "Send note: hi" in sent[-1].text
@@ -269,7 +269,7 @@ async def test_sweep_skips_resolving_of_a_running_task(user, rec_bus, sent, cloc
     tid, aid = await _pending(user.id)
     await tasks.set_status(tid, TaskStatus.RUNNING)
     await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
-    clock.advance(minutes=11)
+    clock.advance(minutes=21)
     assert (await flow.sweep())["stuck"] == 0
     assert (await approvals.get(aid)).status == ApprovalStatus.RESOLVING
 
@@ -341,3 +341,18 @@ def test_register_sweeps_hooks_startup_morning_and_wakeups():
     assert system.SYSTEM_WAKEUP_HANDLERS["system_approval_remind"] is flow.on_remind_wakeup
     assert system.SYSTEM_WAKEUP_HANDLERS["system_approval_expire"] is flow.on_expire_wakeup
     routines._morning_hooks[:] = [f for f in routines._morning_hooks if f.__name__ != "sweep_for_user"]
+
+
+async def test_repeated_sweeps_log_one_history_row(user, rec_bus, clock):
+    from sqlalchemy import select
+
+    from mavis.store.models import Message
+
+    tid, aid = await _pending(user.id)
+    await _force(aid, status=ApprovalStatus.EXECUTED.value, started_at=utcnow(), resolved_at=utcnow())
+    await tasks.cancel(user.id, tid)
+    await flow.sweep()
+    await flow.sweep()
+    async with Session() as s:
+        rows = list(await s.scalars(select(Message).where(Message.user_id == user.id)))
+    assert [r.content for r in rows if "went through" in r.content].__len__() == 1
