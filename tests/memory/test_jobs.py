@@ -207,4 +207,5 @@ async def test_busy_learn_is_retried_twice_on_wakeups_then_dropped(memory, user,
         await jobs.handle_learn(Job(id="learn:tg:4:r2", user_id=user.id, kind=JobKind.LEARN,
                                     payload=w2[0].payload["learn"]))
     assert len(await _learn_wakeups(user.id)) == 2  # no third retry
-    assert any(e["event"] == "memory.learn_dropped_llm_busy" for e in logs)
+    [final] = [e for e in logs if e["event"] == "memory.learn_dropped_final"]
+    assert final["job_id"] == "learn:tg:4:r2" and final["log_level"] == "error"  # loops lost too

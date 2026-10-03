@@ -93,8 +93,9 @@ async def handle_learn(job: Job) -> None:
                 log.warning("memory.learn_deferred_llm_busy", job_id=job.id, source_ref=source_ref,
                             retry=retry + 1, error=str(exc))
             else:
-                log.warning("memory.learn_dropped_llm_busy", job_id=job.id, source_ref=source_ref,
-                            error=str(exc))
+                # Final: the facts AND any loops this text would have created are lost.
+                log.error("memory.learn_dropped_final", job_id=job.id, source_ref=source_ref,
+                          attempts=retry + 1, error=str(exc))
             return
         if p.get("conversation", True):
             await maybe_summarize(job.user_id)
