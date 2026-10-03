@@ -132,6 +132,8 @@ def _make_tool(spec: ActionSpec) -> MavisTool:
         priority=spec.priority,
         on_taint=TaintPolicy.APPROVE if spec.taint_approve else TaintPolicy.ALLOW,
         prepare=workspace_tools.PREPARES.get(spec.name),
+        identity=spec.identity,
+        action_time=spec.action_time,
     )
 
 
