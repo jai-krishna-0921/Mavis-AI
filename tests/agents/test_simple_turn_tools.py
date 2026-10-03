@@ -352,3 +352,53 @@ async def test_retry_with_unknown_taint_assumes_tainted(db, channel, fake_llm, m
     assert simple_turn.is_tainted((await messages.recent(user.id))[-1])
     [learn] = [j for j in jobs if j.kind is JobKind.LEARN]
     assert learn.payload["trust"] == "untrusted"
+
+
+async def test_digest_turn_is_tainted_and_small_talk_is_not(db, channel, fake_llm, memory, bus, monkeypatch):
+    from mavis.agents import context_hooks
+
+    async def inbox(user_id, text):
+        return "## What you've seen in their inbox\n<untrusted>x</untrusted>" if "gmail" in text else ""
+
+    context_hooks.clear_context_providers()
+    context_hooks.register_context_provider(inbox)
+    try:
+        user, _ = await users.get_or_create_by_chat(77, "Jai")
+        jobs = await _jobs(bus, monkeypatch)
+        fake_llm.push_text("Nothing new.")
+        await run_turn(msg_event(user.id, "any gmail updates?", "e1"))
+        fake_llm.push_text("Hey!")
+        await run_turn(msg_event(user.id, "how are you", "e2"))
+        fake_llm.push_text("Good.")
+        await run_turn(msg_event(user.id, "cool", "e3"))
+    finally:
+        context_hooks.clear_context_providers()
+    learns = [j for j in jobs if j.kind is JobKind.LEARN]
+    assert [j.payload["trust"] for j in learns] == ["untrusted", "untrusted", "user"]
+    assert len(fake_llm.calls) == 3  # one model call per turn, no extra tool rounds
+
+
+@pytest.mark.parametrize(("untrusted", "trust"), [(True, "untrusted"), (False, "user")])
+async def test_reply_after_proactive_ping_learns_at_its_trust(
+    db, channel, fake_llm, memory, bus, monkeypatch, untrusted, trust
+) -> None:
+    """A proactive message composed from email content taints the user's next reply (final review I3)."""
+    from mavis.domain.decisions import ComposedMessage, NotifyIntent
+    from mavis.initiative.wiring import build_initiative
+
+    async def no_embed(texts):
+        return [[1.0, 0.0] for _ in texts]
+
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    jobs = await _jobs(bus, monkeypatch)
+    init = build_initiative(bus, memory, embed=no_embed)
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["An email says your HR contact changed."]))
+    intent = NotifyIntent(urgency=3, intent="Heads-up about an email", dedupe_key="attn:m1")
+    assert await init.executor.notify(user, intent, untrusted=untrusted)
+    log = await messages.recent(user.id)
+    assert simple_turn.is_tainted(log[-1]) is untrusted
+    fake_llm.push_text("Okay.")
+    await run_turn(msg_event(user.id, "ok thanks", "e1"))
+    [learn] = [j for j in jobs if j.kind is JobKind.LEARN]
+    assert learn.payload["trust"] == trust
+    assert "HR contact" in learn.payload["text"]

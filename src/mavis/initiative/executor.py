@@ -13,7 +13,7 @@ from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision, NotifyIntent, WakeupRequest
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import Loop, LoopStatus, LoopUpsert
-from mavis.domain.messages import Outbound, Role
+from mavis.domain.messages import TAINT_SUFFIX, Button, Outbound, Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.composer import Composer
 from mavis.initiative.quiet import QuietTracker
@@ -126,9 +126,11 @@ class InitiativeExecutor:
             return 0
         due = now + RELEASE_DELAY
         moved = 0
-        for w in await self._wakeups.pending(user.id, WakeupKind.DEFERRED):
-            if w.due_at > due and await self._wakeups.reschedule(w.id, due):
-                moved += 1
+        # attention asks and notifies deferred by quiet hours too; each is revalidated when it fires
+        for kind in (WakeupKind.DEFERRED, WakeupKind.SYSTEM_ATTENTION_SPEAK):
+            for w in await self._wakeups.pending(user.id, kind):
+                if w.due_at > due and await self._wakeups.reschedule(w.id, due):
+                    moved += 1
         if moved:
             log.info("initiative.deferred_released", user=user.id, count=moved)
         return moved
@@ -208,7 +210,8 @@ class InitiativeExecutor:
 
     async def notify(self, user, intent: NotifyIntent, context: str = "", quiet_streak: int = 0,
                      untrusted: bool = False, original_due: datetime | None = None,
-                     origin: dict[str, Any] | None = None) -> bool:
+                     origin: dict[str, Any] | None = None,
+                     buttons: list[list[Button]] | None = None) -> bool:
         if untrusted and intent.urgency > MAX_UNTRUSTED_URGENCY:
             intent = intent.model_copy(update={"urgency": MAX_UNTRUSTED_URGENCY})
         # an untrusted ping must not use up the loop's daily slot for this kind of ping
@@ -238,7 +241,7 @@ class InitiativeExecutor:
             return False
         if verdict.budget_bypass:  # counts toward the daily cap on over-budget security notices
             extra = [*extra, f"{SECURITY_BYPASS_PREFIX}{intent.dedupe_key or timeutil.now().isoformat()}"]
-        if intent.dedupe_key and await self._recover_partial(user, intent):
+        if intent.dedupe_key and await self._recover_partial(user, intent, tainted=untrusted):
             await self._follow_up_sent(origin)
             return False
         message = await self._composer.compose(user, intent.intent, intent.urgency,
@@ -248,7 +251,7 @@ class InitiativeExecutor:
             log.info("initiative.composer_dropped", user=user.id, intent=intent.intent[:80])
             return False
         await self.deliver(user, message.messages, intent.dedupe_key, intent.urgency, quiet_streak,
-                           extra_keys=extra)
+                           extra_keys=extra, buttons=buttons, tainted=untrusted)
         await self._follow_up_sent(origin)
         return True
 
@@ -261,7 +264,7 @@ class InitiativeExecutor:
         if loop is not None and loop.status is LoopStatus.OPEN:
             await self._loops.close(loop_id, LoopStatus.AWAITING_REPLY)
 
-    async def _recover_partial(self, user, intent: NotifyIntent) -> bool:
+    async def _recover_partial(self, user, intent: NotifyIntent, tainted: bool = False) -> bool:
         """A prior attempt enqueued bubbles but died before log/record: finish that, send nothing new."""
         now = timeutil.now()
         local_date = timeutil.to_local(now, user.timezone).date().isoformat()
@@ -269,13 +272,16 @@ class InitiativeExecutor:
         if not sent:
             return False
         await messages.log(user.id, Role.ASSISTANT, "\n".join(sent), proactive=True,
-                           event_id=f"proactive:{intent.dedupe_key}:{local_date}:0")
+                           event_id=proactive_event_id(f"{intent.dedupe_key}:{local_date}:0", tainted))
         await self._policy.record(user, intent.dedupe_key, intent.urgency, now)
         log.info("initiative.notify_recovered", user=user.id, key=intent.dedupe_key)
         return True
 
     async def deliver(self, user, bubbles: list[str], dedupe_key: str | None = None, urgency: int = 3,
-                      quiet_streak: int = 0, extra_keys: list[str] | None = None) -> None:
+                      quiet_streak: int = 0, extra_keys: list[str] | None = None,
+                      buttons: list[list[Button]] | None = None, tainted: bool = False) -> None:
+        """`tainted`: the text was derived from third-party content. Its history row carries the taint
+        marker, so the user's next reply is learned as untrusted (simple_turn._previous_tainted)."""
         now = timeutil.now()
         local_date = timeutil.to_local(now, user.timezone).date().isoformat()
 
@@ -283,15 +289,22 @@ class InitiativeExecutor:
             return f"{prefix}{dedupe_key}:{local_date}:{i}" if dedupe_key else None
 
         async with Session() as session:
+            last = len(bubbles) - 1
             for i, text in enumerate(bubbles):
+                rows = buttons if (buttons and i == last) else []  # the keyboard rides on the last bubble
                 await outbox.enqueue(session, Outbound(user_id=user.id, text=text, proactive=True,
-                                                       dedupe_key=scoped("", i)))
+                                                       dedupe_key=scoped("", i), buttons=rows))
             await session.commit()
+        key = scoped("", 0)
         await messages.log(user.id, Role.ASSISTANT, "\n".join(bubbles), proactive=True,
-                           event_id=scoped("proactive:", 0))
+                           event_id=proactive_event_id(key, tainted) if key else None)
         await self._policy.record(user, dedupe_key, urgency, now, extra_keys=extra_keys or ())
         if quiet_streak > 0:  # only a USER_QUIET nudge continues its chain; other proactive never arm one
             await self._quiet.after_assistant_message(user.id, bubbles[-1], streak=quiet_streak)
+
+
+def proactive_event_id(key: str, tainted: bool) -> str:
+    return f"proactive:{key}{TAINT_SUFFIX if tainted else ''}"
 
 
 def _loop_id(origin: dict[str, Any] | None) -> int | None:

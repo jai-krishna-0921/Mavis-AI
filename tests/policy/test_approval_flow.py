@@ -252,6 +252,20 @@ async def test_sweep_leaves_fresh_resolving_alone_and_fails_stale_one(user, rec_
     assert not _DASHES.search(sent[-1].text)
 
 
+async def test_startup_sweep_leaves_stale_resolving_to_the_later_sweeps(user, rec_bus, sent, clock):
+    """After a long worker outage the RESUME_TASK job may still be queued: the startup sweep must not fail
+    the task and drop the user's decision. The morning and wakeup sweeps still repair it."""
+    tid, aid = await _pending(user.id)
+    await tasks.set_status(tid, TaskStatus.AWAITING_APPROVAL)
+    await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
+    clock.advance(minutes=60)
+    await flow.sweep_approvals()
+    assert (await approvals.get(aid)).status == ApprovalStatus.RESOLVING
+    assert (await tasks.get(tid)).status == TaskStatus.AWAITING_APPROVAL
+    await flow.sweep_for_user(user.id)
+    assert (await approvals.get(aid)).status == ApprovalStatus.FAILED
+
+
 async def test_sweep_stuck_resolving_of_a_cancelled_task_tells_the_user(user, rec_bus, sent, clock):
     tid, aid = await _pending(user.id)
     await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)

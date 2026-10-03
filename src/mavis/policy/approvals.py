@@ -307,11 +307,15 @@ async def _sweep_overdue(user_id: int | None) -> int:
     return n
 
 
-async def sweep(user_id: int | None = None) -> dict[str, int]:
+STARTUP_SKIPPED_STEPS = frozenset({"stuck"})
+
+
+async def sweep(user_id: int | None = None, *, skip: frozenset[str] = frozenset()) -> dict[str, int]:
     """Repair approvals the live path could not finish. Safe to run any time and repeatedly.
 
     Runs at worker start, with the morning check-in, and whenever an approval reminder or expiry
-    wakeup fires. Each step is isolated so one failure does not hide the rest."""
+    wakeup fires. Each step is isolated so one failure does not hide the rest. `skip` names steps
+    to leave out."""
     steps = {
         "expired": lambda: _sweep_overdue(user_id),
         "stuck": lambda: _sweep_stuck_resolving(utcnow() - STALE_AFTER, user_id),
@@ -320,6 +324,8 @@ async def sweep(user_id: int | None = None) -> dict[str, int]:
     }
     out: dict[str, int] = {}
     for name, fn in steps.items():
+        if name in skip:
+            continue
         try:
             out[name] = await fn()
         except Exception as exc:  # noqa: BLE001 - keep sweeping
@@ -329,9 +335,10 @@ async def sweep(user_id: int | None = None) -> dict[str, int]:
 
 
 async def sweep_approvals() -> None:
-    """Worker start hook. It runs before the consumers start, which is safe: a RESOLVING row only
-    counts as stuck after STALE_AFTER, longer than the bus redelivery window."""
-    await sweep()
+    """Worker start hook. It skips the "stuck RESOLVING" step: after a worker outage longer than
+    STALE_AFTER, the row's RESUME_TASK job may still be queued in the bus and about to run, so failing
+    the task here would drop the user's decision. The morning and wakeup sweeps cover that step."""
+    await sweep(skip=STARTUP_SKIPPED_STEPS)
 
 
 async def sweep_for_user(user_id: int) -> None:

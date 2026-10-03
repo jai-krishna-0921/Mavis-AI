@@ -195,6 +195,16 @@ Limits are set in `docker-compose.prod.yml`. Idle use was measured in a local ru
 
 Limits sum to about 2.2 GB on purpose (idle use is about 1.35 GB); the 2 GB swapfile covers spikes, and roughly 400 MB stays free for a future sandbox container. On redeploy, `deploy.sh` stops the worker and timer while the image builds, then prunes old images and build cache.
 
+## Attention layer
+
+Every incoming Gmail message is understood (kind, money, risk flags), scored against the user's own baselines, and given one verdict: ask, notify, brief, log or drop. It is on by default and needs no new env vars.
+
+- **Settings** (all optional): `ATTENTION_ENABLED`, `ATTENTION_LARGE_AMOUNTS` (per currency, JSON), `ATTENTION_EVENING_TIME` (default `20:30`), `ATTENTION_UNDERSTAND_PER_WINDOW` (LLM calls per user per 2 minute window, default 4), `ATTENTION_RETENTION_DAYS` (default 90). The defaults are the production values.
+- **Migration order**: `0008_attention` follows `0007_orchestrator` and creates four tables. `deploy/aws/deploy.sh` runs `mavis migrate` before it restarts the worker. If another branch adds a migration after 0007 (Phase 4's `0009_orchestrator_followups`), point its `down_revision` at `0008_attention` when the two merge, then run `uv run pytest tests/store/test_migrations.py`.
+- **First deploy**: for each user with Gmail polling on, the worker queues the last 14 days (up to 40 emails) as backfill. They are understood at 4 per 2 minutes in the background, about 20 minutes in all. Backfill only builds baselines. It never pings, so there is no burst of messages. When it finishes, the user may get one "first look" summary. Watch with `docker compose logs -f worker | grep attention`.
+- **Roll back**: set `ATTENTION_ENABLED=false` and restart the worker. The earlier email path is used again. The attention tables stay but are unused, and pending attention wakeups and its buttons are ignored. No migration downgrade is needed.
+- **Check it**: `uv run python scripts/verify_attention.py` runs the offline scenario tests. `--live` reads recent mail through Composio (read only) and refuses to run when `DATABASE_URL` points at a non-local host. It sends nothing and writes nothing.
+
 ## Documentation
 
 - Design spec: [`docs/superpowers/specs/2026-10-02-mavis-pa-design.md`](docs/superpowers/specs/2026-10-02-mavis-pa-design.md)
