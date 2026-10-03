@@ -436,14 +436,17 @@ async def test_connection_required_interrupts_and_resumes(db, user, provider, ca
 # --- hotfix3 RC4: one open connect prompt per user and capability ---------------------------------
 
 
-async def test_second_task_an_hour_later_joins_the_open_prompt(db, provider, cache, fake_bus, rec, state):
+async def test_second_task_an_hour_later_gets_the_link_again_not_expired(
+    db, provider, cache, fake_bus, rec, state
+):
     now = [NOW]
     flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
     first = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="3")
-    now[0] = NOW + timedelta(minutes=39)  # prod: 13:45 then 14:24 then 15:26 IST
+    now[0] = NOW + timedelta(minutes=39)  # prod: 13:45 then 14:24 IST; the first link died after 10 min
     again = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="6", revoked=True)
     assert again == first
-    assert len(rec.sent) == 1 and len(provider.links) == 1  # no second prompt, no "expired" wording
+    assert len(rec.sent) == 2 and rec.sent[-1].text.startswith("Here's your link again")
+    assert "expired" not in rec.sent[-1].text
     assert {p.task_id for p in await connections.open_for(1, Capability.CALENDAR)} == {"3", "6"}
 
 
@@ -459,10 +462,62 @@ async def test_a_stale_open_prompt_gets_a_fresh_one(db, provider, cache, fake_bu
 async def test_joining_does_not_extend_the_prompt_window(db, provider, cache, fake_bus, rec, state):
     now = [NOW]
     flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
-    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="3")
-    now[0] = NOW + timedelta(minutes=90)
-    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="6")  # joins
+    first = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="3")
+    now[0] = NOW + timedelta(minutes=5)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="6")  # joins silently
     assert len(rec.sent) == 1
-    now[0] = NOW + timedelta(hours=2, minutes=10)  # 2h after the link went out, 40 min after the join
-    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="9")
-    assert len(rec.sent) == 2  # a fresh link: the old one was sent more than 2h ago
+    now[0] = NOW + timedelta(hours=2, minutes=5)  # 2h after the link went out, not after the join
+    fresh = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="9")
+    assert fresh != first and len(rec.sent) == 2
+
+
+# --- review round 2 (I3): never wait silently on a dead link; close every joined row --------------
+
+
+async def test_dead_link_is_resent_once_then_joins_are_silent_again(
+    db, provider, cache, fake_bus, rec, state
+):
+    now = [NOW]
+    flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
+    pid = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="a")
+    now[0] = NOW + timedelta(minutes=5)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="b")
+    assert len(rec.sent) == 1  # the link is still alive
+    now[0] = NOW + timedelta(minutes=30)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="c")
+    assert len(rec.sent) == 2 and rec.sent[-1].text.startswith("Here's your link again")
+    assert provider.links[-1][2].endswith(f"p={pid}")
+    now[0] = NOW + timedelta(minutes=35)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="d")
+    assert len(rec.sent) == 2  # the re-sent link is alive
+
+
+async def _three_waiting(flow, now) -> int:
+    pid = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="a")
+    now[0] = NOW + timedelta(minutes=5)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="b")
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="c")
+    return pid
+
+
+async def test_decline_closes_and_resumes_every_waiting_task(db, provider, cache, fake_bus, rec, state):
+    now = [NOW]
+    flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
+    pid = await _three_waiting(flow, now)
+    await flow.decline(1, pid)
+    assert await connections.open_for(1, Capability.CALENDAR) == []
+    resumed = {j.payload["task_id"] for j in fake_bus.jobs if j.kind is JobKind.RESUME_TASK}
+    assert resumed == {"a", "b", "c"}
+    resumes = [j for j in fake_bus.jobs if j.kind is JobKind.RESUME_TASK]
+    assert all(j.payload["value"] == {"connected": False} for j in resumes)
+
+
+async def test_expiry_closes_and_resumes_every_waiting_task(db, provider, cache, fake_bus, rec, state):
+    now = [NOW]
+    flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
+    pid = await _three_waiting(flow, now)
+    now[0] = NOW + PENDING_TTL + timedelta(minutes=1)
+    await flow.check(pid)
+    assert await connections.open_for(1, Capability.CALENDAR) == []
+    resumed = {j.payload["task_id"] for j in fake_bus.jobs if j.kind is JobKind.RESUME_TASK}
+    assert resumed == {"a", "b", "c"}
