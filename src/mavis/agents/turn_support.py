@@ -17,7 +17,7 @@ from mavis.agents import clarify, context_hooks
 from mavis.bus import get_bus
 from mavis.domain import timeutil
 from mavis.domain.events import Event, Job, JobKind, Trust
-from mavis.domain.messages import TAINT_SUFFIX, Role
+from mavis.domain.messages import TAINT_SUFFIX, Role, tainted_event_id
 from mavis.initiative import wiring
 from mavis.llm.models import INTERACTIVE_GRACE_S
 from mavis.memory.service import get_memory
@@ -96,7 +96,7 @@ def reply_event_id(event_id: str, tainted: bool) -> str:
 
 
 def is_tainted(message: Message) -> bool:
-    return bool(message.event_id and message.event_id.endswith(TAINT_SUFFIX))
+    return tainted_event_id(message.event_id)
 
 
 def previous_message(history: list[Message]) -> Message | None:

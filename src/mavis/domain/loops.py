@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from mavis.domain.events import Trust
@@ -72,9 +72,12 @@ class Loop(BaseModel):
 
 
 class LoopUpsert(BaseModel):
+    """Create a loop (id unset: kind and title required) or update one by id. An update is partial:
+    only the fields the writer actually set change; the rest stay as they are."""
+
     id: int | None = None                # set to update an existing loop
-    kind: LoopKind
-    title: str
+    kind: LoopKind | None = None
+    title: str | None = None
     due_at: datetime | None = None
     entities: list[str] = Field(default_factory=list)
     status: LoopStatus = LoopStatus.OPEN
@@ -85,3 +88,9 @@ class LoopUpsert(BaseModel):
     # default is the safe one: a writer that forgets to say yields an untrusted loop.
     trust: SkipJsonSchema[Trust] = Trust.UNTRUSTED
     origin: SkipJsonSchema[LoopOrigin] = LoopOrigin.UNKNOWN
+
+    @model_validator(mode="after")
+    def _new_loop_is_complete(self) -> LoopUpsert:
+        if self.id is None and (self.kind is None or not (self.title or "").strip()):
+            raise ValueError("a new loop needs a kind and a title")
+        return self

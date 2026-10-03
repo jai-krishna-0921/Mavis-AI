@@ -36,6 +36,7 @@ LOOP_WAKEUP_KINDS = (WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED, WakeupKi
 REMINDER_PREFIX = "Reminder the user asked for: "  # wake_me's wakeup reason
 REMINDER_URGENCY = 4
 LATE_REMINDER_AFTER = timedelta(hours=2)  # later than this, the reminder says it is late
+UNTRUSTED_FIELDS = frozenset({"status", "entities", "watch"})  # all third-party content may change
 
 
 def reminder_text(reason: str, due: datetime, now: datetime, timezone: str) -> str:
@@ -58,21 +59,25 @@ class InitiativeExecutor:
                     quiet_streak: int = 0, origin: dict[str, Any] | None = None,
                     open_loops: list[Loop] | None = None, event_loop_id: int | None = None) -> None:
         untrusted = event.trust is Trust.UNTRUSTED  # spec 8.3: third-party content may not create work
+        # what the reasoner writes is as trusted as the least trusted thing it read
+        write_trust = Trust.UNTRUSTED if untrusted or decision.tainted else Trust.SYSTEM
         for upsert in decision.track:
             if untrusted and not await self._owns_existing_loop(user.id, upsert.id):
-                log.warning("initiative.untrusted_track_skipped", event_id=event.id, title=upsert.title[:80])
+                log.warning("initiative.untrusted_track_skipped", event_id=event.id,
+                            title=(upsert.title or "")[:80])
                 continue
             try:
                 if untrusted:
                     upsert = await self._limit_untrusted_update(upsert, event)
                     if upsert is None:
                         continue
-                # Provenance is set here, never taken from the model. The reasoner's prompt carries
-                # untrusted history, memory and mail, so what it tracks is untrusted content.
+                # Provenance is set here, never taken from the model. An update by id is partial: what
+                # the model did not set stays unchanged, so a status-only change never touches content
+                # or trust.
                 await self._loops.upsert(user.id, upsert.model_copy(update={
-                    "source": event.id[:200], "trust": Trust.UNTRUSTED, "origin": LoopOrigin.REASONER}))
+                    "source": event.id[:200], "trust": write_trust, "origin": LoopOrigin.REASONER}))
             except ValueError as exc:  # e.g. the LLM named a loop id that does not exist: not retryable
-                log.warning("initiative.track_failed", event_id=event.id, title=upsert.title[:80],
+                log.warning("initiative.track_failed", event_id=event.id, title=(upsert.title or "")[:80],
                             error=str(exc))
         for i, w in enumerate(decision.wakeups):
             ended = event.type is EventType.EVENT_ENDED
@@ -203,9 +208,9 @@ class InitiativeExecutor:
         current = await self._loops.get(upsert.id) if upsert.id is not None else None
         if current is None:
             return None
-        return upsert.model_copy(update={
-            "kind": current.kind, "title": current.title, "due_at": current.due_at,
-            "importance": current.importance, "source": event.id[:200], "trust": Trust.UNTRUSTED})
+        allowed = upsert.model_dump(include={"id", *(UNTRUSTED_FIELDS & upsert.model_fields_set)})
+        return LoopUpsert.model_validate(allowed).model_copy(update={
+            "source": event.id[:200], "trust": Trust.UNTRUSTED})
 
     async def _loop_trusted(self, loop_id: int | None) -> bool:
         """A wakeup with no loop has no loop provenance to inherit."""

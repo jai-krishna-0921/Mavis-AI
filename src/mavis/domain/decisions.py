@@ -53,6 +53,9 @@ class InitiativeDecision(BaseModel):
     track: list[LoopUpsert] = Field(default_factory=list)
     wakeups: list[WakeupRequest] = Field(default_factory=list)
     ignore_reason: str | None = None
+    # Set by the reasoner's code, never the model: its prompt carried untrusted content (the signal, a
+    # loop, recalled memory or a history message derived from third-party content).
+    tainted: SkipJsonSchema[bool] = False
 
 
 class ComposedMessage(BaseModel):
