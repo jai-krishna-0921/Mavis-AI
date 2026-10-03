@@ -391,18 +391,16 @@ def test_tool_run_flips_only_at_step_end():
 
 
 def test_split_bubbles():
-    assert split_bubbles("Hey!\n\nHow did it go?\n\nTell me.\n\nMore.") == [
+    assert split_bubbles("Hey!\n---\nHow did it go?\n---\nTell me.\n---\nMore.") == [
         "Hey!", "How did it go?", "Tell me.\n\nMore."
     ]
     assert split_bubbles("   ") == []
     assert split_bubbles("one line") == ["one line"]
 
 
-def test_split_bubbles_keeps_code_blocks_whole_and_drops_dashes():
-    text = "Here it is — enjoy.\n\n```\nx = 1\n\ny = 2 — 3\n```\n\nBye"
-    assert split_bubbles(text) == ["Here it is, enjoy.", "```\nx = 1\n\ny = 2 — 3\n```", "Bye"]
-    out = split_bubbles("A–B notes\n\nsecond")
-    assert not any(d in b for b in out for d in DASHES)
+def test_split_bubbles_keeps_code_blocks_whole_and_leaves_typography_to_the_channel():
+    text = "Here it is — enjoy.\n---\n```\nx = 1\n---\ny = 2 — 3\n```\n---\nBye"
+    assert split_bubbles(text) == ["Here it is — enjoy.", "```\nx = 1\n---\ny = 2 — 3\n```", "Bye"]
 
 
 # --- fix round 1 -------------------------------------------------------------------------------

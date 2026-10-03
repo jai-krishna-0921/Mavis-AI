@@ -7,6 +7,7 @@ from langgraph.types import Command
 
 from mavis.agents import checkpointing
 from mavis.agents import orchestrator_graph as og
+from mavis.channels.formatting import to_plain
 from mavis.domain.decisions import ComposedMessage
 from mavis.domain.errors import BudgetExceeded, ConnectionRequired, LLMError
 from mavis.domain.events import EventType
@@ -466,7 +467,7 @@ async def test_ok_is_at_most_once(user, fake_llm, rec_bus, note_tool):
     a = await approvals.get(aid)
     assert a.status == ApprovalStatus.EXECUTED and a.result == "sent: hi"
     assert a.started_at is not None and a.resolved_at is not None  # execution marker, then outcome
-    assert out_a["final_messages"] == ["Done ✓\nsent: hi"]
+    assert [to_plain(m) for m in out_a["final_messages"]] == ["Done ✓\nsent: hi"]
     assert out_b["final_messages"] == [og.NOTHING_TO_APPROVE_TEXT]
     assert fake_llm.structured_calls == []  # approval responder is deterministic (F22)
 
@@ -495,7 +496,7 @@ async def test_failed_execution_is_recorded_and_reported(user, fake_llm, rec_bus
     await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
     out = await graph.ainvoke(Command(resume={"approval_id": aid, "decision": "ok"}), _cfg(tid))
     assert (await approvals.get(aid)).status == ApprovalStatus.FAILED
-    assert out["final_messages"] == ["Tried, but it failed: smtp refused"]
+    assert [to_plain(m) for m in out["final_messages"]] == ["Tried, but it failed: smtp refused"]
 
 
 @pytest.mark.parametrize("decision, status, text", [
@@ -582,8 +583,9 @@ def test_user_facing_and_prompt_text_has_no_dashes():
     texts = [og.PLANNER_PROMPT, og.CRITIC_PROMPT, og.RESPONDER_RULES, og.REVISE_PROMPT, og.REVISE_FAILED_TEXT,
              og.NOTHING_TO_APPROVE_TEXT, *og.APPROVAL_TEXT.values()]
     assert not [t for t in texts if any(d in t for d in DASHES)]
+    # the failure reason is the tool's own text: shown verbatim, not rewritten
     msgs = og._approval_messages([{"status": "failed", "detail": "bad \u2014 thing"}])
-    assert not any(d in m for m in msgs for d in DASHES)
+    assert [to_plain(m) for m in msgs] == ["Tried, but it failed: bad \u2014 thing"]
 
 
 async def test_approved_integration_failure_is_failed_not_done(user, fake_llm, rec_bus, fresh_registry,
@@ -606,7 +608,8 @@ async def test_approved_integration_failure_is_failed_not_done(user, fake_llm, r
     out = await graph.ainvoke(Command(resume={"approval_id": aid, "decision": "ok"}), _cfg(tid))
     a = await approvals.get(aid)
     assert a.status == ApprovalStatus.FAILED
-    assert out["final_messages"] == ["Tried, but it failed: Recipient address rejected"]
+    shown = [to_plain(m) for m in out["final_messages"]]
+    assert shown == ["Tried, but it failed: Recipient address rejected"]
     assert [e[1] for e in provider.executed] == ["mail.send"]
 
 

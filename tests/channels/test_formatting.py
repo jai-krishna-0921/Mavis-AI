@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from mavis.channels.formatting import sanitize_typography, to_plain, to_telegram_html
+from mavis.channels.formatting import normalize_dashes, to_plain, to_telegram_html
 
 H = to_telegram_html
 
@@ -75,12 +75,12 @@ def test_plain_strips_markup() -> None:
 
 
 def test_dashes() -> None:
-    assert sanitize_typography("assistant—think") == "assistant, think"
-    assert sanitize_typography("a — b") == "a, b"
-    assert sanitize_typography("pages 3–5") == "pages 3-5"
-    assert sanitize_typography("fast – very fast") == "fast, very fast"
-    assert sanitize_typography("wait —, what") == "wait, what"
-    assert sanitize_typography("end. — next") == "end. next"
+    assert normalize_dashes("assistant—think") == "assistant, think"
+    assert normalize_dashes("a — b") == "a, b"
+    assert normalize_dashes("pages 3–5") == "pages 3 to 5"  # a range (phase A4)
+    assert normalize_dashes("fast – very fast") == "fast, very fast"
+    assert normalize_dashes("wait —, what") == "wait, what"
+    assert normalize_dashes("end. — next") == "end. next"
 
 
 @pytest.mark.parametrize("fn", [H, to_plain])
@@ -113,27 +113,15 @@ def test_no_italic_inside_bare_url() -> None:
 
 
 def test_dash_lookalikes() -> None:
-    assert sanitize_typography("wait―what") == "wait, what"
-    assert sanitize_typography("call 555‒0132") == "call 555-0132"
-    assert sanitize_typography("a ‒ b") == "a, b"
-    assert sanitize_typography("it was −5 degrees") == "it was -5 degrees"
-    assert sanitize_typography("fine -- see you then") == "fine, see you then"
-    assert sanitize_typography("run it with --verbose") == "run it with --verbose"
-    assert sanitize_typography("a--b") == "a--b"
+    assert normalize_dashes("wait―what") == "wait, what"
+    assert normalize_dashes("call 555‒0132") == "call 555-0132"
+    assert normalize_dashes("a ‒ b") == "a, b"
+    assert normalize_dashes("it was −5 degrees") == "it was -5 degrees"
+    assert normalize_dashes("fine -- see you then") == "fine, see you then"
+    assert normalize_dashes("run it with --verbose") == "run it with --verbose"
+    assert normalize_dashes("a--b") == "a--b"
 
 
-def test_sanitize_stored_keeps_code() -> None:
-    from mavis.channels.formatting import sanitize_stored
-
-    out = sanitize_stored("sure — here `a—b`\n```\nx -- y\n```\nok -- done")
+def test_normalize_dashes_keeps_code() -> None:
+    out = normalize_dashes("sure — here `a—b`\n```\nx -- y\n```\nok -- done")
     assert out == "sure, here `a—b`\n```\nx -- y\n```\nok, done"
-
-
-async def test_assistant_messages_stored_sanitized(user) -> None:
-    from mavis.domain.messages import Role
-    from mavis.store.repo import messages
-
-    await messages.log(user.id, Role.ASSISTANT, "Good luck — you've got this")
-    await messages.log(user.id, Role.USER, "a — b")
-    rows = await messages.recent(user.id)
-    assert [r.content for r in rows] == ["Good luck, you've got this", "a — b"]

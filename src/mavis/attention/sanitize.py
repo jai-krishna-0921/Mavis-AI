@@ -6,7 +6,6 @@ import re
 import unicodedata
 
 from mavis.attention.schema import EmailKind
-from mavis.channels.formatting import sanitize_typography
 from mavis.initiative.composer import CHECK_DIRECTLY, scrub_untrusted_origin
 
 REMOVED = "[removed]"
@@ -69,7 +68,7 @@ def clean(text: object, limit: int) -> str:
     t = _DIGIT_RUN.sub(_digit_run, t)
     t = _BARE_DOMAIN.sub(REMOVED, t)
     t = _MARKUP.sub("", _TAG.sub("", _CTRL.sub(" ", t)))
-    t = sanitize_typography(" ".join(t.split()))
+    t = " ".join(t.split())  # third-party text keeps its punctuation (a subject's "Q3 – final")
     for i, d in enumerate(dates):
         t = t.replace(chr(0xE100 + i), d)
     return t[:limit].rstrip()

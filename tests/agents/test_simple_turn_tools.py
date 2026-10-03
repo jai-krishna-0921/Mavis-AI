@@ -94,7 +94,7 @@ def _tool_messages(call: list) -> list[ToolMessage]:
 
 async def test_small_talk_is_one_call_and_no_tools(db, channel, fake_llm, memory, bus, integ, bound):
     user, _ = await users.get_or_create_by_chat(77, "Jai")
-    fake_llm.push_text("Hey Jai!\n\nHow's the day going?")
+    fake_llm.push_text("Hey Jai!\n---\nHow's the day going?")
     await run_turn(msg_event(user.id, "hey"))
 
     assert len(fake_llm.calls) == 1

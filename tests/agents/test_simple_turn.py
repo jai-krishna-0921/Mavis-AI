@@ -18,7 +18,7 @@ def msg_event(user_id: int, text: str, event_id: str = "tg:update:1", **payload)
 
 async def test_run_turn_replies_in_bubbles_and_logs(db, channel, fake_llm, memory, bus) -> None:
     user, _ = await users.get_or_create_by_chat(77, "Jai")
-    fake_llm.push_text("Hey Jai!\n\nWhat's on your plate today?")
+    fake_llm.push_text("Hey Jai!\n---\nWhat's on your plate today?")
     await run_turn(msg_event(user.id, "hi"))
 
     assert channel.sent[0].kind == "typing"
@@ -60,7 +60,7 @@ async def test_file_message_is_described(db, channel, fake_llm, memory, bus) -> 
 
 async def test_run_turn_is_idempotent_on_retry(db, channel, fake_llm, memory, bus) -> None:
     user, _ = await users.get_or_create_by_chat(77, "Jai")
-    fake_llm.push_text("First\n\nSecond")
+    fake_llm.push_text("First\n---\nSecond")
     fake_llm.push_text("Other\n\nWords\n\nAnd more")  # a retry would get a different bubble count
     event = msg_event(user.id, "hi")
     await run_turn(event)

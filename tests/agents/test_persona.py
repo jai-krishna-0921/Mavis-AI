@@ -23,7 +23,7 @@ async def test_prompt_style_and_capabilities(db) -> None:
     user, _ = await users.get_or_create_by_chat(4, "Jai")
     prompt = system_prompt(user, NOW)
     assert "—" not in prompt and "–" not in prompt
-    assert "Never use em dashes or en dashes" in prompt
+    assert "Put a colon after a label" in prompt and "line containing just ---" in prompt
     assert "No headings, no tables" in prompt
     assert "Working today:" in prompt and "coming soon" in prompt
     for item in ("remember", "Gmail", "/connect", "/connections", "/disconnect", "morning check-in",
@@ -99,8 +99,9 @@ async def test_connection_state_is_injected(db) -> None:
 
 
 def test_split_bubbles() -> None:
-    assert split_bubbles("Hey!\n\nWhat's up?") == ["Hey!", "What's up?"]
-    assert split_bubbles("one\n\n\n\ntwo\n\nthree\n\nfour") == ["one", "two", "three\n\nfour"]
+    assert split_bubbles("Hey!\n---\nWhat's up?") == ["Hey!", "What's up?"]
+    assert split_bubbles("Hey!\n\nWhat's up?") == ["Hey!\n\nWhat's up?"]  # paragraphs stay together
+    assert split_bubbles("one\n---\n---\ntwo\n---\nthree\n---\nfour") == ["one", "two", "three\n\nfour"]
     assert split_bubbles("  single  ") == ["single"]
     assert split_bubbles("   ") == []
 
