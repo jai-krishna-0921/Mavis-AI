@@ -104,9 +104,10 @@ async def test_daily_budget(user, settings, monkeypatch):
     assert await policy.count_today(user, AFTERNOON) == 6
     verdict = await policy.check(user, 3, None, AFTERNOON)
     assert not verdict.allow and verdict.reason == "daily budget reached"
-    assert verdict.defer_until == SEVEN_IST_MON
-    # F4: urgency 5 bypasses quiet hours only, never the daily budget
-    assert not (await policy.check(user, 5, None, AFTERNOON)).allow
+    assert verdict.defer_until is None  # over budget: suppressed, not replayed tomorrow
+    # F4: urgency 5 bypasses quiet hours only, never the daily budget; it waits for tomorrow
+    urgent = await policy.check(user, 5, None, AFTERNOON)
+    assert not urgent.allow and urgent.defer_until == SEVEN_IST_MON
 
 
 async def test_budget_under_limit_allows(user, settings, monkeypatch):
@@ -221,3 +222,18 @@ async def test_awake_still_respects_budget_and_dedupe(user, clock):
     assert (await policy.check(user, 3, "k", LATE_NIGHT)).reason == "duplicate"
     await _add_proactive(user.id, *[LATE_NIGHT - timedelta(minutes=i + 2) for i in range(6)])
     assert (await policy.check(user, 3, None, LATE_NIGHT)).reason == "daily budget reached"
+
+
+async def test_day_key_is_not_dated_twice(user, clock):
+    from sqlalchemy import select
+
+    from mavis.store.models import PingLogRow
+
+    policy = PingPolicy()
+    await policy.record(user, "morning:2026-09-27", 3, AFTERNOON)
+    await policy.record(user, "followup20260927", 3, AFTERNOON)
+    await policy.record(user, "prep:7", 3, AFTERNOON)
+    async with Session() as s:
+        keys = sorted(await s.scalars(select(PingLogRow.key)))
+    assert keys == ["followup20260927", "morning:2026-09-27", "prep:7:2026-09-27"]
+    assert (await policy.check(user, 3, "morning:2026-09-27", AFTERNOON)).reason == "duplicate"
