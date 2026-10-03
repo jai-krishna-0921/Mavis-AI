@@ -145,11 +145,16 @@ async def test_registry_refuses_without_queueing_an_approval(workspace_on, googl
 # --- beyond the brief: composition with Task 8, fail-closed errors, approved creates --------------------
 
 
-def test_every_file_target_is_guarded_and_task_verifiers_are_kept():
+def test_every_file_target_is_guarded():
     assert set(workspace_guard.FILE_TARGETS) <= set(PREPARES)
-    assert PREPARES["tasks.complete"] is workspace_guard.prepare_task
-    assert PREPARES["tasks.update"] is workspace_guard.prepare_task
+    assert {"tasks.complete", "tasks.update", "drive.move"} <= set(workspace_guard.FILE_TARGETS)
     assert "drive.trash" not in PREPARES
+
+
+async def test_task_verifiers_still_run_after_the_allowlist(google, user):
+    google.results["tasks.get"] = ToolResult(ok=False, error="Composio answered 404 for POST /x")
+    out = await run_prepare("tasks.complete", a.TaskCompleteArgs(task_id="t9"), None, user.id, tainted=False)
+    assert out.refusal == workspace_guard.TASK_UNKNOWN
 
 
 async def test_refusal_wins_over_escalation(google, user):
@@ -160,7 +165,7 @@ async def test_refusal_wins_over_escalation(google, user):
 
 
 async def test_an_allowed_target_still_gets_its_escalation(google, user):
-    tid = await tasks.create(user.id, goal="add a line to the Q3 deck notes")
+    tid = await tasks.create(user.id, goal=f"add a line to https://docs.google.com/document/d/{DECK}/edit")
     named(google, "Q3 Deck")
     google.results["drive.permissions"] = ToolResult(ok=True, data={"permissions": [
         {"id": "p1", "type": "user", "role": "owner", "emailAddress": "someone@else.com"},
@@ -228,3 +233,147 @@ async def test_an_approved_upload_is_recorded_for_the_task_that_asked(workspace_
     assert workspace_guard.created_by(tid) == {"upload-approved"}
     out = await run_prepare("drive.share", share("upload-approved"), tid, user.id)
     assert out.refusal is None
+
+
+# --- fix round 1 ---------------------------------------------------------------------------------------
+
+THEIRS = {"permissions": [
+    {"id": "p1", "type": "user", "role": "owner", "emailAddress": "attacker@evil.example"},
+    {"id": "p2", "type": "user", "role": "writer", "emailAddress": "j@x.com"}]}
+SHARED = {"permissions": [
+    {"id": "p1", "type": "user", "role": "owner", "emailAddress": "j@x.com"},
+    {"id": "p2", "type": "anyone", "role": "reader"}]}
+MINE = {"permissions": [{"id": "p1", "type": "user", "role": "owner", "emailAddress": "j@x.com"}]}
+FOLDER = "1FolderIdAbcdefghijklmnopqrst"
+
+
+def perms(provider, data: dict) -> None:
+    provider.results["drive.permissions"] = ToolResult(ok=True, data=data)
+
+
+async def test_a_doc_someone_else_owns_is_not_named_by_its_title(google, user):
+    tid = await tasks.create(user.id, goal="summarize the notes from today")
+    named(google, "notes")
+    perms(google, THEIRS)
+    args = a.DocAppendArgs(document_id=PAYROLL, text="x")
+    assert (await run_prepare("docs.append", args, tid, user.id)).refusal == REFUSAL
+
+
+async def test_unknown_ownership_is_not_named_by_its_title(google, user):
+    tid = await tasks.create(user.id, goal="append to Q3 budget")
+    named(google, "Q3 budget")
+    google.results["drive.permissions"] = ToolResult(ok=False, error="Composio answered 403 for POST /x")
+    args = a.DocAppendArgs(document_id=DECK, text="x")
+    assert (await run_prepare("docs.append", args, tid, user.id)).refusal == REFUSAL
+
+
+async def test_an_owned_doc_named_by_its_title_is_allowed(google, user):
+    tid = await tasks.create(user.id, goal="append to Q3 budget")
+    named(google, "Q3 budget")
+    perms(google, MINE)
+    args = a.DocAppendArgs(document_id=DECK, text="x")
+    assert (await run_prepare("docs.append", args, tid, user.id)).refusal is None
+
+
+async def test_a_title_inside_a_longer_word_is_not_named(google, user):
+    tid = await tasks.create(user.id, goal="tidy up my notebook")
+    named(google, "note")
+    perms(google, MINE)
+    assert (await run_prepare("drive.share", share(DECK), tid, user.id)).refusal == REFUSAL
+
+
+def test_names_needs_a_whole_phrase_of_four_or_more_characters():
+    assert workspace_guard.names("append to Q3  Budget, please", "q3 budget")
+    assert not workspace_guard.names("tidy up my notebook", "note")
+    assert not workspace_guard.names("share the Q3 deck", "Q3")  # three characters
+    assert workspace_guard.names("clean up the 'Buy milk' task", "Buy milk")
+
+
+async def test_a_task_rename_or_complete_needs_a_named_task(google, user):
+    tid = await tasks.create(user.id, goal="tick off 'Buy milk'")
+    google.results["tasks.get"] = ToolResult(ok=True, data={"id": "t2", "title": "File taxes"})
+    out = await run_prepare("tasks.update", a.TaskUpdateArgs(task_id="t2", title="Buy milk"), tid, user.id)
+    assert out.refusal == REFUSAL
+    out = await run_prepare("tasks.complete", a.TaskCompleteArgs(task_id="t2"), tid, user.id)
+    assert out.refusal == REFUSAL
+    google.results["tasks.get"] = ToolResult(ok=True, data={"id": "t1", "title": "Buy milk"})
+    out = await run_prepare("tasks.complete", a.TaskCompleteArgs(task_id="t1"), tid, user.id)
+    assert out.refusal is None and out.note == "Task: Buy milk"
+
+
+def move(folder: str) -> a.DriveMoveArgs:
+    return a.DriveMoveArgs(file_id=DECK, to_folder_id=folder)
+
+
+async def test_tainted_move_into_a_shared_or_foreign_folder_is_refused(google, user):
+    tid = await tasks.create(user.id, goal=f"file {DECK} away")
+    named(google, "Team folder")
+    perms(google, SHARED)
+    assert (await run_prepare("drive.move", move(FOLDER), tid, user.id)).refusal == REFUSAL
+    perms(google, THEIRS)
+    assert (await run_prepare("drive.move", move(FOLDER), tid, user.id)).refusal == REFUSAL
+    google.results["drive.permissions"] = ToolResult(ok=False, error="Composio answered 403 for POST /x")
+    assert (await run_prepare("drive.move", move(FOLDER), tid, user.id)).refusal == REFUSAL
+
+
+async def test_tainted_move_into_a_private_named_or_created_folder_is_allowed(google, user):
+    tid = await tasks.create(user.id, goal=f"file {DECK} away")
+    named(google, "Archive")
+    perms(google, MINE)
+    assert (await run_prepare("drive.move", move(FOLDER), tid, user.id)).refusal is None
+    perms(google, SHARED)  # from here on the folder is shared, so only the id rules can allow it
+    workspace_guard.record_created(tid, ["folder-made-here"])
+    assert (await run_prepare("drive.move", move("folder-made-here"), tid, user.id)).refusal is None
+    named_tid = await tasks.create(user.id, goal=f"move {DECK} into {FOLDER}")
+    assert (await run_prepare("drive.move", move(FOLDER), named_tid, user.id)).refusal is None
+
+
+async def test_tainted_move_of_an_unnamed_file_is_refused_even_into_a_private_folder(google, user):
+    tid = await tasks.create(user.id, goal="tidy my drive")
+    named(google, "Payroll 2026")
+    perms(google, MINE)
+    assert (await run_prepare("drive.move", move(FOLDER), tid, user.id)).refusal == REFUSAL
+
+
+async def test_any_move_into_a_shared_or_foreign_folder_is_outward(google, user):
+    named(google, "Team folder")
+    perms(google, SHARED)
+    out = await run_prepare("drive.move", move(FOLDER), None, user.id, tainted=False)
+    assert out.refusal is None and out.risk is RiskClass.OUTWARD
+    assert out.note.startswith("Move into folder: Team folder (")
+    perms(google, THEIRS)
+    out = await run_prepare("drive.move", move(FOLDER), None, user.id, tainted=False)
+    assert out.risk is RiskClass.OUTWARD
+    google.results["drive.permissions"] = ToolResult(ok=False, error="Composio answered 403 for POST /x")
+    out = await run_prepare("drive.move", move(FOLDER), None, user.id, tainted=False)
+    assert out.risk is RiskClass.OUTWARD and out.note == workspace_guard.FOLDER_UNKNOWN_NOTE
+    perms(google, MINE)
+    out = await run_prepare("drive.move", move(FOLDER), None, user.id, tainted=False)
+    assert out.refusal is None and out.risk is None
+
+
+async def test_a_chain_longer_than_the_hop_limit_does_not_trust_its_top_goal(google, user):
+    root = await tasks.create(user.id, goal="make a plan")
+    parent = await tasks.create(user.id, goal=f"share {DECK}", parent_id=root)  # the walk stops here
+    for _ in range(workspace_guard.MAX_PARENT_HOPS):
+        parent = await tasks.create(user.id, goal="sub step", parent_id=parent)
+    assert (await run_prepare("drive.share", share(DECK), parent, user.id)).refusal == REFUSAL
+
+
+async def test_a_chain_at_the_hop_limit_trusts_its_root_goal(google, user):
+    parent = await tasks.create(user.id, goal=f"share {DECK}")
+    for _ in range(workspace_guard.MAX_PARENT_HOPS):
+        parent = await tasks.create(user.id, goal="sub step", parent_id=parent)
+    assert (await run_prepare("drive.share", share(DECK), parent, user.id)).refusal is None
+
+
+async def test_a_missing_parent_does_not_trust_the_child_goal(google, user, monkeypatch):
+    root = await tasks.create(user.id, goal="make a plan")
+    child = await tasks.create(user.id, goal=f"share {DECK}", parent_id=root)
+    real_get = workspace_guard.tasks_repo.get
+
+    async def gone(task_id):
+        return None if task_id == root else await real_get(task_id)
+
+    monkeypatch.setattr(workspace_guard.tasks_repo, "get", gone)
+    assert (await run_prepare("drive.share", share(DECK), child, user.id)).refusal == REFUSAL
