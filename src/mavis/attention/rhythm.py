@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -34,6 +34,19 @@ PENDING_MAX_AGE = timedelta(days=2)
 NOTHING = "Inbox: nothing new that needs you."
 RETENTION_REASON = "retention"
 RETENTION_TIME = "03:30"  # local: daily purge runs while the user sleeps and the LLM slot is idle
+
+EveningSource = Callable[[int, datetime], Awaitable[list[str]]]  # (user_id, local midnight in UTC) -> lines
+_evening_sources: list[EveningSource] = []
+
+
+def register_evening_source(fn: EveningSource) -> None:
+    """Extra evening-wrap lines from other sources (Workspace: overdue tasks, comments on the user's docs)."""
+    if fn not in _evening_sources:
+        _evening_sources.append(fn)
+
+
+def clear_evening_sources() -> None:
+    _evening_sources.clear()
 
 
 def _waiting(rows: list[Any]) -> list[Any]:
@@ -113,7 +126,13 @@ class EveningWrap:
         rows = await repo.recent(user_id, start, origin=repo.ORIGIN_LIVE, limit=200)
         waiting = _waiting(rows)
         flagged = [r for r in rows if r.verdict in ("notify", "ask")]
-        if not waiting and not flagged:
+        extra: list[str] = []
+        for source in list(_evening_sources):
+            try:
+                extra += await source(user_id, start)
+            except Exception as exc:  # noqa: BLE001 - the inbox wrap still goes out
+                log.warning("attention.evening_source_failed", error=type(exc).__name__)
+        if not waiting and not flagged and not extra:
             log.info("attention.evening_skipped", user_id=user_id, reason="nothing notable")
             return False
         handled = sum(1 for r in rows if r.verdict in ROUTINE)
@@ -130,13 +149,16 @@ class EveningWrap:
             )
         else:
             parts.append("Nothing is waiting on them now.")
+        if extra:
+            lines = "\n".join(f"- {x}" for x in extra[:MAX_BRIEF])
+            parts.append(f"From their Google account:\n{wrap_untrusted(lines, 'evening_google')}")
         intent = NotifyIntent(
             urgency=2, intent="\n".join(parts), dedupe_key=f"evening:{local.date().isoformat()}"
         )
         # Quiet hours defer via the executor; a wrap-up deferred past tonight is stale, never a morning ping.
         valid_until = local.replace(hour=EVENING_LATEST, minute=0, second=0, microsecond=0).astimezone(UTC)
         origin = {"kind": "evening_wrap", "valid_until": valid_until.isoformat()}
-        return await self._executor_of().notify(user, intent, untrusted=bool(waiting), origin=origin)
+        return await self._executor_of().notify(user, intent, untrusted=bool(waiting or extra), origin=origin)
 
 
 class FirstLook:

@@ -300,6 +300,7 @@ COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
         "GOOGLESUPER_GET_TASK", lambda a: {"tasklist_id": TASKLIST, "task_id": a.task_id}
     ),
     "mail.profile": SlugMapping("GMAIL_GET_PROFILE", lambda a: {}),
+    "contacts.list": SlugMapping("GOOGLESUPER_GET_CONTACTS", lambda a: {"person_fields": "emailAddresses"}),
 }
 
 # Provider-agnostic trigger names Mavis subscribes to per capability.

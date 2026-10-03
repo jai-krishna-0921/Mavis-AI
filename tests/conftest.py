@@ -486,3 +486,8 @@ def _reset_attention():
     for kind in attention_wiring.SYSTEM_KINDS:
         system.SYSTEM_WAKEUP_HANDLERS.pop(kind.value, None)
     system.SYSTEM_WAKEUP_HANDLERS.pop("system_workspace_poll", None)
+    from mavis.attention import rhythm
+    from mavis.tools.integrations import first_sync
+
+    rhythm.clear_evening_sources()
+    first_sync.EXTRA_HANDLERS.clear()

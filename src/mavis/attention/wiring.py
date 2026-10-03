@@ -21,11 +21,12 @@ from mavis.attention.index import AttentionIndex
 from mavis.attention.intake import Intake
 from mavis.attention.learning import Thresholds
 from mavis.attention.pipeline import AttentionPipeline
-from mavis.attention.rhythm import AttentionBrief, EveningWrap, FirstLook, Retention
+from mavis.attention.rhythm import AttentionBrief, EveningWrap, FirstLook, Retention, register_evening_source
 from mavis.attention.speaker import PREFIX, Speaker
 from mavis.attention.understand import Understander
 from mavis.attention.workspace import PREFIX as WORKSPACE_PREFIX
 from mavis.attention.workspace import WorkspaceIntake
+from mavis.attention.workspace_rhythm import WorkspaceBrief, workspace_evening
 from mavis.config import get_settings
 from mavis.domain.events import Event, EventType
 from mavis.domain.policy import Capability
@@ -39,6 +40,7 @@ from mavis.store.repo import users
 from mavis.timers.service import WakeupService
 from mavis.timers.system import register_system_wakeup
 from mavis.tools.integrations.actions import workspace_enabled
+from mavis.tools.integrations.first_sync import register_first_sync_handler
 from mavis.tools.integrations.poller import WORKSPACE_POLL_KIND
 from mavis.worker.runner import register_event_handler, register_startup_hook
 
@@ -227,6 +229,12 @@ def register_workspace() -> None:
     register_system_wakeup(WORKSPACE_POLL_KIND, workspace.on_wakeup)
     register_startup_hook(heal_workspace)
     routines.register_morning_hook(workspace.ensure_chains)
+    if "workspace" not in {s.name for s in routines.brief_sources()}:
+        routines.register_brief_source(WorkspaceBrief(workspace))
+    register_evening_source(workspace_evening)
+    register_first_sync_handler(Capability.TASKS, workspace.first_sync_tasks)
+    register_first_sync_handler(Capability.DRIVE, workspace.first_sync_drive)
+    register_first_sync_handler(Capability.CONTACTS, workspace.first_sync_contacts)
 
 
 async def close_attention() -> None:

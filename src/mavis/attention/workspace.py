@@ -67,6 +67,7 @@ SPEAK = "speak:"  # WORKSPACE_POLL_KIND reason of a deferred ask or notify: spea
 BASELINE_KEY = "baselined_at"  # users.state["workspace"]: set by first sync (Task 13); polls speak after it
 SHARED_LOOKBACK = timedelta(minutes=30)  # a missing cursor starts here: no backfill, no gap alarm
 MAX_LIST = 200
+MAX_CONTACTS = 1000
 NEW, DUPLICATE = "new", "duplicate"
 SENT, DEFERRED, DROPPED, NONE = "sent", "deferred", "dropped", "none"
 POLL_REASONS: dict[str, Capability] = {"tasks": Capability.TASKS, "drive": Capability.DRIVE}
@@ -206,7 +207,11 @@ class WorkspaceIntake:
         return handled
 
     async def poll_tasks(self, user_id: int, *, quiet: bool = False) -> int:
+        """`quiet=True` is first sync's baseline: nothing is spoken and overdue tasks count as asked, so no
+        keep-or-drop question ever comes for a backlog the user already had. Before the baseline marker a
+        poll is quiet too, but asks nothing away (the baseline still owns that backlog)."""
         user = await users.get(user_id)
+        backlog = quiet
         quiet = quiet or not await self._baselined(user_id)
         local = timeutil.to_local(self.clock(), user.timezone)
         end = local.replace(hour=23, minute=59, second=59, microsecond=0)
@@ -217,15 +222,16 @@ class WorkspaceIntake:
         handled = 0
         for t in extract_list(data, "tasks", "data.tasks"):
             signal = task_signal(t, local.date())
-            if signal is not None and await self.handle(user, signal, quiet=quiet) == NEW:
+            if signal is not None and await self.handle(user, signal, quiet=quiet, backlog=backlog) == NEW:
                 handled += 1
         return handled
 
     # --- decide, persist, speak -----------------------------------------------------------------------
 
-    async def handle(self, user: Any, s: Signal, *, quiet: bool = False) -> str:
+    async def handle(self, user: Any, s: Signal, *, quiet: bool = False, backlog: bool = False) -> str:
         """One row per signal. `quiet`: before the first-sync baseline, asks and notifies become brief
-        rows and nothing is closed (the user has not seen Mavis watch this account yet)."""
+        rows and nothing is closed (the user has not seen Mavis watch this account yet). `backlog` (first
+        sync): a demoted ask also marks the task asked, so it is never asked about later."""
         if s.kind is SignalKind.FILE_SHARED:
             s = s.model_copy(update={"actor_known": await self.known(user.id, s.actor)})
         st = await self.state(user.id)
@@ -238,6 +244,8 @@ class WorkspaceIntake:
         asked = s.object_id in (st.get("asked") or [])
         d = decide(s, loop_id=loop_id, muted=muted, asked=asked)
         if quiet and d.verdict in (Verdict.NOTIFY, Verdict.ASK):
+            if backlog and d.verdict is Verdict.ASK:
+                await self._append(user.id, "asked", s.object_id)
             d = WorkspaceDecision(Verdict.BRIEF, 0, d.reason, d.security)
         facts = {**s.model_dump(mode="json"), "reason": d.reason, "security": d.security,
                  "loop_title": loop_title if d.close_loop is not None else ""}
@@ -410,6 +418,61 @@ class WorkspaceIntake:
             return "I couldn't drop it just now. You can remove it in Google Tasks."
         await repo.set_fields(obs.id, feedback="drop")
         return "Dropped it from your list."
+
+    # --- first sync (spec 5.4), registered through first_sync.register_first_sync_handler ---------------
+
+    async def capture_email(self, user_id: int) -> str:
+        """The user's Google address via workspace_guard.my_email (amendment A4); "" when unknown."""
+        return await self.my_address(user_id)
+
+    async def first_sync_tasks(self, user_id: int) -> list[str]:
+        """Due today and overdue tasks become brief rows (never pings); the rest of the week is counted for
+        the first brief. Then the baseline marker lets polls speak (amendment A3)."""
+        await self.poll_tasks(user_id, quiet=True)
+        user = await users.get(user_id)
+        local = timeutil.to_local(self.clock(), user.timezone)
+        week = (local + timedelta(days=7)).replace(hour=23, minute=59, second=59, microsecond=0)
+        query = {"due_before": week.isoformat(), "max_results": 100}
+        data = await self._execute(user_id, "tasks.list", query)
+        today = local.date().isoformat()
+        upcoming = sum(
+            1 for t in extract_list(data, "tasks", "data.tasks")
+            if t.get("status") != "completed" and str(t.get("due") or "")[:10] > today
+        )
+        await self.patch(user_id, upcoming=upcoming)
+        await self.mark_baselined(user_id)
+        return []
+
+    async def first_sync_drive(self, user_id: int) -> list[str]:
+        """Files shared in the last 7 days are logged silently as a baseline; the share cursor starts now."""
+        await self.capture_email(user_id)
+        now = self.clock()
+        data = await self._execute(user_id, "drive.list_recent", {"shared_with_me": True, "max_results": 25})
+        for f in extract_list(data, "files", "data.files"):
+            when = to_datetime(f.get("sharedWithMeTime"))
+            signal = shared_file_signal(f)
+            if when is None or signal is None or when < now - timedelta(days=7):
+                continue
+            await repo.insert_signal(
+                user_id, signal.message_id, source=signal.source, kind=signal.kind.value, verdict="log",
+                urgency=0, summary=signal.object_title,
+                facts={**signal.model_dump(mode="json"), "reason": "baseline"}, received_at=when,
+            )
+        await self.patch(user_id, shared_after=now.isoformat())
+        return []
+
+    async def first_sync_contacts(self, user_id: int) -> list[str]:
+        """Contacts' email addresses seed actor_known (kept in users.state, at most MAX_CONTACTS)."""
+        data = await self._execute(user_id, "contacts.list", {})
+        people = extract_list(data, "response_data.connections", "connections",
+                              "data.response_data.connections")
+        emails = sorted({
+            str(e["value"]).strip().lower()
+            for p in people for e in p.get("emailAddresses") or [] if isinstance(e, dict) and e.get("value")
+        })
+        if emails:
+            await self.patch(user_id, contacts=emails[:MAX_CONTACTS])
+        return []
 
     # --- poll chains ------------------------------------------------------------------------------------
 
