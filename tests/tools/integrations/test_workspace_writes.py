@@ -212,3 +212,21 @@ async def test_tainted_task_previews_show_the_real_title(workspace_on, gtasks, u
     assert done.value.preview == "✅ Mark a task done\nTask: Pay rent"
     assert edit.value.preview == "✅ Update a task\nNew title: Rent\nDue: Fri 09 Oct\nTask: Pay rent"
     assert "tasks.patch" not in [e[1] for e in gtasks.executed]
+
+
+async def test_a_second_task_edit_in_one_run_sees_the_first(gtasks, user):
+    ctx = ToolContext(user_id=user.id)
+    token = current_run.set(ToolRun())
+    try:
+        await tasks_update(ctx, a.TaskUpdateArgs(task_id="t1", done=True))
+        await tasks_update(ctx, a.TaskUpdateArgs(task_id="t1", notes="x"))
+        await tasks_update(ctx, a.TaskUpdateArgs(task_id="t1", title="New"))
+        await tasks_complete(ctx, a.TaskCompleteArgs(task_id="t1"))
+        note = (await prepare_task(ctx, a.TaskCompleteArgs(task_id="t1"))).note
+    finally:
+        current_run.reset(token)
+    sent = [(e[2]["title"], e[2]["status"]) for e in gtasks.executed if e[1] == "tasks.patch"]
+    assert sent == [("Pay rent", "completed"), ("Pay rent", "completed"), ("New", "completed"),
+                    ("New", "completed")]  # never reopened, rename kept
+    assert note == "Task: New"
+    assert [e[1] for e in gtasks.executed].count("tasks.get") == 1

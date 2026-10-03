@@ -25,6 +25,7 @@ from mavis.tools.integrations.actions import (
     DocArgs,
     DocInsertArgs,
     DriveDownloadArgs,
+    DriveMoveArgs,
     DriveShareArgs,
     DriveUploadArgs,
     DriveUploadFileArgs,
@@ -41,9 +42,11 @@ from mavis.tools.integrations.workspace_guard import (
     ESCALATIONS,
     TASK_UNKNOWN,
     VERIFIERS,
+    TaskFacts,
     created_ids,
     forget_file,
     record_created,
+    remember_task,
     task_facts,
 )
 from mavis.tools.integrations.workspace_render import (
@@ -203,6 +206,26 @@ async def _drive_share(ctx: ToolContext, args: BaseModel) -> str:
     return await drive_share(ctx, args)
 
 
+async def drive_move(
+    ctx: ToolContext,
+    args: DriveMoveArgs,
+    *,
+    provider: IntegrationProvider | None = None,
+    cache: ConnectionCache | None = None,
+) -> str:
+    """Move, then forget the file's cached facts: a file moved into a shared folder inherits its sharing."""
+    try:
+        data = await action_data(ctx, "drive.move", args, provider=provider, cache=cache)
+    finally:
+        forget_file(ctx, args.file_id)
+    return render_created(data)
+
+
+async def _drive_move(ctx: ToolContext, args: BaseModel) -> str:
+    assert isinstance(args, DriveMoveArgs)
+    return await drive_move(ctx, args)
+
+
 async def _patch_task(
     ctx: ToolContext,
     action: str,
@@ -222,7 +245,9 @@ async def _patch_task(
         raise ActionFailed(f"{action} failed: {TASK_UNKNOWN}", reason="that task could not be found")
     status = facts.status if done is None else ("completed" if done else "needsAction")
     patch = TaskPatchArgs(task_id=task_id, title=title or facts.title, status=status, notes=notes, due=due)
-    return render_created(await action_data(ctx, "tasks.patch", patch, provider=provider, cache=cache))
+    data = await action_data(ctx, "tasks.patch", patch, provider=provider, cache=cache)
+    remember_task(ctx, TaskFacts(task_id, patch.title, patch.status))
+    return render_created(data)
 
 
 async def tasks_complete(
@@ -272,7 +297,8 @@ def creating(
 CREATES = ("drive.create_folder", "docs.create", "sheets.create", "tasks.add")
 CUSTOM_FNS: dict[str, CustomFn] = {
     "drive.read": _drive_read, "drive.upload": _drive_upload, "docs.append": _docs_append,
-    "drive.share": _drive_share, "tasks.complete": _tasks_complete, "tasks.update": _tasks_update,
+    "drive.share": _drive_share, "drive.move": _drive_move,
+    "tasks.complete": _tasks_complete, "tasks.update": _tasks_update,
     **{name: creating(name) for name in CREATES},
 }
 PREPARES: dict[str, PrepareFn] = {**ESCALATIONS, **VERIFIERS}
