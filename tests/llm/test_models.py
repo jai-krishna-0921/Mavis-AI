@@ -781,3 +781,11 @@ def test_empty_reasoning_effort_is_not_sent(settings) -> None:
     assert models.chat_model(Tier.FAST).reasoning_effort is None
     settings.llm_reasoning_effort_fast = "medium"
     assert models.chat_model(Tier.FAST).reasoning_effort == "medium"  # cache key includes it
+
+
+def test_reasoning_effort_only_for_gpt_oss_models(settings) -> None:
+    models._build.cache_clear()
+    assert models.chat_model(Tier.FAST, model="gemma4:31b").reasoning_effort is None
+    assert models.chat_model(Tier.FAST, model="gpt-oss:120b").reasoning_effort == "low"  # FAST fallback
+    settings.model_fast = "llama3.3:70b"
+    assert models.chat_model(Tier.FAST).reasoning_effort is None
