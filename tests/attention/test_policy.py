@@ -39,13 +39,25 @@ def test_debit_anomaly_asks(settings):
 
 def test_urgency_five_needs_established_sender(settings, monkeypatch):
     money = u(EmailKind.MONEY_MOVEMENT, money=DEBIT)
-    assert decide(inputs(money, HIGH, sender_established=True), settings).urgency == 5
-    assert decide(inputs(money, HIGH, sender_established=True, urgent_used_today=True), settings).urgency == 4
+    assert (
+        decide(inputs(money, HIGH, sender_established=True, sender_authenticated=True), settings).urgency == 5
+    )
+    # money urgency 5 also needs an authenticated sender (final review M2)
+    assert decide(inputs(money, HIGH, sender_established=True), settings).urgency == 4
+    assert (
+        decide(
+            inputs(money, HIGH, sender_established=True, sender_authenticated=True, urgent_used_today=True),
+            settings,
+        ).urgency
+        == 4
+    )
     look = AnomalyResult(0.9, ("large_amount", "lookalike_domain"), ("a", "b"))
-    looked = decide(inputs(money, look, sender_established=True), settings)
+    looked = decide(inputs(money, look, sender_established=True, sender_authenticated=True), settings)
     assert looked.verdict is Verdict.NOTIFY and looked.urgency == 4
     monkeypatch.setattr(settings, "attention_allow_urgent", False)
-    assert decide(inputs(money, HIGH, sender_established=True), settings).urgency == 4
+    assert (
+        decide(inputs(money, HIGH, sender_established=True, sender_authenticated=True), settings).urgency == 4
+    )
 
 
 def test_receipt_logs_and_bills_by_deadline(settings):

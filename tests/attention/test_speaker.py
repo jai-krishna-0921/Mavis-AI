@@ -31,7 +31,17 @@ class FakeExecutor:
         self.delivered: list[tuple] = []
         self.notified: list[tuple] = []
 
-    async def deliver(self, user, bubbles, dedupe_key=None, urgency=3, quiet_streak=0, buttons=None):
+    async def deliver(
+        self,
+        user,
+        bubbles,
+        dedupe_key=None,
+        urgency=3,
+        quiet_streak=0,
+        extra_keys=None,
+        buttons=None,
+        tainted=False,
+    ):
         self.delivered.append((bubbles, dedupe_key, urgency, buttons))
 
     async def notify(

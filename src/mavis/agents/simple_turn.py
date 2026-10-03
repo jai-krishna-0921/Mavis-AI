@@ -26,6 +26,7 @@ from mavis.domain.events import Event, Job, JobKind, Trust
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.policy import RiskClass
 from mavis.initiative import wiring
+from mavis.initiative.executor import TAINT_SUFFIX
 from mavis.llm import models as llm
 from mavis.memory.service import get_memory
 from mavis.policy.risk import UNTRUSTED_NOTE
@@ -95,8 +96,8 @@ async def build_context(user_id: int, text: str, hint: str = "") -> str:
 
 
 # A reply written after the model read untrusted tool output (an email, a web page) is logged with this
-# event_id suffix (no schema change). Learn text that includes it is learned at untrusted trust.
-TAINT_SUFFIX = ":tainted"
+# event_id suffix (TAINT_SUFFIX, no schema change; proactive messages composed from third-party content
+# carry it too, see executor.deliver). Learn text that includes it is learned at untrusted trust.
 
 
 def _reply_event_id(event_id: str, tainted: bool) -> str:
