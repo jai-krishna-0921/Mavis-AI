@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from zoneinfo import ZoneInfo
+import hashlib
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field
 
 from mavis import bus
+from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.loops import LoopKind, LoopUpsert
 from mavis.domain.policy import RiskClass
 from mavis.loops import service as loops_service
 from mavis.memory import service as memory_service
+from mavis.policy.risk import wrap_untrusted
 from mavis.store.repo import approvals, policy_rules, tasks, users
 from mavis.timers import service as timers_service
 from mavis.tools.registry import MavisTool
@@ -22,8 +25,15 @@ async def to_utc(user_id: int, dt: datetime) -> datetime:
     """Naive datetimes are interpreted in the user's timezone."""
     if dt.tzinfo is None:
         user = await users.get(user_id)
-        dt = dt.replace(tzinfo=ZoneInfo(user.timezone))
+        try:
+            tz = ZoneInfo(user.timezone)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            tz = ZoneInfo(get_settings().default_timezone)
+        dt = dt.replace(tzinfo=tz)
     return dt.astimezone(UTC)
+
+
+MAX_WAKE_AHEAD = timedelta(days=366)
 
 
 class RememberArgs(BaseModel):
@@ -35,16 +45,18 @@ class ForgetArgs(BaseModel):
 
 
 class WakeMeArgs(BaseModel):
-    at: datetime = Field(description="ISO-8601 time. Without an offset it is read as the user's local time.")
+    at: datetime = Field(description="Future ISO-8601 time. Without an offset it is the user's local time.")
     reason: str = Field(min_length=2, max_length=300, description="What to do or check when it fires")
 
 
 class TrackLoopArgs(BaseModel):
     kind: LoopKind
     title: str = Field(min_length=2, max_length=200)
-    due_at: datetime | None = None
-    entities: list[str] = Field(default_factory=list)
-    importance: int = Field(default=3, ge=1, le=5)
+    due_at: datetime | None = Field(
+        default=None, description="Optional deadline, ISO-8601; no offset means the user's local time"
+    )
+    entities: list[str] = Field(default_factory=list, description="Names of people or things involved")
+    importance: int = Field(default=3, ge=1, le=5, description="1 (minor) to 5 (critical)")
 
 
 class NoArgs(BaseModel):
@@ -82,8 +94,12 @@ async def wake_me(user_id: int, args: WakeMeArgs) -> str:
     at = await to_utc(user_id, args.at)
     if at <= timeutil.now():
         return "That time is in the past; pick a future time."
+    if at > timeutil.now() + MAX_WAKE_AHEAD:
+        return "That time is more than a year away; pick a nearer time."
+    key = f"remind:{user_id}:{at:%Y%m%d%H%M}:{hashlib.sha1(args.reason.encode()).hexdigest()[:8]}"
     wakeup_id = await timers_service.WakeupService().wake_me(
-        user_id, at, f"Reminder the user asked for: {args.reason}", kind="agent", payload={"reminder": True}
+        user_id, at, f"Reminder the user asked for: {args.reason}", kind="agent",
+        payload={"reminder": True}, dedupe_key=key,
     )
     return f"Wakeup #{wakeup_id} set for {at.isoformat()}."
 
@@ -102,7 +118,9 @@ async def list_tasks(user_id: int, args: NoArgs) -> str:
     rows = await tasks.active_for_user(user_id)
     if not rows:
         return "No active tasks."
-    return "\n".join(f"#{t.id} [{t.status}] {t.goal[:100]}" for t in rows)
+    return "\n".join(
+        f"#{t.id} [{t.status}] " + wrap_untrusted(t.goal[:100], "list_tasks") for t in rows
+    )
 
 
 async def cancel_task(user_id: int, args: CancelTaskArgs) -> str:
@@ -132,14 +150,15 @@ TOOLS = [
     MavisTool("forget", "Delete memories matching a word or phrase (asks the user first).", ForgetArgs,
               RiskClass.DESTRUCTIVE, forget, _CONV,
               preview=lambda a: f"Forget everything I know matching “{a.needle}”", priority=30),
-    MavisTool("wake_me", "Set a reminder / alarm for yourself to act or check something at a time.",
+    MavisTool("wake_me", "Schedule a reminder at a specific FUTURE time. Use ISO-8601; "
+              "a time without an offset is the user's local time.",
               WakeMeArgs, RiskClass.WRITE_SELF, wake_me, _CONV, priority=65),
     MavisTool("track_loop", "Track an open loop: commitment, waiting-on, goal, concern, routine or watch.",
               TrackLoopArgs, RiskClass.WRITE_SELF, track_loop, _CONV, priority=55),
     MavisTool("list_tasks", "List background tasks Mavis is working on.", NoArgs,
               RiskClass.READ, list_tasks, _CONV, priority=40),
-    MavisTool("cancel_task", "Cancel a background task by id.", CancelTaskArgs,
-              RiskClass.WRITE_SELF, cancel_task, _CONV, priority=35),
+    MavisTool("cancel_task", "Cancel a background task by id. Call list_tasks first to find the id.",
+              CancelTaskArgs, RiskClass.WRITE_SELF, cancel_task, _CONV, priority=35),
     MavisTool("what_do_you_know", "Recall what Mavis knows about the user or a person/topic.", KnowArgs,
               RiskClass.READ, what_do_you_know, _CONV, priority=50),
     MavisTool("add_policy_rule", "Save a standing rule so a kind of action no longer needs approval.",
