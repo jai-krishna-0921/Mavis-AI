@@ -16,11 +16,12 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from mavis.agents.react import react_loop
+from mavis.config import get_settings
 from mavis.domain.errors import BudgetExceeded
 from mavis.domain.tasks import StepOutcome
 from mavis.llm import models as llm
-from mavis.policy.risk import UNTRUSTED_NOTE
-from mavis.tools.registry import get_registry
+from mavis.policy.risk import UNTRUSTED_NOTE, wrap_untrusted
+from mavis.tools.registry import current_run, get_registry
 
 log = structlog.get_logger()
 
@@ -52,6 +53,18 @@ async def spawn_agent(
     *,
     tainted: bool = False,
 ) -> StepOutcome:
+    run = current_run.get()
+    if run is not None:
+        cap = get_settings().spawn_max_per_step
+        if run.spawned >= cap:
+            log.warning("spawn.too_many", role=role, cap=cap)
+            return StepOutcome(
+                ok=False, error="too many workers", tainted=run.tainted,
+                text=wrap_untrusted(
+                    f"Too many workers: at most {cap} can start per step. Do this one in a later step "
+                    "or fold it into one of the workers already running.", "spawn_agent"),
+            )
+        run.spawned += 1
     registry = get_registry()
     allowed = set(registry.names_for("spawn"))
     granted = [t for t in tools if t in allowed]
@@ -71,4 +84,7 @@ async def spawn_agent(
             )
     except TimeoutError as exc:
         raise BudgetExceeded(f"worker {role!r} ran longer than {budget.timeout_s:g}s") from exc
-    return StepOutcome(ok=bool(result.text), text=result.text, error=None if result.text else "empty answer")
+    return StepOutcome(
+        ok=bool(result.text), text=result.text, error=None if result.text else "empty answer",
+        tainted=bool(getattr(result, "tainted", False)),
+    )

@@ -51,3 +51,4 @@ class StepOutcome(BaseModel):
     text: str = ""
     artifacts: list[str] = Field(default_factory=list)  # local file paths
     error: str | None = None
+    tainted: bool = False  # the worker saw untrusted tool output; dependents must not trust the text

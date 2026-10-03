@@ -89,7 +89,8 @@ async def react_loop(
     by_name = {t.name: t for t in tools}
     history: list[BaseMessage] = list(messages)
     # A nested loop (a tool that spawns a worker) shares its parent's run: taint flows both ways.
-    run = current_run.get() or ToolRun()
+    parent = current_run.get()
+    run = parent or ToolRun()
     run.tainted = run.tainted or tainted
     first_approval = len(run.queued_approvals)
     token = current_run.set(run)
@@ -119,6 +120,8 @@ async def react_loop(
                 raise connection
             history.extend(messages_out)
             run.end_step()
+            if parent is None:
+                run.spawned = 0  # the per-step worker cap counts the outermost loop's steps
     finally:
         current_run.reset(token)
 

@@ -239,3 +239,91 @@ async def test_tainted_flag_passes_to_the_loop(user, fresh_registry, fake_llm):
     fake_llm.push_text("fine")
     out = await spawn_mod.spawn_agent(user.id, "w", "g", [], tainted=True)
     assert out.text == "fine"
+
+
+# --- fix round 1 -----------------------------------------------------------------------------
+
+
+def test_knowledge_specialist_tool_set(fresh_registry):
+    from mavis.tools import web
+
+    for t in (*ASSISTANT_TOOLS, *web.TOOLS):
+        fresh_registry.register(t)
+    names = set(fresh_registry.names_for("knowledge"))
+    assert "what_do_you_know" in names
+    assert not names & {"remember", "track_loop", "forget", "wake_me", "add_policy_rule"}
+    prompt = get_specialist("knowledge").prompt
+    assert "what_do_you_know" in prompt and "cannot save" in prompt
+
+
+async def test_inbox_mail_send_is_queued_for_approval(user, fresh_registry, fake_llm):
+    from mavis.store.repo import approvals
+    from mavis.tools.integrations.tools import register_integration_tools
+
+    register_integration_tools(fresh_registry)
+    assert "mail_send" in fresh_registry.names_for("inbox")
+    fake_llm.push_ai(_call("mail_send", {"to": ["a@example.com"], "subject": "Hi", "body": "Hello"}, "c1"))
+    fake_llm.push_text("Drafted and waiting for your OK.")
+    out = await run_specialist(get_specialist("inbox"), user.id, "email a@example.com hello")
+    assert out.ok
+    open_ = await approvals.open_for_user(user.id)
+    assert [a.tool for a in open_] == ["mail_send"]
+
+
+async def test_outcome_carries_taint_from_direct_call(user, fresh_registry, fake_llm):
+    _worker_world(fresh_registry)
+    spec = Specialist(name="conversation", description="d", prompt="p",
+                      tool_names=("mail_read",), max_steps=3)
+    fake_llm.push_ai(_call("mail_read", {"message_id": "m"}, "w1"))
+    fake_llm.push_text("summary")
+    assert (await run_specialist(spec, user.id, "read")).tainted is True
+    fake_llm.push_text("plain")
+    assert (await run_specialist(spec, user.id, "read")).tainted is False
+    fake_llm.push_ai(_call("mail_read", {"message_id": "m"}, "w2"))
+    fake_llm.push_text("summary")
+    assert (await spawn_mod.spawn_agent(user.id, "r", "g", ["mail_read"])).tainted is True
+
+
+async def test_tainted_kwarg_reaches_react_loop(user, fresh_registry, monkeypatch):
+    seen: list = []
+
+    async def _loop(tools, messages, max_steps, **kw):
+        seen.append(kw["tainted"])
+
+        class R:
+            text = "x"
+            tainted = True
+
+        return R()
+
+    monkeypatch.setattr(spawn_mod, "react_loop", _loop)
+    out = await spawn_mod.spawn_agent(user.id, "w", "g", [], tainted=True)
+    assert seen == [True] and out.tainted is True
+
+
+async def test_spawn_per_step_cap(user, fresh_registry, fake_llm, settings):
+    settings.spawn_max_per_step = 2
+    started: list[str] = []
+
+    async def run_worker(goal: str) -> str:
+        out = await spawn_mod.spawn_agent(user.id, goal, goal, [])
+        started.append(goal) if out.ok else None
+        return out.text
+
+    tool = StructuredTool.from_function(coroutine=run_worker, name="run_worker", description="W.",
+                                        metadata={"timeout_s": 0})
+
+    def calls(*goals):
+        return AIMessage(content="", tool_calls=[
+            {"name": "run_worker", "args": {"goal": g}, "id": f"i{i}"} for i, g in enumerate(goals)])
+
+    fake_llm.push_ai(calls("a", "b", "c"))
+    fake_llm.push_text("wa")  # workers' single-text answers (serialised by the limiter)
+    fake_llm.push_text("wb")
+    fake_llm.push_text("parent step two")  # worker c is refused, so the parent answers next
+    fake_llm.push_text("done")
+    res = await react_loop([tool], [HumanMessage("go")], max_steps=3)
+    assert started == ["a", "b"]
+    refused = [m.content for m in res.messages if "Too many workers" in str(m.content)]
+    assert len(refused) == 1 and refused[0].startswith("<untrusted")
+    assert res.text == "parent step two"

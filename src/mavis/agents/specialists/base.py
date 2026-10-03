@@ -59,4 +59,7 @@ async def run_specialist(
             )
     except TimeoutError as exc:
         raise BudgetExceeded(f"specialist {spec.name} ran longer than {spec.timeout_s:g}s") from exc
-    return StepOutcome(ok=bool(result.text), text=result.text, error=None if result.text else "empty answer")
+    return StepOutcome(
+        ok=bool(result.text), text=result.text, error=None if result.text else "empty answer",
+        tainted=bool(getattr(result, "tainted", False)),
+    )
