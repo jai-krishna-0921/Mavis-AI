@@ -21,10 +21,11 @@ from mavis.initiative.quiet import QuietTracker
 from mavis.initiative.reasoner import Reasoner
 from mavis.initiative.routines import Routines
 from mavis.initiative.untrusted import wrap_untrusted
-from mavis.loops.service import LoopService
+from mavis.loops.service import TRUSTED_SOURCE_PREFIXES, LoopService
 from mavis.policy.pings import normalize_dedupe_key
 from mavis.store.repo import decisions as decisions_repo
-from mavis.store.repo import users
+from mavis.store.repo import messages, users
+from mavis.store.repo.loops import title_tokens
 from mavis.timers import system
 from mavis.timers.service import WakeupService
 from mavis.worker.runner import register_event_handler
@@ -34,6 +35,7 @@ MAX_WAKEUP_LATENESS = timedelta(hours=2)
 MAX_LLM_URGENCY = 4
 URGENT_URGENCY = 5
 IMMINENT = timedelta(minutes=15)
+POST_TURN_QUIET = timedelta(minutes=10)
 FOLLOW_UP_VALID_FOR = timedelta(hours=24)
 LIVE_STATUSES = (LoopStatus.OPEN,)
 HANDLED_TYPES = tuple(t for t in EventType if t not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED))
@@ -107,6 +109,7 @@ class InitiativeHandler:
         else:
             log.info("initiative.decision_reused", event_id=event.id)
 
+        decision = await self._quiet_after_turn(event, decision)
         if event.type is EventType.LOOP_CREATED:
             # Always: the model's own wakeups are deduped against these by the executor, not instead of them
             await schedule_default_signals(self._wakeups, Loop.model_validate(event.payload))
@@ -120,6 +123,24 @@ class InitiativeHandler:
 
         if event.type is EventType.EVENT_ENDED and event.payload.get("loop_id"):
             await self._loops.close(int(event.payload["loop_id"]), LoopStatus.DONE)
+
+    async def _quiet_after_turn(self, event: Event, decision: InitiativeDecision) -> InitiativeDecision:
+        """A loop extracted from a chat turn the assistant just answered must not trigger a ping right
+        away: the user is mid-conversation and was just told. Tracking and wakeups still apply. Only an
+        urgent (5) notice about something else may go out."""
+        if event.type is not EventType.LOOP_CREATED or decision.notify is None:
+            return decision
+        if not str(event.payload.get("source", "")).startswith(TRUSTED_SOURCE_PREFIXES):
+            return decision
+        last = await messages.last_user_message_at(event.user_id)
+        if last is None or timeutil.now() - last > POST_TURN_QUIET:
+            return decision
+        about_loop = bool(set(title_tokens(str(event.payload.get("title", ""))))
+                          & set(title_tokens(decision.notify.intent)))
+        if decision.notify.urgency >= URGENT_URGENCY and not about_loop:
+            return decision
+        log.info("initiative.post_turn_suppressed", event_id=event.id, intent=decision.notify.intent[:80])
+        return decision.model_copy(update={"notify": None, "ignore_reason": "just discussed in chat"})
 
     async def _decide(self, user, event: Event, result) -> InitiativeDecision:
         result.extra = await hooks.gather_enrichments(event)
