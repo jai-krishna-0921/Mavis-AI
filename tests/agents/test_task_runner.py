@@ -381,3 +381,108 @@ async def test_default_connect_handler_says_so_and_resumes_as_declined(user, rec
     assert job.kind == JobKind.RESUME_TASK
     value = {"type": "connect", "capability": "gmail", "connected": False}
     assert job.payload == {"task_id": 5, "value": value}
+
+
+async def test_failed_task_leaves_no_open_approvals(
+    user, fake_llm, rec_bus, sent, note_tool, memory_checkpointer, wakeups, monkeypatch
+):
+    monkeypatch.setattr(get_settings(), "task_timeout_s", 0.1)
+    tid = await tasks.create(user.id, goal="g")
+    ids: list[int] = []
+
+    async def _step(step, user_id, context):
+        for _ in range(3):
+            ids.append(await approvals.create(user_id, tid, "send_note", {"text": "hi"},
+                                              "Send note: hi", utcnow() + timedelta(hours=48)))
+        await approvals.claim(ids[1], {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
+        await approvals.claim(ids[2], {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
+        await approvals.claim(ids[2], {ApprovalStatus.RESOLVING}, ApprovalStatus.EXECUTED)
+        await approvals.mark_started(ids[2])  # may have run
+        await asyncio.sleep(1)
+        return StepOutcome(ok=True, text="late")
+
+    monkeypatch.setattr(og, "run_step_agent", _step)
+    fake_llm.push_structured(_one_step_plan())
+    await orchestrator.run_task(tid)
+
+    assert (await tasks.get(tid)).status == TaskStatus.FAILED
+    assert (await approvals.get(ids[0])).status == ApprovalStatus.REJECTED
+    assert (await approvals.get(ids[1])).status == ApprovalStatus.FAILED
+    assert (await approvals.get(ids[2])).status == ApprovalStatus.EXECUTED  # left for the sweep
+    assert await approvals.next_open(tid) is None
+    assert any("may have gone through" in m.text and "Send note: hi" in m.text for m in sent)
+    assert not any(d in m.text for m in sent for d in DASHES)
+
+
+async def test_unchanged_preview_still_reprompts(user, sent, wakeups):
+    tid = await tasks.create(user.id, goal="g")
+    aid = await approvals.create(user.id, tid, "send_note", {"text": "hi"}, "Send note: hi",
+                                 utcnow() + timedelta(hours=48))
+    from mavis.policy import approvals as flow
+
+    await flow.send_approval_prompt(user.id, {"approval_id": aid})
+    await asyncio.sleep(0.01)
+    await flow.send_approval_prompt(user.id, {"approval_id": aid})
+    prompts = [m for m in sent if m.buttons]
+    assert len(prompts) == 2
+    assert prompts[0].dedupe_key != prompts[1].dedupe_key
+    assert len(wakeups) == 2  # expiry wakeups still scheduled once
+
+
+async def test_stale_running_task_is_failed_and_stops_blocking(
+    user, fake_llm, rec_bus, sent, memory_checkpointer, monkeypatch
+):
+    from sqlalchemy import update
+
+    from mavis.store.models import Task
+
+    async def _step(step, user_id, context):
+        return StepOutcome(ok=True, text="x")
+
+    monkeypatch.setattr(og, "run_step_agent", _step)
+    stuck = await tasks.create(user.id, goal="stuck")
+    await tasks.claim(stuck, TaskStatus.QUEUED, TaskStatus.RUNNING)
+    async with Session() as s:
+        await s.execute(update(Task).where(Task.id == stuck).values(
+            started_at=utcnow() - timedelta(seconds=get_settings().task_timeout_s + 3600)))
+        await s.commit()
+    fake_llm.push_structured(_one_step_plan())
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["done"]))
+    tid = await tasks.create(user.id, goal="next")
+    await orchestrator.run_task(tid)
+    assert (await tasks.get(stuck)).status == TaskStatus.FAILED
+    assert (await tasks.get(tid)).status == TaskStatus.DONE
+
+
+async def test_concurrent_run_jobs_start_only_one(
+    user, fake_llm, rec_bus, sent, memory_checkpointer, monkeypatch
+):
+    started: list[int] = []
+
+    async def _step(step, user_id, context):
+        started.append(step.id)
+        await asyncio.sleep(0.1)
+        return StepOutcome(ok=True, text="x")
+
+    monkeypatch.setattr(og, "run_step_agent", _step)
+    fake_llm.push_structured(_one_step_plan())
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["done"]))
+    a = await tasks.create(user.id, goal="a")
+    b = await tasks.create(user.id, goal="b")
+    await asyncio.gather(orchestrator.run_task(a), orchestrator.run_task(b))
+    assert len(started) == 1
+    assert {(await tasks.get(a)).status, (await tasks.get(b)).status} == {TaskStatus.DONE, TaskStatus.QUEUED}
+
+
+async def test_inner_timeout_is_not_reported_as_the_task_limit(
+    user, fake_llm, rec_bus, sent, memory_checkpointer, monkeypatch
+):
+    async def _plan(*a, **k):
+        raise TimeoutError("http")
+
+    monkeypatch.setattr(og, "make_plan", _plan)
+    tid = await tasks.create(user.id, goal="g")
+    await orchestrator.run_task(tid)
+    assert (await tasks.get(tid)).status == TaskStatus.FAILED
+    assert "longer than I allow" not in sent[-1].text
+    assert "timed out" in sent[-1].text

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import timedelta
 from typing import Any
 
 import structlog
@@ -32,15 +33,31 @@ log = structlog.get_logger()
 _LIVE = (TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL)
 
 
+_STALE_MARGIN_S = 60
+_user_locks: dict[int, asyncio.Lock] = {}
+
+
+async def _reap_stale(user_id: int) -> None:
+    """A task RUNNING past the wall-clock limit plus a margin lost its worker: fail it so it stops
+    counting toward the concurrency limit."""
+    cutoff = utcnow() - timedelta(seconds=get_settings().task_timeout_s + _STALE_MARGIN_S)
+    for stale in await tasks.stale_running(user_id, cutoff):
+        log.warning("task.stale_running", task_id=stale.id)
+        await _fail(stale.id, user_id, "that task stalled and was stopped")
+
+
 async def run_task(task_id: int) -> None:
     task = await tasks.get(task_id)
     if task is None or task.status != TaskStatus.QUEUED:
         return
-    if await tasks.running_count(task.user_id) >= get_settings().task_max_concurrency:
-        log.info("task.deferred_concurrency", task_id=task_id)
-        return
-    if not await tasks.claim(task_id, TaskStatus.QUEUED, TaskStatus.RUNNING):
-        return
+    # The per-user lock makes check-then-claim atomic for concurrent RUN_TASK jobs in this process.
+    async with _user_locks.setdefault(task.user_id, asyncio.Lock()):
+        await _reap_stale(task.user_id)
+        if await tasks.running_count(task.user_id) >= get_settings().task_max_concurrency:
+            log.info("task.deferred_concurrency", task_id=task_id)
+            return
+        if not await tasks.claim(task_id, TaskStatus.QUEUED, TaskStatus.RUNNING):
+            return
     await _drive(task_id, task.user_id, initial_state(task))
 
 
@@ -55,18 +72,21 @@ async def _drive(task_id: int, user_id: int, graph_input: Any) -> None:
     s = get_settings()
     progress = asyncio.create_task(_progress_after(task_id, user_id, s.task_progress_after_s))
     result: dict | None = None
+    limit = asyncio.timeout(s.task_timeout_s)
     try:
-        async with checkpointing.open_checkpointer() as saver:
+        async with limit, checkpointing.open_checkpointer() as saver:
             graph = build_orchestrator().compile(checkpointer=saver)
             config = {
                 "configurable": {"thread_id": f"task:{task_id}"},
                 "callbacks": callbacks(), "recursion_limit": 80, "run_name": f"task:{task_id}",
             }
-            result = await asyncio.wait_for(
-                graph.ainvoke(graph_input, config=config), timeout=s.task_timeout_s
-            )
+            result = await graph.ainvoke(graph_input, config=config)
     except TimeoutError:
-        await _fail(task_id, user_id, "that took longer than I allow for one task")
+        if limit.expired():
+            await _fail(task_id, user_id, "that took longer than I allow for one task")
+        else:  # a timeout inside a tool or HTTP call, not the task wall clock
+            log.exception("task.inner_timeout", task_id=task_id)
+            await _fail(task_id, user_id, "something I depend on timed out")
     except Exception:  # noqa: BLE001 - the task row must always reach a final state
         log.exception("task.crashed", task_id=task_id)
         await _fail(task_id, user_id, "something broke on my side")
@@ -95,6 +115,20 @@ async def _fail(task_id: int, user_id: int, reason: str) -> None:
         return  # cancelled (or finished) meanwhile: say nothing about a task the user stopped
     await approval_flow.say(user_id, f"Hit a snag on that task: {reason}. Want me to try again?",
                             dedupe_key=f"task:{task_id}:failed")
+    await _close_approvals(task_id, user_id)
+
+
+async def _close_approvals(task_id: int, user_id: int) -> None:
+    """A failed task never resumes, so its approvals must not stay tappable or stuck."""
+    await approvals.reject_open_for_task(task_id)
+    await approvals.fail_unstarted_for_task(task_id, "the task failed before this ran")
+    for ap in await approvals.may_have_run_for_task(task_id):
+        await approval_flow.say(
+            user_id,
+            "One thing to check: this may have gone through before the task failed.\n"
+            + "\n".join(sanitize_line(line) for line in ap.preview.splitlines()),
+            dedupe_key=f"approval:{ap.id}:may_have_run",
+        )
 
 
 async def _report_executed_after_stop(task_id: int, user_id: int) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
 
 from sqlalchemy import func, select, update
 
@@ -96,6 +97,16 @@ async def running_count(user_id: int) -> int:
             )
         )
         return int(n or 0)
+
+
+async def stale_running(user_id: int, started_before: datetime) -> list[Task]:
+    """RUNNING tasks whose current run began before `started_before` (a run that never finished)."""
+    async with Session() as s:
+        rows = await s.scalars(
+            select(Task).where(Task.user_id == user_id, Task.status == TaskStatus.RUNNING.value,
+                               Task.started_at < started_before).order_by(Task.id)
+        )
+        return list(rows)
 
 
 async def next_queued(user_id: int) -> Task | None:
