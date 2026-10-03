@@ -74,11 +74,13 @@ def test_triggers_cover_all_capabilities_and_map_to_slugs():
             assert toolkit_of_slug(COMPOSIO_TRIGGERS[trig]) == cap.value
 
 
-# Live Composio schemas, fetched 2026-10-03 (hotfix3 RC3): the fields each slug REQUIRES.
+# Live Composio schemas, fetched 2026-10-03 (hotfix3): the fields each slug REQUIRES. Updates use
+# GOOGLECALENDAR_PATCH_EVENT (patch semantics); GOOGLECALENDAR_UPDATE_EVENT is a full PUT replacement
+# whose description says unspecified fields "may be cleared or reset".
 LIVE_REQUIRED = {
     "calendar.list": {"calendarId"},
     "calendar.create_event": {"start_datetime"},
-    "calendar.update_event": {"event_id", "start_datetime"},
+    "calendar.update_event": {"calendar_id", "event_id"},
 }
 
 
@@ -102,15 +104,40 @@ def test_calendar_translators_send_every_live_required_field():
     samples = {
         "calendar.list": CalendarListArgs(time_min=start, time_max=start),
         "calendar.create_event": CalendarCreateArgs(summary="x", start=start),
-        "calendar.update_event": CalendarUpdateArgs(event_id="e1", start=start),
+        "calendar.update_event": CalendarUpdateArgs(event_id="e1", start=start, duration_minutes=30),
     }
     for action, args in samples.items():
         sent = set(COMPOSIO_ACTIONS[action].translate(args))
         assert LIVE_REQUIRED[action] <= sent, (action, LIVE_REQUIRED[action] - sent)
 
 
-def test_calendar_update_tells_the_model_start_is_required():
+def test_calendar_update_is_a_patch_that_sends_only_what_changes():
     from mavis.tools.integrations.actions import CalendarUpdateArgs
 
-    desc = CalendarUpdateArgs.model_fields["start"].description or ""
-    assert "required" in desc.lower() and "current start" in desc.lower()
+    m = COMPOSIO_ACTIONS["calendar.update_event"]
+    assert m.slug == "GOOGLECALENDAR_PATCH_EVENT"
+    assert m.translate(CalendarUpdateArgs(event_id="e1", summary="Renamed")) == {
+        "calendar_id": "primary", "event_id": "e1", "summary": "Renamed"}
+
+
+def test_calendar_update_move_sends_start_and_end():
+    from mavis.tools.integrations.actions import CalendarUpdateArgs
+
+    start = datetime(2026, 10, 5, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    out = COMPOSIO_ACTIONS["calendar.update_event"].translate(
+        CalendarUpdateArgs(event_id="e1", start=start, duration_minutes=90))
+    assert out == {"calendar_id": "primary", "event_id": "e1", "start_time": "2026-10-05T10:00:00+05:30",
+                   "end_time": "2026-10-05T11:30:00+05:30", "timezone": "Asia/Kolkata"}
+
+
+def test_calendar_update_needs_start_and_duration_together():
+    import pytest
+    from pydantic import ValidationError
+
+    from mavis.tools.integrations.actions import CalendarUpdateArgs
+
+    start = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    with pytest.raises(ValidationError, match="current length"):
+        CalendarUpdateArgs(event_id="e1", start=start)
+    with pytest.raises(ValidationError, match="current start"):
+        CalendarUpdateArgs(event_id="e1", duration_minutes=45)
