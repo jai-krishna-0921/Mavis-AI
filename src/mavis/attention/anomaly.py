@@ -15,6 +15,7 @@ from mavis.attention.schema import FLAG_LABELS, NO_ANOMALY, AnomalyResult, Direc
 MIN_TYPICAL_COUNTERPARTY = 3
 MIN_TYPICAL_OTHER = 5
 MIN_HISTORY = 5
+RATIO_TEXT_CAP = 20
 MIN_HOUR_SAMPLES = 10
 RARE_HOUR_SHARE = 0.03
 NIGHT_END = 6
@@ -68,20 +69,20 @@ def score_money(ctx: MoneyContext) -> AnomalyResult:
     snap, parts = ctx.snapshot, []
     typical, scope = 0.0, ""
     if snap.counterparty.count >= MIN_TYPICAL_COUNTERPARTY:
-        typical, scope = snap.counterparty.median, "this payee"
+        typical, scope = snap.counterparty.median, "for this payee"
     elif snap.method.count >= MIN_TYPICAL_OTHER:
-        typical, scope = snap.method.median, f"{ctx.method_label} payments"
+        typical, scope = snap.method.median, f"{ctx.method_label} payment"
     elif snap.overall.count >= MIN_TYPICAL_OTHER:
-        typical, scope = snap.overall.median, "your payments"
+        typical, scope = snap.overall.median, "payment"
     if typical > 0:
         ratio = ctx.amount / typical
         if ratio >= 2:
-            parts.append(
-                ("amount_ratio", min(1.0, math.log10(ratio)), f"about {ratio:.0f}x your usual for {scope}")
-            )
+            usual = f"your usual {scope}"
+            text = f"far above {usual}" if ratio > RATIO_TEXT_CAP else f"about {ratio:.0f}x {usual}"
+            parts.append(("amount_ratio", min(1.0, math.log10(ratio)), text))
     elif ctx.large_amount is not None and ctx.amount >= ctx.large_amount:
         parts.append(("large_amount", 0.7, "a large amount, and I don't know your usual spending yet"))
-    if snap.counterparty.count == 0:
+    if snap.key and snap.counterparty.count == 0:
         if snap.overall.count >= MIN_HISTORY:
             parts.append(("new_counterparty", 0.4, "the first payment I've seen to this payee"))
         else:
