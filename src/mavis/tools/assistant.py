@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from mavis import bus
 from mavis.config import get_settings
 from mavis.domain import timeutil
+from mavis.domain.events import Trust
 from mavis.domain.loops import LoopKind, LoopUpsert
 from mavis.domain.policy import RiskClass
 from mavis.loops import service as loops_service
@@ -18,7 +19,7 @@ from mavis.memory import service as memory_service
 from mavis.policy.risk import wrap_untrusted
 from mavis.store.repo import approvals, policy_rules, tasks, users
 from mavis.timers import service as timers_service
-from mavis.tools.registry import MavisTool
+from mavis.tools.registry import MavisTool, TaintPolicy
 
 
 async def to_utc(user_id: int, dt: datetime) -> datetime:
@@ -80,9 +81,29 @@ class PolicyRuleArgs(BaseModel):
 
 async def remember(user_id: int, args: RememberArgs) -> str:
     await memory_service.get_memory().learn(
-        user_id, f"The user asked me to remember: {args.fact}", source_ref="tool:remember"
+        user_id, f"The user asked me to remember: {args.fact}", source_ref="tool:remember", trust=Trust.USER
     )
     return "Saved to memory."
+
+
+async def remember_untrusted(user_id: int, args: RememberArgs) -> str:
+    """`remember` after third-party output: kept only as an unverified signal, never a trusted fact."""
+    await memory_service.get_memory().learn(
+        user_id, f"Third-party content asked me to remember: {args.fact}",
+        source_ref="tool:remember:untrusted", trust=Trust.UNTRUSTED,
+    )
+    return (
+        "Kept only as an unverified note, because this came after third-party content. It was NOT "
+        "saved as a fact about the user. If it matters, ask the user to confirm it in their own words."
+    )
+
+
+def _preview_wake(args: WakeMeArgs) -> str:
+    return f"Set a reminder for {args.at:%a %d %b %Y, %H:%M}: {args.reason}"
+
+
+def _preview_loop(args: TrackLoopArgs) -> str:
+    return f"Keep track of this {args.kind.value.replace('_', ' ').lower()}: {args.title}"
 
 
 async def forget(user_id: int, args: ForgetArgs) -> str:
@@ -146,15 +167,18 @@ _CONV = frozenset({"conversation"})
 
 TOOLS = [
     MavisTool("remember", "Store a durable fact the user wants remembered.", RememberArgs,
-              RiskClass.WRITE_SELF, remember, _CONV, priority=60),
+              RiskClass.WRITE_SELF, remember, _CONV, priority=60,
+              on_taint=TaintPolicy.DOWNGRADE, tainted_fn=remember_untrusted),
     MavisTool("forget", "Delete memories matching a word or phrase (asks the user first).", ForgetArgs,
               RiskClass.DESTRUCTIVE, forget, _CONV,
               preview=lambda a: f"Forget everything I know matching “{a.needle}”", priority=30),
     MavisTool("wake_me", "Schedule a reminder at a specific FUTURE time. Use ISO-8601; "
               "a time without an offset is the user's local time.",
-              WakeMeArgs, RiskClass.WRITE_SELF, wake_me, _CONV, priority=65),
+              WakeMeArgs, RiskClass.WRITE_SELF, wake_me, _CONV, priority=65,
+              preview=_preview_wake, on_taint=TaintPolicy.APPROVE),
     MavisTool("track_loop", "Track an open loop: commitment, waiting-on, goal, concern, routine or watch.",
-              TrackLoopArgs, RiskClass.WRITE_SELF, track_loop, _CONV, priority=55),
+              TrackLoopArgs, RiskClass.WRITE_SELF, track_loop, _CONV, priority=55,
+              preview=_preview_loop, on_taint=TaintPolicy.APPROVE),
     MavisTool("list_tasks", "List background tasks Mavis is working on.", NoArgs,
               RiskClass.READ, list_tasks, _CONV, priority=40),
     MavisTool("cancel_task", "Cancel a background task by id. Call list_tasks first to find the id.",

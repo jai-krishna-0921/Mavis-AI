@@ -263,6 +263,7 @@ class FakeMemory:
         self.loops_reader = None
         self.profile = ""
         self.learned: list[tuple[int, str, str]] = []
+        self.learned_trust: list = []  # trust passed to each learn(), parallel to `learned`
         self.forgotten: list[str] = []
 
     def set_loops_reader(self, reader) -> None:
@@ -273,6 +274,7 @@ class FakeMemory:
 
     async def learn(self, user_id: int, text: str, source_ref: str = "", trust=None) -> Extraction:
         self.learned.append((user_id, text, source_ref))
+        self.learned_trust.append(trust)
         return Extraction()
 
     async def forget(self, user_id: int, needle: str) -> int:
@@ -423,9 +425,8 @@ class SendNoteArgs(BaseModel):
 @pytest.fixture
 def note_tool(fresh_registry):
     """Registers an OUTWARD 'send_note' tool and returns the list of executed texts."""
-    from mavis.tools.registry import MavisTool
-
     from mavis.domain.policy import RiskClass
+    from mavis.tools.registry import MavisTool
 
     calls: list[str] = []
 

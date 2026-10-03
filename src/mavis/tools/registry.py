@@ -4,6 +4,10 @@ Agents never see raw functions. `for_agent()` / `select()` hand out LangChain to
 whose wrapper enforces, in order: capability (ConnectionRequired), approval for
 risky actions (queues a pending_approvals row instead of running), truncation,
 and <untrusted> wrapping of third-party output.
+
+Taint: inside a tool loop (`current_run`, set by `agents.react.react_loop`), once the model has
+seen any untrusted_output result, trusted-writing tools follow their `on_taint` policy (queue for
+approval, or run a reduced-trust `tainted_fn`), and standing rules no longer auto-approve.
 """
 
 from __future__ import annotations
@@ -14,8 +18,9 @@ import re
 import weakref
 from collections.abc import Awaitable, Callable, Iterable
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
+from enum import StrEnum
 from typing import Any
 
 import structlog
@@ -50,6 +55,41 @@ def _queue_lock() -> asyncio.Lock:
 
 current_user_id: ContextVar[int | None] = ContextVar("current_user_id", default=None)
 current_task_id: ContextVar[int | None] = ContextVar("current_task_id", default=None)
+
+
+class TaintPolicy(StrEnum):
+    """What a tool does once the model has seen third-party (untrusted) output in this run."""
+
+    ALLOW = "allow"  # unchanged: reads, drafts, anything that cannot plant trusted state
+    APPROVE = "approve"  # queue for the user's approval instead of running
+    DOWNGRADE = "downgrade"  # run `tainted_fn` instead (same args, third-party trust)
+
+
+@dataclass
+class ToolRun:
+    """Per tool-loop state shared between the loop and the registry (via `current_run`).
+
+    `tainted` gates trusted writes. It flips only between model steps (`end_step`), because the
+    model cannot have been steered by output it has not seen yet: a tool call issued in the same
+    AI message as `mail_read` was decided before the email was read.
+    """
+
+    tainted: bool = False
+    untrusted_seen: bool = False  # an untrusted_output tool returned during the current step
+    queued_approvals: list[int] = field(default_factory=list)
+
+    def end_step(self) -> None:
+        self.tainted = self.tainted or self.untrusted_seen
+        self.untrusted_seen = False
+
+
+current_run: ContextVar[ToolRun | None] = ContextVar("current_run", default=None)
+
+
+def _run_tainted() -> bool:
+    run = current_run.get()
+    return run is not None and run.tainted
+
 
 ToolFn = Callable[[int, Any], Awaitable[str | dict | list]]
 CapabilityCheck = Callable[[int, Capability], Awaitable[bool]]
@@ -98,6 +138,8 @@ class MavisTool:
     priority: int = 50  # higher = more likely to be offered when tools must be trimmed
     risk_fn: Callable[[BaseModel], RiskClass] | None = None  # argument-dependent risk
     preview_needs_ctx: bool = False  # True => preview(args, ctx: ToolContext)
+    on_taint: TaintPolicy = TaintPolicy.ALLOW
+    tainted_fn: ToolFn | None = None  # required for TaintPolicy.DOWNGRADE
 
     def effective_risk(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn is not None else self.risk
@@ -126,6 +168,8 @@ class ToolRegistry:
     def register(self, tool: MavisTool) -> None:
         if not isinstance(tool.risk, RiskClass):
             raise ValueError(f"tool {tool.name!r} needs a RiskClass risk")
+        if tool.on_taint is TaintPolicy.DOWNGRADE and tool.tainted_fn is None:
+            raise ValueError(f"tool {tool.name!r} has on_taint=DOWNGRADE but no tainted_fn")
         if not _NAME_RE.match(tool.name):
             raise ValueError(f"invalid tool name {tool.name!r}; use [a-zA-Z0-9_-]")
         if tool.name in self._tools:
@@ -176,16 +220,26 @@ class ToolRegistry:
         # Capability first: the user is asked to connect BEFORE being asked to approve.
         await self._require_capability(tool, user_id)
         payload = args.model_dump(mode="json")
+        tainted = _run_tainted()
+        if tainted and tool.on_taint is TaintPolicy.APPROVE:
+            log.info("tool.taint_needs_approval", tool=tool.name)
+            preview = tool.render_preview(args, await tool_context(user_id))
+            raise ApprovalRequired(tool.name, preview, payload)
         if tool.effective_risk(args).needs_approval:
             # Standing rules may waive approval for OUTWARD tools only; SPEND and DESTRUCTIVE always queue.
+            # Never after untrusted output: an email must not ride a rule like "always allow X".
             auto = (
-                tool.effective_risk(args) is RiskClass.OUTWARD
+                not tainted
+                and tool.effective_risk(args) is RiskClass.OUTWARD
                 and tool.name not in NEVER_AUTO_APPROVE
                 and await policy_rules.matches(user_id, tool.name, payload)
             )
             if not auto:
                 preview = tool.render_preview(args, await tool_context(user_id))
                 raise ApprovalRequired(tool.name, preview, payload)
+        if tainted and tool.on_taint is TaintPolicy.DOWNGRADE and tool.tainted_fn is not None:
+            log.info("tool.taint_downgraded", tool=tool.name)
+            return await self._run(tool, user_id, args, actor="agent", fn=tool.tainted_fn)
         return await self._run(tool, user_id, args, actor="agent")
 
     async def execute_approved(self, approval_id: int) -> str:
@@ -198,12 +252,17 @@ class ToolRegistry:
         await self._require_capability(tool, approval.user_id)
         return await self._run(tool, approval.user_id, args, actor="user_approved")
 
-    async def _run(self, tool: MavisTool, user_id: int, args: BaseModel, actor: str) -> str:
+    async def _run(
+        self, tool: MavisTool, user_id: int, args: BaseModel, actor: str, fn: ToolFn | None = None
+    ) -> str:
         token = current_user_id.set(user_id)
         detail: dict[str, Any] = {"args": args.model_dump(mode="json")}
+        if fn is not None:
+            detail["tainted"] = True
         audited = tool.effective_risk(args) is not RiskClass.READ
+        run = current_run.get()
         try:
-            out = await tool.fn(user_id, args)
+            out = await (fn or tool.fn)(user_id, args)
         except (ApprovalRequired, ConnectionRequired):
             raise
         except Exception as exc:
@@ -214,6 +273,8 @@ class ToolRegistry:
                 )
             if tool.untrusted_output:
                 # Third-party error text must never reach the model unwrapped.
+                if run is not None:
+                    run.untrusted_seen = True
                 return wrap_untrusted(truncate(f"Tool error: {exc}"), tool.name)
             raise
         finally:
@@ -222,7 +283,11 @@ class ToolRegistry:
         text = truncate(text)
         if audited:
             await audit.record(user_id, actor=actor, action=tool.name, detail={**detail, "outcome": "ok"})
-        return wrap_untrusted(text, tool.name) if tool.untrusted_output else text
+        if not tool.untrusted_output:
+            return text
+        if run is not None:
+            run.untrusted_seen = True
+        return wrap_untrusted(text, tool.name)
 
     def _as_langchain(self, tool: MavisTool, user_id: int) -> BaseTool:
         async def _call(**kwargs: Any) -> str:
@@ -245,6 +310,9 @@ class ToolRegistry:
                             expires_at=utcnow() + timedelta(hours=get_settings().approval_ttl_hours),
                         )
                 log.info("tool.queued_for_approval", tool=tool.name, approval_id=approval_id)
+                run = current_run.get()
+                if run is not None and approval_id not in run.queued_approvals:
+                    run.queued_approvals.append(approval_id)
                 shown = wrap_untrusted(truncate(req.preview, _PREVIEW_IN_RESULT_CHARS), "approval_preview")
                 return (
                     f"QUEUED_FOR_APPROVAL #{approval_id}: {shown}\n"
