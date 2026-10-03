@@ -1,4 +1,6 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from mavis.domain.integrations import ToolResult
 from mavis.domain.policy import Capability, RiskClass
@@ -101,9 +103,39 @@ def test_calendar_update_is_always_outward():
         CalendarUpdateArgs(event_id="e1", attendees=[]),  # removes every guest
         CalendarUpdateArgs(event_id="e1", attendees=["a@example.com"]),
         CalendarUpdateArgs(event_id="e1", description="private notes"),
-        CalendarUpdateArgs(event_id="e1", start=START),
+        CalendarUpdateArgs(event_id="e1", start=START, duration_minutes=30),
     ]
     tool = _make_tool(spec)
     for args in cases:
         assert spec.risk_for(args) is RiskClass.OUTWARD
         assert tool.effective_risk(args).needs_approval
+
+
+def test_calendar_update_preview_shows_exact_times_and_that_the_rest_stays():
+    spec = ACTIONS["calendar.update_event"]
+    text = spec.preview(CalendarUpdateArgs(event_id="e1", start=START, duration_minutes=90), "UTC")
+    end = START + timedelta(minutes=90)
+    assert f"to {end:%H:%M}" in text and "everything else stays" in text.lower()
+
+
+def test_calendar_update_preview_says_the_guest_list_is_replaced():
+    spec = ACTIONS["calendar.update_event"]
+    text = spec.preview(CalendarUpdateArgs(event_id="e1", attendees=["a@example.com"]), "UTC")
+    assert "replaced" in text.lower() and "exactly" in text.lower() and "a@example.com" in text
+    text = spec.preview(CalendarUpdateArgs(event_id="e1", attendees=[]), "UTC")
+    assert "remov" in text.lower()
+
+
+async def test_old_approval_with_start_but_no_duration_fails_with_a_clear_message(user, fresh_registry):
+    from mavis.domain.errors import ActionFailed
+    from mavis.store.db import utcnow
+    from mavis.store.repo import approvals
+    from mavis.tools.integrations.tools import _make_tool
+
+    fresh_registry.register(_make_tool(ACTIONS["calendar.update_event"]))
+    aid = await approvals.create(user.id, None, "calendar_update_event",
+                                 {"event_id": "e1", "start": "2026-10-05T10:00:00+05:30"},
+                                 "📅 Update event e1", utcnow())
+    with pytest.raises(ActionFailed) as exc:
+        await fresh_registry.execute_approved(aid)
+    assert "how long" in exc.value.reason and "validation" not in exc.value.reason.lower()

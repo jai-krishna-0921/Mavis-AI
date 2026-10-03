@@ -3,6 +3,7 @@ from datetime import timedelta
 from mavis.domain.events import Event, EventType, JobKind, Trust
 from mavis.domain.integrations import ConnectionState, PendingStatus
 from mavis.domain.policy import Capability
+from mavis.domain.wakeups import WakeupKind
 from mavis.store.repo import connections
 from mavis.tools.integrations.connect_flow import (
     CHECK_DELAYS,
@@ -262,18 +263,32 @@ async def test_disconnect_failure_hides_exception_text(db, provider, cache, fake
     assert "—" not in rec.sent[-1].text and "–" not in rec.sent[-1].text
 
 
-async def test_connection_after_not_now_still_activates(db, provider, cache, fake_bus, rec, state):
-    flow = make_flow(provider, cache, fake_bus, rec, state)
-    pid = await flow.start(1, Capability.GMAIL, "")
-    await flow.decline(1, pid)
-    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+async def test_connection_after_not_now_still_activates(db, provider, cache, fake_bus, rec, state, clock):
+    """Wired like production (real check wakeups and cancel_checks): a sign-in finished after "Not now"
+    is found by the prompt's scheduled check and activates."""
+    from mavis.timers.service import WakeupService
+    from mavis.tools.integrations.wiring import (
+        cancel_connection_checks,
+        connection_checks_pending,
+        wakeup_schedule,
+    )
+
+    clock.set(NOW)
     activated = []
 
     async def on_active(user_id, cap):
         activated.append(cap)
 
-    flow.on_active = on_active
-    await flow.check(pid)
+    flow = ConnectFlow(provider=provider, cache=cache, bus=fake_bus, notify=rec.notify,
+                       schedule=wakeup_schedule, state=state, base_url="https://mavis.test",
+                       on_active=on_active, has_checks=connection_checks_pending,
+                       cancel_checks=cancel_connection_checks, clock=lambda: NOW)
+    pid = await flow.start(1, Capability.GMAIL, "")
+    await flow.decline(1, pid)
+    checks = await WakeupService().pending(1, WakeupKind.SYSTEM_CONNECTION_CHECK)
+    assert checks and {w.reason for w in checks} == {str(pid)}  # "Not now" keeps the prompt's checks
+    provider.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    await flow.on_check_wakeup(1, checks[0].reason)  # what the timer delivers for that wakeup
     [ev] = fake_bus.events
     await flow.on_connection_changed(ev)
     assert [j.kind for j in fake_bus.jobs] == [JobKind.FIRST_SYNC]
@@ -431,3 +446,93 @@ async def test_connection_required_interrupts_and_resumes(db, user, provider, ca
     fake_llm.push_structured(ComposedMessage(send=True, messages=["One new email: Hi."]))
     final = await graph.ainvoke(Command(resume=resume.payload["value"]), cfg)
     assert final["results"]["s1"]["ok"] is True and "Hi" in final["results"]["s1"]["text"]
+
+
+# --- hotfix3 RC4: one open connect prompt per user and capability ---------------------------------
+
+
+async def test_second_task_an_hour_later_gets_the_link_again_not_expired(
+    db, provider, cache, fake_bus, rec, state
+):
+    now = [NOW]
+    flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
+    first = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="3")
+    now[0] = NOW + timedelta(minutes=39)  # prod: 13:45 then 14:24 IST; the first link died after 10 min
+    again = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="6", revoked=True)
+    assert again == first
+    assert len(rec.sent) == 2 and rec.sent[-1].text.startswith("Here's your link again")
+    assert "expired" not in rec.sent[-1].text
+    assert {p.task_id for p in await connections.open_for(1, Capability.CALENDAR)} == {"3", "6"}
+
+
+async def test_a_stale_open_prompt_gets_a_fresh_one(db, provider, cache, fake_bus, rec, state):
+    now = [NOW]
+    flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="3")
+    now[0] = NOW + timedelta(hours=3)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="9")
+    assert len(rec.sent) == 2
+
+
+async def test_joining_does_not_extend_the_prompt_window(db, provider, cache, fake_bus, rec, state):
+    now = [NOW]
+    flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
+    first = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="3")
+    now[0] = NOW + timedelta(minutes=5)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="6")  # joins silently
+    assert len(rec.sent) == 1
+    now[0] = NOW + timedelta(hours=2, minutes=5)  # 2h after the link went out, not after the join
+    fresh = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="9")
+    assert fresh != first and len(rec.sent) == 2
+
+
+# --- review round 2 (I3): never wait silently on a dead link; close every joined row --------------
+
+
+async def test_dead_link_is_resent_once_then_joins_are_silent_again(
+    db, provider, cache, fake_bus, rec, state
+):
+    now = [NOW]
+    flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
+    pid = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="a")
+    now[0] = NOW + timedelta(minutes=5)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="b")
+    assert len(rec.sent) == 1  # the link is still alive
+    now[0] = NOW + timedelta(minutes=30)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="c")
+    assert len(rec.sent) == 2 and rec.sent[-1].text.startswith("Here's your link again")
+    assert provider.links[-1][2].endswith(f"p={pid}")
+    now[0] = NOW + timedelta(minutes=35)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="d")
+    assert len(rec.sent) == 2  # the re-sent link is alive
+
+
+async def _three_waiting(flow, now) -> int:
+    pid = await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="a")
+    now[0] = NOW + timedelta(minutes=5)
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="b")
+    await flow.start(1, Capability.CALENDAR, "work with your calendar", task_id="c")
+    return pid
+
+
+async def test_decline_closes_and_resumes_every_waiting_task(db, provider, cache, fake_bus, rec, state):
+    now = [NOW]
+    flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
+    pid = await _three_waiting(flow, now)
+    await flow.decline(1, pid)
+    assert await connections.open_for(1, Capability.CALENDAR) == []
+    resumed = {j.payload["task_id"] for j in fake_bus.jobs if j.kind is JobKind.RESUME_TASK}
+    assert resumed == {"a", "b", "c"}
+    resumes = [j for j in fake_bus.jobs if j.kind is JobKind.RESUME_TASK]
+    assert all(j.payload["value"] == {"connected": False} for j in resumes)
+
+
+async def test_expiry_closes_and_resumes_every_waiting_task(db, provider, cache, fake_bus, rec, state):
+    now = [NOW]
+    flow = make_flow(provider, cache, fake_bus, rec, state, clock=lambda: now[0])
+    pid = await _three_waiting(flow, now)
+    now[0] = NOW + PENDING_TTL + timedelta(minutes=1)
+    await flow.check(pid)
+    assert await connections.open_for(1, Capability.CALENDAR) == []
+    resumed = {j.payload["task_id"] for j in fake_bus.jobs if j.kind is JobKind.RESUME_TASK}
+    assert resumed == {"a", "b", "c"}

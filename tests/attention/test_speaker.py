@@ -319,3 +319,43 @@ def test_currency_allowlist_and_dedupe_length(clock):
     from mavis.attention.speaker import dedupe_key
 
     assert len(dedupe_key(Obs)) == 150
+
+
+# --- hotfix3 RC5: a notify is never lost to LLM load -----------------------------------------------
+
+
+class BusyExecutor(FakeExecutor):
+    async def notify(self, *a, **k):
+        from mavis.domain.errors import LLMError
+
+        raise LLMError("LLM deadline exceeded")
+
+
+async def test_security_notify_falls_back_to_fixed_text_when_the_llm_is_busy(user, clock):
+    clock.set(NOON)
+    obs = await make_obs(
+        user.id, "m81", kind="security", verdict="notify", urgency=4, received_at=NOON,
+        domain="examplemail.com", summary="security from examplemail: new sign-in",
+        facts={"risk_flags": ["new_signin"], "codes": ["risk:new_signin"]},
+    )
+    ex = BusyExecutor()
+    out = await speaker(ex).speak(user, obs, AttentionDecision(Verdict.NOTIFY, 4, 0.8, ("a new sign-in",)))
+    assert out == "sent"
+    [(bubbles, key, urgency, buttons)] = ex.delivered
+    text = " ".join(bubbles)
+    assert key == "attn:m81" and urgency == 4 and buttons is None
+    assert "examplemail" in text and "Gmail" in text
+    assert not any(d in text for d in ("—", "–"))
+
+
+async def test_plain_notify_falls_back_to_the_summary(user, clock):
+    clock.set(NOON)
+    obs = await make_obs(
+        user.id, "m82", kind="deadline_or_bill", verdict="notify", urgency=3, received_at=NOON,
+        summary="deadline or bill from examplepower: bill due", action="pay the bill", facts={"codes": []},
+    )
+    ex = BusyExecutor()
+    assert await speaker(ex).speak(user, obs, AttentionDecision(Verdict.NOTIFY, 3, 0.85)) == "sent"
+    [(bubbles, key, _urgency, buttons)] = ex.delivered
+    assert "bill due" in " ".join(bubbles) and key == "attn:m82"
+    assert [[b.data for b in row] for row in buttons] == [[f"at:m:{obs.id}"]]

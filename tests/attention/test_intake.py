@@ -618,10 +618,9 @@ async def test_failing_compose_does_not_stall_the_drain(user, stack, fake_llm, m
     fake_llm.push_structured(ACCOUNT)  # the pending email is still understood
     assert await stack.intake.drain(user.id) == 1
     assert await repo.pending_count(user.id) == 0
-    assert (await repo.get(q.id)).delivery == repo.QUEUED
-    [nxt] = await drains(stack, user.id)  # the earlier future drain absorbs the re-arm
-    assert nxt.due_at > clock.t
-    assert await outbox_texts() == []
+    # hotfix3 RC5: a failed compose no longer keeps the ping queued; the fixed wording goes out
+    assert (await repo.get(q.id)).delivery == "sent"
+    assert any("bill due" in t for t in await outbox_texts())
 
 
 async def test_drain_skips_redelivery_while_llm_backs_off(user, stack, fake_llm, monkeypatch, clock):
@@ -634,19 +633,17 @@ async def test_drain_skips_redelivery_while_llm_backs_off(user, stack, fake_llm,
     assert nxt.due_at == clock.t + timedelta(seconds=600)
 
 
-async def test_live_compose_failure_keeps_row_queued_and_arms_drain(user, stack, fake_llm, clock):
+async def test_live_compose_failure_still_sends_the_security_notice(user, stack, fake_llm, clock):
+    """hotfix3 RC5 (prod obs 81): the composer's LLM was busy and the security notify was lost."""
     fake_llm.push_structured(
         EmailUnderstanding(kind=EmailKind.SECURITY, needs_user=True, risk_flags=[RiskFlag.NEW_SIGNIN])
     )
     fake_llm.push_error(LLMError("compose down"), structured=True)
     await stack.intake.on_email(email(user.id, "live-f", sender=f"Accounts <{ACCOUNTS}>"))
     obs = await only(user.id)
-    assert (obs.verdict, obs.delivery) == ("notify", repo.QUEUED)
-    assert len(await drains(stack, user.id)) == 1
-    clock.advance(minutes=5)
-    fake_llm.push_structured(ComposedMessage(send=True, messages=["New sign-in on your account."]))
-    await stack.intake.drain(user.id)
-    assert (await repo.get(obs.id)).delivery == "sent"
+    assert (obs.verdict, obs.delivery) == ("notify", "sent")
+    [text] = await outbox_texts()
+    assert text.startswith("Heads up: an email about your") and "Gmail" in text
 
 
 async def test_security_alert_in_social_tab_is_understood_but_stays_bulk(
@@ -882,11 +879,15 @@ async def test_stale_or_retried_queued_ping_is_given_up(user, stack, fake_llm, c
     assert await outbox_texts() == []
 
 
-async def test_resends_are_counted_until_the_cap(user, stack, fake_llm, clock):
+async def test_resends_are_counted_until_the_cap(user, stack, fake_llm, clock, monkeypatch):
     q = await queued_notify(user.id, "q-count", clock)
+
+    async def busy(user, obs):  # a compose failure no longer raises (fixed wording), so fail the send
+        raise LLMError("down")
+
+    monkeypatch.setattr(stack.intake._pipeline, "deliver_queued", busy)
     for _ in range(3):
         clock.advance(minutes=3)
-        fake_llm.push_error(LLMError("compose down"), structured=True)
         await stack.intake.drain(user.id)
     assert (await repo.get(q.id)).facts["resends"] == 3
     clock.advance(minutes=3)

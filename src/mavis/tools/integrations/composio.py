@@ -39,6 +39,16 @@ _STATE_MAP = {
     "EXPIRED": ConnectionState.FAILED,
     "INACTIVE": ConnectionState.FAILED,
 }
+# Composio expires a connect link nobody finished after 10 minutes as EXPIRED, with one of these
+# reasons. That account was never authorized: it is "not connected", not "expired" or "revoked".
+_ABANDONED_REASONS = ("before authorization was started", "started but not completed")
+
+
+def _abandoned(item: dict[str, Any]) -> bool:
+    if str(item.get("status")) not in ("EXPIRED", "FAILED"):
+        return False
+    reason = str(item.get("status_reason") or "").lower()
+    return any(r in reason for r in _ABANDONED_REASONS)
 
 
 class ComposioProvider:
@@ -119,7 +129,8 @@ class ComposioProvider:
         return config_id
 
     async def _accounts(self, user: UserRef) -> dict[str, dict[str, Any]]:
-        """Newest account per toolkit for exactly this identity; a newer non-ACTIVE never hides an ACTIVE."""
+        """Newest account per toolkit for exactly this identity; a newer non-ACTIVE never hides an ACTIVE.
+        Abandoned connect attempts (links never finished) are skipped: they were never accounts."""
         answer = await self._request(
             "GET", "/connected_accounts", params={"user_ids": user.provider_id, "limit": 100}
         )
@@ -129,7 +140,7 @@ class ComposioProvider:
         )
         best: dict[str, dict[str, Any]] = {}
         for item in items:
-            if str(item.get("user_id") or user.provider_id) != user.provider_id:
+            if str(item.get("user_id") or user.provider_id) != user.provider_id or _abandoned(item):
                 continue
             slug = str((item.get("toolkit") or {}).get("slug") or "").lower()
             if not slug:

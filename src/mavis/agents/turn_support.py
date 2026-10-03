@@ -8,21 +8,26 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import timedelta
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from mavis.agents import clarify, context_hooks
 from mavis.bus import get_bus
+from mavis.domain import timeutil
 from mavis.domain.events import Event, Job, JobKind, Trust
 from mavis.domain.messages import TAINT_SUFFIX, Role
 from mavis.initiative import wiring
+from mavis.llm.models import INTERACTIVE_GRACE_S
 from mavis.memory.service import get_memory
 from mavis.store.models import Message
 from mavis.store.repo import profile as profile_repo
 from mavis.store.repo import summaries as summaries_repo
 
 log = structlog.get_logger(__name__)
+# just past the LLM interactive grace window: a chat turn's LEARN must not lose the slot by design
+LEARN_DELAY = timedelta(seconds=INTERACTIVE_GRACE_S + 8)
 
 
 async def initiative_hook(name: str, call) -> None:
@@ -183,7 +188,11 @@ async def enqueue_learn(
     convo = f"Mavis: {previous_reply}\nUser: {text}" if previous_reply else text
     if original:
         convo = f"User: {original}\n{convo}"
+    # Not before the interactive grace window has passed: until then best_effort LLM work fails fast
+    # (the reply's own follow-up calls own the slot), so an immediate LEARN would just be dropped.
+    not_before = timeutil.now() + LEARN_DELAY
     await get_bus().enqueue(Job(
         id=f"learn:{event.id}", user_id=user_id, kind=JobKind.LEARN,
-        payload={"text": convo, "source_ref": event.id, "trust": trust, "conversation": True},
+        payload={"text": convo, "source_ref": event.id, "trust": trust, "conversation": True,
+                 "not_before": not_before.isoformat()},
     ))

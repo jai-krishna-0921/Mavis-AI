@@ -34,7 +34,9 @@ async def connect_callback(p: str | None = None, bus: EventBus = Depends(get_bus
     pending_id = int(p) if p is not None and p.isascii() and p.isdigit() else None
     if pending_id is not None:
         pending = await connections.get_pending(pending_id)
-        if pending is not None and pending.status == PendingStatus.PENDING.value:
+        # DECLINED too: "Not now" and then signing in anyway still counts (check() accepts ACTIVE).
+        if pending is not None and pending.status in (PendingStatus.PENDING.value,
+                                                      PendingStatus.DECLINED.value):
             created = pending.created_at
             created = created if created.tzinfo else created.replace(tzinfo=UTC)
             now = timeutil.now()

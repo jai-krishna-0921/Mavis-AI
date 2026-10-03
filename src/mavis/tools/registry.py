@@ -25,15 +25,15 @@ from typing import Any
 
 import structlog
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from mavis.config import get_settings
-from mavis.domain.errors import ActionFailed, ApprovalRequired, ConnectionRequired
+from mavis.domain.errors import ActionFailed, ApprovalRequired, ConnectionRequired, NeedsUserDetail
 from mavis.domain.policy import Capability, RiskClass
 from mavis.policy.risk import truncate, wrap_untrusted
 from mavis.store.db import utcnow
-from mavis.store.repo import approvals, audit, policy_rules
+from mavis.store.repo import approvals, audit, policy_rules, tasks
 
 log = structlog.get_logger()
 
@@ -63,6 +63,11 @@ def _terms(text: str) -> set[str]:
 
 NEVER_AUTO_APPROVE = frozenset({"add_policy_rule", "forget"})
 _PREVIEW_IN_RESULT_CHARS = 500
+ALREADY_WAITING_RESULT = (
+    "ALREADY_AWAITING_APPROVAL #{id}: this same action is already waiting for the user's OK on an "
+    "earlier card. Nothing new was queued and it has NOT been done yet. Tell the user it's waiting on "
+    "that card; do not queue it again."
+)
 
 # Serialises "find open approval, else create" so identical parallel tool calls queue one approval.
 _queue_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
@@ -112,6 +117,18 @@ current_run: ContextVar[ToolRun | None] = ContextVar("current_run", default=None
 def _run_tainted() -> bool:
     run = current_run.get()
     return run is not None and run.tainted
+
+
+async def _queue_tainted(task_id: int | None) -> bool:
+    """Is a request being queued for approval third-party shaped? The run saw untrusted output (this
+    step or earlier), or it runs for a tainted task."""
+    run = current_run.get()
+    if run is not None and (run.tainted or run.untrusted_seen):
+        return True
+    if task_id is None:
+        return False
+    task = await tasks.get(task_id)
+    return bool(task is not None and task.tainted)
 
 
 ToolFn = Callable[[int, Any], Awaitable[str | dict | list]]
@@ -276,7 +293,18 @@ class ToolRegistry:
         if approval is None:
             raise KeyError(f"approval {approval_id} not found")
         tool = self.get(approval.tool)
-        args = tool.args_model.model_validate(approval.arguments)
+        try:
+            args = tool.args_model.model_validate(approval.arguments)
+        except ValidationError as exc:
+            # A request saved under older rules (or edited into an invalid shape): fail it with a
+            # sentence the user can act on, never a validation dump.
+            causes = [e.get("ctx", {}).get("error") for e in exc.errors()]
+            user_text = next((c.user_text for c in causes if isinstance(c, NeedsUserDetail)),
+                             "Some details of this request are missing now, so I didn't do it. "
+                             "Ask me again?")
+            log.warning("tool.approved_args_invalid", tool=tool.name, approval_id=approval_id)
+            raise ActionFailed(f"Saved arguments are not valid: {exc.errors()[0].get('msg', '')}",
+                               reason=user_text) from None
         await self._require_capability(tool, approval.user_id)
         # The action runs on behalf of the task that held the approval (tools may read its taint).
         task_token = current_task_id.set(approval.task_id)
@@ -349,8 +377,17 @@ class ToolRegistry:
                 return await self.invoke(tool, user_id, args)
             except ApprovalRequired as req:
                 task_id = current_task_id.get()
+                tainted = await _queue_tainted(task_id)
                 async with _queue_lock():
                     existing = await approvals.find_open(user_id, task_id, tool.name, req.arguments)
+                    twin = None if existing is not None else next(iter(
+                        await approvals.waiting_equivalents(user_id, tool.name, req.arguments,
+                                                            tainted=tainted)), None)
+                    if twin is not None:
+                        # The same action already waits on the user (another task, or an earlier
+                        # turn): one card per action, never a second one to approve twice.
+                        log.info("tool.approval_already_waiting", tool=tool.name, approval_id=twin.id)
+                        return ALREADY_WAITING_RESULT.format(id=twin.id)
                     if existing is not None:
                         approval_id = existing.id
                     else:
@@ -361,6 +398,7 @@ class ToolRegistry:
                             arguments=req.arguments,
                             preview=req.preview,
                             expires_at=utcnow() + timedelta(hours=get_settings().approval_ttl_hours),
+                            tainted=tainted,
                         )
                 log.info("tool.queued_for_approval", tool=tool.name, approval_id=approval_id)
                 run = current_run.get()
