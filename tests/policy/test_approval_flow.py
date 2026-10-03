@@ -14,6 +14,7 @@ _DASHES = re.compile("[–—]")
 
 async def _pending(user_id: int) -> tuple[int, int]:
     tid = await tasks.create(user_id, goal="g")
+    await tasks.set_status(tid, TaskStatus.AWAITING_APPROVAL)  # a task with a pending prompt waits for it
     aid = await approvals.create(user_id, tid, "send_note", {"text": "hi"}, "Send note: hi",
                                  utcnow() + timedelta(hours=48))
     return tid, aid
@@ -284,7 +285,8 @@ async def test_sweep_skips_resolving_of_a_running_task(user, rec_bus, sent, cloc
     await tasks.set_status(tid, TaskStatus.RUNNING)
     await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
     clock.advance(minutes=21)
-    assert (await flow.sweep())["stuck"] == 0
+    # "tasks" left out: 21 min is past the task wall clock, so recovery would fail the task first
+    assert (await flow.sweep(skip=frozenset({"tasks"})))["stuck"] == 0
     assert (await approvals.get(aid)).status == ApprovalStatus.RESOLVING
 
 

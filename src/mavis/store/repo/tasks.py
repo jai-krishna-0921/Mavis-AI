@@ -128,6 +128,23 @@ async def stale_running(user_id: int, started_before: datetime) -> list[Task]:
         return list(rows)
 
 
+async def running_started_before(started_before: datetime, user_id: int | None = None) -> list[Task]:
+    """Every user's (or one user's) RUNNING tasks whose current run began before `started_before`."""
+    q = select(Task).where(Task.status == TaskStatus.RUNNING.value, Task.started_at < started_before)
+    if user_id is not None:
+        q = q.where(Task.user_id == user_id)
+    async with Session() as s:
+        return list(await s.scalars(q.order_by(Task.id)))
+
+
+async def users_with_queued(user_id: int | None = None) -> list[int]:
+    q = select(Task.user_id).where(Task.status == TaskStatus.QUEUED.value).distinct()
+    if user_id is not None:
+        q = q.where(Task.user_id == user_id)
+    async with Session() as s:
+        return sorted(await s.scalars(q))
+
+
 async def next_queued(user_id: int) -> Task | None:
     async with Session() as s:
         return await s.scalar(
