@@ -30,14 +30,16 @@ def test_chat_always_offers_web_search_when_web_is_available(db, query) -> None:
     assert len(names) <= simple_turn.CHAT_TOOL_LIMIT and "web_extract" not in names
 
 
-def test_without_web_it_is_not_offered(db, monkeypatch) -> None:
-    from mavis.domain.policy import Capability
+def test_without_web_configured_it_is_not_offered(db, monkeypatch) -> None:
+    from mavis.config import get_settings
+    from mavis.tools.integrations.wiring import tool_available
     from mavis.tools.registry import get_registry
 
     registry = get_registry()
-    monkeypatch.setattr(registry, "available", lambda t: t.requires is not Capability.WEB)
-    names = [t.name for t in simple_turn.chat_tools(1, "who is Kishor Ahuja")]
-    assert "web_search" not in names
+    monkeypatch.setattr(registry, "available", tool_available)
+    assert "web_search" in [t.name for t in simple_turn.chat_tools(1, "who is Kishor Ahuja")]
+    monkeypatch.setattr(get_settings(), "web_search_enabled", False)
+    assert "web_search" not in [t.name for t in simple_turn.chat_tools(1, "who is Kishor Ahuja")]
 
 
 async def test_persona_rule_is_present_with_or_without_tools(db) -> None:
@@ -46,13 +48,38 @@ async def test_persona_rule_is_present_with_or_without_tools(db) -> None:
     user, _ = await users.get_or_create_by_chat(5, "Jai")
     prompt = system_prompt(user, datetime(2026, 10, 6, 4, 30, tzinfo=UTC)).lower()
     assert "real people" in prompt and "not sure" in prompt and "never invent" in prompt
+    assert "search" not in prompt.split("never invent")[1][:200]  # no web promise without tools
     assert "biograph" in prompt
     assert "—" not in prompt and "–" not in prompt
 
 
-def test_tool_rules_say_search_before_stating_world_facts() -> None:
-    rules = simple_turn.TOOL_RULES
-    assert "web_search" in rules and "real people" in rules and "before answering" in rules
+def test_web_rule_is_narrow_and_says_what_the_user_told_needs_no_search() -> None:
+    from mavis.agents.conversation import TOOL_RULES, WEB_RULE
+
+    assert "web_search" not in TOOL_RULES  # the web line is added separately, only when offered
+    assert "specific named real-world person" in WEB_RULE and "look something up" in WEB_RULE
+    assert "the user told you" in WEB_RULE and "you remember" not in WEB_RULE
+    assert "Otherwise answer normally" in WEB_RULE
+
+
+async def test_web_rule_is_added_only_when_web_search_is_offered(db, channel, fake_llm, memory, bus,
+                                                                 monkeypatch) -> None:
+    from mavis.agents.conversation import WEB_RULE
+    from mavis.config import get_settings
+    from mavis.tools.integrations.wiring import tool_available
+    from mavis.tools.registry import get_registry
+
+    monkeypatch.setattr(get_registry(), "available", tool_available)
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    fake_llm.push_text("Hi!")
+    await run_turn(msg_event(user.id, "hi", "e1"))
+    assert WEB_RULE in fake_llm.calls[-1][0].content
+    monkeypatch.setattr(get_settings(), "web_search_enabled", False)
+    fake_llm.push_text("Hi again!")
+    await run_turn(msg_event(user.id, "hello", "e2"))
+    system = fake_llm.calls[-1][0].content
+    assert WEB_RULE not in system and "Using your tools" in system
+    assert "not sure" in system  # the persona's uncertainty rule stays
 
 
 @pytest.fixture
@@ -90,4 +117,4 @@ async def test_who_is_turn_searches_the_web(db, channel, fake_llm, memory, bus, 
     tool_msgs = [m for m in fake_llm.calls[1] if isinstance(m, ToolMessage)]
     assert tool_msgs and f"{name} profile" in tool_msgs[0].content
     system = fake_llm.calls[0][0].content
-    assert "real people" in system and "web_search" in system
+    assert "specific named real-world person" in system

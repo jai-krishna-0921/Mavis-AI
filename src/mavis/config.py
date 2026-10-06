@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     integration_status_ttl_s: int = 60
     integration_provider: Literal["composio"] = "composio"
     tavily_api_key: str = ""
+    web_search_enabled: bool = True  # WEB capability: Tavily when keyed, else DuckDuckGo; False turns it off
     # Google Workspace through Composio's googlesuper toolkit (spec 2026-10-03). Off: behaviour is exactly
     # the Gmail + Calendar setup from before. Prod turns it on in compose after the verify script passes.
     google_workspace_enabled: bool = False
