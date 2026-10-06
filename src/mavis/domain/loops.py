@@ -65,6 +65,7 @@ class Loop(BaseModel):
     # Provenance: UNTRUSTED when any defining content came from a turn/run that saw third-party content.
     trust: Trust = Trust.UNTRUSTED
     origin: LoopOrigin = LoopOrigin.UNKNOWN
+    created_at: datetime | None = None   # when the loop was first written (its title's anchor)
 
     @property
     def trusted(self) -> bool:

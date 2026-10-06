@@ -125,3 +125,51 @@ def test_prompts_ask_for_absolute_dates_in_titles():
     assert "absolute dates" in REASONER_SYSTEM and "`track` titles" in REASONER_SYSTEM
     desc = TrackLoopArgs.model_json_schema()["properties"]["title"].get("description", "")
     assert "absolute date" in desc
+
+
+# --- I2: resolve only text that changed on this write; show when each loop was created --------------
+
+
+@pytest.mark.parametrize("by_id", [False, True])
+async def test_an_echoed_unchanged_title_is_never_re_resolved(user, recording_bus, clock, by_id):
+    svc = LoopService(recording_bus)
+    clock.set(local(IST, 3, 18, 0))  # Saturday: "on Saturday" has two readings, so it stays as written
+    loop = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Call Tom on Saturday",
+                                                trust=Trust.USER))
+    assert loop.title == "Call Tom on Saturday"
+    clock.set(local(IST, 4, 9, 0))  # Sunday: re-resolving now would freeze Sat 10 Oct into it
+    echo = LoopUpsert(id=loop.id if by_id else None, kind=LoopKind.COMMITMENT, title="Call Tom on Saturday",
+                      importance=4)
+    again = await svc.upsert(user.id, echo)
+    assert again.id == loop.id and again.title == "Call Tom on Saturday"
+
+
+async def test_a_changed_title_on_update_is_resolved(user, recording_bus, clock):
+    svc = LoopService(recording_bus)
+    clock.set(local(NYC, 3, 18, 0))
+    await users.update(user.id, timezone=NYC)
+    loop = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Call Tom", trust=Trust.USER))
+    clock.set(local(NYC, 4, 9, 0))
+    changed = await svc.upsert(user.id, LoopUpsert(id=loop.id, title="Call Tom tomorrow"))
+    assert changed.title == "Call Tom Mon 5 Oct"
+
+
+async def test_loops_carry_their_creation_time(user, recording_bus, clock):
+    clock.set(local(IST, 3, 18, 0))
+    loop = await LoopService(recording_bus).upsert(
+        user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Renew the lease", trust=Trust.USER))
+    assert loop.created_at == local(IST, 3, 18, 0)
+
+
+def test_recall_and_reasoner_loop_lines_show_when_the_loop_was_created():
+    from mavis.domain.loops import Loop
+    from mavis.initiative.reasoner import _loop_line
+    from mavis.memory.recall import render_loop
+
+    now = local(AKL, 6, 10, 0)
+    lp = Loop(id=4, user_id=1, kind=LoopKind.COMMITMENT, title="Call Tom on Saturday", trust=Trust.USER,
+              created_at=local(AKL, 3, 18, 0))
+    expected = "Call Tom on Saturday (commitment, created [3 days ago, Sat 3 Oct 18:00])"
+    assert render_loop(lp, AKL, now) == expected
+    line = _loop_line(lp, AKL, now)
+    assert line.endswith("created [3 days ago, Sat 3 Oct 18:00]")

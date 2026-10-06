@@ -14,7 +14,6 @@ from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.events import Provenance, Trust
 from mavis.domain.memory import Extraction, RecallContext
-from mavis.domain.reldate import absolutize
 from mavis.memory import recall as recall_mod
 from mavis.memory.dates import apply_relative_day
 from mavis.memory.embeddings import Embedder, get_embedder
@@ -96,12 +95,6 @@ def grounded_in_user(x: Extraction, said: str) -> Extraction:
     if len(loops) < len(x.loops) or len(events) < len(x.events):
         log.info("memory.ungrounded_items_dropped", loops=len(x.loops) - len(loops),
                  events=len(x.events) - len(events))
-    return x.model_copy(update={"loops": loops, "events": events})
-
-
-def absolutize_titles(x: Extraction, anchor: datetime, tz: str) -> Extraction:
-    loops = [lp.model_copy(update={"title": absolutize(lp.title, anchor, tz)}) for lp in x.loops]
-    events = [ev.model_copy(update={"title": absolutize(ev.title, anchor, tz)}) for ev in x.events]
     return x.model_copy(update={"loops": loops, "events": events})
 
 
@@ -220,8 +213,6 @@ class MemoryService:
         said = user_words_of(text)
         if conversation and said != text.strip():  # an assistant reply was included as context (T3)
             extraction = grounded_in_user(extraction, said)
-        # stored titles are time-neutral (T2): relative dates resolve against when the text was written
-        extraction = absolutize_titles(extraction, anchor, user.timezone)
 
         resolution = await resolve(extraction, await self.graph.entities(user_id), self.embedder)
         trusted = trust is Trust.USER
@@ -256,7 +247,8 @@ class MemoryService:
         )
         if not trusted:
             final = final.model_copy(update={"mood": None})
-        prov = Provenance(source_ref=source_ref, trust=trust, conversation=conversation)
+        # the anchor travels with the provenance: loop titles resolve against when the text was written (T2)
+        prov = Provenance(source_ref=source_ref, trust=trust, conversation=conversation, anchor_at=anchor)
         for hook in self.on_extraction:
             try:
                 await hook(user_id, final, prov)
