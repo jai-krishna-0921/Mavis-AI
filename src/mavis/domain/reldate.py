@@ -6,33 +6,34 @@ moment the source text was written) and the user's zone, and the expressions bec
 
 This is a language-level normaliser, not a list of known strings. The grammar it understands:
 
-- day words: today, tonight, tomorrow, yesterday (common spellings too), optionally followed by
-  morning/afternoon/evening/night; "this morning/afternoon/evening", "last night";
+- day words, lowercase only: today, tonight, tomorrow, yesterday (common spellings too), optionally
+  followed by morning/afternoon/evening/night; "this morning/afternoon/evening", "last night";
   "the day after tomorrow", "the day before yesterday"
-- weekdays (full names; abbreviations only after a marker and in Title case, so "sat" and "wed" the
-  verbs are left alone), optionally preceded by this/coming/last/on/by/before/until/till
-- this/next/last week, the week after next, this/next/last/coming weekend, the weekend,
-  this/next/last month, this/next/last year, end/start/beginning/middle of the day/week/month/year
-- offsets: in N minutes/hours/days/weeks, N ... from now, N ... ago (N in digits, a/an or one..twelve)
+- weekdays, only after a temporal marker (this/coming/next/last/on/by/before/until/till), or at the
+  very start of the text followed by a time ("Thursday 2pm dentist"); abbreviations only in Title case
+- this/next/last week, the week after next, this/next/last/coming weekend, "<preposition> the weekend",
+  this/next/last month and year, end/start/beginning/middle of the day/week/month/year
+- offsets: in N minutes/hours/days/weeks, N ... from now, N ... ago (N in digits, a/an or one..twelve);
+  minute and hour offsets are added in UTC, so a DST change in between gives the right wall time
 
-Resolution conventions (deterministic, in the user's local calendar; weeks start on Monday):
-tonight is that day's evening; a bare or this/on/by weekday is its next occurrence; last weekday is
-the most recent one before the anchor day; "this weekend" on a Saturday or Sunday is the current one.
+It prefers leaving text unchanged over guessing. Nothing is rewritten inside quotes, when glued to
+another token ("Monday.com"), as part of a capitalised name ("Black Friday", "Sunday Times", "Today
+show", "Wednesday Addams", "The Day After Tomorrow"), before "the <ordinal>" ("Friday the 9th"), or in
+recurring phrases ("every Monday", "on Mondays"). Expressions with two common readings stay as written
+too: "next <weekday>", a bare weekday said on that same weekday, "next weekend" said on a weekday, "the
+coming week", and tomorrow said just past midnight (timeutil's ambiguous window). No marker is added:
+the moment the text was written is kept by the caller (created_at, anchor_at).
 
-Where an expression has two common readings, no guess is frozen into the text: it is kept as written and
-the text is marked once with when it was said ("(said Sat 3 Oct 18:48)"), so a reader can still resolve
-it. These are: "next <weekday>", a bare weekday said on that same weekday, "next weekend" said on a
-weekday, and tomorrow / the day after tomorrow said just past midnight (timeutil's ambiguous window).
-
-Recurring phrases (every Monday, on Mondays, weekends) and already absolute dates ("Sun 4 Oct",
-"Friday, 9 October") are not relative and stay unchanged. Running it again on its own output, with any
-later anchor, changes nothing.
+Resolution conventions (deterministic, in the user's local calendar; weeks start on Monday): tonight is
+that day's evening; a this/on/by weekday is its next occurrence; last weekday is the most recent one
+before the anchor day; "this weekend" on a Saturday or Sunday is the current one. Output contains no
+expression the resolver would rewrite again.
 """
 
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from mavis.domain import timeutil
@@ -48,6 +49,15 @@ _N = r"\d{1,3}|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelv
 _UNIT = r"minutes?|mins?|hours?|hrs?|days?|weeks?"
 _PART = r"morning|afternoon|evening|night"
 _MARK = r"this|(?:the\s+)?coming|next|last|on|by|before|until|till"
+_ORDINAL_AFTER = re.compile(
+    r"\s+the\s+(?:\d{1,2}(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|"
+    r"eleventh|twelfth|thirteenth|\w+teenth|twentieth|twenty\w*|thirtieth|thirty\w*)\b", re.IGNORECASE)
+_TIME_AFTER = re.compile(
+    r"\s+(?:at\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)|\d{1,2}:\d{2})", re.IGNORECASE)
+_CAPITAL_AFTER = re.compile(r"\s+(?!I\b)[A-Z][A-Za-z]")
+# quoted spans: double, curly and back quotes, and single quotes that open and close at word edges
+_QUOTED = re.compile(r"\"[^\"]*\"|\u201c[^\u201d]*\u201d|`[^`]*`|\u2018[^\u2019]*\u2019|(?<!\w)'[^']*'(?!\w)")
+_JOINERS = ".-/@_"
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
 # a weekday followed by a calendar date is already absolute ("Friday 9 Oct", "Fri, Oct 9")
 _DATED = rf"(?!,?\s+(?:\d{{1,2}}(?:st|nd|rd|th)?\b(?!\s*(?:am|pm|a\.m|p\.m|:|h\b))|{_MONTH}\s+\d))"
@@ -60,7 +70,7 @@ _PATTERN = re.compile(
     r"|\b(?:the\s+)?week\s+after\s+next\b(?P<wan>)"
     rf"|\b(?P<edge>end|start|beginning|middle)\s+of\s+(?:the\s+|this\s+)?(?P<eunit>day|week|month|year)\b(?!\s+of\b)"
     rf"|\b(?P<which>this|next|last|coming)\s+(?P<unit>weekend|week|month|year)\b"
-    r"|\b(?:the\s+)?weekend\b(?!\s+of\b)(?P<bare_weekend>)"
+    r"|\b(?P<wkprep>over|on|at|during|for|by|until|till)\s+the\s+weekend\b(?!\s+of\b)"
     rf"|\bthis\s+(?P<tpart>{_PART})\b"
     r"|\blast\s+night\b(?P<last_night>)"
     rf"|\b(?P<day>today|tonight|tonite|tomorrow|tomorow|tommorow|tmrw|tmr|yesterday)\b"
@@ -71,8 +81,6 @@ _PATTERN = re.compile(
     rf"|\b(?P<amark>{_MARK})\s+(?P<wa>(?-i:{_ABBR_WD}))\b{_DATED}",
     re.IGNORECASE,
 )
-_SAID = re.compile(r"\(said (?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2} [A-Z][a-z]{2}(?: \d{4})? \d{2}:\d{2}\)")
-_RECURRING = frozenset({"every", "each"})
 _BARE_PREP = frozenset({"by", "before", "until", "till", "after", "since", "from"})
 _KEEP_MARK = frozenset({"on", "by", "before", "until", "till"})
 _PREV_WORD = re.compile(r"([A-Za-z]+)\W*$")
@@ -103,7 +111,7 @@ def _num(raw: str) -> int:
 
 
 class _Unresolved(Exception):
-    """The expression has two common readings: keep it and mark the text with when it was said."""
+    """The expression has two common readings: keep it as written (no guess is frozen into the text)."""
 
 
 class _Resolver:
@@ -111,25 +119,43 @@ class _Resolver:
         self.text = text
         self.local = local
         self.today = local.date()
-        self.unresolved = False
+        self.quoted = [m.span() for m in _QUOTED.finditer(text)]
 
     def _prev_word(self, start: int) -> str:
         m = _PREV_WORD.search(self.text[:start])
         return m.group(1).casefold() if m else ""
 
-    def recurring(self, m: re.Match) -> bool:
-        if m.group("wd") or m.group("bare_weekend") is not None:
-            mark = m.group("wmark")
-            return not mark and self._prev_word(m.start()) in _RECURRING
-        return False
+    def temporal(self, m: re.Match) -> bool:
+        """The match is unambiguous temporal usage. Prefer leaving text unchanged over guessing: never
+        inside quotes, never glued to another token ("Monday.com", "pre-tomorrow"), never part of a
+        capitalised name ("Black Friday", "Sunday Times", "Today show", "The Day After Tomorrow")."""
+        start, end = m.span()
+        text = self.text
+        if any(a <= start < b or a < end <= b for a, b in self.quoted):
+            return False
+        before, after = text[start - 1:start], text[end:end + 2]
+        if before and before in _JOINERS and start >= 2 and text[start - 2].isalnum():
+            return False
+        if len(after) == 2 and after[0] in _JOINERS and after[1].isalnum():
+            return False
+        if m.group("wd") or m.group("wa"):
+            wd_end = m.end("wd") if m.group("wd") else m.end("wa")
+            rest = text[wd_end:]
+            if _ORDINAL_AFTER.match(rest) or _CAPITAL_AFTER.match(rest):
+                return False  # "Friday the 9th", "Wednesday Addams"
+            if m.group("wmark") or m.group("amark"):
+                return True
+            # a bare weekday only at the very start and followed by a time ("Thursday 2pm dentist")
+            return not text[:start].strip() and bool(_TIME_AFTER.match(rest))
+        # every other expression is temporal only in lowercase ("today", not "Today" or "TODAY")
+        return m.group(0) == m.group(0).lower()
 
     def __call__(self, m: re.Match) -> str:
-        if self.recurring(m):
+        if not self.temporal(m):
             return m.group(0)
         try:
             return self._resolve(m)
         except _Unresolved:
-            self.unresolved = True
             return m.group(0)
 
     def _tomorrow_ok(self) -> None:
@@ -154,8 +180,8 @@ class _Resolver:
             return f"{g('edge')} of {span}"
         if g("unit"):
             return self._unit(g("which").casefold(), g("unit").casefold(), monday)
-        if g("bare_weekend") is not None:
-            return self._unit("this", "weekend", monday)
+        if g("wkprep"):
+            return f"{g('wkprep')} {self._unit('this', 'weekend', monday)}"
         if g("tpart"):
             return f"{day(today)} {g('tpart').casefold()}"
         if g("last_night") is not None:
@@ -178,7 +204,8 @@ class _Resolver:
             sign = 1 if forward or g("dir").casefold() != "ago" else -1
             if unit.startswith(("min", "hour", "hr")):
                 delta = timedelta(minutes=n) if unit.startswith("min") else timedelta(hours=n)
-                when = self.local + sign * delta
+                # in UTC, then back to local: a DST change in between moves the wall clock correctly
+                when = (self.local.astimezone(UTC) + sign * delta).astimezone(self.local.tzinfo)
                 core = f"{when:%H:%M} on {day(when.date())}"
                 lead = "at "
             else:
@@ -186,10 +213,10 @@ class _Resolver:
                 core = day(today + timedelta(days=sign * days))
                 lead = "on "
             return core if self._prev_word(m.start()) in _BARE_PREP else lead + core
-        mark = (g("wmark") or g("amark") or "").casefold().split()[-1:]
-        mark = mark[0] if mark else ""
+        raw = (g("wmark") or g("amark") or "").split()[-1:]
+        raw_mark = raw[0] if raw else ""
         target = _WEEKDAYS[g("wd").casefold()] if g("wd") else _ABBR[g("wa")]
-        return self._weekday(mark, target)
+        return self._weekday(raw_mark, target)
 
     def _unit(self, which: str, unit: str, monday: date) -> str:
         today = self.today
@@ -219,8 +246,8 @@ class _Resolver:
             raise _Unresolved
         return str(today.year + {"this": 0, "next": 1, "last": -1}[which])
 
-    def _weekday(self, mark: str, target: int) -> str:
-        today = self.today
+    def _weekday(self, raw_mark: str, target: int) -> str:
+        today, mark = self.today, raw_mark.casefold()
         ahead = (target - today.weekday()) % 7
         if mark == "next":
             raise _Unresolved  # "next Tuesday" means different days to different people
@@ -232,23 +259,19 @@ class _Resolver:
                 return _label(today, today)
             raise _Unresolved  # "on Saturday" said on a Saturday: today or next week
         resolved = _label(today + timedelta(days=ahead), today)
-        return f"{mark} {resolved}" if mark in _KEEP_MARK else resolved
+        return f"{raw_mark} {resolved}" if mark in _KEEP_MARK else resolved
 
 
 def absolutize(text: str, anchor: datetime, tz: str) -> str:
-    """Rewrite relative date expressions in `text` as absolute dates, resolved against `anchor` (when the
-    text was written) in the user's zone `tz`. Text already marked "(said ...)" is returned unchanged."""
-    if not text or _SAID.search(text):
+    """Rewrite unambiguous relative date expressions in `text` as absolute dates, resolved against
+    `anchor` (when the text was written) in the user's zone `tz`. Anything else stays as written."""
+    if not text:
         return text
     local = timeutil.ensure_utc(anchor).astimezone(ZoneInfo(tz))  # type: ignore[union-attr]
-    resolver = _Resolver(text, local)
-    out = _PATTERN.sub(resolver, text)
-    if resolver.unresolved:
-        out = f"{out.rstrip()} (said {_label(local.date(), local.date())} {local:%H:%M})"
-    return out
+    return _PATTERN.sub(_Resolver(text, local), text)
 
 
 def has_relative(text: str) -> bool:
-    """The text holds a relative date expression (recurring phrases like "every Monday" do not count)."""
-    resolver = _Resolver(text or "", datetime(2000, 1, 3, 12, 0))
-    return any(not resolver.recurring(m) for m in _PATTERN.finditer(text or ""))
+    """The text holds a relative date expression the resolver treats as temporal usage."""
+    resolver = _Resolver(text or "", datetime(2000, 1, 3, 12, 0, tzinfo=UTC))
+    return any(resolver.temporal(m) for m in _PATTERN.finditer(text or ""))
