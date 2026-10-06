@@ -124,6 +124,7 @@ STAMP = re.compile(
     rf"\[(?:just now|earlier today {_HHMM}|yesterday, {_DAYNAME} {_HHMM}|\d+ days ago, {_DAYNAME} {_HHMM})\]"
 )
 _LEADING_STAMP = re.compile(rf"^[ \t]*{STAMP.pattern}[ \t]*", re.MULTILINE)
+_ANY_STAMP = re.compile(rf"[ \t]*{STAMP.pattern}")
 
 
 def message_stamp(at: datetime, now: datetime, tz: str) -> str:
@@ -156,5 +157,6 @@ def stamped(text: str, at: datetime, now: datetime, tz: str) -> str:
 
 
 def strip_stamps(text: str) -> str:
-    """Remove stamps the model echoed at the start of a line. Other brackets ([1], [the doc]) stay."""
-    return _LEADING_STAMP.sub("", text)
+    """Remove every replay stamp the model echoed, wherever it appears. The grammar is closed (STAMP), so
+    other brackets ([1], [the doc]) stay."""
+    return _ANY_STAMP.sub("", _LEADING_STAMP.sub("", text))
