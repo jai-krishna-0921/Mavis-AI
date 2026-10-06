@@ -1,18 +1,18 @@
 import asyncio
-from datetime import UTC, datetime
 
 import pytest
 from fakeredis import FakeAsyncRedis
 
 from mavis.bus.base import Stream
 from mavis.bus.redis_streams import RedisStreamsBus
+from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, Job, JobKind
 from tests.fakes import wait_until
 
 
 def ev(event_id: str) -> Event:
     return Event(id=event_id, user_id=1, type=EventType.USER_MESSAGE,
-                 occurred_at=datetime.now(UTC), source="t")
+                 occurred_at=timeutil.now(), source="t")
 
 
 @pytest.fixture

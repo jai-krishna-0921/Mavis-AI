@@ -14,6 +14,7 @@ from typing import Protocol
 import structlog
 from qdrant_client import AsyncQdrantClient, models
 
+from mavis.domain import timeutil
 from mavis.memory.embeddings import Embedder
 
 log = structlog.get_logger()
@@ -102,7 +103,7 @@ class QdrantVectorStore:
         clean = list(unique.values())
         vectors = await self._embedder.embed(clean)
         now = (at.astimezone(UTC) if at and at.tzinfo else at.replace(tzinfo=UTC) if at
-               else datetime.now(UTC)).isoformat()
+               else timeutil.now()).isoformat()
         await self._client.upsert(
             COLLECTION,
             points=[

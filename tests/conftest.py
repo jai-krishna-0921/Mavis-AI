@@ -194,6 +194,30 @@ async def memory(graph, vector, embedder):
     set_memory(None)
 
 
+# Every test runs on the project's clock (timeutil.now), never the wall clock: a fixed start that ticks
+# with real elapsed time, so durations still pass. The `clock` fixture replaces it with a hand-moved one.
+# MAVIS_TEST_NOW (ISO-8601 with offset) moves the start: the suite must pass at any start, e.g.
+# MAVIS_TEST_NOW=2026-10-06T23:30:00+05:30 (quiet hours) or 2026-11-01T01:30:00-04:00 (DST change).
+DEFAULT_TEST_NOW = "2026-09-29T11:00:00+05:30"  # a Tuesday late morning in Asia/Kolkata
+
+
+@pytest.fixture(autouse=True)
+def _pinned_clock(monkeypatch):
+    import os
+    import time as _time
+
+    from mavis.domain import timeutil
+
+    start = datetime.fromisoformat(os.environ.get("MAVIS_TEST_NOW") or DEFAULT_TEST_NOW).astimezone(UTC)
+    t0 = _time.monotonic()
+
+    def ticking() -> datetime:
+        return start + timedelta(seconds=_time.monotonic() - t0)
+
+    monkeypatch.setattr(timeutil, "_clock", ticking)
+    return start
+
+
 class _Clock:
     def __init__(self) -> None:
         # Sunday 27 Sep 2026, 13:30 IST, the opening of the reference transcript.

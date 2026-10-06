@@ -5,9 +5,10 @@ four pending calendar approvals (chat follow-ups re-queued it while two tasks qu
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from mavis.agents import orchestrator, task_dispatch
+from mavis.domain import timeutil
 from mavis.domain.decisions import (
     ComposedMessage,
     InitiativeDecision,
@@ -29,14 +30,14 @@ GOAL = "Send an interview invite to Jane for Friday 3pm"
 
 def _loop_created(origin: LoopOrigin) -> Event:
     return Event(id="loop:7:created", user_id=1, type=EventType.LOOP_CREATED,
-                 occurred_at=datetime.now(UTC), source="loops",
+                 occurred_at=timeutil.now(), source="loops",
                  payload={"id": 7, "title": "Interview Jane", "source": "x", "origin": origin.value})
 
 
 def _decision() -> InitiativeDecision:
     return InitiativeDecision(
         act=[TaskRequest(goal=GOAL)],
-        wakeups=[WakeupRequest(at=datetime.now(UTC) + timedelta(hours=1), reason="check invite")],
+        wakeups=[WakeupRequest(at=timeutil.now() + timedelta(hours=1), reason="check invite")],
         notify=NotifyIntent(urgency=2, intent="tell them about the invite"),
     )
 

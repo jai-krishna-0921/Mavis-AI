@@ -1,12 +1,12 @@
 import asyncio
-from datetime import UTC, datetime
 
+from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, Trust
 from mavis.worker.runner import handle_event, register_event_handler
 
 
 def make(event_type: EventType, event_id: str, user_id: int = 1) -> Event:
-    return Event(id=event_id, user_id=user_id, type=event_type, occurred_at=datetime.now(UTC),
+    return Event(id=event_id, user_id=user_id, type=event_type, occurred_at=timeutil.now(),
                  source="test", payload={}, trust=Trust.USER if event_type is EventType.USER_MESSAGE
                  else Trust.SYSTEM)
 

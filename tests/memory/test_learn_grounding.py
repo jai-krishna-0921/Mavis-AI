@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.memory import ExtractedEvent, Extraction, LoopDraft
 from mavis.loops.service import LoopService, loops_from_extraction
@@ -39,7 +40,7 @@ async def _learn_text(user_id, text: str, previous: str | None, original: str | 
     ts.get_bus = lambda: bus
     try:
         ev = Event(id="tg:update:5", user_id=user_id, type=EventType.USER_MESSAGE,
-                   occurred_at=datetime.now(UTC), source="telegram", payload={"text": text}, trust=Trust.USER)
+                   occurred_at=timeutil.now(), source="telegram", payload={"text": text}, trust=Trust.USER)
         await enqueue_learn(user_id, ev, text, previous, original)
     finally:
         ts.get_bus = original_get
