@@ -380,7 +380,7 @@ async def test_digest_turn_is_tainted_and_small_talk_is_not(db, channel, fake_ll
 
 @pytest.mark.parametrize(("untrusted", "trust"), [(True, "untrusted"), (False, "user")])
 async def test_reply_after_proactive_ping_learns_at_its_trust(
-    db, channel, fake_llm, memory, bus, monkeypatch, untrusted, trust
+    db, channel, fake_llm, memory, bus, monkeypatch, clock, untrusted, trust
 ) -> None:
     """A proactive message composed from email content taints the user's next reply (final review I3)."""
     from mavis.domain.decisions import ComposedMessage, NotifyIntent
