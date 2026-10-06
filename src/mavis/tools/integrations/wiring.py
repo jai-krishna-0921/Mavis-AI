@@ -297,6 +297,8 @@ def capability_reason(capability: Capability) -> str:
 def tool_available(tool: MavisTool) -> bool:
     """Integration tools are offered only when a provider is configured (a dev box without a key
     does not waste tool rounds on them)."""
+    if tool.requires is Capability.WEB:
+        return get_settings().web_search_enabled  # web tools exist only when WEB is configured
     if tool.requires not in active_capabilities():
         return tool.requires is None or tool.requires not in GOOGLE_CAPABILITIES
     from mavis.tools import integrations

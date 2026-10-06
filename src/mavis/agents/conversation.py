@@ -101,9 +101,6 @@ TOOL_RULES = (
     "- Sending or replying to email, inviting guests, forgetting things and standing rules always wait "
     "for their OK. When a tool answers QUEUED_FOR_APPROVAL, tell them it's ready and waiting for their "
     "OK (they get buttons to approve, edit or cancel). Never say it was sent or done.\n"
-    "- Facts about the real world (specific real people, companies, products, prices, news, or anything "
-    "that changes over time): call web_search before answering, unless they told you themselves or you "
-    "remember it. If the search finds nothing clear, say you're not sure. Never invent a biography.\n"
     "- Reminders: wake_me at the exact time they asked for.\n"
     "- For any question about what is pending, open, due, on their radar or left to do, call pending and "
     "answer only from its result. Your earlier messages and the conversation summary may be outdated: "
@@ -115,6 +112,14 @@ TOOL_RULES = (
     f"- {UNTRUSTED_NOTE}"
 )
 TOOLS_GUIDE = TOOL_RULES  # name kept for callers of the chat-tools slice
+# Added only when web_search is offered. Web results are untrusted (they taint the turn), so search only
+# when the question needs the outside world, not for everything.
+WEB_RULE = (
+    "- Use web_search only when they ask about a specific named real-world person, organisation, product, "
+    "price, event or news, or ask you to look something up; then answer from what it finds. Anything the "
+    "user told you needs no search. Otherwise answer normally. If the search finds nothing clear, say "
+    "you're not sure. Never invent a biography."
+)
 
 
 def chat_tools(user_id: int, query: str = "") -> list[BaseTool]:
@@ -385,6 +390,8 @@ async def run_turn(event: Event) -> None:
         tools = chat_tools(user.id, query=f"{text}\n{previous or ''}")
         if tools:
             system = f"{system}\n\n{TOOL_RULES}"
+            if any(t.name == "web_search" for t in tools):
+                system = f"{system}\n{WEB_RULE}"
         prompt: list[BaseMessage] = [SystemMessage(system)]
         prompt += to_langchain(history, now, user.timezone)
 
