@@ -41,12 +41,13 @@ class LoopService:
 
     async def upsert(self, user_id: int, data: LoopUpsert, *, anchor_at: datetime | None = None) -> Loop:
         """`anchor_at`: when the text the title came from was written (default: now, the writer's own
-        time). Relative dates in the title resolve against it (T2), so a stored title stays true later."""
-        if data.title:
-            title = absolutize(data.title, anchor_at or timeutil.now(), await _timezone(user_id))
-            data = data.model_copy(update={"title": title})
+        time). Relative dates in a new or changed title resolve against it (T2), so a stored title stays
+        true later. A title echoed unchanged is never resolved again: a later anchor would re-date it."""
         # Distinct key from `user:{id}`: turn hooks already hold that one, so this cannot self-deadlock.
         async with lock(f"loops:{user_id}"):
+            if data.title and not await _is_stored_title(user_id, data):
+                title = absolutize(data.title, anchor_at or timeutil.now(), await _timezone(user_id))
+                data = data.model_copy(update={"title": title})
             changed = False
             if data.id is not None:
                 result = await repo.update(user_id, data.id, data)
@@ -155,6 +156,15 @@ class LoopService:
         await self._bus.publish(event)
 
 
+async def _is_stored_title(user_id: int, data: LoopUpsert) -> bool:
+    """The write repeats a title already stored (the loop it updates, or any live loop of the user)."""
+    title = (data.title or "").strip()
+    if data.id is not None:
+        current = await repo.get(data.id)
+        return current is not None and current.user_id == user_id and current.title.strip() == title
+    return any(lp.title.strip() == title for lp in await repo.list_open(user_id))
+
+
 async def _timezone(user_id: int) -> str:
     try:
         return (await users.get(user_id)).timezone or get_settings().default_timezone
@@ -173,7 +183,9 @@ async def _proactive_reply_anchor(user_id: int) -> datetime | None:
     return timeutil.ensure_utc(prev.created_at)
 
 
-async def _upsert_unless_closed(service: LoopService, user_id: int, data: LoopUpsert) -> None:
+async def _upsert_unless_closed(
+    service: LoopService, user_id: int, data: LoopUpsert, anchor_at: datetime | None = None
+) -> None:
     """Skip a loop the user already closed in the last week: re-extraction must not resurrect it."""
     data.title = data.title.strip()[:TITLE_MAX]
     if not data.title:
@@ -181,7 +193,7 @@ async def _upsert_unless_closed(service: LoopService, user_id: int, data: LoopUp
     if await repo.find_recently_closed(user_id, data.title, timeutil.now() - REOPEN_GUARD):
         log.info("loops.reopen_skipped", user_id=user_id)
         return
-    await service.upsert(user_id, data)
+    await service.upsert(user_id, data, anchor_at=anchor_at)
 
 
 def extraction_trust(prov: Provenance) -> Trust:
@@ -226,6 +238,7 @@ async def loops_from_extraction(
                 trust=trust,
                 origin=LoopOrigin.CONVERSATION,
             ),
+            prov.anchor_at,
         )
     for ev in extraction.events:
         if ev.ambiguous or ev.starts_at is None or ev.importance < MIN_EVENT_IMPORTANCE:
@@ -243,4 +256,5 @@ async def loops_from_extraction(
                 trust=trust,
                 origin=LoopOrigin.CONVERSATION,
             ),
+            prov.anchor_at,
         )

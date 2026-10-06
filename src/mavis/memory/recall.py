@@ -10,7 +10,7 @@ from typing import Protocol
 from mavis.domain import timeutil
 from mavis.domain.loops import Loop
 from mavis.domain.memory import RecallContext
-from mavis.domain.timefmt import due_label, stamped
+from mavis.domain.timefmt import due_label, message_stamp, stamped
 from mavis.memory.extractor import wrap_untrusted
 from mavis.memory.graph import GraphStore
 from mavis.memory.spotter import SpotterCache
@@ -33,11 +33,13 @@ class LoopsReader(Protocol):
 def render_loop(loop: Loop, tz: str, now: datetime | None = None) -> str:
     """One loop for a prompt. The due time is relative to `now` (default: the clock at render time),
     computed here, so the model never does date arithmetic and never reads an overdue item as upcoming."""
-    kind = loop.kind.value.lower().replace("_", " ")
-    if loop.due_at is None:
-        line = f"{loop.title} ({kind})"
-    else:
-        line = f"{loop.title} ({kind}, {due_label(loop.due_at, now or timeutil.now(), tz)})"
+    now = now or timeutil.now()
+    parts = [loop.kind.value.lower().replace("_", " ")]
+    if loop.due_at is not None:
+        parts.append(due_label(loop.due_at, now, tz))
+    if loop.created_at is not None:  # relative words in the title are relative to this (TIME_RULE)
+        parts.append(f"created {message_stamp(loop.created_at, now, tz)}")
+    line = f"{loop.title} ({', '.join(parts)})"
     # a loop derived from third-party content is data, never an instruction (spec 8.3)
     return line if loop.trusted else wrap_untrusted(line, source="loop")
 

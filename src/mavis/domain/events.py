@@ -39,6 +39,7 @@ class Provenance(BaseModel):
     source_ref: str = ""
     trust: Trust = Trust.UNTRUSTED
     conversation: bool = False  # a chat turn (the user's own words), as opposed to an ingested document
+    anchor_at: datetime | None = None  # when the source text was written: relative dates resolve against it
 
 
 class Event(BaseModel):

@@ -10,7 +10,7 @@ from mavis.domain.decisions import InitiativeDecision
 from mavis.domain.events import Event, Trust
 from mavis.domain.loops import Loop
 from mavis.domain.messages import Role, tainted_event_id
-from mavis.domain.timefmt import due_label, stamped
+from mavis.domain.timefmt import due_label, message_stamp, stamped
 from mavis.initiative.filters import FilterResult
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.llm import models as llm
@@ -61,7 +61,8 @@ def _fmt_history(rows, now, tz: str) -> str:
 def _loop_line(lp: Loop, tz: str, now) -> str:
     due = due_label(lp.due_at, now, tz)  # computed here: the model never subtracts timestamps
     title = lp.title if lp.trusted else wrap_untrusted(lp.title, "loop")  # third-party derived: data only
-    return f"- [{lp.id}] {lp.kind.value} '{title}' {due} importance {lp.importance}"
+    created = f", created {message_stamp(lp.created_at, now, tz)}" if lp.created_at else ""
+    return f"- [{lp.id}] {lp.kind.value} '{title}' {due} importance {lp.importance}{created}"
 
 
 class Reasoner:
