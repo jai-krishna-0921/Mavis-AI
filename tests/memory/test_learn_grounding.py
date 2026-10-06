@@ -144,3 +144,31 @@ def test_extractor_prompt_says_context_is_not_a_source():
     assert "<assistant_context>" in SYSTEM_PROMPT
     assert "never extract" in SYSTEM_PROMPT.lower() or "do not extract" in SYSTEM_PROMPT.lower()
     assert "user's own words" in SYSTEM_PROMPT
+
+
+async def test_reply_only_items_are_dropped_even_when_the_user_says_yes(memory, user, recording_bus, clock,
+                                                                        fake_llm):
+    from mavis.agents.turn_support import learn_text
+
+    svc = _hooked(memory, recording_bus)
+    clock.set(local(IST, 5, 18, 0))
+    fake_llm.push_structured(Extraction(loops=[LoopDraft(kind="COMMITMENT", title="Book the vet")]))
+    await memory.learn(user.id, learn_text("yes, the second one", "1. renew the passport 2. book the vet",
+                                           None), "tg:update:30", Trust.USER, anchor_at=clock.t)
+    assert await svc.active(user.id) == []  # the chat turn tracks agreements with track_loop (I4)
+
+
+@pytest.mark.parametrize(("said", "title", "kept"), [
+    ("remind me to book a table at Nobu", "Book a table at Nobu", True),
+    ("I'll block out Friday for deep work", "Block Friday for deep work", True),
+    ("ok, I'll call him", "Call Ravi about the lease", False),       # only the action word is shared
+    ("sending it now", "Send Meera the deck", False),
+    ("need to renew it", "Renew passport", False),
+    ("passport stuff is pending", "Renew passport", True),
+    ("dentist", "Dentist", True),                                     # one-word item: the word identifies it
+])
+def test_the_action_word_alone_does_not_ground_an_item(said, title, kept):
+    from mavis.domain.memory import Extraction, LoopDraft
+
+    x = Extraction(loops=[LoopDraft(kind="COMMITMENT", title=title)])
+    assert bool(service_mod.grounded_in_user(x, said).loops) is kept
