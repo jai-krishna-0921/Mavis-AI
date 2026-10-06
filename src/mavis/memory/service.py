@@ -19,6 +19,7 @@ from mavis.memory.dates import apply_relative_day
 from mavis.memory.embeddings import Embedder, get_embedder
 from mavis.memory.extractor import extract
 from mavis.memory.graph import GraphStore, make_graph
+from mavis.memory.names import is_user
 from mavis.memory.recall import LoopsReader
 from mavis.memory.resolver import resolve
 from mavis.memory.spotter import SpotterCache
@@ -70,30 +71,45 @@ def _grounded(title: str, entities: list[str], said: str) -> bool:
     """The item names something the user actually said: a person it involves, or an identifying word of
     its title (exact, or sharing a stem of at least _GROUNDING_STEM letters). Function words, times and
     dates are not identifying (loops_repo.title_tokens), nor is the leading action word."""
-    low = said.casefold()
-    if any(e.strip() and e.strip().casefold() in low for e in entities):
+    if any(e.strip() and _named(e, said) for e in entities):
         return True
-    words = set(_WORD.findall(low))
     tokens = loops_repo.title_tokens(title)
     # An item title leads with its action ("Call Ravi about the lease", "Renew passport"): the action word
     # is shared by many items and does not say which one. What identifies it is the rest (its object,
     # the people, the topic); a one-word title is identified by that word.
-    identifying = tokens[1:] or tokens
-    for t in identifying:
-        for w in words:
-            if t == w or (min(len(t), len(w)) >= _GROUNDING_STEM and (t.startswith(w) or w.startswith(t))):
-                return True
-    return False
+    return _words_match(tokens[1:] or tokens, said)
+
+
+def _words_match(tokens: list[str], said: str) -> bool:
+    words = set(_WORD.findall(said.casefold()))
+    return any(t == w or (min(len(t), len(w)) >= _GROUNDING_STEM and (t.startswith(w) or w.startswith(t)))
+               for t in tokens for w in words)
+
+
+def _named(name: str, said: str) -> bool:
+    """The user's words name this entity: the user themself, the full name, or one of its name words
+    ("Ravi" names "Ravi Menon")."""
+    if is_user(name) or (name.strip() and name.strip().casefold() in said.casefold()):
+        return True
+    return _words_match([w for w in _WORD.findall(name.casefold()) if len(w) >= 3], said)
 
 
 def grounded_in_user(x: Extraction, said: str) -> Extraction:
-    """Drop loops and events the user never mentioned (lifted from the assistant context)."""
+    """Keep only what the user's own words support (T3, I5). Anything lifted from the assistant context
+    is dropped: loops and events, entities the user never named, relations whose every non-user side
+    the user did not name, and profile updates whose value the user did not say."""
     loops = [lp for lp in x.loops if _grounded(lp.title, lp.entities, said)]
     events = [ev for ev in x.events if _grounded(ev.title, ev.with_people, said)]
-    if len(loops) < len(x.loops) or len(events) < len(x.events):
-        log.info("memory.ungrounded_items_dropped", loops=len(x.loops) - len(loops),
-                 events=len(x.events) - len(events))
-    return x.model_copy(update={"loops": loops, "events": events})
+    entities = [e for e in x.entities if _named(e.name, said)]
+    relations = [r for r in x.relations if _named(r.subject, said) and _named(r.object, said)]
+    profile = [u for u in x.profile_updates if _words_match(loops_repo.title_tokens(u.value), said)]
+    dropped = {"loops": len(x.loops) - len(loops), "events": len(x.events) - len(events),
+               "entities": len(x.entities) - len(entities), "relations": len(x.relations) - len(relations),
+               "profile_updates": len(x.profile_updates) - len(profile)}
+    if any(dropped.values()):
+        log.info("memory.ungrounded_items_dropped", **dropped)
+    return x.model_copy(update={"loops": loops, "events": events, "entities": entities,
+                                "relations": relations, "profile_updates": profile})
 
 
 def user_message_of(text: str) -> str:
