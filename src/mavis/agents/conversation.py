@@ -69,8 +69,9 @@ log = structlog.get_logger(__name__)
 # What the turn did, for Phase 7 metrics: SMALL_TALK, DIRECT_TOOL, TASK, CONNECT or APPROVAL_REPLY.
 current_route: ContextVar[str | None] = ContextVar("current_route", default=None)
 
-CHAT_TOOL_LIMIT = 8
-CHAT_ALWAYS = ("start_task", "connect_account", "pending", "web_search")  # each only when available
+CHAT_TOOL_LIMIT = 10
+# each only when available; track_loop and wake_me carry agreements and reminders (LEARN does not)
+CHAT_ALWAYS = ("start_task", "connect_account", "pending", "web_search", "track_loop", "wake_me")
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
 # Offered together: mail_search returns short previews only, so without mail_read a question about an
 # email (one a brief mentioned, say) cannot be answered from its text; mail_read needs search's ids.
@@ -102,6 +103,9 @@ TOOL_RULES = (
     "for their OK. When a tool answers QUEUED_FOR_APPROVAL, tell them it's ready and waiting for their "
     "OK (they get buttons to approve, edit or cancel). Never say it was sent or done.\n"
     "- Reminders: wake_me at the exact time they asked for.\n"
+    "- When they agree to something you suggested (\"yes\", \"do that\", \"the second one\") or ask you "
+    "to remember or remind them of something, call track_loop or wake_me in this same turn with the "
+    "concrete item from the conversation, written out in full. Nothing else saves it for them.\n"
     "- For any question about what is pending, open, due, on their radar or left to do, call pending and "
     "answer only from its result. Your earlier messages and the conversation summary may be outdated: "
     "they are claims, not facts.\n"

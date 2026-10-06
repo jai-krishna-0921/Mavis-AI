@@ -26,9 +26,9 @@ Rules:
 - Keep only things likely to matter later: people and how they relate to the user, work/study, goals,
   preferences, struggles, plans, commitments, things the user is waiting on, worries.
 - In a chat turn, only lines starting "User: " are a source: everything you extract must come from the
-  user's own words. Text inside <assistant_context> is the assistant's earlier reply, included only to
-  resolve references ("the second one", "that time"). Never extract loops, events, facts or profile
-  updates from it, even when the user acknowledges it ("ok", "thanks").
+  user's own words. Text inside <assistant_context> is the assistant's earlier reply, shown only so the
+  user's words make sense. Never extract loops, events, facts, entities or profile updates from it, even
+  when the user agrees with it or acknowledges it ("yes", "ok", "thanks").
 - Use "User" as the subject for the user themself.
 - Entity labels must be one of: {labels}.
 - Relation types must be one of: {rels}.

@@ -195,7 +195,8 @@ async def known_name(user_id: int) -> str | None:
 
 def learn_text(text: str, previous_reply: str | None, original: str | None) -> str:
     """What LEARN reads for a turn (T3). Only "User: " lines are a source; the previous reply is fenced
-    context for resolving references ("the second one", "that"), never a source of items."""
+    context so the user's words make sense, never a source of items. Agreements to a suggestion ("yes",
+    "the second one") are tracked by the chat turn itself (track_loop / wake_me), not by LEARN."""
     parts = [f"{USER_PREFIX}{original}"] if original else []
     if previous_reply:
         fenced = previous_reply.replace(CONTEXT_OPEN, "(assistant_context)").replace(

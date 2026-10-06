@@ -36,7 +36,7 @@ INIT_RETRY_COOLDOWN_S = 30.0
 USER_PREFIX = "User: "
 LEGACY_ASSISTANT_PREFIX = "Mavis: "  # LEARN text written before T3: the reply as a "Mavis: " line
 CONTEXT_OPEN, CONTEXT_CLOSE = "<assistant_context>", "</assistant_context>"
-CONTEXT_NOTE = "Your previous reply: context only for resolving references. Do not extract items from it."
+CONTEXT_NOTE = "Your previous reply: context only. Do not extract items from it."
 
 
 def user_words_of(text: str) -> str:
@@ -63,24 +63,22 @@ def user_words_of(text: str) -> str:
 
 
 _WORD = re.compile(r"[a-z0-9]+")
-_GROUNDING_STEM = 4  # "submit" grounds "submitting", "remind" grounds "reminder"
-_GENERIC_ACTIONS = frozenset(
-    "call email mail text message send reply respond meet meeting book pay buy get check follow up remind "
-    "reminder review finish do make go take ask tell schedule plan prep prepare block blocked start "
-    "complete see talk discuss sort fix handle look".split()
-)
+_GROUNDING_STEM = 4  # "claims" grounds "claim", "renewal" grounds "renew"
 
 
 def _grounded(title: str, entities: list[str], said: str) -> bool:
     """The item names something the user actually said: a person it involves, or an identifying word of
-    its title (exact, or sharing a stem of at least _GROUNDING_STEM letters)."""
+    its title (exact, or sharing a stem of at least _GROUNDING_STEM letters). Function words, times and
+    dates are not identifying (loops_repo.title_tokens), nor is the leading action word."""
     low = said.casefold()
     if any(e.strip() and e.strip().casefold() in low for e in entities):
         return True
     words = set(_WORD.findall(low))
     tokens = loops_repo.title_tokens(title)
-    # a shared generic action ("call", "send") does not say which item: match what identifies it
-    identifying = [t for t in tokens if t not in _GENERIC_ACTIONS] or tokens
+    # An item title leads with its action ("Call Ravi about the lease", "Renew passport"): the action word
+    # is shared by many items and does not say which one. What identifies it is the rest (its object,
+    # the people, the topic); a one-word title is identified by that word.
+    identifying = tokens[1:] or tokens
     for t in identifying:
         for w in words:
             if t == w or (min(len(t), len(w)) >= _GROUNDING_STEM and (t.startswith(w) or w.startswith(t))):
