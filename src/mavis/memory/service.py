@@ -13,6 +13,7 @@ from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.events import Provenance, Trust
 from mavis.domain.memory import Extraction, RecallContext
+from mavis.domain.reldate import absolutize
 from mavis.memory import recall as recall_mod
 from mavis.memory.dates import apply_relative_day
 from mavis.memory.embeddings import Embedder, get_embedder
@@ -32,6 +33,12 @@ MIN_EPISODE_WORDS = 4
 RECALL_TOTAL_TIMEOUT_S = 1.5
 INIT_RETRY_COOLDOWN_S = 30.0
 USER_PREFIX = "User: "
+
+
+def absolutize_titles(x: Extraction, anchor: datetime, tz: str) -> Extraction:
+    loops = [lp.model_copy(update={"title": absolutize(lp.title, anchor, tz)}) for lp in x.loops]
+    events = [ev.model_copy(update={"title": absolutize(ev.title, anchor, tz)}) for ev in x.events]
+    return x.model_copy(update={"loops": loops, "events": events})
 
 
 def user_message_of(text: str) -> str:
@@ -146,6 +153,8 @@ class MemoryService:
             extraction = extraction.model_copy(update={"mood": None})
         if trust is Trust.USER:  # the model sometimes misreads "by Tuesday": fix the plain cases in code
             extraction = apply_relative_day(extraction, user_message_of(text), anchor, user.timezone)
+        # stored titles are time-neutral (T2): relative dates resolve against when the text was written
+        extraction = absolutize_titles(extraction, anchor, user.timezone)
 
         resolution = await resolve(extraction, await self.graph.entities(user_id), self.embedder)
         trusted = trust is Trust.USER
