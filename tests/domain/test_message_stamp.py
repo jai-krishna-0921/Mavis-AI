@@ -72,7 +72,11 @@ def test_stamped_prefixes_and_strip_only_removes_leading_stamps() -> None:
     now = at(IST, 2026, 10, 6, 10, 0)
     text = stamped("lunch tomorrow?", at(IST, 2026, 10, 3, 12, 0), now, IST)
     assert text == "[3 days ago, Sat 3 Oct 12:00] lunch tomorrow?"
-    # an echoed stamp at the start of a reply (or of a bubble) is removed; brackets elsewhere stay
+    # an echoed stamp is removed wherever it appears; other brackets stay
     assert strip_stamps("[just now] Sure thing.\n[earlier today 09:12] Done") == "Sure thing.\nDone"
+    assert strip_stamps("You said [2 days ago, Sun 4 Oct 15:46] that it was tomorrow.") == (
+        "You said that it was tomorrow.")
+    assert strip_stamps("Done ([yesterday, Mon 5 Oct 22:00]).") == "Done ()."
+    assert strip_stamps("Noted [earlier today 09:12]") == "Noted"
     assert strip_stamps("See [1] and [the doc]") == "See [1] and [the doc]"
     assert re.match(r"\[", strip_stamps("[1] first source")) is not None
