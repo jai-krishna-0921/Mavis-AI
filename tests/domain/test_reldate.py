@@ -1,7 +1,8 @@
 """T2: stored titles are time-neutral. One language-level resolver rewrites relative date expressions
 against the moment the text was written, in the user's zone. Expressions it cannot resolve without a
-guess are kept and the text is marked with when it was said. Varied phrasings, anchors across zones,
-year boundaries, idempotence, and text without relative words left alone."""
+guess, and anything that is not plainly temporal usage (names, quotes, glued tokens), stay unchanged.
+Varied phrasings, anchors across zones, year boundaries, DST changes, idempotence, and text without
+relative words left alone."""
 
 from __future__ import annotations
 
@@ -56,7 +57,12 @@ AT_SAT = [
     ("Book flights the week after next", "Book flights week of 12 Oct"),
     ("Text Meera 3 weeks from now", "Text Meera on Sat 24 Oct"),
     ("Sleep early last night was rough", "Sleep early Fri 2 Oct night was rough"),
-    ("TOMORROW: call the bank", "Sun 4 Oct: call the bank"),
+    ("Lunch on friday", "Lunch on Fri 9 Oct"),
+    ("By Monday send the report", "By Mon 5 Oct send the report"),
+    ("Call Sam on Friday at 3pm", "Call Sam on Fri 9 Oct at 3pm"),
+    ("Pay the deposit before Thursday", "Pay the deposit before Thu 8 Oct"),
+    ("Watch the match at the weekend", "Watch the match at weekend of Sat 3 Oct"),
+    ("Today show tickets, buy them today", "Today show tickets, buy them Sat 3 Oct"),
     ("Visa appointment in two days' time", "Visa appointment on Mon 5 Oct"),
     ("Call the plumber in 2 days time", "Call the plumber on Mon 5 Oct"),
     ("Dinner the coming Wednesday", "Dinner Wed 7 Oct"),
@@ -85,6 +91,25 @@ UNCHANGED = [
     "Offsite week of 12 Oct",
     "Budget Oct 2026",
     "Weekends are for family",
+    # proper nouns, titles, quotes and glued tokens are never rewritten
+    "Watch the Today show",
+    "Black Friday deals",
+    "Shop on Black Friday",
+    "Read the Sunday Times",
+    "Cancel the Monday.com trial",
+    "Wednesday Addams costume",
+    "Rewatch The Day After Tomorrow",
+    "Dinner Friday the 9th",
+    "Party on Friday the 13th",
+    "Plan a weekend getaway",
+    "Weekend Update sketch",
+    'Reply to the "see you tomorrow" email',
+    "Play 'Friday I'm in Love' at the party",
+    "Run the `today` command",
+    "Ask about the tomorrow-ready build",
+    "TOMORROW: call the bank",
+    "Today: call the bank",
+    "Thursday Murthy's birthday",
     "Hear back in a day or two",
     "Reply in a few days",
 ]
@@ -98,28 +123,27 @@ def test_text_without_relative_words_is_unchanged(text) -> None:
 
 
 AMBIGUOUS = [
-    # said on a Saturday: "Saturday" could be today or next week
-    ("Call Tom on Saturday", "Call Tom on Saturday (said Sat 3 Oct 18:48)"),
-    # "next Tuesday" means different days to different people
-    ("Lunch next Tuesday", "Lunch next Tuesday (said Sat 3 Oct 18:48)"),
-    ("Movie next Fri with Sam", "Movie next Fri with Sam (said Sat 3 Oct 18:48)"),
+    # two common readings: kept exactly as written, with no marker
+    ("Call Tom on Saturday", "Call Tom on Saturday"),       # said on a Saturday: today or next week
+    ("Lunch next Tuesday", "Lunch next Tuesday"),
+    ("Movie next Fri with Sam", "Movie next Fri with Sam"),
 ]
 
 
 @pytest.mark.parametrize(("text", "expected"), AMBIGUOUS)
-def test_ambiguous_expressions_are_kept_and_marked_with_when_they_were_said(text, expected) -> None:
+def test_ambiguous_expressions_are_kept_unchanged(text, expected) -> None:
     assert absolutize(text, at(LON, *SAT), LON) == expected
 
 
 def test_resolvable_parts_still_resolve_next_to_an_ambiguous_one() -> None:
     out = absolutize("Prep tomorrow for lunch next Tuesday", at(NYC, *SAT), NYC)
-    assert out == "Prep Sun 4 Oct for lunch next Tuesday (said Sat 3 Oct 18:48)"
+    assert out == "Prep Sun 4 Oct for lunch next Tuesday"
 
 
 @pytest.mark.parametrize("tz", ZONES)
 def test_just_past_midnight_tomorrow_is_ambiguous_but_tonight_is_not(tz) -> None:
     anchor = at(tz, 2026, 10, 4, 1, 30)  # Sunday 01:30
-    assert absolutize("Call the bank tomorrow", anchor, tz) == "Call the bank tomorrow (said Sun 4 Oct 01:30)"
+    assert absolutize("Call the bank tomorrow", anchor, tz) == "Call the bank tomorrow"
     assert absolutize("Gym tonight", anchor, tz) == "Gym Sun 4 Oct evening"
 
 
@@ -128,7 +152,7 @@ def test_one_instant_resolves_by_each_users_local_day() -> None:
     assert absolutize("Gym tomorrow", instant, NYC) == "Gym Sun 4 Oct"        # Sat 16:00
     assert absolutize("Gym tomorrow", instant, LON) == "Gym Sun 4 Oct"        # Sat 21:00
     assert absolutize("Gym tomorrow", instant, AKL) == "Gym Mon 5 Oct"        # Sun 09:00
-    assert absolutize("Gym tomorrow", instant, IST) == "Gym tomorrow (said Sun 4 Oct 01:30)"  # 01:30
+    assert absolutize("Gym tomorrow", instant, IST) == "Gym tomorrow"  # 01:30: two readings
 
 
 @pytest.mark.parametrize(("text", "expected"), [
@@ -149,9 +173,9 @@ def test_year_boundary(text, expected) -> None:
     ((2026, 10, 7, 9, 0), "Hike this weekend", "Hike weekend of Sat 10 Oct"),        # Wednesday
     ((2026, 10, 4, 9, 0), "Hike this weekend", "Hike weekend of Sat 3 Oct"),         # Sunday
     ((2026, 10, 4, 9, 0), "Hike next weekend", "Hike weekend of Sat 10 Oct"),        # Sunday
-    ((2026, 10, 7, 9, 0), "Hike next weekend", "Hike next weekend (said Wed 7 Oct 09:00)"),
+    ((2026, 10, 7, 9, 0), "Hike next weekend", "Hike next weekend"),
     ((2026, 10, 5, 9, 0), "Photos from last weekend", "Photos from weekend of Sat 3 Oct"),
-    ((2026, 10, 7, 9, 0), "Call on Wednesday", "Call on Wednesday (said Wed 7 Oct 09:00)"),
+    ((2026, 10, 7, 9, 0), "Call on Wednesday", "Call on Wednesday"),
     ((2026, 10, 7, 9, 0), "Call this Wednesday", "Call Wed 7 Oct"),
     ((2026, 10, 7, 9, 0), "Notes from last Wednesday", "Notes from Wed 30 Sep"),
 ])
@@ -160,12 +184,35 @@ def test_weeks_weekends_and_same_weekday(weekday_anchor, text, expected) -> None
 
 
 @pytest.mark.parametrize("tz", ZONES)
-@pytest.mark.parametrize("text", [t for t, _ in AT_SAT + AMBIGUOUS] + UNCHANGED)
+@pytest.mark.parametrize("text", [t for t, _ in AT_SAT] + UNCHANGED)
 def test_idempotent_under_any_later_anchor(text, tz) -> None:
     once = absolutize(text, at(tz, *SAT), tz)
     for later in (at(tz, 2026, 10, 6, 10, 0), at(tz, 2026, 11, 20, 3, 0), at(tz, 2027, 2, 1, 23, 0)):
-        assert absolutize(once, later, tz) == once
-    assert has_relative(once) is False or "(said " in once
+        if text not in {t for t, _ in AMBIGUOUS}:
+            assert absolutize(once, later, tz) == once
+    assert absolutize(once, at(tz, *SAT), tz) == once
+
+
+@pytest.mark.parametrize(("tz", "anchor", "text", "expected"), [
+    # New York falls back on 1 Nov 2026: 00:30 EDT plus two real hours is 01:30 EST, not 02:30
+    (NYC, datetime(2026, 11, 1, 4, 30, tzinfo=UTC), "Call back in 2 hours",
+     "Call back at 01:30 on Sun 1 Nov"),
+    # London springs forward on 28 Mar 2027: 00:30 GMT plus one hour is 02:30 BST
+    (LON, datetime(2027, 3, 28, 0, 30, tzinfo=UTC), "Check in 1 hour", "Check at 02:30 on Sun 28 Mar"),
+    (LON, datetime(2027, 3, 28, 0, 30, tzinfo=UTC), "Ping 90 minutes from now",
+     "Ping at 03:00 on Sun 28 Mar"),
+    # Auckland moves forward on 27 Sep 2026 at 02:00 NZST
+    (AKL, datetime(2026, 9, 26, 13, 30, tzinfo=UTC), "Feed the cat in 1 hour",
+     "Feed the cat at 03:30 on Sun 27 Sep"),
+])
+def test_hour_offsets_are_dst_correct(tz, anchor, text, expected) -> None:
+    assert absolutize(text, anchor, tz) == expected
+
+
+def test_no_said_marker_is_ever_added() -> None:
+    for text, _ in AT_SAT + AMBIGUOUS:
+        for anchor in (at(IST, *SAT), at(IST, 2026, 10, 4, 1, 30)):
+            assert "(said" not in absolutize(text, anchor, IST)
 
 
 def test_output_has_no_em_or_en_dashes() -> None:
