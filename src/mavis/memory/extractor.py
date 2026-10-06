@@ -32,6 +32,8 @@ Rules:
   the date stated next to an item (an email's received date) if there is one, else the time the text was
   written above. Output ISO-8601 WITH the user's UTC offset. If the day is ambiguous (e.g. "tomorrow"
   said between 00:00 and 04:59 local), set ambiguous=true and starts_at=null.
+- Titles of loops and events are read days later, so write absolute dates in them ("Sun 4 Oct",
+  "week of 12 Oct"), never relative words like today, tomorrow, tonight or next week.
 - loops.kind is one of COMMITMENT, WAITING_ON, GOAL, CONCERN, ROUTINE, WATCH.
 - profile_updates only for stable traits (name, timezone, tone, goals, key_people, routines, dislikes).
 - mood: one word, only if clearly expressed by the user.

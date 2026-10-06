@@ -12,11 +12,13 @@ import structlog
 from sqlalchemy.exc import NoResultFound
 
 from mavis.bus.base import EventBus
+from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, Provenance, Trust
 from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.memory import Extraction
 from mavis.domain.messages import Role
+from mavis.domain.reldate import absolutize
 from mavis.store.repo import loops as repo
 from mavis.store.repo import messages, users
 from mavis.worker.locks import lock
@@ -37,7 +39,12 @@ class LoopService:
     def __init__(self, bus: EventBus) -> None:
         self._bus = bus
 
-    async def upsert(self, user_id: int, data: LoopUpsert) -> Loop:
+    async def upsert(self, user_id: int, data: LoopUpsert, *, anchor_at: datetime | None = None) -> Loop:
+        """`anchor_at`: when the text the title came from was written (default: now, the writer's own
+        time). Relative dates in the title resolve against it (T2), so a stored title stays true later."""
+        if data.title:
+            title = absolutize(data.title, anchor_at or timeutil.now(), await _timezone(user_id))
+            data = data.model_copy(update={"title": title})
         # Distinct key from `user:{id}`: turn hooks already hold that one, so this cannot self-deadlock.
         async with lock(f"loops:{user_id}"):
             changed = False
@@ -146,6 +153,13 @@ class LoopService:
             trust=Trust.SYSTEM if loop.trusted else Trust.UNTRUSTED,
         )
         await self._bus.publish(event)
+
+
+async def _timezone(user_id: int) -> str:
+    try:
+        return (await users.get(user_id)).timezone or get_settings().default_timezone
+    except NoResultFound:
+        return get_settings().default_timezone
 
 
 async def _proactive_reply_anchor(user_id: int) -> datetime | None:
