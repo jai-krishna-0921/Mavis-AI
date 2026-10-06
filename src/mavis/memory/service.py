@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -23,6 +24,7 @@ from mavis.memory.recall import LoopsReader
 from mavis.memory.resolver import resolve
 from mavis.memory.spotter import SpotterCache
 from mavis.memory.vector import QdrantVectorStore, VectorStore
+from mavis.store.repo import loops as loops_repo
 from mavis.store.repo import profile as profile_repo
 from mavis.store.repo import users
 
@@ -33,6 +35,68 @@ MIN_EPISODE_WORDS = 4
 RECALL_TOTAL_TIMEOUT_S = 1.5
 INIT_RETRY_COOLDOWN_S = 30.0
 USER_PREFIX = "User: "
+LEGACY_ASSISTANT_PREFIX = "Mavis: "  # LEARN text written before T3: the reply as a "Mavis: " line
+CONTEXT_OPEN, CONTEXT_CLOSE = "<assistant_context>", "</assistant_context>"
+CONTEXT_NOTE = "Your previous reply: context only for resolving references. Do not extract items from it."
+
+
+def user_words_of(text: str) -> str:
+    """Every "User: " segment of a LEARN text, joined: the only source of loops and events (T3). The fenced
+    assistant context and legacy "Mavis: " lines are skipped. Text without any marker is all the user's."""
+    if USER_PREFIX not in text and CONTEXT_OPEN not in text and not text.startswith(LEGACY_ASSISTANT_PREFIX):
+        return text.strip()
+    segments: list[list[str]] = []
+    in_context = in_user = False
+    for line in text.split("\n"):
+        if in_context:
+            in_context = line.strip() != CONTEXT_CLOSE
+            continue
+        if line.startswith(CONTEXT_OPEN):
+            in_context, in_user = True, False
+        elif line.startswith(USER_PREFIX):
+            segments.append([line[len(USER_PREFIX):]])
+            in_user = True
+        elif line.startswith(LEGACY_ASSISTANT_PREFIX):
+            in_user = False
+        elif in_user:
+            segments[-1].append(line)
+    return "\n".join("\n".join(seg).strip() for seg in segments).strip()
+
+
+_WORD = re.compile(r"[a-z0-9]+")
+_GROUNDING_STEM = 4  # "submit" grounds "submitting", "remind" grounds "reminder"
+_GENERIC_ACTIONS = frozenset(
+    "call email mail text message send reply respond meet meeting book pay buy get check follow up remind "
+    "reminder review finish do make go take ask tell schedule plan prep prepare block blocked start "
+    "complete see talk discuss sort fix handle look".split()
+)
+
+
+def _grounded(title: str, entities: list[str], said: str) -> bool:
+    """The item names something the user actually said: a person it involves, or an identifying word of
+    its title (exact, or sharing a stem of at least _GROUNDING_STEM letters)."""
+    low = said.casefold()
+    if any(e.strip() and e.strip().casefold() in low for e in entities):
+        return True
+    words = set(_WORD.findall(low))
+    tokens = loops_repo.title_tokens(title)
+    # a shared generic action ("call", "send") does not say which item: match what identifies it
+    identifying = [t for t in tokens if t not in _GENERIC_ACTIONS] or tokens
+    for t in identifying:
+        for w in words:
+            if t == w or (min(len(t), len(w)) >= _GROUNDING_STEM and (t.startswith(w) or w.startswith(t))):
+                return True
+    return False
+
+
+def grounded_in_user(x: Extraction, said: str) -> Extraction:
+    """Drop loops and events the user never mentioned (lifted from the assistant context)."""
+    loops = [lp for lp in x.loops if _grounded(lp.title, lp.entities, said)]
+    events = [ev for ev in x.events if _grounded(ev.title, ev.with_people, said)]
+    if len(loops) < len(x.loops) or len(events) < len(x.events):
+        log.info("memory.ungrounded_items_dropped", loops=len(x.loops) - len(loops),
+                 events=len(x.events) - len(events))
+    return x.model_copy(update={"loops": loops, "events": events})
 
 
 def absolutize_titles(x: Extraction, anchor: datetime, tz: str) -> Extraction:
@@ -153,6 +217,9 @@ class MemoryService:
             extraction = extraction.model_copy(update={"mood": None})
         if trust is Trust.USER:  # the model sometimes misreads "by Tuesday": fix the plain cases in code
             extraction = apply_relative_day(extraction, user_message_of(text), anchor, user.timezone)
+        said = user_words_of(text)
+        if conversation and said != text.strip():  # an assistant reply was included as context (T3)
+            extraction = grounded_in_user(extraction, said)
         # stored titles are time-neutral (T2): relative dates resolve against when the text was written
         extraction = absolutize_titles(extraction, anchor, user.timezone)
 
