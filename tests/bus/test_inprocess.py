@@ -1,15 +1,15 @@
 import asyncio
-from datetime import UTC, datetime
 
 import pytest
 
 from mavis.bus.inprocess import InProcessBus
+from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, Job, JobKind
 
 
 def ev(event_id: str, user_id: int = 1) -> Event:
     return Event(id=event_id, user_id=user_id, type=EventType.USER_MESSAGE,
-                 occurred_at=datetime.now(UTC), source="test")
+                 occurred_at=timeutil.now(), source="test")
 
 
 async def test_duplicate_event_processed_once() -> None:

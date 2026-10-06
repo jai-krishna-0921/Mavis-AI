@@ -1,10 +1,10 @@
-from datetime import UTC, datetime
 
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from mavis.agents.simple_turn import run_turn
 from mavis.channels.outbox_sender import OutboxSender
+from mavis.domain import timeutil
 from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.messages import Outbound, Role
@@ -13,7 +13,7 @@ from mavis.store.repo import messages, outbox, users
 
 
 def msg_event(user_id: int, text: str, event_id: str = "tg:update:1", **payload) -> Event:
-    return Event(id=event_id, user_id=user_id, type=EventType.USER_MESSAGE, occurred_at=datetime.now(UTC),
+    return Event(id=event_id, user_id=user_id, type=EventType.USER_MESSAGE, occurred_at=timeutil.now(),
                  source="telegram", payload={"text": text, **payload}, trust=Trust.USER)
 
 

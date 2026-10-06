@@ -17,6 +17,7 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mavis.config import get_settings
+from mavis.domain import timeutil
 from mavis.domain.memory import SINGLE_VALUED_RELS, Entity, Relation
 from mavis.memory.names import USER_KEY, is_user, node_key, normalize_name, sanitize_label, sanitize_rel
 from mavis.store import db as dbm
@@ -35,7 +36,7 @@ class GraphStore(Protocol):
 
 
 def _now() -> datetime:
-    return datetime.now(UTC)
+    return timeutil.now()  # the injectable clock: recency decay follows moved time in tests and demos
 
 
 def edge_score(confidence: float, valid_from: datetime, now: datetime) -> float:
