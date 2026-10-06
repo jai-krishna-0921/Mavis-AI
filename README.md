@@ -100,7 +100,12 @@ In production set `ENV=prod` and list your Telegram chat id in `ALLOWED_TELEGRAM
 ```bash
 uv run pytest -q          # full test suite (no network calls, models are faked)
 uv run ruff check src tests
+scripts/test_clock_matrix.sh   # the suite at several clock starts (quiet hours, midnight, weekend, DST)
 ```
+
+Tests never read the wall clock: every test runs on the project clock, pinned to a fixed start that ticks
+with real time. `MAVIS_TEST_NOW=2026-10-06T23:30:00+05:30 uv run pytest -q` runs the suite from another
+start, and `scripts/test_clock_matrix.sh` runs it from each start CI should cover.
 
 Project layout:
 
