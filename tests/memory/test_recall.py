@@ -62,6 +62,10 @@ class _Vector:
     async def search_with_kind(self, user_id, query, k=6, min_score=0.35):
         return [(text, "episode") for text in await self.search(user_id, query, k, min_score)]
 
+    async def search_hits(self, user_id, query, k=6, min_score=0.35):
+        hits = await self.search_with_kind(user_id, query, k, min_score)
+        return [(text, kind, None) for text, kind in hits]
+
     async def search(self, user_id, query, k=6, min_score=0.35):
         if self.fail:
             raise RuntimeError("qdrant down")
