@@ -8,6 +8,7 @@ from mavis.channels.outbox_sender import OutboxSender
 from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.messages import Outbound, Role
+from mavis.domain.timefmt import strip_stamps
 from mavis.store.repo import messages, outbox, users
 
 
@@ -40,8 +41,9 @@ async def test_history_is_included(db, channel, fake_llm, memory, bus) -> None:
     await run_turn(msg_event(user.id, "my friend Jawahar is helping me", "e1"))
     fake_llm.push_text("Jawahar!")
     await run_turn(msg_event(user.id, "who's helping me?", "e2"))
-    contents = [m.content for m in fake_llm.calls[-1][1:]]
+    contents = [strip_stamps(m.content) for m in fake_llm.calls[-1][1:]]
     assert contents == ["my friend Jawahar is helping me", "Noted.", "who's helping me?"]
+    assert fake_llm.calls[-1][1].content.startswith("[just now] ")  # replayed history is stamped (T1)
 
 
 async def test_start_command_adds_greeting_hint(db, channel, fake_llm, memory, bus) -> None:

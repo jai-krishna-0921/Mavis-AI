@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -18,6 +18,7 @@ from mavis.bus import get_bus
 from mavis.domain import timeutil
 from mavis.domain.events import Event, Job, JobKind, Trust
 from mavis.domain.messages import TAINT_SUFFIX, Role, tainted_event_id
+from mavis.domain.timefmt import message_stamp, stamped
 from mavis.initiative import wiring
 from mavis.llm.models import INTERACTIVE_GRACE_S
 from mavis.memory.service import get_memory
@@ -58,11 +59,21 @@ def user_text(event: Event) -> str:
     return text
 
 
-def to_langchain(history: list[Message]) -> list[BaseMessage]:
-    return [HumanMessage(m.content) if m.role == Role.USER.value else AIMessage(m.content) for m in history]
+def to_langchain(history: list[Message], now: datetime, tz: str) -> list[BaseMessage]:
+    """Replay stored messages to the model, each stamped relative to `now` in the user's zone (T1), so
+    "tomorrow" in a two-day-old message is not read as tomorrow. The last message is the one being
+    answered when it is the user's: it is not stamped."""
+    out: list[BaseMessage] = []
+    for i, m in enumerate(history):
+        current = i == len(history) - 1 and m.role == Role.USER.value
+        text = m.content if current else stamped(m.content, m.created_at, now, tz)
+        out.append(HumanMessage(text) if m.role == Role.USER.value else AIMessage(text))
+    return out
 
 
-async def build_context_ex(user_id: int, text: str, hint: str = "") -> tuple[str, bool]:
+async def build_context_ex(
+    user_id: int, text: str, hint: str = "", *, tz: str | None = None
+) -> tuple[str, bool]:
     """Hint + rolling summary + recalled memory + hook context for the system prompt. Never raises.
 
     The bool is True when hook context (the inbox digest, ...) was included. That block is derived from
@@ -73,7 +84,10 @@ async def build_context_ex(user_id: int, text: str, hint: str = "") -> tuple[str
         memory = get_memory()
         recall, summary = await asyncio.gather(memory.recall(user_id, text), summaries_repo.latest(user_id))
         if summary:
-            parts.append(f"## Earlier in our conversation\n{summary.summary}")
+            # when it was written: relative words in an older summary are relative to that moment
+            written = (f" (summary written {message_stamp(summary.created_at, timeutil.now(), tz)[1:-1]})"
+                       if tz else "")
+            parts.append(f"## Earlier in our conversation{written}\n{summary.summary}")
         parts.append(recall.render())
     except Exception:
         log.warning("simple_turn.recall_failed", exc_info=True)
@@ -83,8 +97,8 @@ async def build_context_ex(user_id: int, text: str, hint: str = "") -> tuple[str
     return "\n\n".join(p for p in parts if p.strip()), bool(extra.strip())
 
 
-async def build_context(user_id: int, text: str, hint: str = "") -> str:
-    return (await build_context_ex(user_id, text, hint))[0]
+async def build_context(user_id: int, text: str, hint: str = "", *, tz: str | None = None) -> str:
+    return (await build_context_ex(user_id, text, hint, tz=tz))[0]
 
 
 # TAINT_SUFFIX (domain.messages): a reply written after the model read untrusted tool output is logged

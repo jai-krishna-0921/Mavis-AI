@@ -55,6 +55,7 @@ from mavis.domain.errors import ConnectionRequired
 from mavis.domain.events import Event
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.tasks import ApprovalStatus, TaskKind, TaskOrigin
+from mavis.domain.timefmt import strip_stamps
 from mavis.llm import models as llm
 from mavis.policy import approvals as approval_flow
 from mavis.policy.risk import UNTRUSTED_NOTE
@@ -361,7 +362,8 @@ async def run_turn(event: Event) -> None:
         hint = RESTART_HINT if recent_assistant else START_HINT
     async with presence.typing(user.telegram_chat_id):  # refreshed until the reply is queued
         (context, hooked), connections, card_name = await asyncio.gather(
-            build_context_ex(user.id, text, hint), connection_states(user.id), known_name(user.id)
+            build_context_ex(user.id, text, hint, tz=user.timezone), connection_states(user.id),
+            known_name(user.id),
         )
         # Start tainted when third-party content is already in the prompt: any replayed assistant message
         # was written from it, or hook context (the inbox digest) was added. The react loop then applies
@@ -381,7 +383,7 @@ async def run_turn(event: Event) -> None:
         if tools:
             system = f"{system}\n\n{TOOL_RULES}"
         prompt: list[BaseMessage] = [SystemMessage(system)]
-        prompt += to_langchain(history)
+        prompt += to_langchain(history, now, user.timezone)
 
         connect_texts: list[str] = []
         token = current_turn.set(TurnInfo(event_id=event.id))
@@ -412,7 +414,8 @@ async def run_turn(event: Event) -> None:
             log.info("simple_turn.tools", tools=result.tools_called, steps=result.steps,
                      tainted=result.tainted, wrapped_up=result.wrapped_up,
                      queued=result.queued_approvals)
-        reply = result.text or WRAP_UP_FALLBACK
+        # replayed messages carry stamps (T1); one echoed at the start of a line is not content
+        reply = strip_stamps(result.text or "").strip() or WRAP_UP_FALLBACK
         bubbles = persona.split_bubbles(reply) or [reply]
 
         async with Session() as s:
