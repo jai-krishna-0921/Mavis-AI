@@ -21,7 +21,7 @@ from mavis.domain.messages import TAINT_SUFFIX, Role, tainted_event_id
 from mavis.domain.timefmt import message_stamp, stamped
 from mavis.initiative import wiring
 from mavis.llm.models import INTERACTIVE_GRACE_S
-from mavis.memory.service import get_memory
+from mavis.memory.service import CONTEXT_CLOSE, CONTEXT_NOTE, CONTEXT_OPEN, USER_PREFIX, get_memory
 from mavis.store.models import Message
 from mavis.store.repo import profile as profile_repo
 from mavis.store.repo import summaries as summaries_repo
@@ -193,15 +193,26 @@ async def known_name(user_id: int) -> str | None:
         return None
 
 
+def learn_text(text: str, previous_reply: str | None, original: str | None) -> str:
+    """What LEARN reads for a turn (T3). Only "User: " lines are a source; the previous reply is fenced
+    context for resolving references ("the second one", "that"), never a source of items."""
+    parts = [f"{USER_PREFIX}{original}"] if original else []
+    if previous_reply:
+        fenced = previous_reply.replace(CONTEXT_OPEN, "(assistant_context)").replace(
+            CONTEXT_CLOSE, "(/assistant_context)")
+        parts += [f"{CONTEXT_OPEN} {CONTEXT_NOTE}", fenced, CONTEXT_CLOSE]
+    if not parts:
+        return text
+    return "\n".join([*parts, f"{USER_PREFIX}{text}"])
+
+
 async def enqueue_learn(
     user_id: int, event: Event, text: str, previous_reply: str | None, original: str | None = None,
     *, tainted: bool = False,
 ) -> None:
     """`tainted`: the turn or the included previous reply saw untrusted tool output: learn as untrusted."""
     trust = Trust.UNTRUSTED.value if tainted else event.trust.value
-    convo = f"Mavis: {previous_reply}\nUser: {text}" if previous_reply else text
-    if original:
-        convo = f"User: {original}\n{convo}"
+    convo = learn_text(text, previous_reply, original)
     # Not before the interactive grace window has passed: until then best_effort LLM work fails fast
     # (the reply's own follow-up calls own the slot), so an immediate LEARN would just be dropped.
     not_before = timeutil.now() + LEARN_DELAY
