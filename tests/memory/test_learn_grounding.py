@@ -172,3 +172,55 @@ def test_the_action_word_alone_does_not_ground_an_item(said, title, kept):
 
     x = Extraction(loops=[LoopDraft(kind="COMMITMENT", title=title)])
     assert bool(service_mod.grounded_in_user(x, said).loops) is kept
+
+
+# --- I5: facts, entities, relations and profile updates are grounded the same way -------------------
+
+
+def _x(**kw):
+    from mavis.domain.memory import Entity, Extraction, ProfileUpdate, Relation  # noqa: F401
+
+    return Extraction(**kw)
+
+
+def test_reply_derived_entities_relations_and_profile_updates_are_dropped():
+    from mavis.domain.memory import Entity, ProfileUpdate, Relation
+
+    x = _x(
+        entities=[Entity(name="Ravi Menon", label="Person"), Entity(name="Siemens", label="Organization"),
+                  Entity(name="User", label="User")],
+        relations=[
+            Relation(subject="Ravi Menon", rel="WORKS_AT", object="Siemens",
+                     statement="Ravi works at Siemens."),
+            Relation(subject="User", rel="FRIEND_OF", object="Ravi Menon", statement="Ravi is a friend."),
+            Relation(subject="User", rel="PREFERS", object="Morning meetings",
+                     statement="Prefers morning meetings."),
+        ],
+        profile_updates=[ProfileUpdate(field="goals", value="Run a marathon"),
+                         ProfileUpdate(field="tone", value="casual")],
+    )
+    out = service_mod.grounded_in_user(x, "ravi is my friend, keep it casual")
+    assert [e.name for e in out.entities] == ["Ravi Menon", "User"]
+    assert [r.statement for r in out.relations] == ["Ravi is a friend."]
+    assert [p.value for p in out.profile_updates] == ["casual"]
+
+
+async def test_learn_keeps_only_user_grounded_facts(memory, user, fake_llm, clock):
+    from mavis.agents.turn_support import learn_text
+    from mavis.domain.memory import Entity, Relation
+
+    clock.set(local(IST, 5, 18, 0))
+    fake_llm.push_structured(_x(
+        entities=[Entity(name="Jawahar", label="Person"), Entity(name="Acme", label="Organization")],
+        relations=[
+            Relation(subject="Jawahar", rel="WORKS_AT", object="Acme", statement="Jawahar works at Acme."),
+            Relation(subject="User", rel="FRIEND_OF", object="Jawahar", statement="Jawahar is Jai's friend."),
+        ],
+    ))
+    reply = "Jawahar works at Acme now, by the way."
+    await memory.learn(user.id, learn_text("cool, jawahar is a good friend", reply, None), "tg:update:40",
+                       Trust.USER, anchor_at=clock.t)
+    statements = [d["statement"] for d in await memory.graph.dump(user.id)]
+    assert statements == ["Jawahar is Jai's friend."]
+    assert {e.name for e in await memory.graph.entities(user.id)} >= {"Jawahar"}
+    assert "Acme" not in {e.name for e in await memory.graph.entities(user.id)}
