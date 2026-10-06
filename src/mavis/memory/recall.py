@@ -10,7 +10,7 @@ from typing import Protocol
 from mavis.domain import timeutil
 from mavis.domain.loops import Loop
 from mavis.domain.memory import RecallContext
-from mavis.domain.timefmt import due_label
+from mavis.domain.timefmt import due_label, stamped
 from mavis.memory.extractor import wrap_untrusted
 from mavis.memory.graph import GraphStore
 from mavis.memory.spotter import SpotterCache
@@ -117,14 +117,18 @@ async def recall(
     async def _graph() -> list[str]:
         return await graph.neighborhood(user_id, names) if names else []
 
+    written: dict[str, datetime] = {}  # recalled text -> when it was written (for its stamp)
+
     async def _episodes() -> list[str]:
-        hits = await vector.search_with_kind(user_id, text)
+        hits = await vector.search_hits(user_id, text)
         # Third-party text (email, etc.) is stored as kind="signal"; it must never reach a prompt raw.
         out = []
-        for t, kind in hits:
+        for t, kind, at in hits:
             if kind == "signal":
                 t = wrap_untrusted(t, source="memory")
                 tainted.add(t)
+            if at is not None:
+                written.setdefault(t, at)
             out.append(t)
         return out
 
@@ -151,6 +155,9 @@ async def recall(
     )
     ctx = assemble(profile, loop_lines, facts, episodes, budget)
     ctx.untrusted = any(item in tainted for item in [*ctx.loops, *ctx.episodes])
+    # A recalled moment is replayed text: stamp it with when it was written (T1), after dedupe/budget.
+    now = timeutil.now()
+    ctx.episodes = [stamped(e, written[e], now, tz) if e in written else e for e in ctx.episodes]
     return ctx
 
 

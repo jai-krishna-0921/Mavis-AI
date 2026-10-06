@@ -158,16 +158,17 @@ class MemoryService:
         if trusted:
             for rel in resolution.relations:
                 await self.graph.upsert_relation(user_id, rel, source_ref=source_ref)
-            await self.vector.add(user_id, facts, kind="fact", source_ref=source_ref)
+            await self.vector.add(user_id, facts, kind="fact", source_ref=source_ref, at=anchor)
             episode = user_message_of(text)
         else:
             # Third-party text: derived facts are signals (wrapped as untrusted in recall); no graph
             # relations, no profile or mood changes.
-            await self.vector.add(user_id, facts, kind="signal", source_ref=source_ref)
+            await self.vector.add(user_id, facts, kind="signal", source_ref=source_ref, at=anchor)
             episode = text
         if len(episode.split()) >= MIN_EPISODE_WORDS:
             await self.vector.add(
-                user_id, [episode[:500]], kind="episode" if trusted else "signal", source_ref=source_ref
+                user_id, [episode[:500]], kind="episode" if trusted else "signal", source_ref=source_ref,
+                at=anchor,
             )
 
         if trusted and extraction.profile_updates:
