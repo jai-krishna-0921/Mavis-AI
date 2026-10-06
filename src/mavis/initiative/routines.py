@@ -32,7 +32,8 @@ MORNING_ROUTINE = "morning_checkin"
 MORNING_TITLE = "Morning check-in"
 EARLIEST, LATEST = 7 * 60, 11 * 60  # learned check-in clamped to 07:00–11:00 local
 LEAD_MINUTES = 30                   # check in shortly before the user usually shows up
-MIN_SAMPLES = 2
+MIN_SAMPLES = 2                     # mornings needed (per weekday/weekend group) before trusting the data
+MORNING_FROM, MORNING_UNTIL = 5 * 60, 12 * 60  # only first messages in 05:00 to 11:59 local count
 MAX_IGNORED = 3  # after three check-ins with no user reply, stop sending until they write again
 
 
@@ -228,9 +229,13 @@ class Routines:
         async with Session() as s:
             stamps = list(await s.scalars(select(Message.created_at).where(
                 Message.user_id == user.id, Message.role == Role.USER.value, Message.created_at >= since)))
+        # Each day's earliest MORNING message: an evening-only day says nothing about when they start
+        # their day, and a message just past midnight belongs to the night before.
         firsts: dict[date, datetime] = {}
         for ts in stamps:
             local = timeutil.to_local(ts, user.timezone)
+            if not MORNING_FROM <= local.hour * 60 + local.minute < MORNING_UNTIL:
+                continue
             if local.date() not in firsts or local < firsts[local.date()]:
                 firsts[local.date()] = local
         minutes = [f.hour * 60 + f.minute for d, f in firsts.items() if (d.weekday() >= 5) == weekend]
