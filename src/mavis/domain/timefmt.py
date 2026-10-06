@@ -8,6 +8,7 @@ item is never presented as upcoming.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -110,3 +111,50 @@ def relative_past(at: datetime, now: datetime, tz: str) -> str:
 
 def due_label(due: datetime | None, now: datetime, tz: str) -> str:
     return relative_due(due, now, tz).label
+
+
+# --- stamps on replayed messages (T1) ----------------------------------------------------------------
+# A replayed message carries no clock of its own, so the model reads "today" in a two-day-old message as
+# today. Every replay prefixes each stored message with this stamp, computed against the clock at replay
+# time in the user's zone. The grammar is closed (STAMP), so an echoed stamp can be stripped from output.
+
+_HHMM = r"\d{2}:\d{2}"
+_DAYNAME = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2} [A-Z][a-z]{2}(?: \d{4})?"
+STAMP = re.compile(
+    rf"\[(?:just now|earlier today {_HHMM}|yesterday, {_DAYNAME} {_HHMM}|\d+ days ago, {_DAYNAME} {_HHMM})\]"
+)
+_LEADING_STAMP = re.compile(rf"^[ \t]*{STAMP.pattern}[ \t]*", re.MULTILINE)
+
+
+def message_stamp(at: datetime, now: datetime, tz: str) -> str:
+    """'[just now]', '[earlier today 09:12]', '[yesterday, Mon 5 Oct 22:00]', '[2 days ago, Sun 4 Oct 15:46]'.
+
+    Days are counted by the user's local calendar, so a message 15 minutes before local midnight is
+    'yesterday'. A time in the future (clock skew) reads as 'just now'."""
+    zone = ZoneInfo(tz)
+    at_utc, now_utc = _utc(at), _utc(now)
+    if now_utc - at_utc < NOW_WINDOW:
+        return "[just now]"
+    local, local_now = at_utc.astimezone(zone), now_utc.astimezone(zone)
+    days = (local_now.date() - local.date()).days
+    hhmm = f"{local:%H:%M}"
+    if days <= 0:
+        return f"[earlier today {hhmm}]"
+    if days == 1:
+        return f"[yesterday, {_day(local, local_now)} {hhmm}]"
+    return f"[{days} days ago, {_day(local, local_now)} {hhmm}]"
+
+
+def absolute_time(at: datetime, tz: str) -> str:
+    """'Thu 1 Oct 2026 09:00' in the user's zone: for text that is stored and read later (summaries)."""
+    local = _utc(at).astimezone(ZoneInfo(tz))
+    return f"{local:%a} {local.day} {local:%b} {local.year} {local:%H:%M}"
+
+
+def stamped(text: str, at: datetime, now: datetime, tz: str) -> str:
+    return f"{message_stamp(at, now, tz)} {text}"
+
+
+def strip_stamps(text: str) -> str:
+    """Remove stamps the model echoed at the start of a line. Other brackets ([1], [the doc]) stay."""
+    return _LEADING_STAMP.sub("", text)
