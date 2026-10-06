@@ -70,7 +70,7 @@ log = structlog.get_logger(__name__)
 current_route: ContextVar[str | None] = ContextVar("current_route", default=None)
 
 CHAT_TOOL_LIMIT = 8
-CHAT_ALWAYS = ("start_task", "connect_account", "pending")
+CHAT_ALWAYS = ("start_task", "connect_account", "pending", "web_search")  # each only when available
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
 # Offered together: mail_search returns short previews only, so without mail_read a question about an
 # email (one a brief mentioned, say) cannot be answered from its text; mail_read needs search's ids.
@@ -101,6 +101,9 @@ TOOL_RULES = (
     "- Sending or replying to email, inviting guests, forgetting things and standing rules always wait "
     "for their OK. When a tool answers QUEUED_FOR_APPROVAL, tell them it's ready and waiting for their "
     "OK (they get buttons to approve, edit or cancel). Never say it was sent or done.\n"
+    "- Facts about the real world (specific real people, companies, products, prices, news, or anything "
+    "that changes over time): call web_search before answering, unless they told you themselves or you "
+    "remember it. If the search finds nothing clear, say you're not sure. Never invent a biography.\n"
     "- Reminders: wake_me at the exact time they asked for.\n"
     "- For any question about what is pending, open, due, on their radar or left to do, call pending and "
     "answer only from its result. Your earlier messages and the conversation summary may be outdated: "
