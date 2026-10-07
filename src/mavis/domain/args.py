@@ -10,7 +10,8 @@ and then a provider 400. `ToolArgs` normalises every args model before any of th
   result in the same turn (it can retry or ask the user), so it never reaches an approval card;
 - a blank string in an optional field follows the field's meaning. A patch field (default None: "None
   keeps it") that may be empty keeps "" as "clear it" (an event's description, a task's notes); a field
-  that may not be empty, or has a real default, treats blank as not given (the default applies);
+  that may not be empty (min_length, as every title or name that identifies a thing declares), or has a
+  real default, treats blank as not given (the default applies);
 - a list whose items were all blank counts as not given; an explicit `[]` is kept (it can mean "remove
   every guest");
 - fields typed `Email` must hold one email address (`Name <addr>` and `mailto:addr` become `addr`).

@@ -143,7 +143,8 @@ class CalendarUpdateArgs(LocalTimes):
     """Only the fields that change; everything else on the event stays as it is."""
 
     event_id: str
-    summary: str | None = None
+    # a title identifies the event: it can change, never be blanked (blank = keep it, see domain.args)
+    summary: str | None = Field(default=None, min_length=1, description="A new title; empty keeps it")
     start: datetime | None = Field(
         default=None,
         description=wall_clock("New start time. Moving an event needs duration_minutes too (its current "
