@@ -5,15 +5,18 @@ A model fills tool arguments loosely: a guest list of `[""]`, a title of spaces,
 provider receives, so a self-only calendar block became an OUTWARD invite card with an empty "With:" line
 and then a provider 400. `ToolArgs` normalises every args model before any of that is computed:
 
-- every string is stripped of surrounding whitespace;
-- list-of-string items are stripped and blank items dropped;
-- a blank value (an empty string, or a list whose items were all blank) counts as NOT GIVEN: an optional
-  field falls back to its default, a required field is an error the model sees as the tool result in the
-  same turn (it can retry or ask the user), so it never reaches an approval card;
-- fields typed `Email` must hold one email address (`Name <addr>` is reduced to `addr`).
+- list-of-string items (addresses, names, ids) are stripped and blank items dropped;
+- a blank string (empty or only whitespace) in a REQUIRED field is an error the model sees as the tool
+  result in the same turn (it can retry or ask the user), so it never reaches an approval card;
+- a blank string in an optional field follows the field's meaning. A patch field (default None: "None
+  keeps it") that may be empty keeps "" as "clear it" (an event's description, a task's notes); a field
+  that may not be empty, or has a real default, treats blank as not given (the default applies);
+- a list whose items were all blank counts as not given; an explicit `[]` is kept (it can mean "remove
+  every guest");
+- fields typed `Email` must hold one email address (`Name <addr>` and `mailto:addr` become `addr`).
 
-An explicitly empty list (`[]`) is kept: it can mean something ("remove every guest"). Internal argument
-models that code builds (exact provider payloads) stay plain BaseModels and are not touched.
+Non-blank text is kept exactly as written (a body's paragraph breaks, Markdown indentation). Internal
+argument models that code builds (exact provider payloads) stay plain BaseModels and are not touched.
 """
 
 from __future__ import annotations
@@ -25,14 +28,17 @@ from email.utils import parseaddr
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import AfterValidator, BaseModel, model_validator
+from pydantic.fields import FieldInfo
 
-_EMAIL_RE = re.compile(r"^[^@\s<>,;\"]+@[^@\s<>,;\"]+\.[^@\s<>,;\"]+$")
+_EMAIL_RE = re.compile(r"^[^@\s<>,;:\"]+@[^@\s<>,;:\"]+\.[^@\s<>,;:\"]+$")
 
 
 def email_address(value: str) -> str:
     """One email address, bare. Raises ValueError (a tool error the model reads) otherwise."""
     text = value.strip()
     candidate = parseaddr(text)[1] if "<" in text else text
+    if candidate[:7].lower() == "mailto:":
+        candidate = candidate[7:]
     if not _EMAIL_RE.match(candidate):
         raise ValueError(
             f"{value!r} is not an email address. Use a real address (look the person up, or ask the "
@@ -68,6 +74,13 @@ def _shape(annotation: Any) -> Shape | None:
     return None  # numbers, dates, enums, literals, unions such as sheet cells: left to pydantic
 
 
+def _clearable(field: FieldInfo) -> bool:
+    """A patch field (default None) whose value may be the empty string."""
+    if field.default is not None or field.default_factory is not None:
+        return False
+    return not any(getattr(m, "min_length", 0) for m in field.metadata)
+
+
 def normalise_args(model: type[BaseModel], data: dict[str, Any]) -> dict[str, Any]:
     """The rule above, on raw input for `model`. Returns a new dict; raises ValueError on a blank
     required field."""
@@ -80,8 +93,10 @@ def normalise_args(model: type[BaseModel], data: dict[str, Any]) -> dict[str, An
         value = out[key]
         blank = False
         if shape == "str" and isinstance(value, str):
-            value = value.strip()
-            blank = not value
+            blank = not value.strip()
+            if blank and not field.is_required() and _clearable(field):
+                out[key] = ""  # a patch field: "" clears it, which is not the same as leaving it out
+                continue
         elif shape == "strlist" and isinstance(value, list):
             items = [v.strip() if isinstance(v, str) else v for v in value]
             kept = [v for v in items if not (isinstance(v, str) and not v)]

@@ -59,15 +59,16 @@ def test_calendar_create_keeps_real_guests_and_strips_them():
     assert "With: a@x.io, b@y.org" in preview
 
 
-@pytest.mark.parametrize("guest", ["Ravi", "priya at example dot com", "@nohost", "a@b"])
+@pytest.mark.parametrize("guest", ["Ravi", "priya at example dot com", "@nohost", "a@b", "mailto:",
+                                   "x:y@z.io"])
 def test_calendar_guests_must_be_email_addresses(guest):
     with pytest.raises(ValidationError, match="not an email address"):
         CalendarCreateArgs(summary="Lunch", start=START, attendees=[guest])
 
 
 def test_calendar_update_blank_guest_list_changes_nothing_but_empty_list_removes_all():
-    blank = CalendarUpdateArgs(event_id="ev1", attendees=[""], summary="  ")
-    assert blank.attendees is None and blank.summary is None
+    blank = CalendarUpdateArgs(event_id="ev1", attendees=[""])
+    assert blank.attendees is None
     assert "Guests" not in ACTIONS["calendar.update_event"].preview(blank, CTX.timezone)
     cleared = CalendarUpdateArgs(event_id="ev1", attendees=[])
     assert "all removed" in ACTIONS["calendar.update_event"].preview(cleared, CTX.timezone)
@@ -92,8 +93,10 @@ def test_blank_required_strings_are_rejected(model, kwargs, field):
 
 
 def test_mail_addresses_are_normalised_and_checked():
-    args = MailComposeArgs(to=[" ana@x.io", ""], cc=["", " Bo <bo@y.org> "], subject=" Q3 ", body="Hi ")
-    assert args.to == ["ana@x.io"] and args.cc == ["bo@y.org"] and args.subject == "Q3"
+    args = MailComposeArgs(to=[" ana@x.io", ""], cc=["", " Bo <bo@y.org> ", "mailto:Cy@z.io"],
+                           subject="Q3", body="Hi,\n\n  - item\n")
+    assert args.to == ["ana@x.io"] and args.cc == ["bo@y.org", "Cy@z.io"]
+    assert args.body == "Hi,\n\n  - item\n"  # non-blank text is kept exactly as written
     reply = MailReplyArgs(thread_id="t", to="Meetup <info@meetup.com>", body="ok")
     assert reply.to == "info@meetup.com"
     with pytest.raises(ValidationError, match="not an email address"):
@@ -104,10 +107,32 @@ def test_mail_addresses_are_normalised_and_checked():
 
 
 def test_optional_blank_strings_fall_back_to_defaults():
-    assert TaskUpdateArgs(task_id="t1", title="").title is None  # "leave empty to keep the current one"
+    assert TaskUpdateArgs(task_id="t1", title="").title is None  # may not be empty: "keep the current one"
     assert TaskAddArgs(title="Pay rent", notes="   ").notes == ""
     assert CalendarCreateArgs(summary="x", start=START, description=" ").description == ""
-    assert SearchArgs(query="  standing desks  ").query == "standing desks"
+    assert SearchArgs(query="  standing desks  ").query == "  standing desks  "  # text kept as written
+
+
+@pytest.mark.parametrize("model,kwargs,field", [
+    (CalendarUpdateArgs, {"event_id": "ev1", "description": ""}, "description"),
+    (CalendarUpdateArgs, {"event_id": "ev1", "description": "   "}, "description"),
+    (TaskUpdateArgs, {"task_id": "t1", "notes": ""}, "notes"),
+    (TaskUpdateArgs, {"task_id": "t1", "notes": " \n"}, "notes"),
+])
+def test_blank_patch_fields_still_mean_clear_it(model, kwargs, field):
+    """I3: on an update, "" clears the field; leaving it out keeps it. The two must stay different."""
+    assert getattr(model(**kwargs), field) == ""
+    assert getattr(model(**{k: v for k, v in kwargs.items() if k != field}), field) is None
+
+
+def test_cleared_patch_fields_reach_the_provider_as_empty():
+    from mavis.tools.integrations.composio_map import COMPOSIO_ACTIONS
+
+    cleared = COMPOSIO_ACTIONS["calendar.update_event"].translate(
+        CalendarUpdateArgs(event_id="ev1", description=""))
+    assert cleared.get("description") == ""
+    kept = COMPOSIO_ACTIONS["calendar.update_event"].translate(CalendarUpdateArgs(event_id="ev1"))
+    assert "description" not in kept
 
 
 def test_other_list_fields_drop_blanks_but_cells_keep_them():
