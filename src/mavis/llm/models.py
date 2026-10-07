@@ -179,8 +179,9 @@ class _Limiter:
     A freed slot goes to the oldest waiter of the best rank: interactive, then background, then
     best_effort; a background waiter that has waited >= BACKGROUND_AGING_S ranks with interactive,
     so task work cannot starve behind chat. best_effort never ages and never waits behind or right
-    after other work: it fails fast with LLMError while a higher-rank caller is queued or one held
-    a slot within INTERACTIVE_GRACE_S.
+    after other work: while a higher-rank caller is queued or one held a slot within
+    INTERACTIVE_GRACE_S, it may use spare slots but never the last free one (it fails fast with
+    LLMError instead).
     A running call is never preempted. Everything here is synchronous (no await between state
     changes), so release() cannot be interrupted by a second cancellation.
     """
@@ -194,9 +195,15 @@ class _Limiter:
         """A non-best_effort call is using (or just used) a slot: best_effort keeps off it a while."""
         self._last_used = asyncio.get_running_loop().time()
 
-    def _best_effort_blocked(self, now: float) -> bool:
+    def _work_active(self, now: float) -> bool:
         return (any(w.rank < 2 and not w.fut.done() for w in self._waiters)
                 or now - self._last_used < INTERACTIVE_GRACE_S)
+
+    def _best_effort_blocked(self, now: float) -> bool:
+        """best_effort never takes the last free slot while higher-rank work is queued or recently ran:
+        that slot is kept for the chat's next call. Spare slots beyond it may be used (with one slot,
+        the last is the only one, so best_effort waits out the whole grace window)."""
+        return self._free <= 1 and self._work_active(now)
 
     async def acquire(self, priority: Priority, wait_s: float) -> None:
         loop = asyncio.get_running_loop()
@@ -230,10 +237,13 @@ class _Limiter:
         """Hand free slots to live waiters. Never raises; dead (cancelled/timed-out) waiters are dropped."""
         now = asyncio.get_running_loop().time()
         self._waiters = [w for w in self._waiters if not w.fut.done()]
-        if any(w.rank < 2 for w in self._waiters) or now - self._last_used < INTERACTIVE_GRACE_S:
+        if self._best_effort_blocked(now):
             self._fail_best_effort()
         while self._free > 0 and self._waiters:
             pick = min(self._waiters, key=lambda w: (self._effective_rank(w, now), w.since))
+            if pick.rank == 2 and self._best_effort_blocked(now):
+                self._fail_best_effort()  # only the reserved slot is left
+                continue
             self._waiters.remove(pick)
             if pick.fut.done():  # defensive: cancelled between the filter and here
                 continue

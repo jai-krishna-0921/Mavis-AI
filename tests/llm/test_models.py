@@ -801,3 +801,34 @@ def test_reasoning_effort_only_for_gpt_oss_models(settings) -> None:
     assert models.chat_model(Tier.FAST, model="gpt-oss:120b").reasoning_effort == "low"  # FAST fallback
     settings.model_fast = "llama3.3:70b"
     assert models.chat_model(Tier.FAST).reasoning_effort is None
+
+
+# --- several slots: best_effort may use spare capacity, never the last free slot while chat is active ----
+
+
+@pytest.mark.parametrize("size", [2, 3, 5])
+async def test_best_effort_uses_spare_slots_right_after_chat_but_never_the_last(monkeypatch, size) -> None:
+    monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", 20.0)
+    lim = models._Limiter(size)
+    await lim.acquire("interactive", 1)  # a chat turn is running (holds one slot)
+    for _ in range(size - 2):  # every slot but the chat's and one spare for its next call
+        await asyncio.wait_for(lim.acquire("best_effort", 1), 1)
+    with pytest.raises(LLMError, match="interactive"):
+        await lim.acquire("best_effort", 1)  # only one slot left: it stays free for the chat
+    await asyncio.wait_for(lim.acquire("interactive", 1), 1)  # and the chat gets it at once
+
+
+@pytest.mark.parametrize("size", [2, 4])
+async def test_best_effort_waiter_gets_a_spare_slot_but_not_the_last_one(monkeypatch, size) -> None:
+    monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", 20.0)
+    lim = models._Limiter(size)
+    for _ in range(size):
+        await lim.acquire("background", 1)  # saturated by task work (counts as recent use)
+    be = asyncio.create_task(lim.acquire("best_effort", 5))
+    await asyncio.sleep(0)
+    lim.release()  # one slot frees: it is the last free one while work is active
+    with pytest.raises(LLMError):
+        await asyncio.wait_for(be, 1)
+    if size > 2:
+        lim.release()  # now two are free: a best_effort caller may take one of them
+        await asyncio.wait_for(lim.acquire("best_effort", 1), 1)
