@@ -137,6 +137,10 @@ async def test_untrusted_event_may_update_existing_loop(user, clock, recording_b
     loop = await loops.upsert(user.id, LoopUpsert(kind=LoopKind.WAITING_ON, title="Recruiter reply"))
     update = LoopUpsert(id=loop.id, kind=LoopKind.WAITING_ON, title="Recruiter reply", status=LoopStatus.DONE)
     await executor.apply(user, InitiativeDecision(track=[update]), untrusted_ev())
+    assert (await loops.get(loop.id)).status is LoopStatus.OPEN  # H5: no evidence, the claim is a note
+    # the signal is code-matched to the loop (its watch): that is evidence, so the update applies
+    await executor.apply(user, InitiativeDecision(track=[update]), untrusted_ev(),
+                         evidence_loop_ids=frozenset({loop.id}))
     assert await loops.active(user.id) == []
     assert (await loops.get(loop.id)).status is LoopStatus.DONE
 

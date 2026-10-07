@@ -368,8 +368,9 @@ async def test_suppression_is_persisted_so_a_late_retry_stays_quiet(user, clock,
     assert calls == []
 
 
-async def test_loop_from_non_chat_source_may_ping(user, clock, recording_bus, fake_memory, fake_llm,
-                                                  monkeypatch):
+async def test_reasoner_origin_loop_never_triggers_the_reasoner(user, clock, recording_bus, fake_memory,
+                                                                fake_llm, monkeypatch):
+    """H5: the reasoner's own `track` is not a new signal (it echoed pings under a fresh key)."""
     init = build(recording_bus, fake_memory)
     clock.set(ist(27, 20, 0))
     await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Board review",
@@ -377,9 +378,8 @@ async def test_loop_from_non_chat_source_may_ping(user, clock, recording_bus, fa
                                                 origin=LoopOrigin.REASONER))
     [created] = recording_bus.take()
     calls = spy_notify(init, monkeypatch)
-    fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="prep reminder")))
-    await init.handler.handle(created)
-    assert len(calls) == 1
+    await init.handler.handle(created)  # fake_llm is empty: a reasoner call would raise
+    assert calls == []
 
 
 async def test_prompts_forbid_invented_offers(user, clock, fake_memory, fake_llm):
@@ -609,7 +609,8 @@ async def test_follow_up_wakeup_survives_the_awaiting_transition(user, clock, re
     assert agent[0].loop_id is None
 
 
-async def test_undelivered_follow_up_closes_the_loop(user, clock, recording_bus, fake_memory, fake_llm):
+async def test_undelivered_follow_up_leaves_the_loop_open(user, clock, recording_bus, fake_memory, fake_llm):
+    """H5: silence never yields DONE; the loop stays visible (overdue) for the user to decide."""
     from mavis.domain.decisions import ComposedMessage
     from mavis.domain.loops import LoopStatus
 
@@ -619,7 +620,7 @@ async def test_undelivered_follow_up_closes_the_loop(user, clock, recording_bus,
     fake_llm.push_structured(InitiativeDecision(notify=NotifyIntent(urgency=3, intent="ask how it went")))
     fake_llm.push_structured(ComposedMessage(send=False))  # composer decided it is no longer relevant
     await init.handler.handle(ended_event(user, loop.id))
-    assert (await init.loops.get(loop.id)).status is LoopStatus.DONE
+    assert (await init.loops.get(loop.id)).status is LoopStatus.OPEN
 
 
 async def test_deferred_follow_up_survives_a_reply_to_another_ping(user, clock, recording_bus, fake_memory,
