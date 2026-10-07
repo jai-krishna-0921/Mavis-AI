@@ -148,6 +148,11 @@ class LoopRow(Base):
     # Provenance (phase A): explicit, never inferred from `source`. Rows from before it read as untrusted.
     trust: Mapped[str] = mapped_column(String(12), default="untrusted", server_default="untrusted")
     origin: Mapped[str] = mapped_column(String(16), default="unknown", server_default="unknown")
+    # The source the loop was CREATED from (a chat turn's event id), never overwritten by a later merge
+    # (`source` is). A failed action blocks only loops created in its turns (hotfix4 H1).
+    created_ref: Mapped[str | None] = mapped_column(String(200))
+    # While BLOCKED: the failed approval that blocked it ("approval:9"), so a later success reopens it.
+    blocked_by: Mapped[str | None] = mapped_column(String(40))
 
 
 class WakeupRow(Base):

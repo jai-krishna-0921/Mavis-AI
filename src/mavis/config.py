@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     # away; the task models (glm-5.3 and fallbacks) tend to issue one search or extract per round, and a
     # run that hits the limit now wraps up with what it gathered instead of failing.
     research_max_steps: int = 10
+    # A failed approval blocks the loops created in its own chat turn and in the user's turn just before
+    # it, but only when that previous turn came within this many minutes (older turns are unrelated).
+    failed_turn_link_minutes: int = 30
     tool_timeout_s: float = 45  # per tool call inside react_loop; a tool may override via metadata
     task_step_parallelism: int = 1
     spawn_max_per_step: int = 3  # spawned workers one model step may start

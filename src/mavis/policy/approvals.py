@@ -432,7 +432,11 @@ async def _sweep_stuck_resolving(cutoff, user_id: int | None) -> int:
             # kept, so replaying a guess is unsafe. Fail the task (this closes the approval too).
             await orchestrator.fail_task(task.id, ap.user_id, "I lost your answer before I could act on it")
         elif await approvals.set_status(ap.id, ApprovalStatus.FAILED, "the decision was never applied",
-                                        from_statuses={ApprovalStatus.RESOLVING}):
+                                        from_statuses={ApprovalStatus.RESOLVING},
+                                        failure_reason="your answer was never applied"):
+            from mavis.policy import outcomes  # lazy: outcomes imports the registry
+
+            await outcomes.block_loops_of_failed_approval(ap.id)
             await say(ap.user_id, "I couldn't finish acting on your answer here, so nothing was done:\n"
                       + _preview_lines(ap), dedupe_key=f"approval:{ap.id}:never_ran")
         n += 1

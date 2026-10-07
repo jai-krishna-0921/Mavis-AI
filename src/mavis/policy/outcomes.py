@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 
 import structlog
 
+from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.loops import LoopOrigin, LoopStatus
 from mavis.domain.tasks import ApprovalStatus, TaskKind, TaskStatus
@@ -130,61 +131,96 @@ async def acknowledge(user_id: int, refs: list[str]) -> int:
         if kind in ids and num.strip().isdigit():
             ids[kind].append(int(num))
     acked = await approvals.acknowledge(user_id, ids["approval"])
+    if acked:
+        await drop_blocked_by(user_id, ids["approval"])
     return acked + await tasks.acknowledge(user_id, ids["task"])
 
 
 # --- loops of a failed action ---------------------------------------------------------------------
 
 
+def _ref(approval_id: int) -> str:
+    return f"approval:{approval_id}"
+
+
 async def _turns_of(approval) -> list[str]:
-    """The chat turn that queued `approval` and the one before it (whose request it usually answered)."""
+    """The chat turn that queued `approval`, plus the user's turn just before it (whose request it usually
+    answered) when that came within `failed_turn_link_minutes`. An older previous turn is unrelated."""
     task = await tasks.get(approval.task_id) if approval.task_id is not None else None
     if task is None or task.kind != TaskKind.APPROVAL.value or not task.turn_ref:
         return []
     turns = [task.turn_ref]
-    if (previous := await messages.previous_user_event(approval.user_id, task.turn_ref)) is not None:
-        turns.append(previous)
+    window = timedelta(minutes=get_settings().failed_turn_link_minutes)
+    previous = await messages.previous_user_event(approval.user_id, task.turn_ref)
+    if previous is not None and previous[1] <= window:
+        turns.append(previous[0])
     return turns
 
 
-async def failed_turns(user_id: int, now: datetime | None = None) -> set[str]:
-    """Chat turns linked to an approval that failed in the last 48 h."""
+async def failed_turns(user_id: int, now: datetime | None = None) -> dict[str, int]:
+    """Chat turns linked to an approval that failed in the last 48 h: turn id -> approval id."""
     since = (now or timeutil.now()) - WINDOW
-    turns: set[str] = set()
+    turns: dict[str, int] = {}
     for ap in await approvals.resolved_since(user_id, since, [ApprovalStatus.FAILED]):
-        turns.update(await _turns_of(ap))
+        if ap.acknowledged_at is not None:
+            continue  # the user already decided about it
+        for turn in await _turns_of(ap):
+            turns.setdefault(turn, ap.id)
     return turns
 
 
 async def block_loops_of_failed_approval(approval_id: int) -> int:
-    """Move the OPEN conversation loops of a failed approval's turns to BLOCKED. Returns how many."""
+    """Move the OPEN conversation loops CREATED in a failed approval's turns to BLOCKED. Returns how many."""
     approval = await approvals.get(approval_id)
     if approval is None or approval.status != ApprovalStatus.FAILED.value:
         return 0
     turns = await _turns_of(approval)
-    return await _block(approval.user_id, turns)
+    return await _set(approval.user_id, await loops_repo.list_created_in(approval.user_id, turns,
+                                                                        (LoopStatus.OPEN,)),
+                      LoopStatus.BLOCKED, blocked_by=_ref(approval.id))
 
 
-async def block_if_from_failed_turn(user_id: int, loop_id: int, source: str) -> bool:
-    """A loop LEARN wrote after the approval had already failed: block it at once."""
-    if source not in await failed_turns(user_id):
+async def block_if_from_failed_turn(user_id: int, loop) -> bool:
+    """A loop LEARN created after the approval of its turn had already failed: block it at once. A loop
+    that only merged into an older one (created elsewhere) is left alone."""
+    if not loop.created_ref or loop.status is not LoopStatus.OPEN:
         return False
-    return await _block(user_id, [source], only=loop_id) > 0
+    approval_id = (await failed_turns(user_id)).get(loop.created_ref)
+    if approval_id is None:
+        return False
+    return await _set(user_id, [loop], LoopStatus.BLOCKED, blocked_by=_ref(approval_id)) > 0
 
 
-async def _block(user_id: int, turns: list[str], only: int | None = None) -> int:
-    if not turns:
+async def reopen_after_success(approval_id: int) -> int:
+    """An approved action executed: loops blocked by an earlier failure of the same action (same target,
+    action time or identity, see _same_subject) go back to OPEN."""
+    done = await approvals.get(approval_id)
+    if done is None or done.status != ApprovalStatus.EXECUTED.value:
         return 0
+    since = timeutil.now() - WINDOW
+    failed = [ap for ap in await approvals.resolved_since(done.user_id, since, [ApprovalStatus.FAILED])
+              if ap.id != done.id and _same_subject(ap, done)]
+    blocked = await loops_repo.list_blocked_by(done.user_id, [_ref(ap.id) for ap in failed])
+    return await _set(done.user_id, blocked, LoopStatus.OPEN)
+
+
+async def drop_blocked_by(user_id: int, approval_ids: list[int]) -> int:
+    """The user decided about a failure (acknowledged it): the loops it blocked are dropped."""
+    blocked = await loops_repo.list_blocked_by(user_id, [_ref(i) for i in approval_ids])
+    return await _set(user_id, blocked, LoopStatus.DROPPED)
+
+
+async def _set(user_id: int, loops: list, status: LoopStatus, blocked_by: str | None = None) -> int:
     from mavis import bus  # lazy: bus wiring imports the worker
     from mavis.loops.service import LoopService
 
     service = LoopService(bus.get_bus())
-    blocked = 0
-    for lp in await loops_repo.list_from_sources(user_id, turns, (LoopStatus.OPEN,)):
-        if lp.origin is not LoopOrigin.CONVERSATION or (only is not None and lp.id != only):
-            continue
-        if await service.close(lp.id, LoopStatus.BLOCKED) is not None:
-            blocked += 1
-    if blocked:
-        log.info("outcomes.loops_blocked", user_id=user_id, count=blocked)
-    return blocked
+    changed = 0
+    for lp in loops:
+        if status is LoopStatus.BLOCKED and lp.origin is not LoopOrigin.CONVERSATION:
+            continue  # only loops the user's own turn produced; the reasoner's are its business
+        if await service.close(lp.id, status, blocked_by=blocked_by) is not None:
+            changed += 1
+    if changed:
+        log.info("outcomes.loops_set", user_id=user_id, status=status.value, count=changed)
+    return changed

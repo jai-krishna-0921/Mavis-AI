@@ -69,6 +69,8 @@ class Loop(BaseModel):
     trust: Trust = Trust.UNTRUSTED
     origin: LoopOrigin = LoopOrigin.UNKNOWN
     created_at: datetime | None = None   # when the loop was first written (its title's anchor)
+    created_ref: str | None = None       # the source it was created from (never changed by a merge)
+    blocked_by: str | None = None        # while BLOCKED: the failed approval ref that blocked it
 
     @property
     def trusted(self) -> bool:

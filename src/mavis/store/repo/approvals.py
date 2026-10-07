@@ -312,10 +312,18 @@ async def fail_unstarted_for_task(task_id: int, note: str) -> int:
                    & PendingApproval.started_at.is_(None)
                    & PendingApproval.resolved_at.is_(None)),
             )
-            .values(status=ApprovalStatus.FAILED.value, result=note, resolved_at=utcnow())
+            .values(status=ApprovalStatus.FAILED.value, result=note, failure_reason=note[:300],
+                    resolved_at=utcnow())
         )
         await s.commit()
         return res.rowcount or 0
+
+
+async def failed_for_task(task_id: int) -> list[PendingApproval]:
+    async with Session() as s:
+        return list(await s.scalars(select(PendingApproval).where(
+            PendingApproval.task_id == task_id, PendingApproval.status == ApprovalStatus.FAILED.value)
+            .order_by(PendingApproval.id)))
 
 
 async def may_have_run_for_task(task_id: int) -> list[PendingApproval]:

@@ -171,8 +171,12 @@ class Routines:
         ]
         # Recently failed actions and tasks come first: they need the user's decision (hotfix4 H1). The
         # same computed list the `pending` tool shows, so the brief never says a failed thing is set.
-        failed = [BriefItem(f"{outcomes.HEADING}: {i.summary}: {i.outcome}, {i.reason}", not i.tainted)
-                  for i in await outcomes.recently_failed(user.id)]
+        try:
+            failed = [BriefItem(f"{outcomes.HEADING}: {i.summary}: {i.outcome}, {i.reason}", not i.tainted)
+                      for i in await outcomes.recently_failed(user.id)]
+        except Exception:  # noqa: BLE001 - like a broken source, it must not kill the brief
+            log.exception("routines.recently_failed_failed")
+            failed = []
         items = failed + items
         gathered_at = timeutil.now()
         served: list[BriefSource] = []
