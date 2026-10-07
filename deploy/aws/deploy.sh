@@ -64,6 +64,10 @@ tz="$(envget "$DEMO_ENV" DEFAULT_TIMEZONE)"
 [[ -z "$tz" ]] || set_key DEFAULT_TIMEZONE "$tz"
 set_key COMPOSIO_WEBHOOK_SECRET ""
 set_key LLM_MAX_CONCURRENCY 3 force  # paid Ollama tier: several concurrent requests
+# live E2E checks speak as a synthetic chat (below -10**15, never a real Telegram chat) whose sends go to a
+# log sink, never to the owner's chat (scripts/live_e2e.py)
+set_key LIVE_TEST_ENABLED true
+set_key TEST_TELEGRAM_CHAT_ID -1000000000000001
 set_key POSTGRES_PASSWORD "$(openssl rand -hex 24)"
 set_key NEO4J_PASSWORD "$(openssl rand -hex 24)"
 set_key TELEGRAM_WEBHOOK_SECRET "$(openssl rand -hex 24)"

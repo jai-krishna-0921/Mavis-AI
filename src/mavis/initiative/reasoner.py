@@ -111,8 +111,10 @@ class Reasoner:
         )
         if result.extra:
             prompt += f"\n\n## Mavis signals (computed, trusted)\n{result.extra}"
-        if failed := await recent_failures.section(user.id):
+        failed, failed_untrusted = await recent_failures.section(user.id)
+        if failed:
             prompt += f"\n\n{failed}"
+            tainted = tainted or failed_untrusted
         decision = await llm.structured(
             InitiativeDecision, system, prompt, tier=tier, priority="background", fallback=True
         )

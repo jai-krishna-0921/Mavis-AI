@@ -441,3 +441,45 @@ async def test_brief_survives_a_broken_failure_lookup(user, at_now, recording_bu
     routines, _, _ = build(recording_bus, fake_memory)
     await routines.run(user, {"routine": routines_mod.MORNING_ROUTINE, "loop_id": None})
     assert "intent" in seen
+
+
+# --- recently failed reaches the proactive prompts with its trust ------------------------------------------
+
+
+@pytest.mark.parametrize(("tool", "args", "preview", "tainted"), [
+    ("calendar_create_event", {"summary": "Focus block"}, "Focus block, Tue 14:00", False),
+    ("mail_send", {"to": ["a@x.io"], "subject": "Lease"}, "Email to a@x.io: Lease", True),
+    ("drive_share_file", {"file_id": "f1", "email": "b@y.io"}, "Share Budget with b@y.io", True),
+])
+async def test_recently_failed_section_comes_from_real_outcomes_with_its_trust(user, at_now, tool, args,
+                                                                               preview, tainted):
+    from mavis.initiative import recent_failures
+
+    assert await recent_failures.section(user.id) == ("", False)
+    aid = await _approval(user.id, tool, args, preview, ApprovalStatus.FAILED, reason="not accepted",
+                          tainted=tainted)
+    text, untrusted = await recent_failures.section(user.id)
+    assert text.startswith(f"## {recent_failures.HEADING}")
+    assert f"approval:{aid}" in text and "not accepted" in text
+    assert untrusted is tainted
+    assert ("third-party" in text.splitlines()[0]) is tainted
+
+
+@pytest.mark.parametrize("tainted", [False, True])
+async def test_a_third_party_failure_in_the_prompt_taints_the_reasoner_decision(user, at_now, fake_memory,
+                                                                                fake_llm, tainted):
+    from mavis.domain.decisions import InitiativeDecision
+    from mavis.domain.events import Event, EventType, Trust
+    from mavis.initiative.filters import FilterResult
+    from mavis.initiative.reasoner import Reasoner
+    from mavis.policy.pings import PingPolicy
+
+    await _approval(user.id, "mail_send", {"to": ["a@x.io"]}, "Email to a@x.io", ApprovalStatus.FAILED,
+                    reason="not accepted", tainted=tainted)
+    fake_llm.push_structured(InitiativeDecision())
+    ev = Event(id="w1", user_id=user.id, type=EventType.WAKEUP, occurred_at=timeutil.now(), source="timer",
+               trust=Trust.SYSTEM)
+    reasoner = Reasoner(fake_memory, PingPolicy())
+    decision = await reasoner.decide(user, ev, FilterResult(drop=False, summary="s"))
+    assert "Recently failed" in fake_llm.structured_calls[-1]["user"]
+    assert decision.tainted is tainted
