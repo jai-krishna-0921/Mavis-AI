@@ -57,11 +57,17 @@ class InitiativeExecutor:
 
     async def apply(self, user, decision: InitiativeDecision, event: Event, context: str = "",
                     quiet_streak: int = 0, origin: dict[str, Any] | None = None,
-                    open_loops: list[Loop] | None = None, event_loop_id: int | None = None) -> None:
+                    open_loops: list[Loop] | None = None, event_loop_id: int | None = None,
+                    evidence_loop_ids: frozenset[int] = frozenset()) -> None:
+        """`evidence_loop_ids`: loops the triggering signal is code-matched to (an external signal that
+        hit the loop's watch). Only those may be closed by the reasoner."""
         untrusted = event.trust is Trust.UNTRUSTED  # spec 8.3: third-party content may not create work
         # what the reasoner writes is as trusted as the least trusted thing it read
         write_trust = Trust.UNTRUSTED if untrusted or decision.tainted else Trust.SYSTEM
         for upsert in decision.track:
+            upsert = _without_unproven_closure(upsert, evidence_loop_ids, event)
+            if upsert is None:
+                continue
             if untrusted and not await self._owns_existing_loop(user.id, upsert.id):
                 log.warning("initiative.untrusted_track_skipped", event_id=event.id,
                             title=(upsert.title or "")[:80])
@@ -318,6 +324,31 @@ class InitiativeExecutor:
         await self._policy.record(user, dedupe_key, urgency, now, extra_keys=extra_keys or ())
         if quiet_streak > 0:  # only a USER_QUIET nudge continues its chain; other proactive never arm one
             await self._quiet.after_assistant_message(user.id, bubbles[-1], streak=quiet_streak)
+
+
+CLOSING_STATUSES = frozenset({LoopStatus.DONE, LoopStatus.DROPPED, LoopStatus.EXPIRED})
+
+
+def _without_unproven_closure(upsert: LoopUpsert, evidence: frozenset[int],
+                              event: Event) -> LoopUpsert | None:
+    """The reasoner may not close a loop on its own say-so: a closure without code evidence becomes a
+    note in the log and the rest of the update still applies. A new loop born closed is skipped (it
+    records a belief that something already happened). Phase B: the ledger turns such claims into item
+    notes; until then the decision row keeps the claim."""
+    if upsert.status not in CLOSING_STATUSES or "status" not in upsert.model_fields_set:
+        return upsert
+    if upsert.id is None:
+        log.info("initiative.closed_create_skipped", event_id=event.id, title=(upsert.title or "")[:80],
+                 status=upsert.status.value)
+        return None
+    if upsert.id in evidence:
+        return upsert
+    log.info("initiative.closure_claim_noted", event_id=event.id, loop_id=upsert.id,
+             status=upsert.status.value)
+    rest = upsert.model_fields_set - {"status"}
+    if rest <= {"id", "kind", "title"}:  # kind/title echoed beside the closure are not an edit
+        return None
+    return LoopUpsert.model_validate(upsert.model_dump(include=rest))
 
 
 def proactive_event_id(key: str, tainted: bool) -> str:

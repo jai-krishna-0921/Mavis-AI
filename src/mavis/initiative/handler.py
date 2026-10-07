@@ -20,7 +20,7 @@ from mavis.initiative.executor import (
     REMINDER_URGENCY,
     InitiativeExecutor,
 )
-from mavis.initiative.filters import EventFilter
+from mavis.initiative.filters import EXTERNAL_TYPES, EventFilter
 from mavis.initiative.planner import (
     PREP_LEAD,
     PREP_MIN_IMPORTANCE,
@@ -101,8 +101,6 @@ class InitiativeHandler:
                     untrusted=bool(event.payload.get("untrusted", False)),
                     original_due=datetime.fromisoformat(original_due) if original_due else None,
                     origin=origin)
-            if (origin or {}).get("kind") == EventType.EVENT_ENDED.value and origin.get("loop_id"):
-                await self._settle_follow_up(user.id, int(origin["loop_id"]))
             return
         if event.type is EventType.WAKEUP and kind == WakeupKind.ROUTINE.value:
             await self._routines.run(user, event.payload)
@@ -112,6 +110,11 @@ class InitiativeHandler:
             return
         if event.type is EventType.LOOP_CREATED and event.payload.get("kind") == LoopKind.ROUTINE.value:
             return  # routines schedule themselves
+        if event.type is EventType.LOOP_CREATED and event.payload.get("origin") == LoopOrigin.REASONER.value:
+            # The reasoner's own `track` is its belief, not news: feeding it back made echo pings about
+            # the same thing under a new key. No reasoner run and no derived prep/follow-up signals.
+            log.info("initiative.own_track_ignored", event_id=event.id)
+            return
         if event.type is EventType.USER_QUIET:
             asked_at = datetime.fromisoformat(event.payload["asked_at"])
             if not await self._quiet.still_quiet(user.id, asked_at):
@@ -146,23 +149,15 @@ class InitiativeHandler:
         if event.trust is Trust.UNTRUSTED:
             context = wrap_untrusted(result.summary, event.type.value)
         streak = int(event.payload.get("streak", 0)) + 1 if event.type is EventType.USER_QUIET else 0
+        # Code evidence that a loop may have concluded: an external signal the filter matched to it by
+        # its watch. Time passing, silence and the model's own belief are never evidence.
+        external = event.type in EXTERNAL_TYPES
+        evidence = frozenset(lp.id for lp in result.matched_loops) if external else frozenset()
         await self._executor.apply(user, decision, event, context=context, quiet_streak=streak,
                                   origin=await self._origin_for(event), open_loops=open_loops,
-                                  event_loop_id=_event_loop_id(event))
-
-        if event.type is EventType.EVENT_ENDED and event.payload.get("loop_id"):
-            await self._settle_follow_up(user.id, int(event.payload["loop_id"]))
-
-    async def _settle_follow_up(self, user_id: int, loop_id: int) -> None:
-        """After a follow-up attempt: the executor moved the loop to AWAITING if the question was
-        delivered. If it is still OPEN and no deferred follow-up is pending, nothing will be asked, so
-        the loop is done. A pending deferred follow-up keeps it OPEN until it goes out."""
-        loop = await self._loops.get(loop_id)
-        if loop is None or loop.status is not LoopStatus.OPEN:
-            return
-        if any(w.loop_id == loop_id for w in await self._wakeups.pending(user_id, WakeupKind.DEFERRED)):
-            return
-        await self._loops.close(loop_id, LoopStatus.DONE)
+                                  event_loop_id=_event_loop_id(event), evidence_loop_ids=evidence)
+        # Silence never closes a loop: an EVENT_ENDED whose follow-up did not go out leaves it OPEN (it
+        # stays visible, overdue, for the user to decide). Phase B's ledger keeps the same rule.
 
     async def _decide(self, user, event: Event, result) -> InitiativeDecision:
         result.extra = await hooks.gather_enrichments(event)
