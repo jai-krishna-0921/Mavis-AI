@@ -1,6 +1,38 @@
 from __future__ import annotations
 
+from enum import StrEnum
+
 from mavis.domain.policy import Capability
+
+
+class FailureKind(StrEnum):
+    """The one vocabulary for why an outside action did not happen (hotfix4 H3). Provider adapters
+    classify their failures into these; what the user reads is built from the kind, never from a
+    provider's own error body."""
+
+    INVALID_ARGUMENT = "invalid_argument"
+    AUTH = "auth"
+    NOT_FOUND = "not_found"
+    RATE_LIMITED = "rate_limited"
+    UNAVAILABLE = "unavailable"
+    UNKNOWN = "unknown"
+
+
+_FAILURE_TEXT: dict[FailureKind, str] = {
+    FailureKind.INVALID_ARGUMENT: "{service} did not accept some of the details{field}",
+    FailureKind.AUTH: "{service} refused access, so it may need reconnecting",
+    FailureKind.NOT_FOUND: "{service} could not find it{field}",
+    FailureKind.RATE_LIMITED: "{service} is busy right now, try again in a few minutes",
+    FailureKind.UNAVAILABLE: "{service} is unreachable right now",
+    FailureKind.UNKNOWN: "{service} reported an error",
+}
+
+
+def failure_text(kind: FailureKind, service: str, field: str | None = None) -> str:
+    """Plain words for the user: the service and the kind of failure, plus the argument it was about
+    (an argument name of ours, e.g. "attendees"), never the provider's message."""
+    about = f" (the {field.replace('_', ' ')})" if field else ""
+    return _FAILURE_TEXT[kind].format(service=service, field=about)
 
 
 class MavisError(Exception):
@@ -39,9 +71,12 @@ class ActionFailed(MavisError):
     `execute_approved`, so an approved action that failed is never recorded as executed.
     """
 
-    def __init__(self, message: str, reason: str = "") -> None:
+    def __init__(self, message: str, reason: str = "", kind: FailureKind = FailureKind.UNKNOWN,
+                 field: str | None = None) -> None:
         super().__init__(message)
         self.reason = reason or message
+        self.kind = kind
+        self.field = field
 
 
 class NeedsUserDetail(ValueError):
@@ -58,7 +93,13 @@ class BudgetExceeded(MavisError):
 
 
 class IntegrationError(MavisError):
-    """Provider unreachable, misconfigured or refused. Message is safe to show; never contains credentials."""
+    """Provider unreachable, misconfigured or refused. Message is safe to show; never contains credentials.
+
+    `status` is the HTTP status when the provider answered one (None: never reached, or no status)."""
+
+    def __init__(self, message: str = "", *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class NoSuchConnection(IntegrationError):

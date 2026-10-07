@@ -130,7 +130,7 @@ async def test_execute_approved_runs_tool_and_audits(user):
 
     aid = await approvals.create(user.id, None, "send_note", {"text": "hello"}, "Send: hello",
                                  utcnow() + timedelta(hours=1))
-    assert await reg.execute_approved(aid) == "sent ok"
+    assert (await reg.execute_approved(aid)).text == "sent ok"
     assert ran == ["hello"]
     assert (await audit.recent(user.id))[0].action == "send_note"
 

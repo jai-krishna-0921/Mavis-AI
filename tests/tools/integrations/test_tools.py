@@ -45,8 +45,8 @@ async def test_failed_execute_while_still_active_reports_failure(provider, cache
     provider.results["mail.search"] = ToolResult(ok=False, error="quota exceeded")
     with pytest.raises(ActionFailed) as exc:
         await gated(CTX, "mail.search", MailSearchArgs(), provider=provider, cache=cache)
-    assert str(exc.value) == "mail.search failed: quota exceeded"
-    assert exc.value.reason == "quota exceeded"
+    assert str(exc.value) == "mail.search failed (unknown): quota exceeded"  # detail for the model
+    assert exc.value.reason == "Gmail reported an error"  # plain words for the user, from the kind
 
 
 async def test_integration_error_returns_sentence(cache):
@@ -116,4 +116,5 @@ async def test_model_driven_failure_returns_friendly_wrapped_text(provider, cach
     register_integration_tools(registry)
     tool = registry.get("mail_search")
     out = await registry.invoke(tool, 1, MailSearchArgs(query="x"))
-    assert out == '<untrusted source="mail_search">\nmail.search failed: quota exceeded\n</untrusted>'
+    assert out == ('<untrusted source="mail_search">\nmail.search failed (unknown): quota exceeded\n'
+                   '</untrusted>')

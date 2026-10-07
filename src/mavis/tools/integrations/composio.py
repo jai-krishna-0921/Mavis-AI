@@ -23,7 +23,7 @@ import httpx
 from pydantic import ValidationError
 
 from mavis.config import get_settings
-from mavis.domain.errors import IntegrationError, NoSuchConnection
+from mavis.domain.errors import FailureKind, IntegrationError, NoSuchConnection
 from mavis.domain.events import Event
 from mavis.domain.integrations import ConnectionState, Toolkit, ToolResult, UserRef
 from mavis.domain.policy import Capability
@@ -38,6 +38,7 @@ from mavis.tools.integrations.composio_map import (
     slug_for,
     toolkit_of_slug,
 )
+from mavis.tools.integrations.failures import classify
 
 # Hosts Composio's presigned upload URLs may point at (its OpenAPI: storage_backend s3 or azure_blob_storage).
 STORAGE_HOST_SUFFIXES = (".amazonaws.com", ".composio.dev", ".blob.core.windows.net")
@@ -160,7 +161,8 @@ class ComposioProvider:
             # `from None`: httpx exceptions carry the request (and its headers) - never chain them.
             raise IntegrationError(f"could not reach Composio: {type(exc).__name__}") from None
         if resp.status_code >= 400:
-            raise IntegrationError(f"Composio answered {resp.status_code} for {method} {path}") from None
+            raise IntegrationError(f"Composio answered {resp.status_code} for {method} {path}",
+                                   status=resp.status_code) from None
         if not resp.content:
             return {}
         try:
@@ -338,12 +340,13 @@ class ComposioProvider:
         spec = ACTIONS.get(action)
         mapping = COMPOSIO_ACTIONS.get(action)
         if spec is None or mapping is None:
-            return ToolResult(ok=False, error=f"unknown action {action!r}")
+            return ToolResult(ok=False, error=f"unknown action {action!r}", error_kind=FailureKind.UNKNOWN)
         try:
             parsed = spec.args_model.model_validate(args)
         except ValidationError as exc:
-            fields = ", ".join(".".join(str(p) for p in e["loc"]) for e in exc.errors())
-            return ToolResult(ok=False, error=f"invalid arguments for {action}: {fields}")
+            locs = [".".join(str(p) for p in e["loc"]) for e in exc.errors()]
+            return ToolResult(ok=False, error=f"invalid arguments for {action}: {', '.join(locs)}",
+                              error_kind=FailureKind.INVALID_ARGUMENT, error_field=locs[0] if locs else None)
         try:
             slug = slug_for(action, await self._toolkit_for(user, spec.capability, mapping.slug))
             arguments = mapping.translate(parsed)
@@ -356,10 +359,16 @@ class ComposioProvider:
                 body={"user_id": user.provider_id, "arguments": arguments},
             )
         except IntegrationError as exc:
-            return ToolResult(ok=False, error=str(exc))
+            kind = classify(None, status=exc.status)[0] if exc.status else FailureKind.UNAVAILABLE
+            return ToolResult(ok=False, error=str(exc), error_kind=kind)
         if not answer.get("successful", False):
-            reason = str(answer.get("error") or "the provider reported a failure")
-            return ToolResult(ok=False, error=reason[:300])
+            # Classified here, at the boundary: the kind decides what the user reads, the body never does.
+            raw = answer.get("error") or answer.get("data") or "the provider reported a failure"
+            kind, field = classify(raw)
+            if kind is FailureKind.UNKNOWN and isinstance(answer.get("data"), dict):
+                kind, field = classify(answer["data"])
+            reason = raw if isinstance(raw, str) else str(raw)
+            return ToolResult(ok=False, error=reason[:300], error_kind=kind, error_field=field)
         return ToolResult(ok=True, data=answer.get("data"))
 
     async def subscribe(self, user: UserRef, trigger: str, config: dict) -> str:
