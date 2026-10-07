@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     task_progress_after_s: float = 30
     approval_ttl_hours: int = 48
     react_max_steps: int = 8
+    # Tool rounds for the research specialist. 6 cut task #14 off after 33 s with its searches thrown
+    # away; the task models (glm-5.3 and fallbacks) tend to issue one search or extract per round, and a
+    # run that hits the limit now wraps up with what it gathered instead of failing.
+    research_max_steps: int = 10
     tool_timeout_s: float = 45  # per tool call inside react_loop; a tool may override via metadata
     task_step_parallelism: int = 1
     spawn_max_per_step: int = 3  # spawned workers one model step may start

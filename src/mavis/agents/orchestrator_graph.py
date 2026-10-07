@@ -355,7 +355,8 @@ def _digest(state: OrchestratorState) -> str:
     lines: list[str] = []
     for s in plan.steps if plan else []:
         r = results.get(s.id, {})
-        status = "ok" if r.get("ok") else "FAILED"
+        status = ("PARTIAL, out of budget, answered from what it gathered" if r.get("ok") and r.get("partial")
+                  else "ok" if r.get("ok") else "FAILED")
         lines.append(f"[{s.id}: {s.agent}: {status}] {s.instruction}\n{_result_body(s.id, r)}")
     return "\n\n".join(lines)
 
