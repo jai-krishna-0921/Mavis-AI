@@ -170,7 +170,7 @@ async def test_model_wakeup_for_an_untrusted_loop_is_untrusted_on_a_trusted_even
                   trust=Trust.SYSTEM)
     request = WakeupRequest(at=clock.t + timedelta(hours=5), reason="invoice again", loop_id=loop.id)
     decision = InitiativeDecision(wakeups=[request])
-    await init.executor.apply(user, decision, event, open_loops=[loop], event_loop_id=loop.id)
+    await init.executor.apply(user, decision, event)
     [w] = await init.wakeups.pending(user.id)
     assert w.payload.get("untrusted") is True
 
@@ -399,7 +399,8 @@ async def test_reasoner_marks_its_decision_tainted_from_its_actual_inputs(user, 
 async def test_scheduled_wakeup_follows_the_runs_taint_on_a_trusted_event(user, clock, recording_bus,
                                                                          fake_memory, tainted_run, expected):
     init = build_initiative(recording_bus, fake_memory, embed=no_embed)
-    request = WakeupRequest(at=clock.t + timedelta(hours=2), reason="check the thing")
+    loop = await init.loops.upsert(user.id, LoopUpsert(kind=LoopKind.GOAL, title="Get fit", trust=Trust.USER))
+    request = WakeupRequest(at=clock.t + timedelta(hours=2), reason="check the thing", loop_id=loop.id)
     await init.executor.apply(user, InitiativeDecision(wakeups=[request], tainted=tainted_run),
                               _wakeup(user.id, clock))
     [w] = await init.wakeups.pending(user.id)
