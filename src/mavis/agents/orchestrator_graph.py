@@ -482,6 +482,16 @@ async def _block_loops_of(approval_id: int) -> None:
         log.warning("approval.block_loops_failed", approval_id=approval_id, error=_err(exc))
 
 
+async def _reopen_loops_of(approval_id: int) -> None:
+    """A retry of a failed action went through: the loops that failure blocked are live again."""
+    try:
+        from mavis.policy import outcomes  # lazy: policy imports the registry
+
+        await outcomes.reopen_after_success(approval_id)
+    except Exception as exc:  # noqa: BLE001 - the action stands; loops are a best-effort follow-on
+        log.warning("approval.reopen_loops_failed", approval_id=approval_id, error=_err(exc))
+
+
 def _failure_reason(exc: Exception) -> str:
     """What the user reads about a failed approved action: plain words only (hotfix4 H3). ActionFailed
     carries them (classified at the integration boundary); anything else is described, never quoted."""
@@ -542,6 +552,7 @@ async def approval_gate(state: OrchestratorState) -> Command:
         await approvals.set_status(pending.id, ApprovalStatus.EXECUTED, result=executed.text,
                                    from_statuses=claimed)
         await _supersede_duplicates(pending, executed=True)
+        await _reopen_loops_of(pending.id)
         return Command(goto="approval_gate", update={
             "action_results": [f"Done: {pending.preview}\nResult: {_clip_result(executed.text)}"],
             # the receipt shows the tool's user_text only, never its model-facing result

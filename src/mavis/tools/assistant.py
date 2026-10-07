@@ -12,6 +12,7 @@ from mavis import bus
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.args import ToolArgs
+from mavis.domain.errors import ActionFailed, FailureKind
 from mavis.domain.events import Trust
 from mavis.domain.localtime import LocalTimes, wall_clock
 from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus, LoopUpsert
@@ -125,12 +126,16 @@ async def forget(user_id: int, args: ForgetArgs) -> ToolOutput:
     return ToolOutput(f"Forgot {n} memories matching '{args.needle}'.")
 
 
-async def wake_me(user_id: int, args: WakeMeArgs) -> str | ToolOutput:
+async def wake_me(user_id: int, args: WakeMeArgs) -> ToolOutput:
     at = await to_utc(user_id, args.at)
+    # a soft failure is an ActionFailed (the model reads the sentence; an approved run reports it as
+    # failed, never as "Done")
     if at <= timeutil.now():
-        return "That time is in the past; pick a future time."
+        raise ActionFailed("That time is in the past; pick a future time.",
+                           reason="that time had already passed", kind=FailureKind.INVALID_ARGUMENT)
     if at > timeutil.now() + MAX_WAKE_AHEAD:
-        return "That time is more than a year away; pick a nearer time."
+        raise ActionFailed("That time is more than a year away; pick a nearer time.",
+                           reason="that time is more than a year away", kind=FailureKind.INVALID_ARGUMENT)
     key = f"remind:{user_id}:{at:%Y%m%d%H%M}:{hashlib.sha1(args.reason.encode()).hexdigest()[:8]}"
     wakeup_id = await timers_service.WakeupService().wake_me(
         user_id, at, f"Reminder the user asked for: {args.reason}", kind="agent",
@@ -164,7 +169,9 @@ async def list_tasks(user_id: int, args: NoArgs) -> str:
 
 async def cancel_task(user_id: int, args: CancelTaskArgs) -> ToolOutput:
     if not await tasks.cancel(user_id, args.task_id):
-        return ToolOutput(f"Task #{args.task_id} was not running, so there was nothing to cancel.")
+        raise ActionFailed(f"Task #{args.task_id} is not active (or not yours).",
+                           reason=f"task #{args.task_id} was not running, so there was nothing to cancel",
+                           kind=FailureKind.NOT_FOUND)
     await approvals.reject_open_for_task(args.task_id)
     return ToolOutput(f"Task #{args.task_id} cancelled.")
 
@@ -264,7 +271,8 @@ class AcknowledgeArgs(ToolArgs):
 async def acknowledge_failure(user_id: int, args: AcknowledgeArgs) -> ToolOutput:
     n = await outcomes.acknowledge(user_id, args.refs)
     if not n:
-        return ToolOutput(model_note="Nothing matched those refs; call pending to see the current list.")
+        raise ActionFailed("Nothing matched those refs; call pending to see the current list.",
+                           reason="there was nothing like that left to clear", kind=FailureKind.NOT_FOUND)
     return ToolOutput("Okay, I'll stop bringing that up.", f"Acknowledged {n} item(s).")
 
 

@@ -3,6 +3,7 @@ from datetime import timedelta
 import pytest
 
 from mavis.domain import timeutil
+from mavis.domain.errors import ActionFailed
 from mavis.domain.loops import LoopKind
 from mavis.domain.policy import RiskClass
 from mavis.store.repo import policy_rules, tasks
@@ -82,9 +83,11 @@ async def test_wake_me_naive_time_is_user_local(user, wakeups):
 
 
 async def test_wake_me_rejects_past(user, wakeups):
-    out = await assistant.wake_me(user.id, assistant.WakeMeArgs(
-        at=timeutil.now() - timedelta(minutes=5), reason="late"))
-    assert "past" in out
+    # a soft failure is an ActionFailed: the model reads the sentence, an approved run reports "failed"
+    with pytest.raises(ActionFailed, match="past") as exc:
+        await assistant.wake_me(user.id, assistant.WakeMeArgs(
+            at=timeutil.now() - timedelta(minutes=5), reason="late"))
+    assert "passed" in exc.value.reason
     assert wakeups == []
 
 
@@ -111,9 +114,10 @@ async def test_what_do_you_know_renders_recall(user, fake_memory):
 
 
 async def test_wake_me_rejects_far_future(user, wakeups):
-    out = await assistant.wake_me(user.id, assistant.WakeMeArgs(
-        at=timeutil.now() + timedelta(days=400), reason="far"))
-    assert "year" in out and wakeups == []
+    with pytest.raises(ActionFailed, match="year"):
+        await assistant.wake_me(user.id, assistant.WakeMeArgs(
+            at=timeutil.now() + timedelta(days=400), reason="far"))
+    assert wakeups == []
 
 
 async def test_wake_me_bad_timezone_falls_back(user, wakeups):

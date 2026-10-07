@@ -35,6 +35,8 @@ def to_domain(r: LoopRow) -> Loop:
         trust=_trust(r.trust),
         origin=_origin(r.origin),
         created_at=timeutil.ensure_utc(r.created_at),
+        created_ref=r.created_ref,
+        blocked_by=r.blocked_by,
     )
 
 
@@ -75,6 +77,7 @@ async def insert(user_id: int, data: LoopUpsert) -> Loop:
             importance=data.importance,
             watch=_watch_json(data),
             source=data.source,
+            created_ref=data.source or None,
             trust=data.trust.value,
             origin=data.origin.value,
             created_at=now,
@@ -226,7 +229,8 @@ def normalise_title(title: str) -> str:
 async def find_recently_closed(user_id: int, title: str, since: datetime) -> Loop | None:
     """A DONE/DROPPED (or awaiting-reply) loop with the same normalised title closed after `since`."""
     wanted = normalise_title(title)
-    closed = (LoopStatus.DONE.value, LoopStatus.DROPPED.value, LoopStatus.AWAITING_REPLY.value)
+    closed = (LoopStatus.DONE.value, LoopStatus.DROPPED.value, LoopStatus.AWAITING_REPLY.value,
+              LoopStatus.BLOCKED.value)  # re-extraction must not open a copy of a blocked loop
     async with Session() as s:
         rows = await s.scalars(
             select(LoopRow).where(
@@ -239,7 +243,9 @@ async def find_recently_closed(user_id: int, title: str, since: datetime) -> Loo
     return None
 
 
-async def set_status(user_id: int, loop_id: int, status: LoopStatus) -> tuple[Loop, bool] | None:
+async def set_status(user_id: int, loop_id: int, status: LoopStatus,
+                     blocked_by: str | None = None) -> tuple[Loop, bool] | None:
+    """`blocked_by` is kept only with BLOCKED (the failed approval's ref); any other status clears it."""
     async with Session() as s:
         row = await s.get(LoopRow, loop_id)
         if row is None or row.user_id != user_id:
@@ -247,6 +253,7 @@ async def set_status(user_id: int, loop_id: int, status: LoopStatus) -> tuple[Lo
         if row.status == status.value:
             return to_domain(row), False
         row.status = status.value
+        row.blocked_by = blocked_by if status is LoopStatus.BLOCKED else None
         row.updated_at = timeutil.now()
         row.version = (row.version or 1) + 1
         await s.commit()
@@ -254,7 +261,10 @@ async def set_status(user_id: int, loop_id: int, status: LoopStatus) -> tuple[Lo
         return to_domain(row), True
 
 
-_EXPIRY_STATUSES = (LoopStatus.OPEN.value, LoopStatus.AWAITING_REPLY.value)
+_EXPIRY_STATUSES = (LoopStatus.OPEN.value, LoopStatus.AWAITING_REPLY.value, LoopStatus.BLOCKED.value)
+# A blocked loop does not wait forever: once its failure has left "recently failed" (48 h) undecided, it
+# expires (hotfix4 H1). The user can also drop it (acknowledging the failure) or a later success reopens it.
+BLOCKED_FOR = timedelta(hours=48)
 
 
 async def open_user_ids() -> list[int]:
@@ -300,6 +310,14 @@ async def expire(user_id: int, now) -> list[Loop]:
             select(LoopRow).where(LoopRow.user_id == user_id, LoopRow.status.in_(_EXPIRY_STATUSES))
         )
         for row in rows:
+            if row.status == LoopStatus.BLOCKED.value:
+                if timeutil.ensure_utc(row.updated_at) < now - BLOCKED_FOR:
+                    row.status = LoopStatus.EXPIRED.value
+                    row.blocked_by = None
+                    row.updated_at = now
+                    row.version = (row.version or 1) + 1
+                    expired.append(to_domain(row))
+                continue
             if row.status == LoopStatus.AWAITING_REPLY.value:
                 if timeutil.ensure_utc(row.updated_at) < now - AWAITING_FOR:
                     row.status = LoopStatus.DONE.value
@@ -322,12 +340,23 @@ async def expire(user_id: int, now) -> list[Loop]:
     return expired
 
 
-async def list_from_sources(user_id: int, sources: list[str], statuses: tuple[LoopStatus, ...]) -> list[Loop]:
-    """Loops written from one of `sources` (a chat turn's event id, for LEARN loops) in `statuses`."""
-    if not sources:
+async def list_created_in(user_id: int, refs: list[str], statuses: tuple[LoopStatus, ...]) -> list[Loop]:
+    """Loops CREATED from one of `refs` (a chat turn's event id, for LEARN loops) in `statuses`. A loop
+    that a later turn merely merged into keeps its original `created_ref` and is not returned."""
+    if not refs:
         return []
     async with Session() as s:
         rows = await s.scalars(select(LoopRow).where(
-            LoopRow.user_id == user_id, LoopRow.source.in_(sources),
+            LoopRow.user_id == user_id, LoopRow.created_ref.in_(refs),
             LoopRow.status.in_([x.value for x in statuses])))
+        return [to_domain(r) for r in rows]
+
+
+async def list_blocked_by(user_id: int, refs: list[str]) -> list[Loop]:
+    if not refs:
+        return []
+    async with Session() as s:
+        rows = await s.scalars(select(LoopRow).where(
+            LoopRow.user_id == user_id, LoopRow.status == LoopStatus.BLOCKED.value,
+            LoopRow.blocked_by.in_(refs)))
         return [to_domain(r) for r in rows]
