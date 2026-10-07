@@ -9,8 +9,9 @@ from __future__ import annotations
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
+from mavis.domain.args import ToolArgs
 from mavis.domain.decisions import TaskRequest
 from mavis.domain.messages import Role
 from mavis.domain.policy import RiskClass
@@ -33,13 +34,13 @@ TASK_EXISTS_RESULT = ("Task #{id} is already working on this, so no new task was
 CONNECT_RESULT = "Sent them the connect link and buttons. Don't repeat the link."
 
 
-class StartTaskArgs(BaseModel):
+class StartTaskArgs(ToolArgs):
     goal: str = Field(min_length=3, max_length=2000,
                       description="What to do, in the user's words plus anything needed to do it well")
     context: str = Field(default="", max_length=4000, description="Relevant facts from the conversation")
 
 
-class ConnectArgs(BaseModel):
+class ConnectArgs(ToolArgs):
     service: str = Field(min_length=2, max_length=40, description="gmail, calendar, slack or notion")
 
 

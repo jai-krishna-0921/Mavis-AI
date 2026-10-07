@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field
 
+from mavis.domain.args import ToolArgs
+
 WALL_CLOCK_MARK = "the time as the user said it, no offset or Z"
 TIMEZONE_FIELD = "timezone"
 LOCAL_ONLY_FIELDS = frozenset({TIMEZONE_FIELD})  # read by code, never sent to a provider
@@ -24,7 +26,7 @@ def wall_clock(what: str) -> str:
     return f"{what}. Local wall-clock time, ISO 8601, e.g. 2026-10-04T11:00: {WALL_CLOCK_MARK}."
 
 
-class LocalTimes(BaseModel):
+class LocalTimes(ToolArgs):
     """Mixin for every tool args model with a datetime field."""
 
     timezone: str | None = Field(

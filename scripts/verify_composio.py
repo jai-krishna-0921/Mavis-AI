@@ -31,6 +31,7 @@ from mavis.tools.integrations.actions import (
     DocInsertArgs,
     DriveShareArgs,
     MailComposeArgs,
+    MailReplyArgs,
     SheetAppendArgs,
     SheetUpdateArgs,
     TaskAddArgs,
@@ -58,6 +59,7 @@ SAMPLES = {
     "calendar.update_event": CalendarUpdateArgs(
         event_id="e", summary="x", start=NOW, duration_minutes=30, attendees=[], description="d"
     ),
+    "mail.reply": MailReplyArgs(thread_id="t", to="a@x.com", body="b"),
     "drive.share": DriveShareArgs(file_id="f", email="a@x.com", role="commenter"),
     "contacts.search": ContactsSearchArgs(query="ab"),
     "sheets.append_row": SheetAppendArgs(spreadsheet_id="s", values=["a", 1]),
