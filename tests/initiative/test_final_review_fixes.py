@@ -195,12 +195,12 @@ async def test_quiet_nudge_armed_for_new_user_only(user, clock):
     wakeups = WakeupService()
     tracker = QuietTracker(wakeups)
     assert await tracker.after_assistant_message(user.id, "How are you?") is not None  # not onboarded
-    await users.update(user.id, onboarded=True)
     await messages.log(user.id, Role.USER, "hi")  # first message now: still in the 3 day window
     assert await tracker.after_assistant_message(user.id, "Anything else?") is not None
     clock.advance(days=4)
     assert await tracker.after_assistant_message(user.id, "Anything else?") is None
     assert await wakeups.pending(user.id, WakeupKind.USER_QUIET) == []
+    assert (await users.get(user.id)).onboarded  # H5: the window ending sets the flag
 
 
 async def test_proactive_message_never_arms_quiet(user, clock, recording_bus, fake_memory, fake_llm):

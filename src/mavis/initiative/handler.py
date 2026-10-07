@@ -125,6 +125,10 @@ class InitiativeHandler:
             asked_at = datetime.fromisoformat(event.payload["asked_at"])
             if not await self._quiet.still_quiet(user.id, asked_at):
                 return
+            subject = subjects.Subject.parse(event.payload.get("subject"))
+            if not await self._quiet.owed(user.id, subject):  # armed before H5, or the item moved on
+                log.info("initiative.quiet_not_owed", event_id=event.id)
+                return
 
         if event.type is EventType.EVENT_STARTING and not await self._origin_still_valid(
                 user.id, {"kind": "event_starting", "loop_id": event.payload.get("loop_id")}):
@@ -196,7 +200,10 @@ class InitiativeHandler:
     async def _origin_for(self, event: Event) -> dict | None:
         """Why a ping is being sent, carried with it if it is deferred so it can be revalidated."""
         if event.type is EventType.USER_QUIET:
-            return {"kind": event.type.value, "asked_at": event.payload.get("asked_at")}
+            origin = {"kind": event.type.value, "asked_at": event.payload.get("asked_at")}
+            if event.payload.get("subject"):  # the item the unanswered question is about
+                origin["subject"] = event.payload["subject"]
+            return origin
         loop_id = _event_loop_id(event)
         if loop_id is None:
             return None

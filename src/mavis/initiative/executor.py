@@ -279,7 +279,8 @@ class InitiativeExecutor:
             log.info("initiative.composer_dropped", user=user.id, intent=intent.intent[:80])
             return False
         await self.deliver(user, message.messages, intent.dedupe_key, intent.urgency, quiet_streak,
-                           extra_keys=extra, buttons=buttons, tainted=untrusted)
+                           extra_keys=extra, buttons=buttons, tainted=untrusted,
+                           quiet_subject=Subject.parse(o.get("subject")))
         await self._follow_up_sent(origin)
         return True
 
@@ -307,7 +308,8 @@ class InitiativeExecutor:
 
     async def deliver(self, user, bubbles: list[str], dedupe_key: str | None = None, urgency: int = 3,
                       quiet_streak: int = 0, extra_keys: list[str] | None = None,
-                      buttons: list[list[Button]] | None = None, tainted: bool = False) -> None:
+                      buttons: list[list[Button]] | None = None, tainted: bool = False,
+                      quiet_subject: Subject | None = None) -> None:
         """`tainted`: the text was derived from third-party content. Its history row carries the taint
         marker, so the user's next reply is learned as untrusted (simple_turn._previous_tainted)."""
         now = timeutil.now()
@@ -328,7 +330,8 @@ class InitiativeExecutor:
                            event_id=proactive_event_id(key, tainted) if key else None)
         await self._policy.record(user, dedupe_key, urgency, now, extra_keys=extra_keys or ())
         if quiet_streak > 0:  # only a USER_QUIET nudge continues its chain; other proactive never arm one
-            await self._quiet.after_assistant_message(user.id, bubbles[-1], streak=quiet_streak)
+            await self._quiet.after_assistant_message(user.id, bubbles[-1], streak=quiet_streak,
+                                                      subject=quiet_subject)
 
 
 CLOSING_STATUSES = frozenset({LoopStatus.DONE, LoopStatus.DROPPED, LoopStatus.EXPIRED})

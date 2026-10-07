@@ -104,8 +104,8 @@ async def test_reasoner_cannot_close_a_loop_without_evidence(user, clock, record
     recording_bus.take()
     fake_llm.push_structured(InitiativeDecision(track=[LoopUpsert(id=loop.id, status=status, importance=4)]))
     payload = {"kind": kind, "loop_id": loop.id}
-    if etype is EventType.USER_QUIET:
-        payload["asked_at"] = timeutil.now().isoformat()
+    if etype is EventType.USER_QUIET:  # a question this loop depends on, so the nudge is owed
+        payload.update(asked_at=timeutil.now().isoformat(), subject=f"loop:{loop.id}")
     await init.handler.handle(timer_event(user, etype, f"wakeup:{kind}:{status}", **payload))
     after = await init.loops.get(loop.id)
     assert after.status is LoopStatus.OPEN
