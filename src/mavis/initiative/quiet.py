@@ -11,8 +11,6 @@ from mavis.domain import timeutil
 from mavis.domain.loops import LoopKind, LoopOrigin
 from mavis.domain.messages import Role
 from mavis.domain.wakeups import WakeupKind
-from mavis.initiative import subjects
-from mavis.initiative.subjects import Subject
 from mavis.store.db import Session
 from mavis.store.models import Message
 from mavis.store.repo import messages, users
@@ -30,21 +28,18 @@ class QuietTracker:
     def __init__(self, wakeups: WakeupService) -> None:
         self._wakeups = wakeups
 
-    async def after_assistant_message(self, user_id: int, text: str, streak: int = 0,
-                                      subject: Subject | None = None) -> int | None:
-        """Arm a USER_QUIET nudge only when the user owes an answer something of theirs depends on:
-        `subject` is the user item the question is about. Without one, only the onboarding question of
-        a new user who has given Mavis nothing to track yet is nudged (spec 4.5). Mavis's own optional
-        offers ("want me to...?") are never chased."""
+    async def after_assistant_message(self, user_id: int, text: str, streak: int = 0) -> int | None:
+        """Arm a USER_QUIET nudge only for the onboarding question of a new user who has given Mavis
+        nothing to track yet (spec 4.5). After that nothing is chased: a chat question cannot be tied to
+        a user item structurally, Mavis's optional offers ("want me to...?") are never chased, and
+        proactive questions (a "how did it go?" follow-up) never arm a nudge (QA F3)."""
         await self._wakeups.cancel_where(user_id, [WakeupKind.USER_QUIET])  # newest question supersedes
         if not ends_with_question(text) or streak >= MAX_QUIET_STREAK:
             return None
-        if not await self.owed(user_id, subject):
+        if not await self.owed(user_id):
             return None
         now = timeutil.now()
         payload = {"asked_at": now.isoformat(), "question": text[-300:], "streak": streak}
-        if subject is not None:
-            payload["subject"] = subject.key
         return await self._wakeups.wake_me(
             user_id,
             now + timedelta(hours=get_settings().onboarding_quiet_hours),
@@ -53,11 +48,8 @@ class QuietTracker:
             payload=payload,
         )
 
-    async def owed(self, user_id: int, subject: Subject | None) -> bool:
-        """Does the user owe an answer worth one nudge? Checked when arming and again when it fires."""
-        if subject is not None:
-            state = await subjects.resolve(user_id, subject)
-            return state is not None and state.live
+    async def owed(self, user_id: int) -> bool:
+        """Is an onboarding nudge still owed? Checked when arming and again when it fires."""
         return await self.in_onboarding(user_id) and not await _has_own_items(user_id)
 
     async def in_onboarding(self, user_id: int) -> bool:

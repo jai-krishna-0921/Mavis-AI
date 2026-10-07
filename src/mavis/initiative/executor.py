@@ -14,7 +14,7 @@ from mavis.domain.decisions import InitiativeDecision, NotifyIntent, WakeupReque
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.messages import TAINT_SUFFIX, Button, Outbound, Role
-from mavis.domain.wakeups import WakeupKind
+from mavis.domain.wakeups import WakeupKind, WakeupStatus
 from mavis.initiative import subjects
 from mavis.initiative.composer import Composer
 from mavis.initiative.quiet import QuietTracker
@@ -74,7 +74,7 @@ class InitiativeExecutor:
         # each wakeup's subject as it was before this run's own writes (a run's own edit is no change)
         bound = [(w, await self._subject_for(user.id, w, event)) for w in decision.wakeups]
         for upsert in decision.track:
-            upsert = _without_unproven_closure(upsert, evidence_loop_ids, event)
+            upsert = _without_unproven_state(upsert, evidence_loop_ids, event)
             if upsert is None:
                 continue
             if untrusted and not await self._owns_existing_loop(user.id, upsert.id):
@@ -179,7 +179,7 @@ class InitiativeExecutor:
             log.warning("initiative.wakeup_unbound_rejected", event_id=event.id, reason=w.reason[:80],
                         subject=state.subject.key if state else None)
             return
-        if event.source == "timer" and await self._rearm_without_change(user.id, state):
+        if event.source == "timer" and await self._rearm_without_change(user.id, state, event):
             log.info("initiative.wakeup_chain_stopped", event_id=event.id, subject=state.subject.key)
             return
         loop_id = state.loop_id
@@ -198,14 +198,18 @@ class InitiativeExecutor:
         except ValueError as exc:
             log.warning("initiative.wakeup_failed", event_id=event.id, reason=w.reason[:80], error=str(exc))
 
-    async def _rearm_without_change(self, user_id: int, state: SubjectState) -> bool:
+    async def _rearm_without_change(self, user_id: int, state: SubjectState, event: Event) -> bool:
         """A run started by a timer may not set another wakeup for a subject whose state is the same as
-        when an earlier wakeup for it was set: no self-continuing chains (at most one re-check per
-        state of the subject)."""
-        since = timeutil.now() - CHAIN_LOOKBACK
+        when an earlier wakeup for it fired: no self-continuing chains (at most one re-check per
+        externally caused state of the subject). The triggering wakeup counts even before the timer
+        marks it fired; a wakeup that is merely pending does not block (it has not looked yet)."""
         mark = (state.subject.key, state.fingerprint)
+        if (event.payload.get("subject"), event.payload.get("subject_state")) == mark:
+            return True
+        since = timeutil.now() - CHAIN_LOOKBACK
         return any((w.payload.get("subject"), w.payload.get("subject_state")) == mark
-                   for w in await self._wakeups.history(user_id, WakeupKind.AGENT, since))
+                   for w in await self._wakeups.history(user_id, WakeupKind.AGENT, since)
+                   if w.status is WakeupStatus.FIRED)
 
     async def _covered(self, user_id: int, loop_id: int, at: datetime) -> bool:
         """A pending wakeup for the same loop within MERGE_WINDOW already covers this one."""
@@ -253,9 +257,10 @@ class InitiativeExecutor:
         loop_key = None if untrusted else loop_ping_key(o.get("loop_id"), o.get("kind"))
         extra = [loop_key] if loop_key else []
         slot = subject_ping_key(o.get("subject"), o.get("kind"), untrusted)
+        # the subject slot is not a check key: it is taken atomically below, after a crashed earlier
+        # attempt (slot taken, bubbles enqueued, nothing recorded) has had the chance to be finished
         verdict = await self._policy.check(user, intent.urgency, intent.dedupe_key, timeutil.now(),
-                                           extra_keys=[*extra, slot] if slot else extra,
-                                           bypass_budget=intent.security)
+                                           extra_keys=extra, bypass_budget=intent.security)
         if not verdict.allow:
             log.info("initiative.notify_blocked", user=user.id, reason=verdict.reason,
                      defer_until=verdict.defer_until)
@@ -301,8 +306,7 @@ class InitiativeExecutor:
                 await self._policy.release(user, reserved)
             return False
         await self.deliver(user, message.messages, intent.dedupe_key, intent.urgency, quiet_streak,
-                           extra_keys=extra, buttons=buttons, tainted=untrusted,
-                           quiet_subject=Subject.parse(o.get("subject")))
+                           extra_keys=extra, buttons=buttons, tainted=untrusted)
         await self._follow_up_sent(origin)
         return True
 
@@ -330,8 +334,7 @@ class InitiativeExecutor:
 
     async def deliver(self, user, bubbles: list[str], dedupe_key: str | None = None, urgency: int = 3,
                       quiet_streak: int = 0, extra_keys: list[str] | None = None,
-                      buttons: list[list[Button]] | None = None, tainted: bool = False,
-                      quiet_subject: Subject | None = None) -> None:
+                      buttons: list[list[Button]] | None = None, tainted: bool = False) -> None:
         """`tainted`: the text was derived from third-party content. Its history row carries the taint
         marker, so the user's next reply is learned as untrusted (simple_turn._previous_tainted)."""
         now = timeutil.now()
@@ -352,31 +355,36 @@ class InitiativeExecutor:
                            event_id=proactive_event_id(key, tainted) if key else None)
         await self._policy.record(user, dedupe_key, urgency, now, extra_keys=extra_keys or ())
         if quiet_streak > 0:  # only a USER_QUIET nudge continues its chain; other proactive never arm one
-            await self._quiet.after_assistant_message(user.id, bubbles[-1], streak=quiet_streak,
-                                                      subject=quiet_subject)
+            await self._quiet.after_assistant_message(user.id, bubbles[-1], streak=quiet_streak)
 
 
 CLOSING_STATUSES = frozenset({LoopStatus.DONE, LoopStatus.DROPPED, LoopStatus.EXPIRED})
+STATE_FIELDS = frozenset({"status", "due_at"})
 
 
-def _without_unproven_closure(upsert: LoopUpsert, evidence: frozenset[int],
-                              event: Event) -> LoopUpsert | None:
-    """The reasoner may not close a loop on its own say-so: a closure without code evidence becomes a
-    note in the log and the rest of the update still applies. A new loop born closed is skipped (it
-    records a belief that something already happened). Phase B: the ledger turns such claims into item
-    notes; until then the decision row keeps the claim."""
-    if upsert.status not in CLOSING_STATUSES or "status" not in upsert.model_fields_set:
-        return upsert
+def _without_unproven_state(upsert: LoopUpsert, evidence: frozenset[int], event: Event) -> LoopUpsert | None:
+    """The reasoner's `track` is its belief. On an existing loop it may not move the due date, and may
+    change the status only when the signal is code evidence for that loop: those two fields are the
+    subject's state, and they change only from outside (the user, a matched email, a closure by code).
+    That keeps the wakeup chain rule honest across runs: the reasoner's own edits never "change" the
+    subject. A blocked change is logged as a note and the rest of the update still applies. A new loop
+    born in any state but OPEN is skipped (it records a belief that something already happened).
+    Phase B: the ledger turns such claims into item notes; until then the decision row keeps them."""
     if upsert.id is None:
-        log.info("initiative.closed_create_skipped", event_id=event.id, title=(upsert.title or "")[:80],
-                 status=upsert.status.value)
-        return None
-    if upsert.id in evidence:
+        if upsert.status is not LoopStatus.OPEN:
+            log.info("initiative.closed_create_skipped", event_id=event.id, title=(upsert.title or "")[:80],
+                     status=upsert.status.value)
+            return None
         return upsert
-    log.info("initiative.closure_claim_noted", event_id=event.id, loop_id=upsert.id,
-             status=upsert.status.value)
-    rest = upsert.model_fields_set - {"status"}
-    if rest <= {"id", "kind", "title"}:  # kind/title echoed beside the closure are not an edit
+    blocked = set(STATE_FIELDS & upsert.model_fields_set)
+    if upsert.id in evidence:
+        blocked.discard("status")
+    if not blocked:
+        return upsert
+    log.info("initiative.state_claim_noted", event_id=event.id, loop_id=upsert.id,
+             fields=sorted(blocked), status=upsert.status.value if "status" in blocked else None)
+    rest = upsert.model_fields_set - blocked
+    if rest <= {"id", "kind", "title"}:  # kind/title echoed beside the claim are not an edit
         return None
     return LoopUpsert.model_validate(upsert.model_dump(include=rest))
 

@@ -67,8 +67,8 @@ def loop_ping_key(loop_id: int | str | None, kind: str | None) -> str | None:
 
 def subject_ping_key(subject: str | None, kind: str | None, untrusted: bool = False) -> str | None:
     """The per-subject daily slot, whatever key the model chose. A commitment's prep (before it starts)
-    and everything after are separate slots; a ping derived from third-party content has its own slot,
-    so it never uses up the trusted one."""
+    and everything after are separate slots; a ping derived
+    from third-party content has its own slot, so it never uses up the trusted one."""
     if not subject:
         return None
     slot = "prep" if kind == "event_starting" else "any"

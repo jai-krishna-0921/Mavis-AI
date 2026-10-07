@@ -292,8 +292,8 @@ async def list_awaiting(user_id: int, since: datetime) -> list[tuple[Loop, datet
 
 
 async def expire(user_id: int, now) -> list[Loop]:
-    """Mark one user's stale OPEN loops EXPIRED, and close loops whose follow-up got no reply within
-    AWAITING_FOR; returns the loops that changed."""
+    """Mark one user's stale OPEN loops EXPIRED, and expire loops whose follow-up got no reply within
+    AWAITING_FOR (silence is not completion); returns the loops that changed."""
     expired: list[Loop] = []
     async with Session() as s:
         rows = await s.scalars(
@@ -302,7 +302,7 @@ async def expire(user_id: int, now) -> list[Loop]:
         for row in rows:
             if row.status == LoopStatus.AWAITING_REPLY.value:
                 if timeutil.ensure_utc(row.updated_at) < now - AWAITING_FOR:
-                    row.status = LoopStatus.DONE.value
+                    row.status = LoopStatus.EXPIRED.value  # no answer is not an outcome: never DONE
                     row.updated_at = now
                     row.version = (row.version or 1) + 1
                     expired.append(to_domain(row))

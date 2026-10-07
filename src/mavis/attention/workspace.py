@@ -45,7 +45,7 @@ from mavis.domain.loops import LoopStatus
 from mavis.domain.messages import Button
 from mavis.domain.policy import Capability
 from mavis.initiative.untrusted import wrap_untrusted
-from mavis.policy.pings import PingPolicy
+from mavis.policy.pings import PingPolicy, subject_ping_key
 from mavis.store.repo import attention as repo
 from mavis.store.repo import audit, users
 from mavis.tools.integrations.actions import ACTIONS
@@ -412,9 +412,12 @@ class WorkspaceIntake:
                                          origin={"kind": "attention", "subject": f"observation:{obs.id}"})
         except Exception as exc:  # noqa: BLE001 - LLM busy or any composer failure: the row is still spoken
             log.warning("workspace.notify_fallback_text", obs_id=obs.id, error=type(exc).__name__)
-            await executor.deliver(user, [self._comment_text(s)], key, notice.urgency,
-                                   buttons=self._mute_button(obs, s), tainted=True)
-            sent = True
+            # the composer gave the subject's slot back; the fixed text takes it again (one ping a day)
+            slot = subject_ping_key(f"observation:{obs.id}", "attention", untrusted=True)
+            sent = await PingPolicy().reserve(user, slot, timeutil.now()) is not None
+            if sent:
+                await executor.deliver(user, [self._comment_text(s)], key, notice.urgency,
+                                       buttons=self._mute_button(obs, s), tainted=True)
         await repo.set_fields(obs.id, delivery=SENT if sent else NONE)
 
     async def _ask(self, user: Any, obs: Any, s: Signal, key: str) -> None:

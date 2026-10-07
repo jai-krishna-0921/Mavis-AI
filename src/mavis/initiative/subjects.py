@@ -69,6 +69,7 @@ class SubjectState:
     record: str       # the source record, for grounding composed text (third-party parts wrapped)
     untrusted: bool = False
     loop_id: int | None = None
+    status: str = ""
 
 
 def _int(raw: Any) -> int | None:
@@ -130,8 +131,11 @@ async def _loop_state(user_id: int, subject: Subject) -> SubjectState | None:
     live = (lp.status in LIVE_LOOP_STATUSES and lp.kind is not LoopKind.ROUTINE
             and lp.origin is not LoopOrigin.REASONER)
     due = timeutil.ensure_utc(lp.due_at).isoformat() if lp.due_at else "-"
-    return SubjectState(subject, live, f"{lp.status.value}|{due}", record, untrusted=not lp.trusted,
-                        loop_id=lp.id)
+    # Externally caused state only: OPEN and AWAITING read the same (AWAITING means Mavis asked its own
+    # follow-up), and the reasoner can change neither status nor due (executor._without_unproven_state).
+    phase = "live" if lp.status in LIVE_LOOP_STATUSES else lp.status.value
+    return SubjectState(subject, live, f"{phase}|{due}", record, untrusted=not lp.trusted, loop_id=lp.id,
+                        status=lp.status.value)
 
 
 async def _approval_state(user_id: int, subject: Subject) -> SubjectState | None:
@@ -142,7 +146,7 @@ async def _approval_state(user_id: int, subject: Subject) -> SubjectState | None
         return None
     record = f"Action needing approval #{row.id} ({row.tool}): status {row.status}. Preview: {row.preview}"
     return SubjectState(subject, row.status in OPEN_APPROVALS, row.status, record,
-                        untrusted=bool(getattr(row, "tainted", False)))
+                        untrusted=bool(row.tainted), status=row.status)
 
 
 async def _task_state(user_id: int, subject: Subject) -> SubjectState | None:
@@ -153,7 +157,7 @@ async def _task_state(user_id: int, subject: Subject) -> SubjectState | None:
         return None
     record = f"Background task #{row.id}: '{row.goal}'. Status: {row.status}."
     return SubjectState(subject, row.status in LIVE_TASK_STATUSES, row.status, record,
-                        untrusted=bool(row.tainted))
+                        untrusted=bool(row.tainted), status=row.status)
 
 
 async def _observation_state(user_id: int, subject: Subject) -> SubjectState | None:

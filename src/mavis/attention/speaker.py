@@ -26,7 +26,7 @@ from mavis.domain.errors import LLMError
 from mavis.domain.messages import Button
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.email_triage import SECURITY_INTENT
-from mavis.policy.pings import SECURITY_BYPASS_PREFIX, PingPolicy
+from mavis.policy.pings import SECURITY_BYPASS_PREFIX, PingPolicy, subject_ping_key
 from mavis.timers.service import WakeupService
 from mavis.tools.integrations.normalize import to_datetime
 
@@ -256,6 +256,11 @@ class Speaker:
             sent = await executor.notify(user, intent, context=obs.summary, untrusted=True, buttons=buttons,
                                          origin={"kind": "attention", "subject": f"observation:{obs.id}"})
         except LLMError as exc:
+            # the composer gave the subject's slot back; the fixed text takes it again (one ping a day)
+            slot = subject_ping_key(f"observation:{obs.id}", "attention", untrusted=True)
+            if await self._policy.reserve(user, slot, timeutil.now()) is None:
+                log.info("attention.fallback_slot_taken", obs_id=obs.id)
+                return DROPPED
             # The composer could not phrase it (LLM busy). The policy already allowed this ping, so
             # send the fixed wording rather than lose it (prod: a security notice, obs 81).
             log.warning("attention.notify_fallback_text", obs_id=obs.id, error=type(exc).__name__)
