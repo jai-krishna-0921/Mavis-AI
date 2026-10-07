@@ -40,16 +40,20 @@ CONTEXT_OPEN, CONTEXT_CLOSE = "<assistant_context>", "</assistant_context>"
 CONTEXT_NOTE = "Your previous reply: context only. Do not extract items from it."
 
 
-def user_words_of(text: str) -> str:
-    """Every "User: " segment of a LEARN text, joined: the only source of loops and events (T3). The fenced
-    assistant context and legacy "Mavis: " lines are skipped. Text without any marker is all the user's."""
+def _split_learn_text(text: str) -> tuple[str, str]:
+    """(the user's words, the assistant context) of a LEARN text. The user's words are every "User: "
+    segment; the context is the fenced previous reply and any legacy "Mavis: " lines. Text without any
+    marker is all the user's."""
     if USER_PREFIX not in text and CONTEXT_OPEN not in text and not text.startswith(LEGACY_ASSISTANT_PREFIX):
-        return text.strip()
+        return text.strip(), ""
     segments: list[list[str]] = []
+    context: list[str] = []
     in_context = in_user = False
     for line in text.split("\n"):
         if in_context:
             in_context = line.strip() != CONTEXT_CLOSE
+            if in_context:
+                context.append(line)
             continue
         if line.startswith(CONTEXT_OPEN):
             in_context, in_user = True, False
@@ -58,26 +62,52 @@ def user_words_of(text: str) -> str:
             in_user = True
         elif line.startswith(LEGACY_ASSISTANT_PREFIX):
             in_user = False
+            context.append(line[len(LEGACY_ASSISTANT_PREFIX):])
         elif in_user:
             segments[-1].append(line)
-    return "\n".join("\n".join(seg).strip() for seg in segments).strip()
+        else:
+            context.append(line)
+    user = "\n".join("\n".join(seg).strip() for seg in segments).strip()
+    return user, "\n".join(context).strip()
+
+
+def user_words_of(text: str) -> str:
+    """Every "User: " segment of a LEARN text, joined: the only source of loops and events (T3). The fenced
+    assistant context and legacy "Mavis: " lines are skipped. Text without any marker is all the user's."""
+    return _split_learn_text(text)[0]
+
+
+def assistant_context_of(text: str) -> str:
+    """The assistant's words in a LEARN text (the fenced previous reply, legacy "Mavis: " lines): what the
+    user may be echoing. Empty when the text is all the user's."""
+    return _split_learn_text(text)[1]
 
 
 _WORD = re.compile(r"[a-z0-9]+")
 _GROUNDING_STEM = 4  # "claims" grounds "claim", "renewal" grounds "renew"
 
 
-def _grounded(title: str, entities: list[str], said: str) -> bool:
+def _grounded(title: str, entities: list[str], said: str, context: str | None) -> bool:
     """The item names something the user actually said: a person it involves, or an identifying word of
     its title (exact, or sharing a stem of at least _GROUNDING_STEM letters). Function words, times and
-    dates are not identifying (loops_repo.title_tokens), nor is the leading action word."""
+    dates are not identifying (loops_repo.title_tokens).
+
+    The leading word needs care. An item title often leads with its action ("Call Ravi about the lease"),
+    and when the assistant's reply proposed that action the user echoing it ("ok, I'll call him") does
+    not say which item they mean. So the first word grounds the item only when it is the user's own: it
+    does not appear in the assistant context. A noun-first title ("Dentist appointment Friday") is then
+    grounded by "dentist" unless the reply said it first. With no context given (None) the first word
+    cannot be shown to be the user's own and does not count; a one-word title is identified by its word."""
     if any(e.strip() and _named(e, said) for e in entities):
         return True
     tokens = loops_repo.title_tokens(title)
-    # An item title leads with its action ("Call Ravi about the lease", "Renew passport"): the action word
-    # is shared by many items and does not say which one. What identifies it is the rest (its object,
-    # the people, the topic); a one-word title is identified by that word.
-    return _words_match(tokens[1:] or tokens, said)
+    if not tokens:
+        return False
+    rest = tokens[1:]
+    first_is_own = context is not None and not _words_match(tokens[:1], context)
+    if not rest or first_is_own:
+        return _words_match(tokens, said)
+    return _words_match(rest, said)
 
 
 def _words_match(tokens: list[str], said: str) -> bool:
@@ -94,12 +124,13 @@ def _named(name: str, said: str) -> bool:
     return _words_match([w for w in _WORD.findall(name.casefold()) if len(w) >= 3], said)
 
 
-def grounded_in_user(x: Extraction, said: str) -> Extraction:
-    """Keep only what the user's own words support (T3, I5). Anything lifted from the assistant context
+def grounded_in_user(x: Extraction, said: str, context: str | None = None) -> Extraction:
+    """Keep only what the user's own words support (T3, I5); `context` is the assistant's previous reply
+    (see _grounded for how it decides the leading word). Anything lifted from the assistant context
     is dropped: loops and events, entities the user never named, relations whose every non-user side
     the user did not name, and profile updates whose value the user did not say."""
-    loops = [lp for lp in x.loops if _grounded(lp.title, lp.entities, said)]
-    events = [ev for ev in x.events if _grounded(ev.title, ev.with_people, said)]
+    loops = [lp for lp in x.loops if _grounded(lp.title, lp.entities, said, context)]
+    events = [ev for ev in x.events if _grounded(ev.title, ev.with_people, said, context)]
     entities = [e for e in x.entities if _named(e.name, said)]
     relations = [r for r in x.relations if _named(r.subject, said) and _named(r.object, said)]
     profile = [u for u in x.profile_updates if _words_match(loops_repo.title_tokens(u.value), said)]
@@ -224,9 +255,9 @@ class MemoryService:
             extraction = extraction.model_copy(update={"mood": None})
         if trust is Trust.USER:  # the model sometimes misreads "by Tuesday": fix the plain cases in code
             extraction = apply_relative_day(extraction, user_message_of(text), anchor, user.timezone)
-        said = user_words_of(text)
+        said, context = _split_learn_text(text)
         if conversation and said != text.strip():  # an assistant reply was included as context (T3)
-            extraction = grounded_in_user(extraction, said)
+            extraction = grounded_in_user(extraction, said, context)
 
         resolution = await resolve(extraction, await self.graph.entities(user_id), self.embedder)
         trusted = trust is Trust.USER
