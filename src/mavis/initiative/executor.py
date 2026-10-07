@@ -20,7 +20,13 @@ from mavis.initiative.composer import Composer
 from mavis.initiative.quiet import QuietTracker
 from mavis.initiative.subjects import Subject, SubjectKind, SubjectState, event_subject
 from mavis.loops.service import LoopService
-from mavis.policy.pings import SECURITY_BYPASS_PREFIX, PingPolicy, in_quiet_hours, loop_ping_key
+from mavis.policy.pings import (
+    SECURITY_BYPASS_PREFIX,
+    PingPolicy,
+    in_quiet_hours,
+    loop_ping_key,
+    subject_ping_key,
+)
 from mavis.store.db import Session
 from mavis.store.repo import messages, outbox
 from mavis.timers.service import WakeupService
@@ -246,8 +252,10 @@ class InitiativeExecutor:
         o = origin or {}
         loop_key = None if untrusted else loop_ping_key(o.get("loop_id"), o.get("kind"))
         extra = [loop_key] if loop_key else []
+        slot = subject_ping_key(o.get("subject"), o.get("kind"), untrusted)
         verdict = await self._policy.check(user, intent.urgency, intent.dedupe_key, timeutil.now(),
-                                           extra_keys=extra, bypass_budget=intent.security)
+                                           extra_keys=[*extra, slot] if slot else extra,
+                                           bypass_budget=intent.security)
         if not verdict.allow:
             log.info("initiative.notify_blocked", user=user.id, reason=verdict.reason,
                      defer_until=verdict.defer_until)
@@ -272,11 +280,24 @@ class InitiativeExecutor:
         if intent.dedupe_key and await self._recover_partial(user, intent, tainted=untrusted):
             await self._follow_up_sent(origin)
             return False
-        message = await self._composer.compose(user, intent.intent, intent.urgency,
-                                                _with_delay_note(context, original_due, user),
-                                                untrusted=untrusted)
+        # one ping per subject per local day: taken atomically before composing, so two triggers about
+        # the same thing (under different model keys) cannot both go out; given back if nothing is sent
+        reserved = await self._policy.reserve(user, slot, timeutil.now()) if slot else None
+        if slot and reserved is None:
+            log.info("initiative.notify_subject_taken", user=user.id, slot=slot)
+            return False
+        try:
+            message = await self._composer.compose(user, intent.intent, intent.urgency,
+                                                    _with_delay_note(context, original_due, user),
+                                                    untrusted=untrusted)
+        except BaseException:
+            if reserved:
+                await self._policy.release(user, reserved)
+            raise
         if not message.send:
             log.info("initiative.composer_dropped", user=user.id, intent=intent.intent[:80])
+            if reserved:
+                await self._policy.release(user, reserved)
             return False
         await self.deliver(user, message.messages, intent.dedupe_key, intent.urgency, quiet_streak,
                            extra_keys=extra, buttons=buttons, tainted=untrusted,

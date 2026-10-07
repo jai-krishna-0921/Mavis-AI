@@ -199,15 +199,16 @@ class InitiativeHandler:
 
     async def _origin_for(self, event: Event) -> dict | None:
         """Why a ping is being sent, carried with it if it is deferred so it can be revalidated."""
+        subject = subjects.event_subject(event)  # the ping's daily slot and its grounding record
         if event.type is EventType.USER_QUIET:
             origin = {"kind": event.type.value, "asked_at": event.payload.get("asked_at")}
-            if event.payload.get("subject"):  # the item the unanswered question is about
-                origin["subject"] = event.payload["subject"]
+            if subject is not None:  # the item the unanswered question is about
+                origin["subject"] = subject.key
             return origin
         loop_id = _event_loop_id(event)
         if loop_id is None:
-            return None
-        origin: dict = {"kind": event.type.value, "loop_id": loop_id}
+            return {"kind": event.type.value, "subject": subject.key} if subject is not None else None
+        origin: dict = {"kind": event.type.value, "loop_id": loop_id, "subject": f"loop:{loop_id}"}
         loop = await self._loops.get(loop_id)
         if loop is not None and loop.due_at is not None:
             due = timeutil.ensure_utc(loop.due_at)
