@@ -224,3 +224,64 @@ async def test_learn_keeps_only_user_grounded_facts(memory, user, fake_llm, cloc
     assert statements == ["Jawahar is Jai's friend."]
     assert {e.name for e in await memory.graph.entities(user.id)} >= {"Jawahar"}
     assert "Acme" not in {e.name for e in await memory.graph.entities(user.id)}
+
+
+# --- a noun-first title is grounded by its first word when that word is the user's, not an echo -------
+
+
+@pytest.mark.parametrize(("said", "title"), [
+    ("dentist on friday", "Dentist appointment Friday"),
+    ("gym at 6 tomorrow", "Gym session at 6 tomorrow"),
+    ("passport by the 20th", "Passport renewal by the 20th"),
+])
+async def test_the_users_own_first_word_grounds_a_noun_first_item(memory, user, recording_bus, clock,
+                                                                  fake_llm, said, title):
+    from mavis.agents.turn_support import learn_text
+
+    svc = _hooked(memory, recording_bus)
+    clock.set(local(IST, 5, 18, 0))
+    fake_llm.push_structured(Extraction(loops=[LoopDraft(kind="COMMITMENT", title=title)]))
+    await memory.learn(user.id, learn_text(said, "Anything else on your mind?", None), "tg:update:50",
+                       Trust.USER, anchor_at=clock.t)
+    assert len(await svc.active(user.id)) == 1
+
+
+@pytest.mark.parametrize(("ack", "reply", "title"), [
+    ("ok", "Want me to add a dentist appointment on Friday?", "Dentist appointment Friday"),
+    ("sure", "Shall I put a gym session at 6 tomorrow on your list?", "Gym session at 6 tomorrow"),
+    ("yeah do that", "Passport renewal by the 20th?", "Passport renewal by the 20th"),
+    ("yeah book it", "Want me to book the gym session at 6?", "Book gym session at 6"),
+    ("ok, I'll call him", "Call Ravi about the lease?", "Call Ravi about the lease"),
+    ("sending it now", "Remember to send Meera the deck.", "Send Meera the deck"),
+])
+async def test_an_item_the_reply_proposed_is_dropped_when_the_user_only_agrees(memory, user, recording_bus,
+                                                                              clock, fake_llm, ack, reply,
+                                                                              title):
+    from mavis.agents.turn_support import learn_text
+
+    svc = _hooked(memory, recording_bus)
+    clock.set(local(IST, 5, 18, 0))
+    fake_llm.push_structured(Extraction(loops=[LoopDraft(kind="COMMITMENT", title=title)]))
+    await memory.learn(user.id, learn_text(ack, reply, None), "tg:update:51", Trust.USER, anchor_at=clock.t)
+    assert await svc.active(user.id) == []
+
+
+@pytest.mark.parametrize(("said", "context", "title", "kept"), [
+    ("dentist friday", "How's your week?", "Dentist appointment Friday", True),
+    ("dentist friday", "Dentist appointment Friday?", "Dentist appointment Friday", False),  # echoed
+    ("renew it", "Anything else?", "Renew passport", True),       # the user's own action word
+    ("renew it", "Your passport needs renewing.", "Renew passport", False),  # the reply's word, echoed
+])
+def test_the_first_word_counts_only_when_it_is_not_echoed_from_the_reply(said, context, title, kept):
+    x = Extraction(loops=[LoopDraft(kind="COMMITMENT", title=title)])
+    assert bool(service_mod.grounded_in_user(x, said, context).loops) is kept
+
+
+def test_assistant_context_of_returns_the_fenced_reply_only():
+    from mavis.agents.turn_support import learn_text
+
+    text = learn_text("sure", "Book the vet?\nUser: not a user line", "remind me later")
+    ctx = service_mod.assistant_context_of(text)
+    assert "Book the vet?" in ctx and "not a user line" in ctx
+    assert "sure" not in ctx and "remind me later" not in ctx
+    assert service_mod.assistant_context_of("plain user text") == ""
