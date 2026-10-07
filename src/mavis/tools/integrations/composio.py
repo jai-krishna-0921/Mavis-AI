@@ -38,7 +38,7 @@ from mavis.tools.integrations.composio_map import (
     slug_for,
     toolkit_of_slug,
 )
-from mavis.tools.integrations.failures import classify
+from mavis.tools.integrations.failures import adapter_kind, classify
 
 # Hosts Composio's presigned upload URLs may point at (its OpenAPI: storage_backend s3 or azure_blob_storage).
 STORAGE_HOST_SUFFIXES = (".amazonaws.com", ".composio.dev", ".blob.core.windows.net")
@@ -359,7 +359,7 @@ class ComposioProvider:
                 body={"user_id": user.provider_id, "arguments": arguments},
             )
         except IntegrationError as exc:
-            kind = classify(None, status=exc.status)[0] if exc.status else FailureKind.UNAVAILABLE
+            kind = adapter_kind(exc.status)
             return ToolResult(ok=False, error=str(exc), error_kind=kind)
         if not answer.get("successful", False):
             # Classified here, at the boundary: the kind decides what the user reads, the body never does.

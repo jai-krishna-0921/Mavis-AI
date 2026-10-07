@@ -51,6 +51,17 @@ def kind_for_status(status: int | None) -> FailureKind | None:
     return None
 
 
+def adapter_kind(status: int | None) -> FailureKind:
+    """A failure of the integration adapter's OWN HTTP call (IntegrationError), not a service error inside
+    a successful answer. Its 401, 403 or 404 is about our API key or an action slug, not the user's
+    account, so it must not read as "reconnect": it is unavailable on our side. Bad arguments and rate
+    limits keep their kind; no status (never reached) is unavailable."""
+    kind = kind_for_status(status)
+    if kind in (FailureKind.INVALID_ARGUMENT, FailureKind.RATE_LIMITED):
+        return kind
+    return FailureKind.UNAVAILABLE
+
+
 def _parse(body: Any) -> Any:
     if isinstance(body, (dict, list)):
         return body
@@ -91,19 +102,32 @@ def _kind_for_code(value: str) -> FailureKind | None:
     return None
 
 
+# When codes disagree (Google sends `"status": "PERMISSION_DENIED"` with `"reason": "rateLimitExceeded"` for
+# a 403 rate limit), the more specific kind wins.
+_SPECIFICITY = (FailureKind.RATE_LIMITED, FailureKind.NOT_FOUND, FailureKind.UNAVAILABLE, FailureKind.AUTH,
+                FailureKind.INVALID_ARGUMENT)
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\[\]]{0,63}$")
+
+
 def classify(body: Any = None, *, status: int | None = None) -> tuple[FailureKind, str | None]:
     """(kind, field) for a provider failure. `body` is the provider's error (dict, JSON text, or a
-    string that may embed JSON); `status` an HTTP status the adapter saw itself."""
+    string that may embed JSON); `status` an HTTP status the adapter saw itself.
+
+    A provider's machine code is more specific than an HTTP status, so it wins (a 403 whose reason is
+    rateLimitExceeded is a rate limit, not an auth problem); the status decides when there is no code.
+    `field` is only ever an identifier-shaped value (callers map it to their own argument names)."""
     tree = _parse(body)
     nodes = list(_walk(tree)) if tree is not None else []
-    field = next((str(n[k]) for n in nodes for k in _FIELD_KEYS if isinstance(n.get(k), str) and n[k]), None)
-    kind = kind_for_status(status)
+    field = next((str(n[k]) for n in nodes for k in _FIELD_KEYS
+                  if isinstance(n.get(k), str) and _IDENTIFIER.match(n[k])), None)
+    codes = [n[k] for n in nodes for k in _CODE_KEYS if isinstance(n.get(k), str)]
+    if isinstance(body, str) and tree is None:
+        codes.append(body)  # a bare machine code such as "channel_not_found"
+    found = {k for k in map(_kind_for_code, codes) if k is not None}
+    kind = next((k for k in _SPECIFICITY if k in found), None)
+    if kind is None:
+        kind = kind_for_status(status)
     if kind is None:
         statuses = (n[k] for n in nodes for k in _STATUS_KEYS if isinstance(n.get(k), int))
         kind = next((k for k in map(kind_for_status, statuses) if k is not None), None)
-    if kind is None:
-        codes = [n[k] for n in nodes for k in _CODE_KEYS if isinstance(n.get(k), str)]
-        if isinstance(body, str) and tree is None:
-            codes.append(body)  # a bare machine code such as "channel_not_found"
-        kind = next((k for k in map(_kind_for_code, codes) if k is not None), None)
     return kind or FailureKind.UNKNOWN, field

@@ -17,7 +17,6 @@ from pydantic import BaseModel
 from mavis.domain.errors import (
     ActionFailed,
     ConnectionRequired,
-    FailureKind,
     IntegrationError,
     failure_text,
 )
@@ -34,7 +33,7 @@ from mavis.tools.integrations.actions import (
 )
 from mavis.tools.integrations.base import IntegrationProvider, render_result
 from mavis.tools.integrations.connections import ConnectionCache
-from mavis.tools.integrations.failures import classify, kind_for_status
+from mavis.tools.integrations.failures import adapter_kind, classify
 from mavis.tools.integrations.mail_render import RENDERERS
 from mavis.tools.integrations.workspace_render import RENDERERS as WORKSPACE_RENDERERS
 from mavis.tools.registry import MavisTool, TaintPolicy, ToolContext, ToolRegistry, contextual
@@ -84,7 +83,7 @@ async def gated(
     try:
         result = await call_action(ctx, action, args, provider=provider, cache=cache)
     except IntegrationError as exc:
-        kind = kind_for_status(exc.status) or FailureKind.UNAVAILABLE
+        kind = adapter_kind(exc.status)
         raise ActionFailed(
             f"{failure_text(kind, name)} ({exc}). Tell the user and offer to try again later.",
             reason=failure_text(kind, name), kind=kind,
@@ -102,7 +101,11 @@ def failed_action(action: str, result: ToolResult) -> ActionFailed:
     kind, field = result.error_kind, result.error_field
     if kind is None:
         kind, field = classify(result.error)
-    name = display_name(ACTIONS[action].capability)
+    spec = ACTIONS[action]
+    # only one of OUR argument names is ever named to the user, never provider text
+    leaf = (field or "").split(".")[-1].split("[")[0]
+    field = leaf if leaf in spec.args_model.model_fields else None
+    name = display_name(spec.capability)
     reason = failure_text(kind, name, field)
     detail = (result.error or "no detail").strip()
     return ActionFailed(f"{action} failed ({kind.value}): {detail}", reason=reason, kind=kind, field=field)
