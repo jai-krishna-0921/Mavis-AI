@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from mavis.domain import timeutil
 from mavis.store.db import Session
 from mavis.store.models import AttentionSender
 from mavis.store.repo import attention as repo
@@ -74,7 +75,7 @@ async def _mail(user_id: int, mid: str, **fields):
 async def test_mail_redelivery_and_drain_never_pick_up_workspace_rows(user):
     ws, _ = await _signal(user.id, "drive:f1:e1")
     await repo.set_fields(ws.id, delivery=repo.QUEUED)
-    later = datetime.now(UTC) + timedelta(days=1)
+    later = timeutil.now() + timedelta(days=1)
     assert await repo.undelivered(user.id, later) == []
     assert await repo.users_needing_drain() == []
     mail = await _mail(user.id, "m1", delivery=repo.QUEUED)

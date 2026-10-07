@@ -62,7 +62,7 @@ async def test_answer_turn_learns_the_original_request(
     fake_llm.push_text("Got it, Tuesday at 10.")
     await simple_turn.run_turn(_event(user.id, "Tuesday", "tg:update:2"))
     learn = next(j for j in jobs if j.id == "learn:tg:update:2")
-    assert learn.payload["text"].startswith("User: Plan a meeting for tomorrow at 10 am\nMavis: ")
+    assert learn.payload["text"].startswith("User: Plan a meeting for tomorrow at 10 am\n<assistant_context>")
     assert learn.payload["text"].endswith("User: Tuesday")
 
 

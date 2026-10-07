@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from mavis.domain import timeutil
 from mavis.domain.memory import SINGLE_VALUED_RELS, Entity, Relation
 from mavis.memory.graph import edge_score
 from mavis.memory.names import USER_KEY, is_user, node_key, normalize_name, sanitize_label, sanitize_rel
@@ -118,7 +119,7 @@ def q_neighborhood(hops: int) -> str:
 
 def _to_dt(v: Any) -> datetime:
     if v is None:
-        return datetime.now(UTC)
+        return timeutil.now()
     if hasattr(v, "to_native"):
         v = v.to_native()
     return v if v.tzinfo else v.replace(tzinfo=UTC)
@@ -126,7 +127,7 @@ def _to_dt(v: Any) -> datetime:
 
 def rank_candidates(rows: list[dict], limit: int, now: datetime | None = None) -> list[str]:
     """Same ranking as SqliteGraphStore: score = confidence x recency decay."""
-    now = now or datetime.now(UTC)
+    now = now or timeutil.now()
     scored = sorted(
         (r for r in rows if r.get("st")),
         key=lambda r: edge_score(float(r.get("conf") or 0.0), _to_dt(r.get("vf")), now),

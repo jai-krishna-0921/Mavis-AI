@@ -55,6 +55,7 @@ from mavis.domain.errors import ConnectionRequired
 from mavis.domain.events import Event
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.tasks import ApprovalStatus, TaskKind, TaskOrigin
+from mavis.domain.timefmt import strip_stamps
 from mavis.llm import models as llm
 from mavis.policy import approvals as approval_flow
 from mavis.policy.risk import UNTRUSTED_NOTE
@@ -68,8 +69,9 @@ log = structlog.get_logger(__name__)
 # What the turn did, for Phase 7 metrics: SMALL_TALK, DIRECT_TOOL, TASK, CONNECT or APPROVAL_REPLY.
 current_route: ContextVar[str | None] = ContextVar("current_route", default=None)
 
-CHAT_TOOL_LIMIT = 8
-CHAT_ALWAYS = ("start_task", "connect_account", "pending")
+CHAT_TOOL_LIMIT = 10
+# each only when available; track_loop and wake_me carry agreements and reminders (LEARN does not)
+CHAT_ALWAYS = ("start_task", "connect_account", "pending", "web_search", "track_loop", "wake_me")
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
 # Offered together: mail_search returns short previews only, so without mail_read a question about an
 # email (one a brief mentioned, say) cannot be answered from its text; mail_read needs search's ids.
@@ -101,6 +103,9 @@ TOOL_RULES = (
     "for their OK. When a tool answers QUEUED_FOR_APPROVAL, tell them it's ready and waiting for their "
     "OK (they get buttons to approve, edit or cancel). Never say it was sent or done.\n"
     "- Reminders: wake_me at the exact time they asked for.\n"
+    "- When they agree to something you suggested (\"yes\", \"do that\", \"the second one\") or ask you "
+    "to remember or remind them of something, call track_loop or wake_me in this same turn with the "
+    "concrete item from the conversation, written out in full. Nothing else saves it for them.\n"
     "- For any question about what is pending, open, due, on their radar or left to do, call pending and "
     "answer only from its result. Your earlier messages and the conversation summary may be outdated: "
     "they are claims, not facts.\n"
@@ -111,6 +116,14 @@ TOOL_RULES = (
     f"- {UNTRUSTED_NOTE}"
 )
 TOOLS_GUIDE = TOOL_RULES  # name kept for callers of the chat-tools slice
+# Added only when web_search is offered. Web results are untrusted (they taint the turn), so search only
+# when the question needs the outside world, not for everything.
+WEB_RULE = (
+    "- Use web_search only when they ask about a specific named real-world person, organisation, product, "
+    "price, event or news, or ask you to look something up; then answer from what it finds. Anything the "
+    "user told you needs no search. Otherwise answer normally. If the search finds nothing clear, say "
+    "you're not sure. Never invent a biography."
+)
 
 
 def chat_tools(user_id: int, query: str = "") -> list[BaseTool]:
@@ -361,7 +374,8 @@ async def run_turn(event: Event) -> None:
         hint = RESTART_HINT if recent_assistant else START_HINT
     async with presence.typing(user.telegram_chat_id):  # refreshed until the reply is queued
         (context, hooked), connections, card_name = await asyncio.gather(
-            build_context_ex(user.id, text, hint), connection_states(user.id), known_name(user.id)
+            build_context_ex(user.id, text, hint, tz=user.timezone), connection_states(user.id),
+            known_name(user.id),
         )
         # Start tainted when third-party content is already in the prompt: any replayed assistant message
         # was written from it, or hook context (the inbox digest) was added. The react loop then applies
@@ -380,8 +394,10 @@ async def run_turn(event: Event) -> None:
         tools = chat_tools(user.id, query=f"{text}\n{previous or ''}")
         if tools:
             system = f"{system}\n\n{TOOL_RULES}"
+            if any(t.name == "web_search" for t in tools):
+                system = f"{system}\n{WEB_RULE}"
         prompt: list[BaseMessage] = [SystemMessage(system)]
-        prompt += to_langchain(history)
+        prompt += to_langchain(history, now, user.timezone)
 
         connect_texts: list[str] = []
         token = current_turn.set(TurnInfo(event_id=event.id))
@@ -412,7 +428,8 @@ async def run_turn(event: Event) -> None:
             log.info("simple_turn.tools", tools=result.tools_called, steps=result.steps,
                      tainted=result.tainted, wrapped_up=result.wrapped_up,
                      queued=result.queued_approvals)
-        reply = result.text or WRAP_UP_FALLBACK
+        # replayed messages carry stamps (T1); one echoed at the start of a line is not content
+        reply = strip_stamps(result.text or "").strip() or WRAP_UP_FALLBACK
         bubbles = persona.split_bubbles(reply) or [reply]
 
         async with Session() as s:

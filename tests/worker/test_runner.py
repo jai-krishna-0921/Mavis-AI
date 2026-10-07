@@ -1,8 +1,8 @@
 import asyncio
-from datetime import UTC, datetime
 
 import pytest
 
+from mavis.domain import timeutil
 from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Job, JobKind, Trust
 from mavis.store.db import utcnow
@@ -19,7 +19,7 @@ from mavis.worker.runner import (
 
 def ev(event_id: str, user_id: int = 1, trust: Trust = Trust.USER) -> Event:
     return Event(id=event_id, user_id=user_id, type=EventType.USER_MESSAGE,
-                 occurred_at=datetime.now(UTC), source="test", payload={"text": "hi"}, trust=trust)
+                 occurred_at=timeutil.now(), source="test", payload={"text": "hi"}, trust=trust)
 
 
 async def test_turns_serialised_per_user(settings) -> None:

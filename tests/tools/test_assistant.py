@@ -1,7 +1,8 @@
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import pytest
 
+from mavis.domain import timeutil
 from mavis.domain.loops import LoopKind
 from mavis.domain.policy import RiskClass
 from mavis.store.repo import policy_rules, tasks
@@ -70,7 +71,7 @@ async def test_forget_calls_memory(user, fake_memory):
 
 
 async def test_wake_me_naive_time_is_user_local(user, wakeups):
-    naive = (datetime.now(UTC) + timedelta(days=2))
+    naive = (timeutil.now() + timedelta(days=2))
     naive = naive.replace(tzinfo=None, hour=10, minute=0, second=0, microsecond=0)
     await assistant.wake_me(user.id, assistant.WakeMeArgs(at=naive, reason="pep talk"))
     _, at, reason, kind = wakeups[0]
@@ -82,7 +83,7 @@ async def test_wake_me_naive_time_is_user_local(user, wakeups):
 
 async def test_wake_me_rejects_past(user, wakeups):
     out = await assistant.wake_me(user.id, assistant.WakeMeArgs(
-        at=datetime.now(UTC) - timedelta(minutes=5), reason="late"))
+        at=timeutil.now() - timedelta(minutes=5), reason="late"))
     assert "past" in out
     assert wakeups == []
 
@@ -111,7 +112,7 @@ async def test_what_do_you_know_renders_recall(user, fake_memory):
 
 async def test_wake_me_rejects_far_future(user, wakeups):
     out = await assistant.wake_me(user.id, assistant.WakeMeArgs(
-        at=datetime.now(UTC) + timedelta(days=400), reason="far"))
+        at=timeutil.now() + timedelta(days=400), reason="far"))
     assert "year" in out and wakeups == []
 
 
@@ -123,7 +124,7 @@ async def test_wake_me_bad_timezone_falls_back(user, wakeups):
         row = await s.get(User, user.id)
         row.timezone = "Not/AZone"
         await s.commit()
-    naive = (datetime.now(UTC) + timedelta(days=2)).replace(tzinfo=None)
+    naive = (timeutil.now() + timedelta(days=2)).replace(tzinfo=None)
     out = await assistant.wake_me(user.id, assistant.WakeMeArgs(at=naive, reason="tz"))
     assert out.startswith("Wakeup #") and len(wakeups) == 1
 

@@ -59,7 +59,9 @@ class WakeMeArgs(LocalTimes):
 
 class TrackLoopArgs(LocalTimes):
     kind: LoopKind
-    title: str = Field(min_length=2, max_length=200)
+    title: str = Field(min_length=2, max_length=200, description=(
+        "What it is, read days later: write any day as an absolute date (Sun 4 Oct), never today or "
+        "tomorrow"))
     due_at: datetime | None = Field(
         default=None, description=wall_clock("Optional deadline")
     )

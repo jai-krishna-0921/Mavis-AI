@@ -9,6 +9,7 @@ from mavis.agents import persona
 from mavis.domain import timeutil
 from mavis.domain.decisions import ComposedMessage
 from mavis.domain.messages import Role
+from mavis.domain.timefmt import stamped, strip_stamps
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.llm import models as llm
 from mavis.store.repo import messages
@@ -109,7 +110,8 @@ class Composer:
             prior_turns=len(persona.recent_messages(recent, now)) or None,
         ) + "\n" + COMPOSER_RULES
         history = (
-            "\n".join(f"{'User' if m.role == Role.USER else 'You'}: {m.content}" for m in recent)
+            "\n".join(f"{'User' if m.role == Role.USER else 'You'}: "
+                      f"{stamped(m.content, m.created_at, now, user.timezone)}" for m in recent)
             or "(no messages yet)"
         )
         if untrusted:
@@ -125,7 +127,8 @@ class Composer:
         )
         bubbles = []
         for b in draft.messages:
-            b = (scrub_untrusted_origin(b) if untrusted else b).strip()  # typography: at the channel
+            # typography: at the channel; an echoed replay stamp (T1) is not content
+            b = strip_stamps(scrub_untrusted_origin(b) if untrusted else b).strip()
             if b:
                 bubbles.append(b)
         bubbles = bubbles[:MAX_BUBBLES]

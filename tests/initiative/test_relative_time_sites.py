@@ -79,6 +79,9 @@ async def test_recall_uses_the_current_clock(clock):
         async def search_with_kind(self, *a, **k):
             return []
 
+        async def search_hits(self, *a, **k):
+            return []
+
     clock.set(ist(3, 9, 30))
     ctx = await recall(1, "x", profile="", tz=IST, spotters=Empty(), graph=Empty(), vector=Empty(),
                        loops=Loops())
