@@ -192,3 +192,62 @@ async def test_chat_wrap_up_failure_still_raises_and_never_sends_raw_results(use
     lc = fresh_registry.for_agent("conversation", user.id)
     with pytest.raises(LLMError):
         await react_loop(lc, [HumanMessage("hi")], max_steps=1, wrap_up=True)
+
+
+@pytest.mark.parametrize("runner", ["specialist", "spawn"])
+@pytest.mark.parametrize("fail_at", [2, 3])
+async def test_a_model_error_mid_loop_returns_the_gathered_work(user, fresh_registry, monkeypatch, runner,
+                                                                fail_at):
+    """A provider error after some tool rounds keeps the work, like running out of budget."""
+    from mavis.domain.errors import LLMError
+
+    tool, agent = ("web_search", "research") if runner == "specialist" else ("price_check", "spawn")
+    _register_lookup(fresh_registry, tool, {agent})
+
+    async def script(n, tools):
+        if n >= fail_at:
+            raise LLMError("all models failed")
+        call = {"name": tool, "args": {"text": f"item {n}"}, "id": f"c{n}"}
+        return AIMessage(content="", tool_calls=[call])
+
+    _scripted(monkeypatch, script)
+    if runner == "specialist":
+        out = await run_specialist(Specialist(name=agent, description="d", prompt="p", tool_names=(tool,),
+                                              max_steps=8), user.id, "dig")
+    else:
+        out = await spawn_mod.spawn_agent(user.id, "w", "g", [tool], budget=spawn_mod.Budget(max_steps=8))
+    assert out.ok and out.partial
+    assert all(f"item {i}" in out.text for i in range(1, fail_at))
+
+
+async def test_a_model_error_before_any_tool_result_still_raises(user, fresh_registry, monkeypatch):
+    from mavis.domain.errors import LLMError
+
+    _register_lookup(fresh_registry, "web_search", {"research"})
+
+    async def script(n, tools):
+        raise LLMError("down")
+
+    _scripted(monkeypatch, script)
+    with pytest.raises(LLMError):
+        await run_specialist(Specialist(name="research", description="d", prompt="p",
+                                        tool_names=("web_search",)), user.id, "dig")
+
+
+async def test_chat_model_error_mid_loop_still_raises(user, fresh_registry, monkeypatch):
+    from langchain_core.messages import HumanMessage
+
+    from mavis.agents.react import react_loop
+    from mavis.domain.errors import LLMError
+
+    _register_lookup(fresh_registry, "web_search", {"conversation"})
+
+    async def script(n, tools):
+        if n >= 2:
+            raise LLMError("down")
+        return _search(n)
+
+    _scripted(monkeypatch, script)
+    with pytest.raises(LLMError):
+        await react_loop(fresh_registry.for_agent("conversation", user.id), [HumanMessage("hi")], max_steps=5,
+                         wrap_up=True)
