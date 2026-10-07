@@ -11,6 +11,7 @@ from mavis.domain.events import Event, Trust
 from mavis.domain.loops import Loop
 from mavis.domain.messages import Role, tainted_event_id
 from mavis.domain.timefmt import due_label, message_stamp, stamped
+from mavis.initiative import recent_failures
 from mavis.initiative.filters import FilterResult
 from mavis.initiative.subjects import event_subject
 from mavis.initiative.untrusted import wrap_untrusted
@@ -110,6 +111,8 @@ class Reasoner:
         )
         if result.extra:
             prompt += f"\n\n## Mavis signals (computed, trusted)\n{result.extra}"
+        if failed := await recent_failures.section(user.id):
+            prompt += f"\n\n{failed}"
         decision = await llm.structured(
             InitiativeDecision, system, prompt, tier=tier, priority="background", fallback=True
         )

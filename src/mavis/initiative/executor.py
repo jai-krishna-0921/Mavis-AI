@@ -289,7 +289,8 @@ class InitiativeExecutor:
         try:
             message = await self._composer.compose(user, intent.intent, intent.urgency,
                                                     _with_delay_note(context, original_due, user),
-                                                    untrusted=untrusted)
+                                                    untrusted=untrusted,
+                                                    subject_record=await _subject_record(user.id, o))
         except BaseException:
             if reserved:
                 await self._policy.release(user, reserved)
@@ -390,6 +391,13 @@ def _loop_id(origin: dict[str, Any] | None) -> int | None:
         return int(raw) if raw is not None else None
     except (TypeError, ValueError):
         return None
+
+
+async def _subject_record(user_id: int, origin: dict[str, Any]) -> str:
+    """The source record of the ping's subject, read from its row now (never from history)."""
+    subject = Subject.parse(origin.get("subject"))
+    state = await subjects.resolve(user_id, subject) if subject is not None else None
+    return state.record if state is not None else ""
 
 
 def _with_delay_note(context: str, original_due: datetime | None, user) -> str:
