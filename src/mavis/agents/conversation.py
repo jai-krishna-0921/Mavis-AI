@@ -199,7 +199,8 @@ async def _connect_prompt(event: Event, user_id: int, exc: ConnectionRequired) -
     return [hint]
 
 
-async def attach_queued_approvals(user_id: int, goal: str, tainted: bool) -> int | None:
+async def attach_queued_approvals(user_id: int, goal: str, tainted: bool,
+                                  turn_ref: str | None = None) -> int | None:
     """Move approvals queued by a chat turn into an APPROVAL task; its gate sends the button prompt.
 
     Called after the turn's reply is committed, so the explanation lands above the buttons. Also picks
@@ -207,8 +208,9 @@ async def attach_queued_approvals(user_id: int, goal: str, tainted: bool) -> int
     pending = await approvals.unattached_for_user(user_id)
     if not pending:
         return None
+    # turn_ref links the approvals to the chat turn that queued them (a failed one blocks that turn's loops)
     task_id = await tasks.create(user_id, goal=goal[:2000], kind=TaskKind.APPROVAL, origin=TaskOrigin.USER,
-                                 tainted=tainted)
+                                 tainted=tainted, turn_ref=turn_ref)
     await approvals.attach([a.id for a in pending], task_id)
     await enqueue_run(task_id, user_id)
     log.info("conversation.approvals_queued", task_id=task_id, approvals=[a.id for a in pending])
@@ -342,7 +344,8 @@ async def run_turn(event: Event) -> None:
         history = await messages.recent(user.id, HISTORY_LIMIT)
         await enqueue_learn(user.id, event, text, previous_reply(history), clarified_request(history),
                             tainted=tainted or previous_tainted(history))
-        await attach_queued_approvals(user.id, text, tainted=tainted)  # it may have died before this
+        await attach_queued_approvals(user.id, text, tainted=tainted,  # it may have died before this
+                                      turn_ref=event.id)
         return
 
     history = await messages.recent(user.id, HISTORY_LIMIT)
@@ -419,7 +422,7 @@ async def run_turn(event: Event) -> None:
             await enqueue_learn(user.id, event, text, previous, clarified_request(history),
                                 tainted=learn_taint)
             # Anything the same step queued (an email to send, say) still gets its prompt.
-            await attach_queued_approvals(user.id, text, tainted=carried_taint)
+            await attach_queued_approvals(user.id, text, tainted=carried_taint, turn_ref=event.id)
             await initiative_hook("quiet.after_assistant_message",
                                   lambda i: i.quiet.after_assistant_message(user.id, connect_texts[-1]))
             current_route.set("CONNECT")
@@ -443,7 +446,7 @@ async def run_turn(event: Event) -> None:
                        event_id=reply_event_id(event.id, read_untrusted))
     await enqueue_learn(user.id, event, text, previous, clarified_request(history),
                         tainted=read_untrusted or learn_taint)
-    await attach_queued_approvals(user.id, text, tainted=result.tainted)
+    await attach_queued_approvals(user.id, text, tainted=result.tainted, turn_ref=event.id)
     await initiative_hook("quiet.after_assistant_message",
                           lambda i: i.quiet.after_assistant_message(user.id, bubbles[-1]))
     current_route.set(_route_for(result.tools_called))

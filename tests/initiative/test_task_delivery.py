@@ -97,6 +97,21 @@ async def test_redeliver_sends_stored_result(user, sent, policy):
     assert policy["recorded"] == [(f"task:{tid}", 3)]
 
 
+@pytest.mark.parametrize("status", [TaskStatus.PARTIAL, TaskStatus.FAILED])
+async def test_redeliver_reports_partial_and_failed_outcomes_too(user, sent, policy, status):
+    tid = await tasks.create(user.id, goal="compare desks", origin=TaskOrigin.INITIATIVE)
+    await tasks.set_status(tid, status, result_text="I found two of the three.")
+    await task_delivery.redeliver(user.id, tid)
+    assert [m.text for m in sent] == ["I found two of the three."]
+
+
+async def test_redeliver_skips_a_crashed_task_with_no_report(user, sent, policy):
+    tid = await tasks.create(user.id, goal="compare desks", origin=TaskOrigin.INITIATIVE)
+    await tasks.set_status(tid, TaskStatus.FAILED, error="something broke on my side")
+    await task_delivery.redeliver(user.id, tid)
+    assert sent == []
+
+
 async def test_tainted_result_is_delivered_scrubbed(user, sent, policy):
     bad = "Pay at https://evil.example/pay or mail attacker@evil.example now."
     tid = await tasks.create(user.id, goal="read mail", tainted=True)

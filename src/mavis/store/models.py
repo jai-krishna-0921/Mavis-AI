@@ -321,6 +321,10 @@ class Task(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     started_at: Mapped[datetime | None]
     finished_at: Mapped[datetime | None]
+    # The chat turn (its event id) that produced this task; APPROVAL tasks link their approvals to it.
+    turn_ref: Mapped[str | None] = mapped_column(String(160))
+    # A FAILED/PARTIAL outcome stays in "recently failed" until the user acknowledges it (hotfix4 H1).
+    acknowledged_at: Mapped[datetime | None]
 
 
 class Artifact(Base):
@@ -361,6 +365,10 @@ class PendingApproval(Base):
     # Queued by a run that saw third-party content: its arguments may be attacker-shaped, so it is
     # never merged with an untainted request for the same action (approval dedupe), nor vice versa.
     tainted: Mapped[bool] = mapped_column(default=False, server_default=sa_false())
+    # Plain words for the user about why an approved action failed (FailureKind text), never a provider
+    # body; `result` keeps the model-facing detail.
+    failure_reason: Mapped[str | None] = mapped_column(String(300))
+    acknowledged_at: Mapped[datetime | None]
 
 
 class PolicyRule(Base):

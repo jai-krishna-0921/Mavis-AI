@@ -193,7 +193,12 @@ async def _upsert_unless_closed(
     if await repo.find_recently_closed(user_id, data.title, timeutil.now() - REOPEN_GUARD):
         log.info("loops.reopen_skipped", user_id=user_id)
         return
-    await service.upsert(user_id, data, anchor_at=anchor_at)
+    loop = await service.upsert(user_id, data, anchor_at=anchor_at)
+    if data.source and loop.status is LoopStatus.OPEN:
+        from mavis.policy import outcomes  # lazy: policy imports the tool registry
+
+        # LEARN ran after the action of this turn (or the next) had already failed: not a live item
+        await outcomes.block_if_from_failed_turn(user_id, loop.id, data.source)
 
 
 def extraction_trust(prov: Provenance) -> Trust:

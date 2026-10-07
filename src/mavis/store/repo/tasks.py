@@ -14,7 +14,7 @@ from mavis.store.db import Session, utcnow
 from mavis.store.models import Artifact, Task
 
 ACTIVE_STATUSES = (TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL)
-_TERMINAL = (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED)
+_TERMINAL = (TaskStatus.DONE, TaskStatus.PARTIAL, TaskStatus.FAILED, TaskStatus.CANCELLED)
 
 
 async def create(
@@ -27,15 +27,17 @@ async def create(
     parent_id: int | None = None,
     tainted: bool = False,
     source_ref: str | None = None,
+    turn_ref: str | None = None,
 ) -> int:
-    """`source_ref` (unique per user): when a task with it exists already, return that task's id."""
+    """`source_ref` (unique per user): when a task with it exists already, return that task's id.
+    `turn_ref`: the chat turn (event id) that produced the task, not unique."""
     if source_ref is not None and (existing := await by_source_ref(user_id, source_ref)) is not None:
         return existing
     async with Session() as s:
         t = Task(
             user_id=user_id, goal=goal, context=context, kind=kind.value, origin=origin.value,
             notify_on_complete=notify_on_complete, parent_id=parent_id, status=TaskStatus.QUEUED.value,
-            tainted=tainted, source_ref=source_ref,
+            tainted=tainted, source_ref=source_ref, turn_ref=turn_ref,
         )
         s.add(t)
         try:
@@ -165,6 +167,29 @@ async def queued_approval_tasks(user_id: int) -> list[Task]:
                                Task.kind == TaskKind.APPROVAL.value).order_by(Task.id)
         )
         return list(rows)
+
+
+async def finished_since(user_id: int, since: datetime, statuses: Iterable[TaskStatus],
+                         kind: TaskKind | None = None) -> list[Task]:
+    """Tasks that reached one of `statuses` at or after `since`, oldest first."""
+    q = select(Task).where(Task.user_id == user_id, Task.status.in_([x.value for x in statuses]),
+                           Task.finished_at >= since)
+    if kind is not None:
+        q = q.where(Task.kind == kind.value)
+    async with Session() as s:
+        return list(await s.scalars(q.order_by(Task.finished_at, Task.id)))
+
+
+async def acknowledge(user_id: int, task_ids: Iterable[int]) -> int:
+    ids = list(task_ids)
+    if not ids:
+        return 0
+    async with Session() as s:
+        res = await s.execute(update(Task).where(Task.user_id == user_id, Task.id.in_(ids),
+                                                 Task.acknowledged_at.is_(None))
+                              .values(acknowledged_at=utcnow()))
+        await s.commit()
+        return res.rowcount or 0
 
 
 async def active_for_user(user_id: int) -> list[Task]:
