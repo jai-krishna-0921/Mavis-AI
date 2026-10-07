@@ -19,7 +19,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langchain_core.tools import BaseTool
 
 from mavis.config import get_settings
-from mavis.domain.errors import ApprovalRequired, BudgetExceeded, ConnectionRequired
+from mavis.domain.errors import ApprovalRequired, BudgetExceeded, ConnectionRequired, LLMError
 from mavis.llm import models as llm
 from mavis.policy.risk import wrap_untrusted
 from mavis.tools.registry import ToolRun, current_run
@@ -89,6 +89,8 @@ async def react_loop(
     wrap_up: bool = False,
     deadline_s: float | None = None,
     tool_timeout_s: float | None = None,
+    wrap_up_timeout_s: float | None = None,
+    digest_on_failed_wrap_up: bool = False,
 ) -> ReactResult:
     """Call the model, run the tools it asks for, repeat until it answers in text.
 
@@ -101,6 +103,13 @@ async def react_loop(
     from what it has; any tool calls in that answer are ignored (`ReactResult.wrapped_up`). Tool
     calls are also cut off at the deadline. `tool_timeout_s` overrides the settings default for
     tools without their own `timeout_s`.
+
+    Wrap-up robustness (background loops): with `deadline_s`, every model call before the wrap-up is cut
+    off at the deadline (the loop then wraps up instead of running into its caller's hard timeout). The
+    wrap-up call binds NO tools, so a model cannot answer it with tool calls only, and it is bounded by
+    `wrap_up_timeout_s`. With `digest_on_failed_wrap_up`, a wrap-up that fails or times out returns a
+    plain digest of the tool results gathered so far instead of raising and discarding them (never for
+    chat: raw tool output must not become a reply).
     """
     by_name = {t.name: t for t in tools}
     history: list[BaseMessage] = list(messages)
@@ -115,14 +124,35 @@ async def react_loop(
     unqueued: list[ApprovalRequired] = []
     steps = 0
     end = None if deadline_s is None else time.monotonic() + deadline_s
+    out_of_time = False
     try:
         while True:
             final = wrap_up and steps > 0 and (
-                steps >= max_steps or (end is not None and time.monotonic() >= end)
+                out_of_time or steps >= max_steps or (end is not None and time.monotonic() >= end)
             )
-            prompt = [*history, HumanMessage(WRAP_UP_NOTE)] if final else history
-            ai = await llm.invoke_tools(prompt, list(tools), tier=tier, temperature=temperature,
-                                        name=name, priority=priority, fallback=fallback)
+            if final:
+                try:
+                    async with asyncio.timeout(wrap_up_timeout_s):
+                        ai = await llm.invoke_tools([*history, HumanMessage(WRAP_UP_NOTE)], [], tier=tier,
+                                                    temperature=temperature, name=name, priority=priority,
+                                                    fallback=fallback)
+                except (TimeoutError, LLMError) as exc:
+                    if not digest_on_failed_wrap_up:
+                        raise
+                    log.warning("react.wrap_up_failed", name=name, error_type=type(exc).__name__)
+                    ai = AIMessage(content=gathered_digest(history[len(messages):]))
+            else:
+                try:
+                    # the first call is never cut (there is nothing to wrap up yet)
+                    async with asyncio.timeout(_left(end) if wrap_up and steps > 0 else None):
+                        ai = await llm.invoke_tools(history, list(tools), tier=tier, temperature=temperature,
+                                                    name=name, priority=priority, fallback=fallback)
+                except TimeoutError:
+                    if not (wrap_up and steps > 0 and end is not None and time.monotonic() >= end):
+                        raise
+                    log.info("react.model_call_cut_at_deadline", name=name, steps=steps)
+                    out_of_time = True
+                    continue
             ai = _sanitized(ai, steps)
             history.append(ai)
             calls, bad = ai.tool_calls, ai.invalid_tool_calls
@@ -151,6 +181,23 @@ async def react_loop(
                 run.spawned = 0  # the per-step worker cap counts the outermost loop's steps
     finally:
         current_run.reset(token)
+
+
+GATHERED_HEAD = "I ran out of time before writing this up. What I found so far:"
+_DIGEST_CHARS = 600
+
+
+def gathered_digest(messages: Sequence[BaseMessage]) -> str:
+    """The tool results a loop gathered, as plain text (its wrap-up answer failed). Empty if none."""
+    lines = [f"- {m.name or 'tool'}: {_text_of(m.content)[:_DIGEST_CHARS]}" for m in messages
+             if isinstance(m, ToolMessage) and _text_of(m.content).strip()
+             and not _text_of(m.content).startswith(("Tool error", "Unknown tool", "Skipped", "Malformed"))]
+    return f"{GATHERED_HEAD}\n" + "\n".join(lines) if lines else ""
+
+
+def _left(end: float | None) -> float | None:
+    """Seconds until a monotonic deadline (None: no deadline), never below a small floor."""
+    return None if end is None else max(end - time.monotonic(), 0.05)
 
 
 async def _run_step(

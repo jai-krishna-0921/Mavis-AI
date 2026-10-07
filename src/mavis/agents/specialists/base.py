@@ -34,7 +34,8 @@ class Specialist:
     runner: Callable[[int, str, str], Awaitable[StepOutcome]] | None = None
 
 
-# Seconds of a specialist's wall clock kept for the wrap-up answer once its tool time is up.
+# Part of a background loop's wall clock kept for its wrap-up answer: at least 30 s (the LLM slot wait and
+# fallbacks count), a quarter of a long budget, never more than half of a short one.
 WRAP_UP_RESERVE_S = 30.0
 
 
@@ -45,9 +46,22 @@ def step_budget(spec: Specialist) -> int:
     return spec.max_steps
 
 
+def wrap_up_reserve(timeout_s: float) -> float:
+    return min(max(WRAP_UP_RESERVE_S, timeout_s * 0.25), timeout_s * 0.5)
+
+
 def wrap_up_deadline(timeout_s: float) -> float:
-    """When a background loop stops calling tools and answers, leaving room inside its hard timeout."""
-    return max(timeout_s - WRAP_UP_RESERVE_S, timeout_s * 0.75)
+    """When a background loop stops calling tools and answers, leaving its reserve inside the hard
+    timeout (every model call before it is cut off here too, see react_loop)."""
+    return timeout_s - wrap_up_reserve(timeout_s)
+
+
+def wrap_up_budget(timeout_s: float) -> dict:
+    """react_loop arguments that make a background loop end in an answer inside `timeout_s`: the
+    deadline, a bound on the wrap-up call (most of the reserve; the rest is slack), and the gathered
+    results as the answer if the wrap-up itself fails."""
+    return {"wrap_up": True, "deadline_s": wrap_up_deadline(timeout_s),
+            "wrap_up_timeout_s": wrap_up_reserve(timeout_s) * 0.8, "digest_on_failed_wrap_up": True}
 
 
 def outcome_of(result: object) -> StepOutcome:
@@ -86,7 +100,7 @@ async def run_specialist(
             result = await react_loop(
                 tools, messages, max_steps=step_budget(spec), tier=spec.tier, temperature=0.2,
                 name=f"specialist:{spec.name}", priority="background", fallback=True, tainted=tainted,
-                wrap_up=True, deadline_s=wrap_up_deadline(spec.timeout_s),
+                **wrap_up_budget(spec.timeout_s),
             )
     except TimeoutError as exc:
         raise BudgetExceeded(f"specialist {spec.name} ran longer than {spec.timeout_s:g}s") from exc
