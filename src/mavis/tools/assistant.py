@@ -6,11 +6,12 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from mavis import bus
 from mavis.config import get_settings
 from mavis.domain import timeutil
+from mavis.domain.args import ToolArgs
 from mavis.domain.events import Trust
 from mavis.domain.localtime import LocalTimes, wall_clock
 from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus, LoopUpsert
@@ -44,11 +45,11 @@ async def to_utc(user_id: int, dt: datetime) -> datetime:
 MAX_WAKE_AHEAD = timedelta(days=366)
 
 
-class RememberArgs(BaseModel):
+class RememberArgs(ToolArgs):
     fact: str = Field(min_length=2, max_length=1000, description="The fact to remember, as a sentence")
 
 
-class ForgetArgs(BaseModel):
+class ForgetArgs(ToolArgs):
     needle: str = Field(min_length=2, max_length=200, description="Word or phrase to delete")
 
 
@@ -69,19 +70,19 @@ class TrackLoopArgs(LocalTimes):
     importance: int = Field(default=3, ge=1, le=5, description="1 (minor) to 5 (critical)")
 
 
-class NoArgs(BaseModel):
+class NoArgs(ToolArgs):
     pass
 
 
-class CancelTaskArgs(BaseModel):
+class CancelTaskArgs(ToolArgs):
     task_id: int
 
 
-class KnowArgs(BaseModel):
+class KnowArgs(ToolArgs):
     topic: str | None = Field(default=None, description="Person/topic to focus on; empty = general")
 
 
-class PolicyRuleArgs(BaseModel):
+class PolicyRuleArgs(ToolArgs):
     tool: str = Field(description="Tool name the rule applies to, e.g. calendar_create_event")
     field: str = Field(description="Argument name to inspect, e.g. attendees")
     contains: str = Field(min_length=2, description="Text that must appear in that argument")
@@ -176,7 +177,7 @@ async def add_policy_rule(user_id: int, args: PolicyRuleArgs) -> str:
     return f"Rule #{rule_id} saved: {args.description}"
 
 
-class PendingArgs(BaseModel):
+class PendingArgs(ToolArgs):
     include_done_recent: bool = Field(default=False,
                                       description="Also list what was finished in the last day")
 

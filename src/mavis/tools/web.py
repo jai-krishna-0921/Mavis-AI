@@ -20,6 +20,7 @@ import structlog
 from pydantic import BaseModel, Field
 
 from mavis.config import get_settings
+from mavis.domain.args import ToolArgs
 from mavis.domain.policy import Capability, RiskClass
 from mavis.domain.tasks import TaskOrigin
 from mavis.tools.registry import MavisTool, current_run, current_task_id
@@ -36,12 +37,12 @@ _FETCH_TIMEOUT_S = 15.0
 _FETCH_DEADLINE_S = 25.0  # total wall clock for one direct fetch, redirects included
 
 
-class SearchArgs(BaseModel):
+class SearchArgs(ToolArgs):
     query: str = Field(min_length=2, max_length=400, description="Focused search query")
     max_results: int = Field(default=5, ge=1, le=10)
 
 
-class ExtractArgs(BaseModel):
+class ExtractArgs(ToolArgs):
     url: str = Field(pattern=r"^https?://", description="Absolute http(s) URL to read")
 
 
