@@ -12,6 +12,7 @@ from mavis.api.ratelimit import webhook_rate_limit
 from mavis.api.routes import connect, health, integrations, telegram
 from mavis.bus import get_bus
 from mavis.channels import telegram_webhook
+from mavis.channels.test_sink import active_test_chat
 from mavis.config import get_settings
 from mavis.logging import configure_logging
 from mavis.store.db import dispose_engine, init_db
@@ -29,6 +30,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError("TELEGRAM_WEBHOOK_SECRET is required in webhook mode")
     if s.env == "prod" and not s.allowed_telegram_chat_ids:
         raise RuntimeError("ALLOWED_TELEGRAM_CHAT_IDS is required when ENV=prod")
+    if s.live_test_enabled and active_test_chat(s) is None:
+        log.error("live_test.disabled_at_startup")  # misconfigured: the reason is logged, path stays off
     if s.is_sqlite:
         await init_db()  # Postgres schemas are managed by `mavis migrate`
     register_integrations()
