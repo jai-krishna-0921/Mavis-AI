@@ -13,14 +13,14 @@ from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus
 from mavis.domain.wakeups import WakeupKind
-from mavis.initiative import hooks
+from mavis.initiative import hooks, subjects
 from mavis.initiative.executor import (
     DEFERRED_TTL,
     REMINDER_PREFIX,
     REMINDER_URGENCY,
     InitiativeExecutor,
 )
-from mavis.initiative.filters import EventFilter
+from mavis.initiative.filters import EXTERNAL_TYPES, EventFilter
 from mavis.initiative.planner import (
     PREP_LEAD,
     PREP_MIN_IMPORTANCE,
@@ -101,20 +101,32 @@ class InitiativeHandler:
                     untrusted=bool(event.payload.get("untrusted", False)),
                     original_due=datetime.fromisoformat(original_due) if original_due else None,
                     origin=origin)
-            if (origin or {}).get("kind") == EventType.EVENT_ENDED.value and origin.get("loop_id"):
-                await self._settle_follow_up(user.id, int(origin["loop_id"]))
             return
         if event.type is EventType.WAKEUP and kind == WakeupKind.ROUTINE.value:
             await self._routines.run(user, event.payload)
+            return
+        if event.type is EventType.WAKEUP and kind == WakeupKind.AGENT.value and (
+                why := await _agent_wakeup_stale(user.id, event)):
+            # Revalidated when it fires: a closed or failed subject cancels its wakeups whatever the
+            # subject's kind, and a wakeup bound to nothing (set before H5) never runs.
+            log.info("initiative.agent_wakeup_dropped", event_id=event.id, reason=why)
             return
         if event.type is EventType.LOOP_UPDATED:
             await self._on_loop_updated(Loop.model_validate(event.payload))
             return
         if event.type is EventType.LOOP_CREATED and event.payload.get("kind") == LoopKind.ROUTINE.value:
             return  # routines schedule themselves
+        if event.type is EventType.LOOP_CREATED and event.payload.get("origin") == LoopOrigin.REASONER.value:
+            # The reasoner's own `track` is its belief, not news: feeding it back made echo pings about
+            # the same thing under a new key. No reasoner run and no derived prep/follow-up signals.
+            log.info("initiative.own_track_ignored", event_id=event.id)
+            return
         if event.type is EventType.USER_QUIET:
             asked_at = datetime.fromisoformat(event.payload["asked_at"])
             if not await self._quiet.still_quiet(user.id, asked_at):
+                return
+            if not await self._quiet.owed(user.id):  # armed before H5 (dead onboarded gate): dropped
+                log.info("initiative.quiet_not_owed", event_id=event.id)
                 return
 
         if event.type is EventType.EVENT_STARTING and not await self._origin_still_valid(
@@ -146,23 +158,14 @@ class InitiativeHandler:
         if event.trust is Trust.UNTRUSTED:
             context = wrap_untrusted(result.summary, event.type.value)
         streak = int(event.payload.get("streak", 0)) + 1 if event.type is EventType.USER_QUIET else 0
+        # Code evidence that a loop may have concluded: an external signal the filter matched to it by
+        # its watch. Time passing, silence and the model's own belief are never evidence.
+        external = event.type in EXTERNAL_TYPES
+        evidence = frozenset(lp.id for lp in result.matched_loops) if external else frozenset()
         await self._executor.apply(user, decision, event, context=context, quiet_streak=streak,
-                                  origin=await self._origin_for(event), open_loops=open_loops,
-                                  event_loop_id=_event_loop_id(event))
-
-        if event.type is EventType.EVENT_ENDED and event.payload.get("loop_id"):
-            await self._settle_follow_up(user.id, int(event.payload["loop_id"]))
-
-    async def _settle_follow_up(self, user_id: int, loop_id: int) -> None:
-        """After a follow-up attempt: the executor moved the loop to AWAITING if the question was
-        delivered. If it is still OPEN and no deferred follow-up is pending, nothing will be asked, so
-        the loop is done. A pending deferred follow-up keeps it OPEN until it goes out."""
-        loop = await self._loops.get(loop_id)
-        if loop is None or loop.status is not LoopStatus.OPEN:
-            return
-        if any(w.loop_id == loop_id for w in await self._wakeups.pending(user_id, WakeupKind.DEFERRED)):
-            return
-        await self._loops.close(loop_id, LoopStatus.DONE)
+                                  origin=await self._origin_for(event), evidence_loop_ids=evidence)
+        # Silence never closes a loop: an EVENT_ENDED whose follow-up did not go out leaves it OPEN (it
+        # stays visible, overdue, for the user to decide). Phase B's ledger keeps the same rule.
 
     async def _decide(self, user, event: Event, result) -> InitiativeDecision:
         result.extra = await hooks.gather_enrichments(event)
@@ -195,12 +198,13 @@ class InitiativeHandler:
 
     async def _origin_for(self, event: Event) -> dict | None:
         """Why a ping is being sent, carried with it if it is deferred so it can be revalidated."""
+        subject = subjects.event_subject(event)  # the ping's daily slot and its grounding record
         if event.type is EventType.USER_QUIET:
             return {"kind": event.type.value, "asked_at": event.payload.get("asked_at")}
         loop_id = _event_loop_id(event)
         if loop_id is None:
-            return None
-        origin: dict = {"kind": event.type.value, "loop_id": loop_id}
+            return {"kind": event.type.value, "subject": subject.key} if subject is not None else None
+        origin: dict = {"kind": event.type.value, "loop_id": loop_id, "subject": f"loop:{loop_id}"}
         loop = await self._loops.get(loop_id)
         if loop is not None and loop.due_at is not None:
             due = timeutil.ensure_utc(loop.due_at)
@@ -228,6 +232,8 @@ class InitiativeHandler:
                 kinds = [k for k in kinds if k is not WakeupKind.DEFERRED]
             await self._wakeups.cancel_where(loop.user_id, kinds, loop_id=loop.id)
             return
+        if loop.origin is LoopOrigin.REASONER:
+            return  # a reasoner belief never gets derived signals, at creation or later (H5)
         if loop.due_at is not None:  # due date may have moved: re-plan derived signals
             derived = [WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED]
             await self._wakeups.cancel_where(loop.user_id, derived, loop_id=loop.id)
@@ -274,6 +280,16 @@ def _imminent_floor(event: Event, decision: InitiativeDecision, loops: list[Loop
         return decision
     notify = decision.notify.model_copy(update={"urgency": URGENT_URGENCY})
     return decision.model_copy(update={"notify": notify})
+
+
+async def _agent_wakeup_stale(user_id: int, event: Event) -> str | None:
+    subject = subjects.event_subject(event)
+    if subject is None:
+        return "unbound"
+    state = await subjects.resolve(user_id, subject)
+    if state is None or not state.live:
+        return f"subject {subject.key} closed"
+    return None
 
 
 def _too_late(event: Event) -> bool:

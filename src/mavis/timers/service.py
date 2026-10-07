@@ -63,6 +63,9 @@ class WakeupService:
     async def pending(self, user_id: int, kind: WakeupKind | None = None) -> list[Wakeup]:
         return await repo.list_pending(user_id, kind)
 
+    async def history(self, user_id: int, kind: WakeupKind, since: datetime) -> list[Wakeup]:
+        return await repo.list_kind_since(user_id, kind, timeutil.ensure_utc(since))
+
     async def claim_due(self, now: datetime, limit: int = 50) -> list[Wakeup]:
         return await repo.claim_due(timeutil.ensure_utc(now), limit)
 
