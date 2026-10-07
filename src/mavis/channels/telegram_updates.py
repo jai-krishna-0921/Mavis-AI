@@ -10,6 +10,7 @@ from typing import Any
 import structlog
 
 from mavis.bus.base import EventBus
+from mavis.channels.test_sink import active_test_chat
 from mavis.config import get_settings
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.messages import InboundFile
@@ -38,8 +39,8 @@ def _chat_allowed(chat_id: int) -> bool:
     """Empty allowlist = allow-all in dev only (warn once); every other env denies."""
     global _warned_open_allowlist
     s = get_settings()
-    if s.test_telegram_chat_id is not None and chat_id == s.test_telegram_chat_id:
-        return True  # the live E2E test user; its sends go to the log sink (channels.test_sink)
+    if chat_id == active_test_chat(s):
+        return True  # the live E2E test user (synthetic id, webhook + secret only); sends go to the sink
     if s.allowed_telegram_chat_ids:
         return chat_id in s.allowed_telegram_chat_ids
     if s.env != "dev":

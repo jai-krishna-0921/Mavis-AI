@@ -1,11 +1,13 @@
 """Live E2E harness: post Telegram updates to the local webhook as the TEST user and print Mavis's replies.
 
-    TEST_TELEGRAM_CHAT_ID=7000001 uv run python -m scripts.live_e2e "remind me to call Ravi at 6"
+    LIVE_TEST_ENABLED=true TEST_TELEGRAM_CHAT_ID=-1000000000000001 \
+        uv run python -m scripts.live_e2e "remind me to call Ravi at 6"
 
-It only ever speaks as TEST_TELEGRAM_CHAT_ID (the running stack must have the same setting, so the chat is
-admitted and every send to it goes to data_dir/test_sink.jsonl instead of Telegram). It refuses to run
-without one, or when it names a chat in ALLOWED_TELEGRAM_CHAT_IDS (a real user's chat). Replies are read
-from that user's rows only. Never clean up by editing rows: use the product's own tools as the test user.
+It only ever speaks as TEST_TELEGRAM_CHAT_ID (the running stack must have the same settings, so the chat
+is admitted and every send to it goes to data_dir/test_sink.jsonl instead of Telegram). The id
+must be synthetic (below -10**15, which no Telegram chat can have) and not in ALLOWED_TELEGRAM_CHAT_IDS.
+Replies are read from that user's rows only. Never clean up by editing rows: use the product's own
+tools as the test user.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import time
 import httpx
 from sqlalchemy import select
 
+from mavis.channels.test_sink import SYNTHETIC_BELOW, active_test_chat
 from mavis.config import Settings, get_settings
 from mavis.store.db import Session
 from mavis.store.models import Message, User
@@ -29,11 +32,12 @@ class HarnessError(RuntimeError):
 
 
 def target_chat(s: Settings) -> int:
-    chat = s.test_telegram_chat_id
+    """The same rule the stack applies (channels.test_sink.active_test_chat): enabled, synthetic, not
+    allowlisted. Anything else is refused, so the harness never speaks as a real user."""
+    chat = active_test_chat(s)
     if chat is None:
-        raise HarnessError("set TEST_TELEGRAM_CHAT_ID: the harness never speaks as a real user")
-    if chat in s.allowed_telegram_chat_ids:
-        raise HarnessError("TEST_TELEGRAM_CHAT_ID is a real user's chat (it is in ALLOWED_TELEGRAM_CHAT_IDS)")
+        raise HarnessError("set LIVE_TEST_ENABLED=true and a synthetic TEST_TELEGRAM_CHAT_ID below "
+                           f"{SYNTHETIC_BELOW} that is not in ALLOWED_TELEGRAM_CHAT_IDS")
     return chat
 
 

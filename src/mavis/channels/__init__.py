@@ -20,10 +20,10 @@ def get_channel() -> Channel:
             from mavis.channels.fake import ConsoleChannel
 
             _channel = ConsoleChannel()
-        if s.test_telegram_chat_id is not None:  # the live test chat never reaches Telegram
-            from mavis.channels.test_sink import SinkChannel
+        from mavis.channels.test_sink import SinkChannel, active_test_chat
 
-            _channel = SinkChannel(_channel, s.test_telegram_chat_id)
+        if (test_chat := active_test_chat(s)) is not None:  # the live test chat never reaches Telegram
+            _channel = SinkChannel(_channel, test_chat)
     return _channel
 
 
