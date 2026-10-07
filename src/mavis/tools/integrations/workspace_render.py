@@ -11,6 +11,7 @@ import json
 import re
 from typing import Any
 
+from mavis.domain.results import ToolOutput
 from mavis.tools.integrations.mail_render import BODY_CHARS, strip_urls
 from mavis.tools.integrations.normalize import extract_list, pick
 
@@ -231,12 +232,12 @@ def render_created(data: Any) -> str:
 MEET_PREFIX = "https://meet.google.com/"
 
 
-def render_meet(data: Any) -> str:
+def render_meet(data: Any) -> ToolOutput:
     """The one link this module ever returns: the Meet the user just asked for, only if it is Google's."""
     uri = pick(data, "response_data.meetingUri", "meetingUri", "data.response_data.meetingUri")
     if isinstance(uri, str) and uri.startswith(MEET_PREFIX):
-        return f"Meet link: {uri}"
-    return "Created the Meet, but Google returned no link."
+        return ToolOutput(f"Meet link: {uri}")
+    return ToolOutput("Created the Meet, but Google returned no link.")
 
 
 RENDERERS = {

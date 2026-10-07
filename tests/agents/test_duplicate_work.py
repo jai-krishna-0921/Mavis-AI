@@ -90,7 +90,7 @@ async def test_dispatch_keeps_different_goals_apart(user, rec_bus) -> None:
 async def test_start_task_refers_to_the_existing_task(user, rec_bus) -> None:
     [first] = await task_dispatch.dispatch_task_requests(user.id, [TaskRequest(goal=GOAL)],
                                                          TaskOrigin.INITIATIVE)
-    out = await chat_tools.start_task(user.id, chat_tools.StartTaskArgs(goal=GOAL))
+    out = (await chat_tools.start_task(user.id, chat_tools.StartTaskArgs(goal=GOAL))).for_model()
     assert f"#{first}" in out and "already" in out.lower()
     assert len([j for j in rec_bus.jobs if j.kind == JobKind.RUN_TASK]) == 1
 

@@ -15,6 +15,7 @@ from mavis.domain.args import ToolArgs
 from mavis.domain.decisions import TaskRequest
 from mavis.domain.messages import Role
 from mavis.domain.policy import RiskClass
+from mavis.domain.results import ToolOutput
 from mavis.domain.tasks import TaskOrigin
 from mavis.store.repo import messages, tasks
 from mavis.tools.registry import MavisTool, TaintPolicy, current_run, current_task_id
@@ -28,9 +29,11 @@ class TurnInfo:
 
 current_turn: ContextVar[TurnInfo | None] = ContextVar("current_turn", default=None)
 
-START_TASK_RESULT = "Started background task #{id}. Tell the user you're on it and will report back."
-TASK_EXISTS_RESULT = ("Task #{id} is already working on this, so no new task was started. Tell the user "
-                      "it's already in progress and you'll report back.")
+# (user_text, model_note): an approved start_task shows the user only the first part (hotfix4 H3).
+START_TASK_USER = "Started background task #{id}."
+START_TASK_NOTE = "Tell the user you're on it and will report back."
+TASK_EXISTS_USER = "Task #{id} is already working on this, so I didn't start another."
+TASK_EXISTS_NOTE = "Tell the user it's already in progress and you'll report back."
 CONNECT_RESULT = "Sent them the connect link and buttons. Don't repeat the link."
 
 
@@ -66,7 +69,7 @@ async def _approved_from_tainted_task() -> bool:
     return bool(task is not None and task.tainted)
 
 
-async def start_task(user_id: int, args: StartTaskArgs) -> str:
+async def start_task(user_id: int, args: StartTaskArgs) -> ToolOutput:
     # lazy: agents import the registry
     from mavis.agents.task_dispatch import dispatch_task_requests, find_duplicate
 
@@ -82,7 +85,7 @@ async def start_task(user_id: int, args: StartTaskArgs) -> str:
         ref = f"turn:{turn.event_id}:start:{turn.starts}"
         turn.starts += 1
     if (dup := await find_duplicate(user_id, args.goal, ref)) is not None:
-        return TASK_EXISTS_RESULT.format(id=dup)
+        return ToolOutput(TASK_EXISTS_USER.format(id=dup), TASK_EXISTS_NOTE)
     tainted = _tainted() or await _approved_from_tainted_task()
     # The approval preview shows only the goal, so after third-party content the unseen `context`
     # (free text the model chose) is dropped rather than smuggled into the task.
@@ -91,7 +94,7 @@ async def start_task(user_id: int, args: StartTaskArgs) -> str:
         user_id, [TaskRequest(goal=args.goal, context=context)], TaskOrigin.USER, tainted=tainted,
         source_ref=ref,
     )
-    return START_TASK_RESULT.format(id=task_id)
+    return ToolOutput(START_TASK_USER.format(id=task_id), START_TASK_NOTE)
 
 
 async def connect_account(user_id: int, args: ConnectArgs) -> str:

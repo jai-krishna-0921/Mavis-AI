@@ -16,6 +16,7 @@ from mavis.domain.events import Trust
 from mavis.domain.localtime import LocalTimes, wall_clock
 from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.policy import RiskClass
+from mavis.domain.results import ToolOutput
 from mavis.domain.tasks import ApprovalStatus
 from mavis.domain.timefmt import DueStatus, relative_due, relative_past
 from mavis.loops import service as loops_service
@@ -118,12 +119,12 @@ def _preview_loop(args: TrackLoopArgs) -> str:
     return f"Keep track of this {args.kind.value.replace('_', ' ').lower()}: {args.title}"
 
 
-async def forget(user_id: int, args: ForgetArgs) -> str:
+async def forget(user_id: int, args: ForgetArgs) -> ToolOutput:
     n = await memory_service.get_memory().forget(user_id, args.needle)
-    return f"Forgot {n} memories matching '{args.needle}'."
+    return ToolOutput(f"Forgot {n} memories matching '{args.needle}'.")
 
 
-async def wake_me(user_id: int, args: WakeMeArgs) -> str:
+async def wake_me(user_id: int, args: WakeMeArgs) -> str | ToolOutput:
     at = await to_utc(user_id, args.at)
     if at <= timeutil.now():
         return "That time is in the past; pick a future time."
@@ -134,10 +135,12 @@ async def wake_me(user_id: int, args: WakeMeArgs) -> str:
         user_id, at, f"Reminder the user asked for: {args.reason}", kind="agent",
         reminder=True, dedupe_key=key,
     )
-    return f"Wakeup #{wakeup_id} set for {at.isoformat()}."
+    # args.at is the user's wall clock (the registry attached their zone), so it reads as they said it
+    return ToolOutput(f"Reminder set for {args.at:%a %d %b, %H:%M}.",
+                      f"Wakeup #{wakeup_id} set for {at.isoformat()}.")
 
 
-async def track_loop(user_id: int, args: TrackLoopArgs) -> str:
+async def track_loop(user_id: int, args: TrackLoopArgs) -> ToolOutput:
     due = await to_utc(user_id, args.due_at) if args.due_at else None
     loop = await loops_service.LoopService(bus.get_bus()).upsert(
         user_id,
@@ -146,7 +149,7 @@ async def track_loop(user_id: int, args: TrackLoopArgs) -> str:
                    # the user asked for it in chat (and approved it when the turn was tainted)
                    trust=Trust.USER, origin=LoopOrigin.CONVERSATION),
     )
-    return f"Tracking loop #{loop.id}: {loop.title}"
+    return ToolOutput(f"Keeping track of: {loop.title}", f"Tracking loop #{loop.id}.")
 
 
 async def list_tasks(user_id: int, args: NoArgs) -> str:
@@ -158,11 +161,11 @@ async def list_tasks(user_id: int, args: NoArgs) -> str:
     )
 
 
-async def cancel_task(user_id: int, args: CancelTaskArgs) -> str:
+async def cancel_task(user_id: int, args: CancelTaskArgs) -> ToolOutput:
     if not await tasks.cancel(user_id, args.task_id):
-        return f"Task #{args.task_id} is not active (or not yours)."
+        return ToolOutput(f"Task #{args.task_id} was not running, so there was nothing to cancel.")
     await approvals.reject_open_for_task(args.task_id)
-    return f"Task #{args.task_id} cancelled."
+    return ToolOutput(f"Task #{args.task_id} cancelled.")
 
 
 async def what_do_you_know(user_id: int, args: KnowArgs) -> str:
@@ -172,9 +175,9 @@ async def what_do_you_know(user_id: int, args: KnowArgs) -> str:
     return ctx.render() or "I don't know much yet."
 
 
-async def add_policy_rule(user_id: int, args: PolicyRuleArgs) -> str:
+async def add_policy_rule(user_id: int, args: PolicyRuleArgs) -> ToolOutput:
     rule_id = await policy_rules.add(user_id, args.tool, args.field, args.contains, args.description)
-    return f"Rule #{rule_id} saved: {args.description}"
+    return ToolOutput(f"Rule saved: {args.description}", f"Rule #{rule_id}.")
 
 
 class PendingArgs(ToolArgs):

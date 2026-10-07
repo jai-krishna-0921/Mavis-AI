@@ -471,12 +471,16 @@ async def _passed_action_time(approval: Any) -> str | None:
     return await approval_flow.passed_action_time(approval)
 
 
-def _first_result_line(result: str) -> str:
-    for line in result.splitlines():
-        line = line.strip()
-        if line and not line.startswith(("<untrusted", "</untrusted")):
-            return verbatim(line[:200])  # tool output: shown as it came back
-    return ""
+def _failure_reason(exc: Exception) -> str:
+    """What the user reads about a failed approved action: plain words only (hotfix4 H3). ActionFailed
+    carries them (classified at the integration boundary); anything else is described, never quoted."""
+    if isinstance(exc, ActionFailed):
+        return exc.reason
+    if isinstance(exc, ConnectionRequired):
+        from mavis.tools.integrations.actions import display_name  # lazy: integrations import agents
+
+        return f"{display_name(exc.capability)} needs connecting again"
+    return "something went wrong on my side"
 
 
 async def approval_gate(state: OrchestratorState) -> Command:
@@ -511,13 +515,9 @@ async def approval_gate(state: OrchestratorState) -> Command:
         # Execution marker for the restart sweep: claimed-but-never-run vs may-have-run.
         await approvals.mark_started(pending.id)
         try:
-            result = await get_registry().execute_approved(pending.id)
+            executed = await get_registry().execute_approved(pending.id)
         except Exception as exc:  # noqa: BLE001 - report, don't crash the task
-            if isinstance(exc, ActionFailed):
-                reason = exc.reason
-            else:
-                reason = (str(exc).splitlines() or [""])[0] or type(exc).__name__
-            reason = reason[:150]
+            reason = _failure_reason(exc)[:150]
             await approvals.set_status(pending.id, ApprovalStatus.FAILED, result=str(exc)[:500],
                                        from_statuses=claimed)
             log.warning("approval.execute_failed", approval_id=pending.id, tool=pending.tool, error=_err(exc))
@@ -527,12 +527,14 @@ async def approval_gate(state: OrchestratorState) -> Command:
                 ],
                 "approval_outcomes": [{"status": "failed", "preview": pending.preview, "detail": reason}],
             })
-        await approvals.set_status(pending.id, ApprovalStatus.EXECUTED, result=result, from_statuses=claimed)
+        await approvals.set_status(pending.id, ApprovalStatus.EXECUTED, result=executed.text,
+                                   from_statuses=claimed)
         await _supersede_duplicates(pending, executed=True)
         return Command(goto="approval_gate", update={
-            "action_results": [f"Done: {pending.preview}\nResult: {_clip_result(result)}"],
+            "action_results": [f"Done: {pending.preview}\nResult: {_clip_result(executed.text)}"],
+            # the receipt shows the tool's user_text only, never its model-facing result
             "approval_outcomes": [{"status": "executed", "preview": pending.preview,
-                                   "detail": _first_result_line(result)}],
+                                   "detail": verbatim(executed.user_text[:300])}],
         })
     if decision == "edit":
         try:

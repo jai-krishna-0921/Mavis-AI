@@ -32,6 +32,7 @@ from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed, ApprovalRequired, ConnectionRequired, NeedsUserDetail
 from mavis.domain.localtime import has_datetimes, localize_args
 from mavis.domain.policy import Capability, RiskClass
+from mavis.domain.results import ToolOutput
 from mavis.domain.tasks import ApprovalStatus
 from mavis.policy.risk import truncate, wrap_untrusted
 from mavis.store.db import utcnow
@@ -145,7 +146,7 @@ async def _queue_tainted(task_id: int | None) -> bool:
     return bool(task is not None and task.tainted)
 
 
-ToolFn = Callable[[int, Any], Awaitable[str | dict | list]]
+ToolFn = Callable[[int, Any], Awaitable[str | dict | list | ToolOutput]]
 CapabilityCheck = Callable[[int, Capability], Awaitable[bool]]
 
 
@@ -175,10 +176,10 @@ async def _localized(args: BaseModel, user_id: int) -> BaseModel:
     return localize_args(args, (await tool_context(user_id)).timezone)
 
 
-def contextual(fn: Callable[[ToolContext, Any], Awaitable[str | dict | list]]) -> ToolFn:
+def contextual(fn: Callable[[ToolContext, Any], Awaitable[str | dict | list | ToolOutput]]) -> ToolFn:
     """Adapt an `async fn(ctx, args)` to the registry's `async fn(user_id, args)` signature."""
 
-    async def wrapped(user_id: int, args: Any) -> str | dict | list:
+    async def wrapped(user_id: int, args: Any) -> str | dict | list | ToolOutput:
         return await fn(await tool_context(user_id), args)
 
     wrapped.__name__ = getattr(fn, "__name__", "contextual")
@@ -226,6 +227,16 @@ class MavisTool:
                 return self.preview(args, ctx or ToolContext(user_id=0))
             return self.preview(args)
         return f"{self.name} {args.model_dump_json()}"
+
+
+@dataclass(frozen=True)
+class Executed:
+    """An approved action that ran (hotfix4 H3). `text` is the full result for the model and the
+    approval row; `user_text` is the only part a user-facing receipt may show (empty when the tool
+    returned a plain, model-only string)."""
+
+    text: str
+    user_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -373,7 +384,7 @@ class ToolRegistry:
             return await self._run(tool, user_id, args, actor="agent", fn=tool.tainted_fn)
         return await self._run(tool, user_id, args, actor="agent")
 
-    async def execute_approved(self, approval_id: int) -> str:
+    async def execute_approved(self, approval_id: int) -> Executed:
         """Run a tool the user explicitly approved. Bypasses the approval check only."""
         approval = await approvals.get(approval_id)
         if approval is None:
@@ -398,9 +409,11 @@ class ToolRegistry:
         try:
             # raise_errors: a failed approved action must surface as an exception, never as a result
             # string, so the caller records FAILED instead of EXECUTED.
-            return await self._run(tool, approval.user_id, args, actor="user_approved", raise_errors=True)
+            text, user_text = await self._execute(tool, approval.user_id, args, actor="user_approved",
+                                                  raise_errors=True)
         finally:
             current_task_id.reset(task_token)
+        return Executed(text=text, user_text=user_text)
 
     async def _run(
         self,
@@ -412,6 +425,20 @@ class ToolRegistry:
         *,
         raise_errors: bool = False,
     ) -> str:
+        """Run for the model: the text it reads (user_text and model_note together)."""
+        return (await self._execute(tool, user_id, args, actor, fn, raise_errors=raise_errors))[0]
+
+    async def _execute(
+        self,
+        tool: MavisTool,
+        user_id: int,
+        args: BaseModel,
+        actor: str,
+        fn: ToolFn | None = None,
+        *,
+        raise_errors: bool = False,
+    ) -> tuple[str, str]:
+        """(text for the model, plain text a user-facing receipt may show)."""
         token = current_user_id.set(user_id)
         detail: dict[str, Any] = {"args": args.model_dump(mode="json")}
         if fn is not None:
@@ -443,19 +470,22 @@ class ToolRegistry:
                 # Third-party error text must never reach the model unwrapped.
                 if run is not None:
                     run.saw_untrusted()
-                return wrap_untrusted(truncate(f"Tool error: {exc}"), tool.name)
+                return wrap_untrusted(truncate(f"Tool error: {exc}"), tool.name), ""
             raise
         finally:
             current_user_id.reset(token)
+        user_text = ""
+        if isinstance(out, ToolOutput):
+            user_text, out = out.user_text, out.for_model()
         text = out if isinstance(out, str) else json.dumps(out, default=str, ensure_ascii=False)
         text = truncate(text)
         if audited and not failed:
             await audit.record(user_id, actor=actor, action=tool.name, detail={**detail, "outcome": "ok"})
         if not tool.untrusted_output:
-            return text
+            return text, user_text
         if run is not None:
             run.saw_untrusted()
-        return wrap_untrusted(text, tool.name)
+        return wrap_untrusted(text, tool.name), user_text
 
     def _as_langchain(self, tool: MavisTool, user_id: int) -> BaseTool:
         async def _call(**kwargs: Any) -> str:

@@ -146,7 +146,7 @@ async def test_execute_approved_skips_prepare(user):
     tid = await tasks.create(user.id, goal="g")
     aid = await approvals.create(user.id, tid, "append", {"file_id": "f1"}, "Append to f1",
                                  utcnow() + timedelta(hours=1))
-    assert await reg.execute_approved(aid) == "done"
+    assert (await reg.execute_approved(aid)).text == "done"
     assert ran == ["f1"] and calls == []
 
 
