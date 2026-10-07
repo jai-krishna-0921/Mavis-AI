@@ -253,7 +253,8 @@ class Speaker:
         )
         buttons = mute_buttons(obs.id) if can_mute(obs) else None
         try:
-            sent = await executor.notify(user, intent, context=obs.summary, untrusted=True, buttons=buttons)
+            sent = await executor.notify(user, intent, context=obs.summary, untrusted=True, buttons=buttons,
+                                         origin={"kind": "attention", "subject": f"observation:{obs.id}"})
         except LLMError as exc:
             # The composer could not phrase it (LLM busy). The policy already allowed this ping, so
             # send the fixed wording rather than lose it (prod: a security notice, obs 81).

@@ -408,7 +408,8 @@ class WorkspaceIntake:
         notice = NotifyIntent(urgency=max(1, urgency), intent=intent, dedupe_key=key)
         executor = self.executor_of()
         try:
-            sent = await executor.notify(user, notice, untrusted=True, buttons=self._mute_button(obs, s))
+            sent = await executor.notify(user, notice, untrusted=True, buttons=self._mute_button(obs, s),
+                                         origin={"kind": "attention", "subject": f"observation:{obs.id}"})
         except Exception as exc:  # noqa: BLE001 - LLM busy or any composer failure: the row is still spoken
             log.warning("workspace.notify_fallback_text", obs_id=obs.id, error=type(exc).__name__)
             await executor.deliver(user, [self._comment_text(s)], key, notice.urgency,

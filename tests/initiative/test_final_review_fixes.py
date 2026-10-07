@@ -261,7 +261,7 @@ async def test_untrusted_brief_items_are_wrapped_and_flag_composer(user, clock, 
     seen = {}
     real = Composer.compose
 
-    async def spy(self, user_, intent, urgency, context="", untrusted=False):
+    async def spy(self, user_, intent, urgency, context="", untrusted=False, subject_record=""):
         seen.update(intent=intent, untrusted=untrusted)
         return await real(self, user_, intent, urgency, context, untrusted=untrusted)
 
@@ -287,7 +287,7 @@ async def test_all_trusted_brief_is_not_flagged(user, clock, recording_bus, fake
     seen = {}
     real = Composer.compose
 
-    async def spy(self, user_, intent, urgency, context="", untrusted=False):
+    async def spy(self, user_, intent, urgency, context="", untrusted=False, subject_record=""):
         seen.update(intent=intent, untrusted=untrusted)
         return await real(self, user_, intent, urgency, context, untrusted=untrusted)
 
