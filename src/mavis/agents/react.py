@@ -107,9 +107,9 @@ async def react_loop(
     Wrap-up robustness (background loops): with `deadline_s`, every model call before the wrap-up is cut
     off at the deadline (the loop then wraps up instead of running into its caller's hard timeout). The
     wrap-up call binds NO tools, so a model cannot answer it with tool calls only, and it is bounded by
-    `wrap_up_timeout_s`. With `digest_on_failed_wrap_up`, a wrap-up that fails or times out returns a
-    plain digest of the tool results gathered so far instead of raising and discarding them (never for
-    chat: raw tool output must not become a reply).
+    `wrap_up_timeout_s`. With `digest_on_failed_wrap_up`, a wrap-up that fails or times out, or a model
+    error after some tool rounds, returns a plain digest of the tool results gathered so far instead of
+    raising and discarding them (never for chat: raw tool output must not become a reply).
     """
     by_name = {t.name: t for t in tools}
     history: list[BaseMessage] = list(messages)
@@ -153,6 +153,20 @@ async def react_loop(
                     log.info("react.model_call_cut_at_deadline", name=name, steps=steps)
                     out_of_time = True
                     continue
+                except LLMError as exc:
+                    # a background loop whose model fails after some rounds keeps what it gathered, as
+                    # on running out of budget; with nothing gathered yet (or in chat) the error stands
+                    digest = gathered_digest(history[len(messages):]) if digest_on_failed_wrap_up else ""
+                    if not (wrap_up and steps > 0 and digest):
+                        raise
+                    log.warning("react.model_failed_mid_loop", name=name, steps=steps,
+                                error_type=type(exc).__name__)
+                    history.append(AIMessage(content=digest))
+                    return ReactResult(
+                        text=digest, steps=steps, messages=history, tools_called=tools_called,
+                        queued_approvals=run.queued_approvals[first_approval:], unqueued_approvals=unqueued,
+                        tainted=run.tainted, wrapped_up=True, read_untrusted=run.untrusted_reads > first_read,
+                    )
             ai = _sanitized(ai, steps)
             history.append(ai)
             calls, bad = ai.tool_calls, ai.invalid_tool_calls
