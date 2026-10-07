@@ -125,8 +125,7 @@ class InitiativeHandler:
             asked_at = datetime.fromisoformat(event.payload["asked_at"])
             if not await self._quiet.still_quiet(user.id, asked_at):
                 return
-            subject = subjects.Subject.parse(event.payload.get("subject"))
-            if not await self._quiet.owed(user.id, subject):  # armed before H5, or the item moved on
+            if not await self._quiet.owed(user.id):  # armed before H5 (dead onboarded gate): dropped
                 log.info("initiative.quiet_not_owed", event_id=event.id)
                 return
 
@@ -201,10 +200,7 @@ class InitiativeHandler:
         """Why a ping is being sent, carried with it if it is deferred so it can be revalidated."""
         subject = subjects.event_subject(event)  # the ping's daily slot and its grounding record
         if event.type is EventType.USER_QUIET:
-            origin = {"kind": event.type.value, "asked_at": event.payload.get("asked_at")}
-            if subject is not None:  # the item the unanswered question is about
-                origin["subject"] = subject.key
-            return origin
+            return {"kind": event.type.value, "asked_at": event.payload.get("asked_at")}
         loop_id = _event_loop_id(event)
         if loop_id is None:
             return {"kind": event.type.value, "subject": subject.key} if subject is not None else None
@@ -236,6 +232,8 @@ class InitiativeHandler:
                 kinds = [k for k in kinds if k is not WakeupKind.DEFERRED]
             await self._wakeups.cancel_where(loop.user_id, kinds, loop_id=loop.id)
             return
+        if loop.origin is LoopOrigin.REASONER:
+            return  # a reasoner belief never gets derived signals, at creation or later (H5)
         if loop.due_at is not None:  # due date may have moved: re-plan derived signals
             derived = [WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED]
             await self._wakeups.cancel_where(loop.user_id, derived, loop_id=loop.id)

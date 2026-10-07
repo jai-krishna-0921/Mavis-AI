@@ -446,7 +446,7 @@ async def test_first_reply_to_the_follow_up_closes_it(user, clock, recording_bus
     assert (await init.loops.get(loop.id)).status is LoopStatus.DONE
 
 
-async def test_unanswered_follow_up_closes_after_a_day(user, clock, recording_bus, fake_memory):
+async def test_unanswered_follow_up_expires_after_a_day(user, clock, recording_bus, fake_memory):
     from mavis.domain.loops import LoopStatus
 
     init = build(recording_bus, fake_memory)
@@ -456,7 +456,7 @@ async def test_unanswered_follow_up_closes_after_a_day(user, clock, recording_bu
     assert await init.loops.expire_stale() == 0
     clock.advance(hours=2)
     assert await init.loops.expire_stale() == 1
-    assert (await init.loops.get(loop.id)).status is LoopStatus.DONE
+    assert (await init.loops.get(loop.id)).status is LoopStatus.EXPIRED  # H5: silence is not DONE
 
 
 async def test_awaiting_keeps_a_deferred_follow_up(user, clock, recording_bus, fake_memory):

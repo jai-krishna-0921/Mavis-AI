@@ -323,9 +323,8 @@ async def test_status_only_reasoner_update_never_touches_content_or_trust(user, 
     await init.executor.apply(user, InitiativeDecision(track=[update], tainted=tainted_run),
                               _wakeup(user.id, clock))
     after = await init.loops.get(loop.id)
-    # H5: a closure without code evidence is only a note, so a closing status leaves the loop OPEN
-    expected = status if status is LoopStatus.AWAITING_REPLY else LoopStatus.OPEN
-    assert after.status is expected and after.trusted
+    # H5: a status change without code evidence is only a note, so the loop stays OPEN
+    assert after.status is LoopStatus.OPEN and after.trusted
     assert (after.kind, after.title, after.due_at, after.importance) == (loop.kind, loop.title, DUE, 5)
 
 

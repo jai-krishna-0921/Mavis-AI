@@ -42,7 +42,7 @@ async def test_second_ping_about_a_subject_under_another_key_is_skipped(user, cl
     assert await init.executor.notify(user, intent("approve23pm"), origin=origin)
     # a different trigger, a different model key, the same subject: no compose, nothing sent
     assert not await init.executor.notify(user, intent("approval23pm04oct"),
-                                          origin={"kind": "user_quiet", "subject": subject})
+                                          origin={"kind": "loop_created", "subject": subject})
     assert await sent(user) == ["first"]
     clock.set(ist(28, 11))  # the next local day the subject may come up again
     fake_llm.push_structured(ComposedMessage(send=True, messages=["next day"]))
