@@ -13,7 +13,7 @@ from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus
 from mavis.domain.wakeups import WakeupKind
-from mavis.initiative import hooks
+from mavis.initiative import hooks, subjects
 from mavis.initiative.executor import (
     DEFERRED_TTL,
     REMINDER_PREFIX,
@@ -105,6 +105,12 @@ class InitiativeHandler:
         if event.type is EventType.WAKEUP and kind == WakeupKind.ROUTINE.value:
             await self._routines.run(user, event.payload)
             return
+        if event.type is EventType.WAKEUP and kind == WakeupKind.AGENT.value and (
+                why := await _agent_wakeup_stale(user.id, event)):
+            # Revalidated when it fires: a closed or failed subject cancels its wakeups whatever the
+            # subject's kind, and a wakeup bound to nothing (set before H5) never runs.
+            log.info("initiative.agent_wakeup_dropped", event_id=event.id, reason=why)
+            return
         if event.type is EventType.LOOP_UPDATED:
             await self._on_loop_updated(Loop.model_validate(event.payload))
             return
@@ -154,8 +160,7 @@ class InitiativeHandler:
         external = event.type in EXTERNAL_TYPES
         evidence = frozenset(lp.id for lp in result.matched_loops) if external else frozenset()
         await self._executor.apply(user, decision, event, context=context, quiet_streak=streak,
-                                  origin=await self._origin_for(event), open_loops=open_loops,
-                                  event_loop_id=_event_loop_id(event), evidence_loop_ids=evidence)
+                                  origin=await self._origin_for(event), evidence_loop_ids=evidence)
         # Silence never closes a loop: an EVENT_ENDED whose follow-up did not go out leaves it OPEN (it
         # stays visible, overdue, for the user to decide). Phase B's ledger keeps the same rule.
 
@@ -269,6 +274,16 @@ def _imminent_floor(event: Event, decision: InitiativeDecision, loops: list[Loop
         return decision
     notify = decision.notify.model_copy(update={"urgency": URGENT_URGENCY})
     return decision.model_copy(update={"notify": notify})
+
+
+async def _agent_wakeup_stale(user_id: int, event: Event) -> str | None:
+    subject = subjects.event_subject(event)
+    if subject is None:
+        return "unbound"
+    state = await subjects.resolve(user_id, subject)
+    if state is None or not state.live:
+        return f"subject {subject.key} closed"
+    return None
 
 
 def _too_late(event: Event) -> bool:

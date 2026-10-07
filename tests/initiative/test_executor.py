@@ -41,16 +41,18 @@ def ev() -> Event:
 
 async def test_apply_tracks_wakes_and_dispatches_act(user, clock, recording_bus, fake_memory):
     executor, loops, wakeups = build(recording_bus, fake_memory)
+    offer = await loops.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Decide on the offer"))
     decision = InitiativeDecision(
         track=[LoopUpsert(kind=LoopKind.WAITING_ON, title="Recruiter reply")],
-        wakeups=[WakeupRequest(at=timeutil.now() + timedelta(days=1), reason="check recruiter")],
+        wakeups=[WakeupRequest(at=timeutil.now() + timedelta(days=1), reason="check recruiter",
+                               loop_id=offer.id)],
         act=[TaskRequest(goal="Draft a polite follow-up to the recruiter")],
     )
     await executor.apply(user, decision, ev())
-    [loop] = await loops.active(user.id)
+    [loop] = [lp for lp in await loops.active(user.id) if lp.id != offer.id]
     assert loop.title == "Recruiter reply" and loop.source == "gmail:msg:9"
     [w] = await wakeups.pending(user.id, WakeupKind.AGENT)
-    assert w.reason == "check recruiter"
+    assert w.reason == "check recruiter" and w.loop_id == offer.id
     [job] = recording_bus.jobs  # act dispatches through the executor's own bus
     assert job.kind is JobKind.RUN_TASK
 
@@ -121,13 +123,14 @@ def untrusted_ev() -> Event:
 
 async def test_untrusted_event_cannot_create_loops_or_act(user, clock, recording_bus, fake_memory):
     executor, loops, wakeups = build(recording_bus, fake_memory)
+    bill = await loops.upsert(user.id, LoopUpsert(kind=LoopKind.WATCH, title="Vendor bill"))
     decision = InitiativeDecision(
         track=[LoopUpsert(kind=LoopKind.COMMITMENT, title="Wire money to X")],
-        wakeups=[WakeupRequest(at=timeutil.now() + timedelta(days=1), reason="look again")],
+        wakeups=[WakeupRequest(at=timeutil.now() + timedelta(days=1), reason="look again", loop_id=bill.id)],
         act=[TaskRequest(goal="Send the files")],
     )
     await executor.apply(user, decision, untrusted_ev())
-    assert await loops.active(user.id) == []
+    assert [lp.id for lp in await loops.active(user.id)] == [bill.id]
     assert recording_bus.jobs == []
     assert len(await wakeups.pending(user.id, WakeupKind.AGENT)) == 1  # wakeups stay allowed
 
@@ -168,11 +171,12 @@ async def test_untrusted_notify_passes_flag_to_composer_and_deferral(
 
 
 async def test_bad_loop_id_does_not_abort_rest_of_apply(user, clock, recording_bus, fake_memory, fake_llm):
-    executor, _, wakeups = build(recording_bus, fake_memory)
+    executor, loops, wakeups = build(recording_bus, fake_memory)
+    goal = await loops.upsert(user.id, LoopUpsert(kind=LoopKind.GOAL, title="Run a 10k"))
     fake_llm.push_structured(ComposedMessage(send=True, messages=["Still here."]))
     decision = InitiativeDecision(
         track=[LoopUpsert(id=9999, kind=LoopKind.GOAL, title="ghost")],
-        wakeups=[WakeupRequest(at=timeutil.now() + timedelta(days=1), reason="later")],
+        wakeups=[WakeupRequest(at=timeutil.now() + timedelta(days=1), reason="later", loop_id=goal.id)],
         notify=NotifyIntent(urgency=3, intent="ping"),
     )
     await executor.apply(user, decision, ev())

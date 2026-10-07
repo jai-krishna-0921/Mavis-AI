@@ -12,16 +12,17 @@ from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision, NotifyIntent, WakeupRequest
 from mavis.domain.events import Event, EventType, Trust
-from mavis.domain.loops import Loop, LoopOrigin, LoopStatus, LoopUpsert
+from mavis.domain.loops import LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.messages import TAINT_SUFFIX, Button, Outbound, Role
 from mavis.domain.wakeups import WakeupKind
+from mavis.initiative import subjects
 from mavis.initiative.composer import Composer
 from mavis.initiative.quiet import QuietTracker
+from mavis.initiative.subjects import Subject, SubjectKind, SubjectState, event_subject
 from mavis.loops.service import LoopService
 from mavis.policy.pings import SECURITY_BYPASS_PREFIX, PingPolicy, in_quiet_hours, loop_ping_key
 from mavis.store.db import Session
 from mavis.store.repo import messages, outbox
-from mavis.store.repo.loops import title_tokens
 from mavis.timers.service import WakeupService
 
 log = structlog.get_logger()
@@ -32,6 +33,7 @@ RELEASE_DELAY = timedelta(seconds=20)  # let the user's reply go out first
 DEFERRED_TTL = timedelta(hours=12)  # a deferred ping with no better bound goes stale after this
 SECURITY_DEFER_GRACE = timedelta(hours=2)
 MERGE_WINDOW = timedelta(minutes=30)  # a model wakeup this close to one already set for the loop merges
+CHAIN_LOOKBACK = timedelta(days=30)
 LOOP_WAKEUP_KINDS = (WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED, WakeupKind.AGENT)
 REMINDER_PREFIX = "Reminder the user asked for: "  # wake_me's wakeup reason
 REMINDER_URGENCY = 4
@@ -57,13 +59,14 @@ class InitiativeExecutor:
 
     async def apply(self, user, decision: InitiativeDecision, event: Event, context: str = "",
                     quiet_streak: int = 0, origin: dict[str, Any] | None = None,
-                    open_loops: list[Loop] | None = None, event_loop_id: int | None = None,
                     evidence_loop_ids: frozenset[int] = frozenset()) -> None:
         """`evidence_loop_ids`: loops the triggering signal is code-matched to (an external signal that
         hit the loop's watch). Only those may be closed by the reasoner."""
         untrusted = event.trust is Trust.UNTRUSTED  # spec 8.3: third-party content may not create work
         # what the reasoner writes is as trusted as the least trusted thing it read
         write_trust = Trust.UNTRUSTED if untrusted or decision.tainted else Trust.SYSTEM
+        # each wakeup's subject as it was before this run's own writes (a run's own edit is no change)
+        bound = [(w, await self._subject_for(user.id, w, event)) for w in decision.wakeups]
         for upsert in decision.track:
             upsert = _without_unproven_closure(upsert, evidence_loop_ids, event)
             if upsert is None:
@@ -85,27 +88,8 @@ class InitiativeExecutor:
             except ValueError as exc:  # e.g. the LLM named a loop id that does not exist: not retryable
                 log.warning("initiative.track_failed", event_id=event.id, title=(upsert.title or "")[:80],
                             error=str(exc))
-        for i, w in enumerate(decision.wakeups):
-            ended = event.type is EventType.EVENT_ENDED
-            loop_id = await self._wakeup_loop(user.id, w, open_loops or [], None if ended else event_loop_id)
-            if ended and loop_id == event_loop_id:
-                # the ended loop is about to close (AWAITING/DONE cancels its wakeups): a follow-up check
-                # like "did the thank-you note go out" must outlive it, so it is not tied to that loop
-                loop_id = None
-            if loop_id is not None and await self._covered(user.id, loop_id, w.at):
-                log.info("initiative.wakeup_merged", event_id=event.id, loop_id=loop_id, reason=w.reason[:80])
-                continue
-            key = f"agent:{loop_id}:{w.reason[:60]}" if loop_id else f"agent:{event.id}:{i}"
-            try:
-                # spec 8.3: a wakeup asked for by an untrusted event or by a run whose prompt carried
-                # untrusted content, or one about an untrusted loop, fires as untrusted (scrubbed, capped)
-                tainted = write_trust is Trust.UNTRUSTED or not await self._loop_trusted(loop_id)
-                await self._wakeups.wake_me(user.id, w.at, w.reason, loop_id, WakeupKind.AGENT,
-                                            dedupe_key=key,
-                                            payload={"untrusted": True} if tainted else None)
-            except ValueError as exc:
-                log.warning("initiative.wakeup_failed", event_id=event.id, reason=w.reason[:80],
-                            error=str(exc))
+        for w, state in bound:
+            await self._schedule_bound(user, w, state, event, write_trust)
         for i, task in enumerate(decision.act):
             if untrusted:
                 log.warning("initiative.untrusted_act_skipped", event_id=event.id, index=i)
@@ -172,29 +156,50 @@ class InitiativeExecutor:
         await self.deliver(user, [text], dedupe_key, REMINDER_URGENCY)
         return True
 
-    async def _wakeup_loop(self, user_id: int, w: WakeupRequest, open_loops: list[Loop],
-                           fallback: int | None) -> int | None:
-        """The loop a model wakeup is about, so closing that loop cancels it: the id the model gave (if
-        it is really this user's), else an open loop the reason clearly names, else the event's loop."""
-        if w.loop_id is not None and await self._owns_existing_loop(user_id, w.loop_id):
-            return w.loop_id
-        said = set(title_tokens(w.reason))
-        best, best_score = None, 0.0
-        for lp in open_loops:
-            words = set(title_tokens(lp.title))
-            shared = len(words & said)
-            if not words or not (shared >= 2 or shared == len(words)):
-                continue
-            score = shared / len(words)
-            if score > best_score:
-                best, best_score = lp.id, score
-            elif score == best_score:
-                best = None  # two loops fit equally well: do not guess
-        if best is not None:
-            return best
-        if fallback is not None and await self._owns_existing_loop(user_id, fallback):
-            return fallback
-        return None
+    async def _subject_for(self, user_id: int, w: WakeupRequest, event: Event) -> SubjectState | None:
+        """The subject a model wakeup is about, by explicit id only: the one the model named if it is
+        really this user's, else the signal's own subject. Never guessed from the reason's words."""
+        named = Subject.of(w.subject_kind, w.subject_id)
+        if named is None and w.loop_id is not None:
+            named = Subject(SubjectKind.LOOP, w.loop_id)
+        if named is not None and (state := await subjects.resolve(user_id, named)) is not None:
+            return state
+        own = event_subject(event)  # the model named none, or an id that is not this user's
+        return await subjects.resolve(user_id, own) if own is not None else None
+
+    async def _schedule_bound(self, user, w: WakeupRequest, state: SubjectState | None, event: Event,
+                              write_trust: Trust) -> None:
+        if state is None or not state.live:
+            log.warning("initiative.wakeup_unbound_rejected", event_id=event.id, reason=w.reason[:80],
+                        subject=state.subject.key if state else None)
+            return
+        if event.source == "timer" and await self._rearm_without_change(user.id, state):
+            log.info("initiative.wakeup_chain_stopped", event_id=event.id, subject=state.subject.key)
+            return
+        loop_id = state.loop_id
+        if loop_id is not None and await self._covered(user.id, loop_id, w.at):
+            log.info("initiative.wakeup_merged", event_id=event.id, loop_id=loop_id, reason=w.reason[:80])
+            return
+        # spec 8.3: a wakeup asked for by an untrusted event or by a run whose prompt carried untrusted
+        # content, or one about an untrusted subject, fires as untrusted (scrubbed, capped)
+        payload: dict[str, Any] = {"subject": state.subject.key, "subject_state": state.fingerprint}
+        if write_trust is Trust.UNTRUSTED or state.untrusted:
+            payload["untrusted"] = True
+        try:
+            await self._wakeups.wake_me(user.id, w.at, w.reason, loop_id, WakeupKind.AGENT,
+                                        dedupe_key=f"agent:{state.subject.key}:{w.reason[:60]}",
+                                        payload=payload)
+        except ValueError as exc:
+            log.warning("initiative.wakeup_failed", event_id=event.id, reason=w.reason[:80], error=str(exc))
+
+    async def _rearm_without_change(self, user_id: int, state: SubjectState) -> bool:
+        """A run started by a timer may not set another wakeup for a subject whose state is the same as
+        when an earlier wakeup for it was set: no self-continuing chains (at most one re-check per
+        state of the subject)."""
+        since = timeutil.now() - CHAIN_LOOKBACK
+        mark = (state.subject.key, state.fingerprint)
+        return any((w.payload.get("subject"), w.payload.get("subject_state")) == mark
+                   for w in await self._wakeups.history(user_id, WakeupKind.AGENT, since))
 
     async def _covered(self, user_id: int, loop_id: int, at: datetime) -> bool:
         """A pending wakeup for the same loop within MERGE_WINDOW already covers this one."""
