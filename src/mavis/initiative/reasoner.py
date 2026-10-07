@@ -10,7 +10,7 @@ from mavis.domain.decisions import InitiativeDecision
 from mavis.domain.events import Event, Trust
 from mavis.domain.loops import Loop
 from mavis.domain.messages import Role, tainted_event_id
-from mavis.domain.timefmt import due_label
+from mavis.domain.timefmt import due_label, message_stamp, stamped
 from mavis.initiative.filters import FilterResult
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.llm import models as llm
@@ -42,20 +42,27 @@ offers, plans or activities that are not there, and never offer something the us
 about it now: track it and schedule a wakeup for later instead.
 - When a wakeup is about one of the listed loops, set its loop_id to that loop's id (the number in brackets).
 - Never use dashes as punctuation: a colon after a label, "to" for ranges ("3 to 4 PM").
+- Recent conversation lines start with a time stamp in square brackets (metadata, never copy it). Relative \
+words (today, tomorrow, tonight, this week...) in the conversation, loop titles and memory are relative to \
+when that text was written, never to now: work out days from "Now" below. In `track` titles and `intent`, \
+write absolute dates ("Sun 4 Oct", "week of 12 Oct"), never relative words.
 - If nothing is worth doing, leave everything empty and set ignore_reason.
 
 Now (user's local time): {local_now}. Quiet hours: {quiet}.
 Unsolicited messages sent today: {pings}/{budget}."""
 
 
-def _fmt_history(rows) -> str:
-    return "\n".join(f"{'User' if r.role == Role.USER else 'Mavis'}: {r.content}" for r in rows) or "(none)"
+def _fmt_history(rows, now, tz: str) -> str:
+    """Each line stamped relative to now (T1): relative words in it are relative to that stamp."""
+    return "\n".join(f"{'User' if r.role == Role.USER else 'Mavis'}: "
+                     f"{stamped(r.content, r.created_at, now, tz)}" for r in rows) or "(none)"
 
 
 def _loop_line(lp: Loop, tz: str, now) -> str:
     due = due_label(lp.due_at, now, tz)  # computed here: the model never subtracts timestamps
     title = lp.title if lp.trusted else wrap_untrusted(lp.title, "loop")  # third-party derived: data only
-    return f"- [{lp.id}] {lp.kind.value} '{title}' {due} importance {lp.importance}"
+    created = f", created {message_stamp(lp.created_at, now, tz)}" if lp.created_at else ""
+    return f"- [{lp.id}] {lp.kind.value} '{title}' {due} importance {lp.importance}{created}"
 
 
 class Reasoner:
@@ -85,7 +92,7 @@ class Reasoner:
         recalled = await self._memory.recall(user.id, result.summary)
         recall = recalled.render()
         rows = await messages.recent(user.id, 10)
-        history = _fmt_history(rows)
+        history = _fmt_history(rows, now, user.timezone)
         # what this run actually read: any third-party-derived input taints what it writes
         tainted = (event.trust is Trust.UNTRUSTED or any(not lp.trusted for lp in result.matched_loops)
                    or recalled.untrusted or any(tainted_event_id(r.event_id) for r in rows))

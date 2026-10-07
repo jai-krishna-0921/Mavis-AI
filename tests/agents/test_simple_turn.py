@@ -1,18 +1,19 @@
-from datetime import UTC, datetime
 
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from mavis.agents.simple_turn import run_turn
 from mavis.channels.outbox_sender import OutboxSender
+from mavis.domain import timeutil
 from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.messages import Outbound, Role
+from mavis.domain.timefmt import strip_stamps
 from mavis.store.repo import messages, outbox, users
 
 
 def msg_event(user_id: int, text: str, event_id: str = "tg:update:1", **payload) -> Event:
-    return Event(id=event_id, user_id=user_id, type=EventType.USER_MESSAGE, occurred_at=datetime.now(UTC),
+    return Event(id=event_id, user_id=user_id, type=EventType.USER_MESSAGE, occurred_at=timeutil.now(),
                  source="telegram", payload={"text": text, **payload}, trust=Trust.USER)
 
 
@@ -40,8 +41,9 @@ async def test_history_is_included(db, channel, fake_llm, memory, bus) -> None:
     await run_turn(msg_event(user.id, "my friend Jawahar is helping me", "e1"))
     fake_llm.push_text("Jawahar!")
     await run_turn(msg_event(user.id, "who's helping me?", "e2"))
-    contents = [m.content for m in fake_llm.calls[-1][1:]]
+    contents = [strip_stamps(m.content) for m in fake_llm.calls[-1][1:]]
     assert contents == ["my friend Jawahar is helping me", "Noted.", "who's helping me?"]
+    assert fake_llm.calls[-1][1].content.startswith("[just now] ")  # replayed history is stamped (T1)
 
 
 async def test_start_command_adds_greeting_hint(db, channel, fake_llm, memory, bus) -> None:

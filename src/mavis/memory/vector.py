@@ -14,19 +14,33 @@ from typing import Protocol
 import structlog
 from qdrant_client import AsyncQdrantClient, models
 
+from mavis.domain import timeutil
 from mavis.memory.embeddings import Embedder
 
 log = structlog.get_logger()
 COLLECTION = "episodes"
 
 
+def _ts(raw: object) -> datetime | None:
+    try:
+        value = datetime.fromisoformat(str(raw)) if raw else None
+    except ValueError:
+        return None
+    return value.replace(tzinfo=UTC) if value is not None and value.tzinfo is None else value
+
+
 class VectorStore(Protocol):
     async def init(self) -> None: ...
-    async def add(self, user_id: int, texts: list[str], kind: str, source_ref: str = "") -> None: ...
+    async def add(
+        self, user_id: int, texts: list[str], kind: str, source_ref: str = "", at: datetime | None = None
+    ) -> None: ...
     async def search(self, user_id: int, query: str, k: int = 6, min_score: float = 0.35) -> list[str]: ...
     async def search_with_kind(
         self, user_id: int, query: str, k: int = 6, min_score: float = 0.35
     ) -> list[tuple[str, str]]: ...
+    async def search_hits(
+        self, user_id: int, query: str, k: int = 6, min_score: float = 0.35
+    ) -> list[tuple[str, str, datetime | None]]: ...
     async def forget(self, user_id: int, needle: str) -> int: ...
     async def count(self, user_id: int) -> int: ...
 
@@ -76,7 +90,10 @@ class QdrantVectorStore:
         if self._remote:  # payload indexes are a no-op (with a warning) in embedded mode
             await self._client.create_payload_index(COLLECTION, "user_id", models.PayloadSchemaType.INTEGER)
 
-    async def add(self, user_id: int, texts: list[str], kind: str, source_ref: str = "") -> None:
+    async def add(
+        self, user_id: int, texts: list[str], kind: str, source_ref: str = "", at: datetime | None = None
+    ) -> None:
+        """`at`: when the text was written (a turn's time), default now. Recall stamps hits with it."""
         unique: dict[str, str] = {}
         for t in texts:
             if t and t.strip():
@@ -85,7 +102,8 @@ class QdrantVectorStore:
             return
         clean = list(unique.values())
         vectors = await self._embedder.embed(clean)
-        now = datetime.now(UTC).isoformat()
+        now = (at.astimezone(UTC) if at and at.tzinfo else at.replace(tzinfo=UTC) if at
+               else timeutil.now()).isoformat()
         await self._client.upsert(
             COLLECTION,
             points=[
@@ -111,6 +129,12 @@ class QdrantVectorStore:
         self, user_id: int, query: str, k: int = 6, min_score: float = 0.35
     ) -> list[tuple[str, str]]:
         """Like search, but each hit is (text, kind) so callers can treat third-party signals as untrusted."""
+        return [(text, kind) for text, kind, _ in await self.search_hits(user_id, query, k, min_score)]
+
+    async def search_hits(
+        self, user_id: int, query: str, k: int = 6, min_score: float = 0.35
+    ) -> list[tuple[str, str, datetime | None]]:
+        """(text, kind, written_at): written_at is None for points stored without a time."""
         if not query.strip():
             return []
         [vec] = await self._embedder.embed([query])
@@ -122,7 +146,8 @@ class QdrantVectorStore:
             query_filter=_user_filter(user_id),
             with_payload=True,
         )
-        return [(p.payload["text"], str(p.payload.get("kind", "episode"))) for p in res.points if p.payload]
+        return [(p.payload["text"], str(p.payload.get("kind", "episode")), _ts(p.payload.get("ts")))
+                for p in res.points if p.payload]
 
     async def _scroll_user(self, user_id: int) -> list[models.Record]:
         out: list[models.Record] = []

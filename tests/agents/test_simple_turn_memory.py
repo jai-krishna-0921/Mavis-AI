@@ -43,7 +43,11 @@ async def test_learn_text_includes_previous_reply(db, channel, fake_llm, memory,
     fake_llm.push_text("Nice.")
     await simple_turn.run_turn(msg_event(user.id, "hi", "e1"))
     await simple_turn.run_turn(msg_event(user.id, "Monday interview", "e2"))
-    assert jobs_seen[1].payload["text"] == "Mavis: What's up?\nUser: Monday interview"
+    from mavis.memory.service import CONTEXT_CLOSE, CONTEXT_NOTE, CONTEXT_OPEN
+
+    # the previous reply is fenced context, never a source of items (T3)
+    assert jobs_seen[1].payload["text"] == (
+        f"{CONTEXT_OPEN} {CONTEXT_NOTE}\nWhat's up?\n{CONTEXT_CLOSE}\nUser: Monday interview")
 
 
 async def test_recall_failure_does_not_break_reply(db, channel, fake_llm, memory, bus, monkeypatch):

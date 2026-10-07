@@ -34,6 +34,7 @@ def to_domain(r: LoopRow) -> Loop:
         version=r.version or 1,
         trust=_trust(r.trust),
         origin=_origin(r.origin),
+        created_at=timeutil.ensure_utc(r.created_at),
     )
 
 

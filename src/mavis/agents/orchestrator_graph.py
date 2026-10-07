@@ -37,6 +37,7 @@ from mavis.agents.specialists import SPECIALISTS, get_specialist
 from mavis.agents.specialists.base import current_deliverable, run_specialist
 from mavis.channels.formatting import verbatim
 from mavis.config import get_settings
+from mavis.domain import timeutil
 from mavis.domain.decisions import ComposedMessage
 from mavis.domain.errors import ActionFailed, BudgetExceeded, ConnectionRequired, LLMError
 from mavis.domain.events import Event, EventType, Trust
@@ -76,6 +77,7 @@ Mention anything that failed, was cancelled or is still waiting for their OK. Ke
 put the source list in the last bubble. Do not mention internal step ids or agents."""
 
 REVISE_PROMPT = """Revise the tool arguments exactly as the user asked. Change nothing else.
+Resolve relative days and times in the request ("tomorrow", "Friday") against the local time given.
 Return the complete revised arguments."""
 
 REVISE_FAILED_TEXT = (
@@ -421,13 +423,16 @@ async def connect_gate(state: OrchestratorState) -> Command:
 
 async def revise_approval(approval: Any, instructions: str) -> None:
     tool = get_registry().get(approval.tool)
+    ctx = await tool_context(approval.user_id)
+    # "move it to tomorrow" needs the user's clock: relative days resolve against now, in their zone
+    local = timeutil.to_local(timeutil.now(), ctx.timezone)
     revised = await llm.structured(
         tool.args_model, REVISE_PROMPT,
+        f"Right now (the user's local time): {local:%A %d %B %Y, %H:%M} ({ctx.timezone}).\n\n"
         f"Current arguments (JSON):\n{json.dumps(approval.arguments, ensure_ascii=False)}"
         f"\n\nUser's change request:\n{instructions}",
         tier=llm.Tier.FAST, **_BG,
     )
-    ctx = await tool_context(approval.user_id)
     # the same wall-clock normalisation invoke/execute_approved use, BEFORE the preview is rendered and
     # the args stored, so the card shows exactly what will run
     revised = localize_args(revised, ctx.timezone)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -104,7 +103,7 @@ async def ingest_update(data: dict[str, Any], bus: EventBus, answer: Answerer | 
             payload["command"] = m.group(1).lower()
         if file := _file(msg):
             payload["file"] = file.model_dump()
-        occurred = datetime.fromtimestamp(msg.get("date") or time.time(), UTC)
+        occurred = datetime.fromtimestamp(msg["date"], UTC) if msg.get("date") else utcnow()
     else:
         return False
 
