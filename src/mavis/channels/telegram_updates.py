@@ -38,6 +38,8 @@ def _chat_allowed(chat_id: int) -> bool:
     """Empty allowlist = allow-all in dev only (warn once); every other env denies."""
     global _warned_open_allowlist
     s = get_settings()
+    if s.test_telegram_chat_id is not None and chat_id == s.test_telegram_chat_id:
+        return True  # the live E2E test user; its sends go to the log sink (channels.test_sink)
     if s.allowed_telegram_chat_ids:
         return chat_id in s.allowed_telegram_chat_ids
     if s.env != "dev":
