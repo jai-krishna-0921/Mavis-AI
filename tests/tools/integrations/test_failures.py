@@ -98,8 +98,10 @@ def _service(capability: Capability) -> str:
     return display_name(capability)
 
 
-@pytest.mark.parametrize("status,kind", [(400, FailureKind.INVALID_ARGUMENT), (403, FailureKind.AUTH),
-                                         (404, FailureKind.NOT_FOUND), (502, FailureKind.UNAVAILABLE)])
+# The adapter's OWN call failing (our API key, a slug) is not the user's account: never "reconnect".
+@pytest.mark.parametrize("status,kind", [(400, FailureKind.INVALID_ARGUMENT), (403, FailureKind.UNAVAILABLE),
+                                         (401, FailureKind.UNAVAILABLE), (404, FailureKind.UNAVAILABLE),
+                                         (429, FailureKind.RATE_LIMITED), (502, FailureKind.UNAVAILABLE)])
 async def test_integration_error_status_is_classified(status, kind):
     provider = _Failing(raise_status=status)
     provider.set_state(1, Capability.CALENDAR, ConnectionState.ACTIVE)
@@ -135,3 +137,36 @@ async def test_composio_execute_classifies_unsuccessful_answers():
     assert not res.ok and res.error_kind is FailureKind.UNAVAILABLE
     res = await provider.execute(UserRef(user_id=7), "calendar.create_event", {"start": "2026-10-08T14:00"})
     assert res.error_kind is FailureKind.INVALID_ARGUMENT and res.error_field == "summary"
+
+
+@pytest.mark.parametrize("body,kind", [
+    # Google: a 403 is often a rate limit, and its reason says so (status PERMISSION_DENIED notwithstanding)
+    ({"error": {"code": 403, "status": "PERMISSION_DENIED",
+                "errors": [{"domain": "usageLimits", "reason": "rateLimitExceeded"}]}},
+     FailureKind.RATE_LIMITED),
+    ({"error": {"code": 403, "errors": [{"reason": "userRateLimitExceeded"}]}}, FailureKind.RATE_LIMITED),
+    ({"error": {"code": 403, "errors": [{"reason": "quotaExceeded"}]}}, FailureKind.RATE_LIMITED),
+    ({"error": {"code": 403, "errors": [{"reason": "insufficientPermissions"}]}}, FailureKind.AUTH),
+    ({"error": {"code": 403, "errors": [{"reason": "forbidden"}]}}, FailureKind.AUTH),
+    ({"error": {"code": 400, "errors": [{"reason": "notFound"}]}}, FailureKind.NOT_FOUND),
+    ({"error": {"code": 500, "errors": [{"reason": "backendError"}]}}, FailureKind.UNAVAILABLE),
+    ({"status": 400, "code": "rate_limited"}, FailureKind.RATE_LIMITED),
+    ({"error": {"code": 403}}, FailureKind.AUTH),  # no code: the status decides
+])
+def test_a_specific_machine_code_beats_the_http_status(body, kind):
+    assert classify(body)[0] is kind
+    assert classify("calendar.create_event failed: " + json.dumps(body))[0] is kind  # embedded JSON too
+
+
+@pytest.mark.parametrize("location,shown", [
+    ("attendees", "attendees"), ("summary", "summary"), ("body.attendees[0].email", None),
+    ("Please see <a href=x>the body text here</a>", None), ("nonexistent_field", None),
+])
+def test_only_our_own_argument_names_reach_the_user(location, shown):
+    from mavis.tools.integrations.tools import failed_action
+
+    body = json.dumps({"error": {"code": 400, "errors": [{"reason": "invalid", "location": location}]}})
+    exc = failed_action("calendar.create_event", ToolResult(ok=False, error=body))
+    assert exc.field == shown
+    assert exc.reason == failure_text(FailureKind.INVALID_ARGUMENT, "Google Calendar", shown)
+    assert "<" not in exc.reason and "body text" not in exc.reason
