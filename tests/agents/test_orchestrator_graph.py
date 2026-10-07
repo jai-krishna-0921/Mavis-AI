@@ -191,7 +191,7 @@ async def test_budget_exceeded_step_reports_failure(user, fake_llm, rec_bus, mon
     out = await _run(tid)
     assert out["results"]["s1"]["ok"] is False
     assert "budget" in out["results"]["s1"]["error"]
-    assert (await tasks.get(tid)).status == TaskStatus.DONE
+    assert (await tasks.get(tid)).status == TaskStatus.FAILED  # nothing got done: never "done" (hotfix4 H1)
 
 
 async def test_crashing_step_is_reported_not_fatal(user, fake_llm, rec_bus, monkeypatch):
@@ -204,7 +204,7 @@ async def test_crashing_step_is_reported_not_fatal(user, fake_llm, rec_bus, monk
     tid = await tasks.create(user.id, goal="g")
     out = await _run(tid)
     assert out["results"]["s1"]["error"] == "step failed (RuntimeError)"
-    assert (await tasks.get(tid)).status == TaskStatus.DONE
+    assert (await tasks.get(tid)).status == TaskStatus.FAILED
 
 
 async def test_invalid_plan_falls_back_to_single_research_step(user, fake_llm, rec_bus, monkeypatch):
@@ -386,7 +386,7 @@ async def test_connect_gate_declined_continues_without(user, fake_llm, rec_bus, 
     assert any("chose not to connect gmail" in a for a in final["action_results"])
     note = next(a for a in final["action_results"] if "chose not to connect" in a)
     assert "check my inbox" in note and "s1" not in note  # no internal step ids for the responder
-    assert (await tasks.get(tid)).status == TaskStatus.DONE
+    assert (await tasks.get(tid)).status == TaskStatus.FAILED  # the only step never ran
 
 
 async def test_dependents_wait_for_the_connect_answer(user, fake_llm, rec_bus, monkeypatch):
@@ -467,7 +467,8 @@ async def test_ok_is_at_most_once(user, fake_llm, rec_bus, note_tool):
     a = await approvals.get(aid)
     assert a.status == ApprovalStatus.EXECUTED and a.result == "sent: hi"
     assert a.started_at is not None and a.resolved_at is not None  # execution marker, then outcome
-    assert [to_plain(m) for m in out_a["final_messages"]] == ["Done ✓\nsent: hi"]
+    # a plain-string result is model-only: the receipt shows nothing of it (hotfix4 H3)
+    assert [to_plain(m) for m in out_a["final_messages"]] == ["Done ✓"]
     assert out_b["final_messages"] == [og.NOTHING_TO_APPROVE_TEXT]
     assert fake_llm.structured_calls == []  # approval responder is deterministic (F22)
 
@@ -496,7 +497,9 @@ async def test_failed_execution_is_recorded_and_reported(user, fake_llm, rec_bus
     await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
     out = await graph.ainvoke(Command(resume={"approval_id": aid, "decision": "ok"}), _cfg(tid))
     assert (await approvals.get(aid)).status == ApprovalStatus.FAILED
-    assert [to_plain(m) for m in out["final_messages"]] == ["Tried, but it failed: smtp refused"]
+    # an unexpected exception is described in plain words, never quoted (hotfix4 H3)
+    shown = [to_plain(m) for m in out["final_messages"]]
+    assert shown == ["Tried, but it failed: something went wrong on my side"]
 
 
 @pytest.mark.parametrize("decision, status, text", [
@@ -609,7 +612,7 @@ async def test_approved_integration_failure_is_failed_not_done(user, fake_llm, r
     a = await approvals.get(aid)
     assert a.status == ApprovalStatus.FAILED
     shown = [to_plain(m) for m in out["final_messages"]]
-    assert shown == ["Tried, but it failed: Recipient address rejected"]
+    assert shown == ["Tried, but it failed: Gmail reported an error"]  # the kind's words, not the provider's
     assert [e[1] for e in provider.executed] == ["mail.send"]
 
 
@@ -629,3 +632,70 @@ def test_clip_result_keeps_the_untrusted_wrapper_closed():
     assert clipped.startswith('<untrusted source="mail_send">\n') and clipped.endswith("\n</untrusted>")
     assert clipped.count("x") == 100
     assert og._clip_result("plain " * 200, 10) == "plain plai"
+
+
+# --- hotfix4 H3: receipts render user_text only; failures read as the kind's plain words -----------------
+
+
+async def _approve_once(user_id: int, tool: str, args: dict, preview: str) -> tuple[int, dict]:
+    tid = await tasks.create(user_id, goal="approve", kind=TaskKind.APPROVAL)
+    aid = await approvals.create(user_id, tid, tool, args, preview, utcnow() + timedelta(hours=48))
+    graph = _graph()
+    await graph.ainvoke(og.initial_state(await tasks.get(tid)), _cfg(tid))
+    await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
+    return aid, await graph.ainvoke(Command(resume={"approval_id": aid, "decision": "ok"}), _cfg(tid))
+
+
+@pytest.mark.parametrize("user_text,note", [
+    ("Started background task #7.", "Tell the user you're on it and will report back."),
+    ("Reminder set for Thu 08 Oct, 09:00.", "Wakeup #31 set for 2026-10-08T03:30:00+00:00."),
+    ("", "QUEUE_ID=99. Do not mention ids to the user."),
+])
+async def test_receipt_shows_user_text_and_never_the_model_note(user, fake_llm, rec_bus, fresh_registry,
+                                                                user_text, note):
+    from mavis.domain.policy import RiskClass
+    from mavis.domain.results import ToolOutput
+    from mavis.tools.registry import MavisTool
+
+    async def _do(user_id, args):
+        return ToolOutput(user_text, note)
+
+    fresh_registry.register(MavisTool(name="send_note", description="d", args_model=SendNoteArgs,
+                                      risk=RiskClass.OUTWARD, fn=_do, agents=frozenset({"conversation"})))
+    aid, out = await _approve_once(user.id, "send_note", {"text": "x"}, "Send note: x")
+    shown = "\n".join(to_plain(m) for m in out["final_messages"])
+    assert shown == (f"Done ✓\n{user_text}" if user_text else "Done ✓")
+    assert note not in shown
+    assert note in (await approvals.get(aid)).result  # the model-facing record keeps the full result
+
+
+@pytest.mark.parametrize("tool,capability,args,error,service", [
+    ("calendar_create_event", Capability.CALENDAR,
+     {"summary": "Block", "start": "2099-10-08T14:00:00", "attendees": ["a@x.io"]},
+     '{"error": {"errors": [{"reason": "invalid", "message": "Invalid attendee email."}], "code": 400}}',
+     "Google Calendar"),
+    ("slack_send", Capability.SLACK, {"channel": "#ops", "text": "deploy done"},
+     '{"ok": false, "error": "channel_not_found"}', "Slack"),
+    ("notion_create_page", Capability.NOTION, {"parent_id": "p1", "title": "Notes"},
+     '{"status": 429, "code": "rate_limited", "message": "slow down"}', "Notion"),
+    ("mail_send", Capability.GMAIL, {"to": ["kim@x.io"], "subject": "Hi", "body": "Hello"},
+     'calendar.create_event failed: {"error": {"code": 401, "message": "Request had invalid credentials"}}',
+     "Gmail"),
+])
+async def test_failed_provider_body_never_reaches_the_user(user, fake_llm, rec_bus, fresh_registry, provider,
+                                                          cache, monkeypatch, tool, capability, args, error,
+                                                          service):
+    from mavis.domain.integrations import ConnectionState, ToolResult
+    from mavis.tools.integrations import tools as tools_mod
+    from mavis.tools.integrations.actions import ACTIONS
+
+    monkeypatch.setattr(tools_mod, "_deps", lambda p, c: (provider, cache))
+    tools_mod.register_integration_tools(fresh_registry)
+    provider.set_state(user.id, capability, ConnectionState.ACTIVE)
+    action = next(a for a in ACTIONS if a.replace(".", "_") == tool)
+    provider.results[action] = ToolResult(ok=False, error=error)
+    aid, out = await _approve_once(user.id, tool, args, "the card")
+    shown = "\n".join(to_plain(m) for m in out["final_messages"])
+    assert (await approvals.get(aid)).status == ApprovalStatus.FAILED
+    assert shown.startswith(f"Tried, but it failed: {service} ")
+    assert "{" not in shown and "error" not in shown.lower()

@@ -94,12 +94,13 @@ class LoopService:
     async def get(self, loop_id: int) -> Loop | None:
         return await repo.get(loop_id)
 
-    async def close(self, loop_id: int, status: LoopStatus = LoopStatus.DONE) -> Loop | None:
+    async def close(self, loop_id: int, status: LoopStatus = LoopStatus.DONE,
+                    blocked_by: str | None = None) -> Loop | None:
         current = await repo.get(loop_id)
         if current is None:
             return None
         async with lock(f"loops:{current.user_id}"):
-            result = await repo.set_status(current.user_id, loop_id, status)
+            result = await repo.set_status(current.user_id, loop_id, status, blocked_by=blocked_by)
             if result is None:
                 return None
             loop, changed = result
@@ -193,7 +194,12 @@ async def _upsert_unless_closed(
     if await repo.find_recently_closed(user_id, data.title, timeutil.now() - REOPEN_GUARD):
         log.info("loops.reopen_skipped", user_id=user_id)
         return
-    await service.upsert(user_id, data, anchor_at=anchor_at)
+    loop = await service.upsert(user_id, data, anchor_at=anchor_at)
+    if data.source and loop.created_ref == data.source and loop.status is LoopStatus.OPEN:
+        from mavis.policy import outcomes  # lazy: policy imports the tool registry
+
+        # created by this turn after the action of this turn (or the next) had already failed
+        await outcomes.block_if_from_failed_turn(user_id, loop)
 
 
 def extraction_trust(prov: Provenance) -> Trust:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -71,3 +71,26 @@ async def last_user_message_at(user_id: int) -> datetime | None:
                                                        Message.role == Role.USER.value)
         )
     return None if ts is None else ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)
+
+
+async def previous_user_event(user_id: int, event_id: str) -> tuple[str, timedelta] | None:
+    """The user's turn just before the one logged as `event_id`: (its event id, how long before)."""
+    async with Session() as s:
+        here = (await s.execute(select(Message.id, Message.created_at).where(
+            Message.user_id == user_id, Message.event_id == event_id))).first()
+        if here is None:
+            return None
+        prev = (await s.execute(
+            select(Message.event_id, Message.created_at).where(
+                Message.user_id == user_id, Message.role == Role.USER.value, Message.id < here[0],
+                Message.event_id.is_not(None))
+            .order_by(Message.id.desc()).limit(1)
+        )).first()
+        if prev is None:
+            return None
+        gap = _aware(here[1]) - _aware(prev[1])
+        return prev[0], gap
+
+
+def _aware(ts: datetime) -> datetime:
+    return ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)

@@ -126,11 +126,10 @@ async def test_creating_records_ids_for_the_task(provider, cache):
 
 
 def test_render_meet_returns_only_a_google_meet_link():
-    assert render_meet({"response_data": {"meetingUri": "https://meet.google.com/abc-defg-hij"}}) == (
-        "Meet link: https://meet.google.com/abc-defg-hij"
-    )
+    meet = render_meet({"response_data": {"meetingUri": "https://meet.google.com/abc-defg-hij"}})
+    assert meet.user_text == "Meet link: https://meet.google.com/abc-defg-hij"
     other = render_meet({"response_data": {"meetingUri": "https://evil.example/x"}})
-    assert other.startswith("Created the Meet")
+    assert other.user_text.startswith("Created the Meet")
 
 
 # --- tasks.complete / tasks.update: the real title comes from tasks.get, never from the model ----------
