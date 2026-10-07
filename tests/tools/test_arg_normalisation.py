@@ -182,3 +182,31 @@ async def test_invalid_args_return_to_the_model_and_queue_nothing(user, fake_llm
     assert tool_msg.content.startswith("Tool error")
     assert res.queued_approvals == []
     assert await approvals.open_for_user(user.id) == []
+
+
+_IDENTITY_FIELDS = {"summary", "title", "name", "subject"}
+
+
+def test_identity_text_fields_can_never_be_cleared_to_blank(workspace_on):
+    """A title or name identifies the thing: an update may change it, never blank it."""
+    from mavis.tools import load_builtin_tools
+
+    registry = ToolRegistry()
+    load_builtin_tools(registry)
+    loose = []
+    for tool in registry._tools.values():
+        for name, field in tool.args_model.model_fields.items():
+            if name in _IDENTITY_FIELDS and not field.is_required() and \
+                    not any(getattr(m, "min_length", 0) for m in field.metadata):
+                loose.append(f"{tool.name}.{name}")
+    assert loose == []
+
+
+@pytest.mark.parametrize("model,kwargs,field", [
+    (CalendarUpdateArgs, {"event_id": "ev1", "summary": ""}, "summary"),
+    (CalendarUpdateArgs, {"event_id": "ev1", "summary": "  "}, "summary"),
+    (TaskUpdateArgs, {"task_id": "t1", "title": ""}, "title"),
+    (TaskUpdateArgs, {"task_id": "t1", "title": "\t"}, "title"),
+])
+def test_blank_identity_on_update_keeps_the_current_value(model, kwargs, field):
+    assert getattr(model(**kwargs), field) is None  # not given: the current title stays
