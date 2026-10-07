@@ -11,15 +11,19 @@ _channel: Channel | None = None
 def get_channel() -> Channel:
     global _channel
     if _channel is None:
-        token = get_settings().telegram_bot_token
-        if token:
+        s = get_settings()
+        if s.telegram_bot_token:
             from mavis.channels.telegram import TelegramChannel
 
-            _channel = TelegramChannel(token)
+            _channel = TelegramChannel(s.telegram_bot_token)
         else:
             from mavis.channels.fake import ConsoleChannel
 
             _channel = ConsoleChannel()
+        from mavis.channels.test_sink import SinkChannel, active_test_chat
+
+        if (test_chat := active_test_chat(s)) is not None:  # the live test chat never reaches Telegram
+            _channel = SinkChannel(_channel, test_chat)
     return _channel
 
 

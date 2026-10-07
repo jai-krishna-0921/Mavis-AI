@@ -21,7 +21,7 @@ from mavis.domain.memory import ExtractedEvent, Extraction
 from mavis.domain.messages import Role
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative import wiring
-from mavis.store.repo import messages
+from mavis.store.repo import messages, tasks
 from mavis.worker.handlers import register_default_handlers
 from mavis.worker.runner import handle_event, handle_job
 
@@ -151,8 +151,9 @@ async def test_wakeup_in_quiet_hours_is_deferred_to_morning(user, world, clock, 
     init = world
     await init.wakeups.cancel_where(user.id, [WakeupKind.ROUTINE, WakeupKind.USER_QUIET])
     clock.set(ist(28, 22, 0))
+    task_id = await tasks.create(user.id, "Summarise the reading list")  # H5: a wakeup has a subject
     await init.wakeups.wake_me(user.id, ist(28, 23, 30), "late nudge", kind=WakeupKind.AGENT,
-                               dedupe_key="e2e:late")
+                               dedupe_key="e2e:late", payload={"subject": f"task:{task_id}"})
 
     clock.set(ist(28, 23, 30))
     assert await init.timer.tick() == 1

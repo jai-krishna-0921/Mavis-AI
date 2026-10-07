@@ -50,6 +50,14 @@ async def list_pending(user_id: int, kind: WakeupKind | None = None) -> list[Wak
         return [to_domain(r) for r in await s.scalars(q.order_by(WakeupRow.due_at, WakeupRow.id))]
 
 
+async def list_kind_since(user_id: int, kind: WakeupKind, since: datetime) -> list[Wakeup]:
+    """Every wakeup of `kind` created since `since`, whatever its status (pending, fired, cancelled)."""
+    q = select(WakeupRow).where(WakeupRow.user_id == user_id, WakeupRow.kind == kind.value,
+                                WakeupRow.created_at >= since)
+    async with Session() as s:
+        return [to_domain(r) for r in await s.scalars(q.order_by(WakeupRow.id))]
+
+
 async def cancel_ids(ids: Iterable[int]) -> int:
     ids = list(ids)
     if not ids:

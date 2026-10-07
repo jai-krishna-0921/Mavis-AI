@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from mavis.config import get_settings
@@ -63,6 +63,16 @@ def loop_ping_key(loop_id: int | str | None, kind: str | None) -> str | None:
     if loop_id in (None, "") or not kind:
         return None
     return f"loop:{loop_id}:{kind}"
+
+
+def subject_ping_key(subject: str | None, kind: str | None, untrusted: bool = False) -> str | None:
+    """The per-subject daily slot, whatever key the model chose. A commitment's prep (before it starts)
+    and everything after are separate slots; a ping derived
+    from third-party content has its own slot, so it never uses up the trusted one."""
+    if not subject:
+        return None
+    slot = "prep" if kind == "event_starting" else "any"
+    return f"subj:{subject}:{slot}{':u' if untrusted else ''}"
 
 
 def _day_key(dedupe_key: str, local_now: datetime) -> str:
@@ -163,6 +173,25 @@ class PingPolicy:
                     await session.commit()
                 except IntegrityError:
                     await session.rollback()  # already recorded: dedupe is the point
+
+    async def reserve(self, user, key: str, now: datetime) -> str | None:
+        """Atomically take a daily slot (insert-or-skip in ping_log): the stored key, or None when it is
+        already taken today. Taken before composing; `release` gives it back if nothing was sent."""
+        stored = _day_key(key, timeutil.to_local(now, user.timezone))
+        async with Session() as session:
+            session.add(PingLogRow(user_id=user.id, key=stored, urgency=0, sent_at=timeutil.ensure_utc(now)))
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                return None
+        return stored
+
+    async def release(self, user, stored: str) -> None:
+        async with Session() as session:
+            await session.execute(delete(PingLogRow).where(PingLogRow.user_id == user.id,
+                                                           PingLogRow.key == stored))
+            await session.commit()
 
     async def _seen(self, user_id: int, key: str) -> bool:
         async with Session() as session:

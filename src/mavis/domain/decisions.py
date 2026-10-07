@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
@@ -41,9 +42,14 @@ class TaskRequest(BaseModel):
 
 
 class WakeupRequest(BaseModel):
+    """A wakeup is always about one existing subject, named by id (code rejects one without)."""
+
     at: datetime
     reason: str
-    loop_id: int | None = None
+    loop_id: int | None = Field(default=None, description="The id of the listed loop this is about")
+    subject_kind: Literal["loop", "approval", "task", "observation"] | None = Field(
+        default=None, description="With subject_id: the signal's subject when it is not a listed loop")
+    subject_id: int | None = None
 
 
 class InitiativeDecision(BaseModel):

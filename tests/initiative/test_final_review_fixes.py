@@ -195,12 +195,12 @@ async def test_quiet_nudge_armed_for_new_user_only(user, clock):
     wakeups = WakeupService()
     tracker = QuietTracker(wakeups)
     assert await tracker.after_assistant_message(user.id, "How are you?") is not None  # not onboarded
-    await users.update(user.id, onboarded=True)
     await messages.log(user.id, Role.USER, "hi")  # first message now: still in the 3 day window
     assert await tracker.after_assistant_message(user.id, "Anything else?") is not None
     clock.advance(days=4)
     assert await tracker.after_assistant_message(user.id, "Anything else?") is None
     assert await wakeups.pending(user.id, WakeupKind.USER_QUIET) == []
+    assert (await users.get(user.id)).onboarded  # H5: the window ending sets the flag
 
 
 async def test_proactive_message_never_arms_quiet(user, clock, recording_bus, fake_memory, fake_llm):
@@ -261,7 +261,7 @@ async def test_untrusted_brief_items_are_wrapped_and_flag_composer(user, clock, 
     seen = {}
     real = Composer.compose
 
-    async def spy(self, user_, intent, urgency, context="", untrusted=False):
+    async def spy(self, user_, intent, urgency, context="", untrusted=False, subject_record=""):
         seen.update(intent=intent, untrusted=untrusted)
         return await real(self, user_, intent, urgency, context, untrusted=untrusted)
 
@@ -287,7 +287,7 @@ async def test_all_trusted_brief_is_not_flagged(user, clock, recording_bus, fake
     seen = {}
     real = Composer.compose
 
-    async def spy(self, user_, intent, urgency, context="", untrusted=False):
+    async def spy(self, user_, intent, urgency, context="", untrusted=False, subject_record=""):
         seen.update(intent=intent, untrusted=untrusted)
         return await real(self, user_, intent, urgency, context, untrusted=untrusted)
 
