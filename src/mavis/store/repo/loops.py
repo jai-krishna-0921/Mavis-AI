@@ -320,3 +320,14 @@ async def expire(user_id: int, now) -> list[Loop]:
                 expired.append(to_domain(row))
         await s.commit()
     return expired
+
+
+async def list_from_sources(user_id: int, sources: list[str], statuses: tuple[LoopStatus, ...]) -> list[Loop]:
+    """Loops written from one of `sources` (a chat turn's event id, for LEARN loops) in `statuses`."""
+    if not sources:
+        return []
+    async with Session() as s:
+        rows = await s.scalars(select(LoopRow).where(
+            LoopRow.user_id == user_id, LoopRow.source.in_(sources),
+            LoopRow.status.in_([x.value for x in statuses])))
+        return [to_domain(r) for r in rows]

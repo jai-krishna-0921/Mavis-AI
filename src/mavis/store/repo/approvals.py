@@ -237,6 +237,7 @@ async def set_status(
     result: str | None = None,
     *,
     from_statuses: Iterable[ApprovalStatus] = OPEN_APPROVAL_STATUSES,
+    failure_reason: str | None = None,
 ) -> bool:
     """Move an approval to `status` only while it is in one of `from_statuses` (default: open).
 
@@ -246,6 +247,8 @@ async def set_status(
     values: dict = {"status": status.value}
     if result is not None:
         values["result"] = result
+    if failure_reason is not None:
+        values["failure_reason"] = failure_reason[:300]
     if status in TERMINAL_APPROVAL_STATUSES:
         values["resolved_at"] = utcnow()
     async with Session() as s:
@@ -406,7 +409,33 @@ async def executed_after_stop(since: datetime, user_id: int | None = None) -> li
         .where(PendingApproval.status == ApprovalStatus.EXECUTED.value,
                PendingApproval.resolved_at.is_not(None),
                Task.status.in_([TaskStatus.CANCELLED.value, TaskStatus.FAILED.value]),
+               # a task that finished through its responder already reported what ran (hotfix4 H1)
+               Task.result_text.is_(None),
                Task.finished_at >= since)
     )
     async with Session() as s:
         return list(await s.scalars(_for_user(stmt, user_id).order_by(PendingApproval.id)))
+
+
+async def resolved_since(user_id: int, since: datetime, statuses: Iterable[ApprovalStatus],
+                         tool: str | None = None) -> list[PendingApproval]:
+    """Approvals resolved into one of `statuses` at or after `since`, oldest first."""
+    stmt = select(PendingApproval).where(
+        PendingApproval.user_id == user_id, PendingApproval.status.in_([x.value for x in statuses]),
+        PendingApproval.resolved_at >= since)
+    if tool is not None:
+        stmt = stmt.where(PendingApproval.tool == tool)
+    async with Session() as s:
+        return list(await s.scalars(stmt.order_by(PendingApproval.resolved_at, PendingApproval.id)))
+
+
+async def acknowledge(user_id: int, approval_ids: Iterable[int]) -> int:
+    ids = list(approval_ids)
+    if not ids:
+        return 0
+    async with Session() as s:
+        res = await s.execute(update(PendingApproval).where(
+            PendingApproval.user_id == user_id, PendingApproval.id.in_(ids),
+            PendingApproval.acknowledged_at.is_(None)).values(acknowledged_at=utcnow()))
+        await s.commit()
+        return res.rowcount or 0

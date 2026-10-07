@@ -24,6 +24,9 @@ class LoopStatus(StrEnum):
     DONE = "DONE"
     EXPIRED = "EXPIRED"
     DROPPED = "DROPPED"
+    # Its action failed (an approval in the turn that created it): not OPEN, so no prep or "how did it
+    # go" fires; the failure itself is shown as "recently failed" for the user to decide (hotfix4 H1).
+    BLOCKED = "BLOCKED"
 
 
 class LoopOrigin(StrEnum):

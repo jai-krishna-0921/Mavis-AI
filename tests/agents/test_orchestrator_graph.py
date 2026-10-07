@@ -191,7 +191,7 @@ async def test_budget_exceeded_step_reports_failure(user, fake_llm, rec_bus, mon
     out = await _run(tid)
     assert out["results"]["s1"]["ok"] is False
     assert "budget" in out["results"]["s1"]["error"]
-    assert (await tasks.get(tid)).status == TaskStatus.DONE
+    assert (await tasks.get(tid)).status == TaskStatus.FAILED  # nothing got done: never "done" (hotfix4 H1)
 
 
 async def test_crashing_step_is_reported_not_fatal(user, fake_llm, rec_bus, monkeypatch):
@@ -204,7 +204,7 @@ async def test_crashing_step_is_reported_not_fatal(user, fake_llm, rec_bus, monk
     tid = await tasks.create(user.id, goal="g")
     out = await _run(tid)
     assert out["results"]["s1"]["error"] == "step failed (RuntimeError)"
-    assert (await tasks.get(tid)).status == TaskStatus.DONE
+    assert (await tasks.get(tid)).status == TaskStatus.FAILED
 
 
 async def test_invalid_plan_falls_back_to_single_research_step(user, fake_llm, rec_bus, monkeypatch):
@@ -386,7 +386,7 @@ async def test_connect_gate_declined_continues_without(user, fake_llm, rec_bus, 
     assert any("chose not to connect gmail" in a for a in final["action_results"])
     note = next(a for a in final["action_results"] if "chose not to connect" in a)
     assert "check my inbox" in note and "s1" not in note  # no internal step ids for the responder
-    assert (await tasks.get(tid)).status == TaskStatus.DONE
+    assert (await tasks.get(tid)).status == TaskStatus.FAILED  # the only step never ran
 
 
 async def test_dependents_wait_for_the_connect_answer(user, fake_llm, rec_bus, monkeypatch):

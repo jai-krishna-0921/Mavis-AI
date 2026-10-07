@@ -71,3 +71,17 @@ async def last_user_message_at(user_id: int) -> datetime | None:
                                                        Message.role == Role.USER.value)
         )
     return None if ts is None else ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)
+
+
+async def previous_user_event(user_id: int, event_id: str) -> str | None:
+    """The event id of the user's message just before the one logged as `event_id` (the previous turn)."""
+    async with Session() as s:
+        here = await s.scalar(select(Message.id).where(Message.user_id == user_id,
+                                                       Message.event_id == event_id))
+        if here is None:
+            return None
+        return await s.scalar(
+            select(Message.event_id).where(Message.user_id == user_id, Message.role == Role.USER.value,
+                                           Message.id < here, Message.event_id.is_not(None))
+            .order_by(Message.id.desc()).limit(1)
+        )

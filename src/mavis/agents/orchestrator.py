@@ -175,6 +175,8 @@ async def _report_executed_after_stop(task_id: int, user_id: int) -> None:
     task = await tasks.get(task_id)
     if task is None or task.status not in (TaskStatus.CANCELLED, TaskStatus.FAILED):
         return
+    if task.result_text is not None:
+        return  # it finished through its responder (FAILED from its outcomes), which reported what ran
     for ap in await approvals.executed_for_task(task_id):
         await approval_flow.say(
             user_id,
