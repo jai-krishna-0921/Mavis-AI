@@ -121,14 +121,16 @@ class Composer:
                       f"{stamped(m.content, m.created_at, now, user.timezone)}" for m in recent)
             or "(no messages yet)"
         )
+        failed, failed_untrusted = await recent_failures.section(user.id)
         if untrusted:
             intent = wrap_untrusted(intent, "reasoner")
             context = wrap_untrusted(context, "reasoner") if context else context
         grounding = ""
         if subject_record:
             grounding = f"Source record (what this message is about; authoritative):\n{subject_record}\n\n"
-        if failed := await recent_failures.section(user.id):
+        if failed:
             grounding += f"{failed}\n\n"
+        untrusted = untrusted or failed_untrusted  # third-party text in the prompt: scrub what it may echo
         prompt = (
             f"{grounding}What to accomplish: {intent}\nUrgency: {urgency}/5\n"
             f"Extra context:\n{context or '-'}\n\n"

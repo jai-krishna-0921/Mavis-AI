@@ -84,13 +84,13 @@ async def test_without_a_subject_there_is_no_record_block(user, clock, fake_memo
 
 
 async def test_recently_failed_hook_reaches_composer_and_reasoner(user, clock, fake_memory, fake_llm):
-    """The H1 provider is wired after merge; the hook is empty by default and rendered when it has lines."""
+    """Nothing failed: no section. A provider with lines reaches both prompts."""
     fake_llm.push_structured(ComposedMessage(send=True, messages=["ok"]))
     await Composer(fake_memory).compose(user, "say hi", 2)
     assert recent_failures.HEADING not in fake_llm.structured_calls[-1]["user"]
 
     async def provider(user_id):
-        return "- Calendar block Sun 4 Oct 14:00: failed (invalid attendee)"
+        return "- Calendar block Sun 4 Oct 14:00: failed (invalid attendee)", False
 
     recent_failures.set_provider(provider)
     try:
