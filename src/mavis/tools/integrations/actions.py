@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, Field, model_validator
 
 from mavis.config import get_settings
+from mavis.domain.args import Email, ToolArgs
 from mavis.domain.errors import NeedsUserDetail
 from mavis.domain.localtime import LocalTimes, localize_args, wall_clock
 from mavis.domain.policy import Capability, RiskClass
@@ -82,31 +83,31 @@ def display_name(capability: Capability) -> str:
 # --- argument models -----------------------------------------------------------------------------
 
 
-class MailSearchArgs(BaseModel):
+class MailSearchArgs(ToolArgs):
     query: str = Field(
         default="", description="Gmail search syntax, e.g. 'from:alice newer_than:7d is:unread'"
     )
     max_results: int = Field(default=10, ge=1, le=50)
 
 
-class MailReadArgs(BaseModel):
+class MailReadArgs(ToolArgs):
     message_id: str
 
 
-class MailThreadArgs(BaseModel):
+class MailThreadArgs(ToolArgs):
     thread_id: str
 
 
-class MailComposeArgs(BaseModel):
-    to: list[str] = Field(min_length=1, description="Recipient email addresses")
+class MailComposeArgs(ToolArgs):
+    to: list[Email] = Field(min_length=1, description="Recipient email addresses")
     subject: str
     body: str
-    cc: list[str] = Field(default_factory=list)
+    cc: list[Email] = Field(default_factory=list)
 
 
-class MailReplyArgs(BaseModel):
+class MailReplyArgs(ToolArgs):
     thread_id: str
-    to: str
+    to: Email
     body: str
 
 
@@ -119,7 +120,7 @@ class CalendarListArgs(LocalTimes):
     )
 
 
-class CalendarFindArgs(BaseModel):
+class CalendarFindArgs(ToolArgs):
     query: str
 
 
@@ -132,7 +133,7 @@ class CalendarCreateArgs(LocalTimes):
     summary: str
     start: datetime = Field(description=wall_clock("Start time"))
     duration_minutes: int = Field(default=30, ge=5, le=1440)
-    attendees: list[str] = Field(
+    attendees: list[Email] = Field(
         default_factory=list, description="Guest emails; adding guests sends invites"
     )
     description: str = ""
@@ -142,7 +143,8 @@ class CalendarUpdateArgs(LocalTimes):
     """Only the fields that change; everything else on the event stays as it is."""
 
     event_id: str
-    summary: str | None = None
+    # a title identifies the event: it can change, never be blanked (blank = keep it, see domain.args)
+    summary: str | None = Field(default=None, min_length=1, description="A new title; empty keeps it")
     start: datetime | None = Field(
         default=None,
         description=wall_clock("New start time. Moving an event needs duration_minutes too (its current "
@@ -153,7 +155,7 @@ class CalendarUpdateArgs(LocalTimes):
         description="Length in minutes; goes with start (pass the event's current start to change only "
                     "the length)",
     )
-    attendees: list[str] | None = None
+    attendees: list[Email] | None = None
     description: str | None = None
 
     @model_validator(mode="after")
@@ -174,29 +176,29 @@ class CalendarUpdateArgs(LocalTimes):
         return self
 
 
-class SlackChannelsArgs(BaseModel):
+class SlackChannelsArgs(ToolArgs):
     pass
 
 
-class SlackHistoryArgs(BaseModel):
+class SlackHistoryArgs(ToolArgs):
     channel: str = Field(description="Channel id or name")
     limit: int = Field(default=20, ge=1, le=100)
 
 
-class SlackSendArgs(BaseModel):
+class SlackSendArgs(ToolArgs):
     channel: str
     text: str
 
 
-class NotionSearchArgs(BaseModel):
+class NotionSearchArgs(ToolArgs):
     query: str = ""
 
 
-class NotionReadArgs(BaseModel):
+class NotionReadArgs(ToolArgs):
     page_id: str
 
 
-class NotionCreateArgs(BaseModel):
+class NotionCreateArgs(ToolArgs):
     parent_id: str = Field(description="Parent page id")
     title: str
     content: str = Field(default="", description="Markdown body")
@@ -205,11 +207,11 @@ class NotionCreateArgs(BaseModel):
 # --- Google Workspace argument models (spec 2026-10-03 section 4) ---------------------------------------
 
 
-class NoArgs(BaseModel):
+class NoArgs(ToolArgs):
     pass
 
 
-class DriveSearchArgs(BaseModel):
+class DriveSearchArgs(ToolArgs):
     query: str = Field(
         default="",
         description="Drive search syntax, e.g. \"name contains 'budget'\", \"fullText contains 'Priya'\", "
@@ -218,30 +220,30 @@ class DriveSearchArgs(BaseModel):
     max_results: int = Field(default=10, ge=1, le=25)
 
 
-class DriveRecentArgs(BaseModel):
+class DriveRecentArgs(ToolArgs):
     shared_with_me: bool = Field(default=False, description="Only files other people shared with the user")
     max_results: int = Field(default=10, ge=1, le=25)
 
 
-class FileArgs(BaseModel):
+class FileArgs(ToolArgs):
     file_id: str = Field(min_length=1, description="Drive file id (from drive_search or drive_list_recent)")
 
 
-class DriveDownloadArgs(BaseModel):
+class DriveDownloadArgs(ToolArgs):
     file_id: str = Field(min_length=1)
     mime_type: str = Field(default="", description="Export type for Google Docs, Sheets and Slides")
 
 
-class DocArgs(BaseModel):
+class DocArgs(ToolArgs):
     document_id: str = Field(min_length=1, description="Google Doc id (a Drive file id)")
 
 
-class SheetsFindArgs(BaseModel):
+class SheetsFindArgs(ToolArgs):
     query: str = Field(default="", description="e.g. \"name contains 'budget'\"; empty lists recent sheets")
     max_results: int = Field(default=10, ge=1, le=25)
 
 
-class SheetsReadArgs(BaseModel):
+class SheetsReadArgs(ToolArgs):
     spreadsheet_id: str = Field(min_length=1)
     range: str = Field(default="", description="A1 range like 'Sheet1!A1:F50'; empty reads the first sheet")
 
@@ -255,61 +257,61 @@ class TasksListArgs(LocalTimes):
     max_results: int = Field(default=50, ge=1, le=100)
 
 
-class TaskRefArgs(BaseModel):
+class TaskRefArgs(ToolArgs):
     task_id: str = Field(min_length=1, description="Task id from tasks_list")
 
 
-class ContactsSearchArgs(BaseModel):
+class ContactsSearchArgs(ToolArgs):
     query: str = Field(min_length=2, description="A name, email or phone number")
     max_results: int = Field(default=10, ge=1, le=30)
 
 
-class MeetTranscriptArgs(BaseModel):
+class MeetTranscriptArgs(ToolArgs):
     conference_record_id: str = Field(min_length=1, description="Conference record id, e.g. 'abc-123'")
 
 
-class FolderCreateArgs(BaseModel):
+class FolderCreateArgs(ToolArgs):
     name: str = Field(min_length=1, max_length=200)
     parent_id: str = Field(default="", description="Parent folder id; empty puts it in My Drive")
 
 
-class DriveMoveArgs(BaseModel):
+class DriveMoveArgs(ToolArgs):
     file_id: str = Field(min_length=1)
     to_folder_id: str = Field(min_length=1, description="Destination folder id")
     from_folder_id: str = Field(default="", description="Current folder id, when known")
 
 
-class DriveShareArgs(BaseModel):
+class DriveShareArgs(ToolArgs):
     file_id: str = Field(min_length=1)
-    email: str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", description="Email of the person to share with")
+    email: Email = Field(description="Email of the person to share with")
     role: Literal["reader", "commenter", "writer"] = "reader"
 
 
-class DocCreateArgs(BaseModel):
+class DocCreateArgs(ToolArgs):
     title: str = Field(min_length=1, max_length=200)
     markdown: str = Field(default="", description="The document body as Markdown")
 
 
-class DocCommentArgs(BaseModel):
+class DocCommentArgs(ToolArgs):
     file_id: str = Field(min_length=1, description="Doc, Sheet or Slides file id")
     content: str = Field(min_length=1, max_length=2000)
 
 
-class SheetCreateArgs(BaseModel):
+class SheetCreateArgs(ToolArgs):
     title: str = Field(min_length=1, max_length=200)
 
 
-class TaskAddArgs(BaseModel):
+class TaskAddArgs(ToolArgs):
     title: str = Field(min_length=1, max_length=1024)
     notes: str = Field(default="", max_length=8192)
     due: date | None = Field(default=None, description="Due date (Google Tasks keeps the date only)")
 
 
-class TaskCompleteArgs(BaseModel):
+class TaskCompleteArgs(ToolArgs):
     task_id: str = Field(min_length=1, description="Task id from tasks_list")
 
 
-class TaskUpdateArgs(BaseModel):
+class TaskUpdateArgs(ToolArgs):
     task_id: str = Field(min_length=1, description="Task id from tasks_list")
     title: str | None = Field(default=None, min_length=1, max_length=1024,
                               description="A new title; leave empty to keep the current one")
@@ -329,11 +331,11 @@ class TaskPatchArgs(BaseModel):
     due: date | None = None
 
 
-class TaskDeleteArgs(BaseModel):
+class TaskDeleteArgs(ToolArgs):
     task_id: str = Field(min_length=1)
 
 
-class DriveUploadArgs(BaseModel):
+class DriveUploadArgs(ToolArgs):
     artifact_id: int = Field(description="Id of a file this task produced (deck, report, sheet)")
     folder_id: str = Field(default="", description="Drive folder id; empty puts it in My Drive")
 
@@ -350,7 +352,7 @@ class DriveUploadFileArgs(BaseModel):
 CellValue = str | int | float | bool
 
 
-class DocAppendArgs(BaseModel):
+class DocAppendArgs(ToolArgs):
     document_id: str = Field(min_length=1)
     text: str = Field(min_length=1, max_length=20000, description="Plain text added at the end of the doc")
 
@@ -363,13 +365,13 @@ class DocInsertArgs(BaseModel):
     index: int = Field(ge=1)
 
 
-class SheetAppendArgs(BaseModel):
+class SheetAppendArgs(ToolArgs):
     spreadsheet_id: str = Field(min_length=1)
     range: str = Field(default="Sheet1", description="Sheet name (or table range); the row goes at the end")
     values: list[CellValue] = Field(min_length=1, max_length=50, description="One row of cells")
 
 
-class SheetUpdateArgs(BaseModel):
+class SheetUpdateArgs(ToolArgs):
     spreadsheet_id: str = Field(min_length=1)
     sheet_name: str = Field(min_length=1)
     start_cell: str = Field(pattern=r"^[A-Za-z]{1,3}[1-9][0-9]{0,6}$", description="Top-left cell, e.g. 'B2'")

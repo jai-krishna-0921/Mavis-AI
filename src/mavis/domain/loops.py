@@ -24,6 +24,9 @@ class LoopStatus(StrEnum):
     DONE = "DONE"
     EXPIRED = "EXPIRED"
     DROPPED = "DROPPED"
+    # Its action failed (an approval in the turn that created it): not OPEN, so no prep or "how did it
+    # go" fires; the failure itself is shown as "recently failed" for the user to decide (hotfix4 H1).
+    BLOCKED = "BLOCKED"
 
 
 class LoopOrigin(StrEnum):
@@ -66,6 +69,8 @@ class Loop(BaseModel):
     trust: Trust = Trust.UNTRUSTED
     origin: LoopOrigin = LoopOrigin.UNKNOWN
     created_at: datetime | None = None   # when the loop was first written (its title's anchor)
+    created_ref: str | None = None       # the source it was created from (never changed by a merge)
+    blocked_by: str | None = None        # while BLOCKED: the failed approval ref that blocked it
 
     @property
     def trusted(self) -> bool:

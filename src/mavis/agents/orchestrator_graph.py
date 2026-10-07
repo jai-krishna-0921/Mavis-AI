@@ -355,7 +355,8 @@ def _digest(state: OrchestratorState) -> str:
     lines: list[str] = []
     for s in plan.steps if plan else []:
         r = results.get(s.id, {})
-        status = "ok" if r.get("ok") else "FAILED"
+        status = ("PARTIAL, out of budget, answered from what it gathered" if r.get("ok") and r.get("partial")
+                  else "ok" if r.get("ok") else "FAILED")
         lines.append(f"[{s.id}: {s.agent}: {status}] {s.instruction}\n{_result_body(s.id, r)}")
     return "\n\n".join(lines)
 
@@ -471,12 +472,36 @@ async def _passed_action_time(approval: Any) -> str | None:
     return await approval_flow.passed_action_time(approval)
 
 
-def _first_result_line(result: str) -> str:
-    for line in result.splitlines():
-        line = line.strip()
-        if line and not line.startswith(("<untrusted", "</untrusted")):
-            return verbatim(line[:200])  # tool output: shown as it came back
-    return ""
+async def _block_loops_of(approval_id: int) -> None:
+    """The failed action's loops stop being OPEN (no prep or "how did it go" for what never happened)."""
+    try:
+        from mavis.policy import outcomes  # lazy: policy imports the registry
+
+        await outcomes.block_loops_of_failed_approval(approval_id)
+    except Exception as exc:  # noqa: BLE001 - the failure is recorded; loops are a best-effort follow-on
+        log.warning("approval.block_loops_failed", approval_id=approval_id, error=_err(exc))
+
+
+async def _reopen_loops_of(approval_id: int) -> None:
+    """A retry of a failed action went through: the loops that failure blocked are live again."""
+    try:
+        from mavis.policy import outcomes  # lazy: policy imports the registry
+
+        await outcomes.reopen_after_success(approval_id)
+    except Exception as exc:  # noqa: BLE001 - the action stands; loops are a best-effort follow-on
+        log.warning("approval.reopen_loops_failed", approval_id=approval_id, error=_err(exc))
+
+
+def _failure_reason(exc: Exception) -> str:
+    """What the user reads about a failed approved action: plain words only (hotfix4 H3). ActionFailed
+    carries them (classified at the integration boundary); anything else is described, never quoted."""
+    if isinstance(exc, ActionFailed):
+        return exc.reason
+    if isinstance(exc, ConnectionRequired):
+        from mavis.tools.integrations.actions import display_name  # lazy: integrations import agents
+
+        return f"{display_name(exc.capability)} needs connecting again"
+    return "something went wrong on my side"
 
 
 async def approval_gate(state: OrchestratorState) -> Command:
@@ -511,28 +536,28 @@ async def approval_gate(state: OrchestratorState) -> Command:
         # Execution marker for the restart sweep: claimed-but-never-run vs may-have-run.
         await approvals.mark_started(pending.id)
         try:
-            result = await get_registry().execute_approved(pending.id)
+            executed = await get_registry().execute_approved(pending.id)
         except Exception as exc:  # noqa: BLE001 - report, don't crash the task
-            if isinstance(exc, ActionFailed):
-                reason = exc.reason
-            else:
-                reason = (str(exc).splitlines() or [""])[0] or type(exc).__name__
-            reason = reason[:150]
+            reason = _failure_reason(exc)[:150]
             await approvals.set_status(pending.id, ApprovalStatus.FAILED, result=str(exc)[:500],
-                                       from_statuses=claimed)
+                                       from_statuses=claimed, failure_reason=reason)
             log.warning("approval.execute_failed", approval_id=pending.id, tool=pending.tool, error=_err(exc))
+            await _block_loops_of(pending.id)
             return Command(goto="approval_gate", update={
                 "action_results": [
                     f"Failed: {pending.preview}\nReason: {wrap_untrusted(reason, pending.tool)}"
                 ],
                 "approval_outcomes": [{"status": "failed", "preview": pending.preview, "detail": reason}],
             })
-        await approvals.set_status(pending.id, ApprovalStatus.EXECUTED, result=result, from_statuses=claimed)
+        await approvals.set_status(pending.id, ApprovalStatus.EXECUTED, result=executed.text,
+                                   from_statuses=claimed)
         await _supersede_duplicates(pending, executed=True)
+        await _reopen_loops_of(pending.id)
         return Command(goto="approval_gate", update={
-            "action_results": [f"Done: {pending.preview}\nResult: {_clip_result(result)}"],
+            "action_results": [f"Done: {pending.preview}\nResult: {_clip_result(executed.text)}"],
+            # the receipt shows the tool's user_text only, never its model-facing result
             "approval_outcomes": [{"status": "executed", "preview": pending.preview,
-                                   "detail": _first_result_line(result)}],
+                                   "detail": verbatim(executed.user_text[:300])}],
         })
     if decision == "edit":
         try:
@@ -602,6 +627,36 @@ async def responder(state: OrchestratorState) -> dict:
     return {"final_messages": texts}
 
 
+_NOT_DONE_APPROVALS = frozenset({"failed", "past"})  # the user wanted it and it did not happen
+
+
+def derive_outcome(state: OrchestratorState) -> tuple[TaskStatus, str | None]:
+    """The task's terminal status from what actually happened (hotfix4 H1), and a plain reason.
+
+    - Approvals: an approved action that failed (or whose time had passed) is not done.
+    - Steps: a step that failed (including out of budget with nothing to show) is not done; a step that
+      wrapped up on its budget with an answer is partly done.
+    FAILED when nothing got done, PARTIAL when some of it did, DONE otherwise. A rejected, expired or
+    superseded card is the user's decision, not a failure."""
+    outcomes = state.get("approval_outcomes", [])
+    executed = sum(1 for o in outcomes if o.get("status") == "executed")
+    not_done = sum(1 for o in outcomes if o.get("status") in _NOT_DONE_APPROVALS)
+    results = list(state.get("results", {}).values()) if state.get("kind") != TaskKind.APPROVAL else []
+    ok_full = sum(1 for r in results if r.get("ok") and not r.get("partial"))
+    ok_partial = sum(1 for r in results if r.get("ok") and r.get("partial"))
+    failed_steps = sum(1 for r in results if not r.get("ok"))
+    done_any = executed + ok_full + ok_partial
+    if not_done == 0 and failed_steps == 0 and ok_partial == 0:
+        return TaskStatus.DONE, None
+    if done_any == 0:
+        if not_done and not results:
+            return TaskStatus.FAILED, None  # the approval's own failure_reason says why
+        return TaskStatus.FAILED, "it could not be finished"
+    if ok_partial and not (not_done or failed_steps):
+        return TaskStatus.PARTIAL, "it ran out of time or steps, so the answer covers only what I found"
+    return TaskStatus.PARTIAL, "only part of it got done"
+
+
 async def finish(state: OrchestratorState) -> dict:
     task_id, user_id = state["task_id"], state["user_id"]
     messages = state.get("final_messages", [])
@@ -619,7 +674,10 @@ async def finish(state: OrchestratorState) -> dict:
         # Taint picked up mid-run (a step read an email) lives only in the graph state: store it on the
         # row too, so delivery, redelivery and the next chat turn treat the result as untrusted.
         fields["tainted"] = True
-    if not await tasks.claim(task_id, active, TaskStatus.DONE, **fields):
+    status, reason = derive_outcome(state)
+    if reason is not None:
+        fields["error"] = reason  # plain words: shown in "recently failed"
+    if not await tasks.claim(task_id, active, status, **fields):
         log.info("orchestrator.finish_skipped", task_id=task_id)
         return {}
     task = await tasks.get(task_id)
@@ -629,7 +687,7 @@ async def finish(state: OrchestratorState) -> dict:
         payload={
             "task_id": task_id, "messages": messages, "artifacts": artifacts,
             "origin": task.origin, "notify_on_complete": task.notify_on_complete,
-            "tainted": bool(task.tainted),
+            "tainted": bool(task.tainted), "status": status.value,
         },
     ))
     return {}

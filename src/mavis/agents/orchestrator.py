@@ -157,7 +157,11 @@ fail_task = _fail  # public name for the approval sweep
 async def _close_approvals(task_id: int, user_id: int) -> None:
     """A failed task never resumes, so its approvals must not stay tappable or stuck."""
     await approvals.reject_open_for_task(task_id)
-    await approvals.fail_unstarted_for_task(task_id, "the task failed before this ran")
+    if await approvals.fail_unstarted_for_task(task_id, "the task failed before this ran"):
+        from mavis.policy import outcomes  # lazy: policy imports the registry
+
+        for ap in await approvals.failed_for_task(task_id):  # never ran: its loops are not live either
+            await outcomes.block_loops_of_failed_approval(ap.id)
     for ap in await approvals.may_have_run_for_task(task_id):
         await approval_flow.say(
             user_id,
@@ -175,6 +179,8 @@ async def _report_executed_after_stop(task_id: int, user_id: int) -> None:
     task = await tasks.get(task_id)
     if task is None or task.status not in (TaskStatus.CANCELLED, TaskStatus.FAILED):
         return
+    if task.result_text is not None:
+        return  # it finished through its responder (FAILED from its outcomes), which reported what ran
     for ap in await approvals.executed_for_task(task_id):
         await approval_flow.say(
             user_id,

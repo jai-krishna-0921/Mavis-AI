@@ -14,7 +14,7 @@ import structlog
 
 from mavis.domain.events import Event
 from mavis.domain.messages import TAINT_SUFFIX, Outbound, Role
-from mavis.domain.tasks import TaskOrigin, TaskStatus
+from mavis.domain.tasks import REPORTED_STATUSES, TaskOrigin
 from mavis.initiative.composer import scrub_untrusted_origin
 from mavis.policy import pings
 from mavis.store.db import Session, utcnow
@@ -84,7 +84,10 @@ async def deliver_task_result(event: Event) -> None:
 async def redeliver(user_id: int, task_id: int) -> None:
     """Called by the task_delivery wakeup once the ping policy window opens."""
     task = await tasks.get(task_id)
-    if task is None or task.user_id != user_id or task.status != TaskStatus.DONE:
+    # A task that finished through its responder, whatever its outcome (DONE, PARTIAL or FAILED), has a
+    # report to deliver; a crashed or stalled one has none (the user was told when it failed).
+    if (task is None or task.user_id != user_id or task.status not in REPORTED_STATUSES
+            or task.result_text is None):
         return
     tainted = bool(task.tainted)
     texts = _clean((task.result_text or "").split("\n\n"), tainted)

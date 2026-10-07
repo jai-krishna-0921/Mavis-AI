@@ -113,7 +113,7 @@ async def test_track_loop_tool_title_is_resolved_at_call_time(user, recording_bu
     clock.set(local(LON, 3, 18, 0))
     out = await assistant.track_loop(user.id, assistant.TrackLoopArgs(
         kind=LoopKind.COMMITMENT, title="Send the deck in 2 days"))
-    assert "Send the deck on Mon 5 Oct" in out
+    assert "Send the deck on Mon 5 Oct" in out.user_text
 
 
 def test_prompts_ask_for_absolute_dates_in_titles():

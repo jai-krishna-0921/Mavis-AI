@@ -3,6 +3,7 @@ from datetime import timedelta
 import pytest
 
 from mavis.domain import timeutil
+from mavis.domain.errors import ActionFailed
 from mavis.domain.loops import LoopKind
 from mavis.domain.policy import RiskClass
 from mavis.store.repo import policy_rules, tasks
@@ -67,7 +68,7 @@ async def test_remember_calls_memory_learn(user, fake_memory):
 async def test_forget_calls_memory(user, fake_memory):
     out = await assistant.forget(user.id, assistant.ForgetArgs(needle="Teamcenter"))
     assert fake_memory.forgotten == ["Teamcenter"]
-    assert "2" in out
+    assert "2" in out.for_model()
 
 
 async def test_wake_me_naive_time_is_user_local(user, wakeups):
@@ -82,16 +83,18 @@ async def test_wake_me_naive_time_is_user_local(user, wakeups):
 
 
 async def test_wake_me_rejects_past(user, wakeups):
-    out = await assistant.wake_me(user.id, assistant.WakeMeArgs(
-        at=timeutil.now() - timedelta(minutes=5), reason="late"))
-    assert "past" in out
+    # a soft failure is an ActionFailed: the model reads the sentence, an approved run reports "failed"
+    with pytest.raises(ActionFailed, match="past") as exc:
+        await assistant.wake_me(user.id, assistant.WakeMeArgs(
+            at=timeutil.now() - timedelta(minutes=5), reason="late"))
+    assert "passed" in exc.value.reason
     assert wakeups == []
 
 
 async def test_track_loop_upserts(user, loops):
     out = await assistant.track_loop(user.id, assistant.TrackLoopArgs(
         kind=LoopKind.COMMITMENT, title="Interview prep", entities=["Jawahar"]))
-    assert "#3" in out
+    assert "#3" in out.for_model()
     assert loops[0].title == "Interview prep" and loops[0].source == "tool:track_loop"
 
 
@@ -100,7 +103,7 @@ async def test_list_and_cancel_tasks(user):
     listing = await assistant.list_tasks(user.id, assistant.NoArgs())
     assert f"#{tid}" in listing and "compare flights" in listing
     out = await assistant.cancel_task(user.id, assistant.CancelTaskArgs(task_id=tid))
-    assert "cancelled" in out.lower()
+    assert "cancelled" in out.for_model().lower()
     assert await assistant.list_tasks(user.id, assistant.NoArgs()) == "No active tasks."
 
 
@@ -111,9 +114,10 @@ async def test_what_do_you_know_renders_recall(user, fake_memory):
 
 
 async def test_wake_me_rejects_far_future(user, wakeups):
-    out = await assistant.wake_me(user.id, assistant.WakeMeArgs(
-        at=timeutil.now() + timedelta(days=400), reason="far"))
-    assert "year" in out and wakeups == []
+    with pytest.raises(ActionFailed, match="year"):
+        await assistant.wake_me(user.id, assistant.WakeMeArgs(
+            at=timeutil.now() + timedelta(days=400), reason="far"))
+    assert wakeups == []
 
 
 async def test_wake_me_bad_timezone_falls_back(user, wakeups):
@@ -126,7 +130,7 @@ async def test_wake_me_bad_timezone_falls_back(user, wakeups):
         await s.commit()
     naive = (timeutil.now() + timedelta(days=2)).replace(tzinfo=None)
     out = await assistant.wake_me(user.id, assistant.WakeMeArgs(at=naive, reason="tz"))
-    assert out.startswith("Wakeup #") and len(wakeups) == 1
+    assert out.model_note.startswith("Wakeup #") and len(wakeups) == 1
 
 
 async def test_list_tasks_wraps_goal_as_untrusted(user):

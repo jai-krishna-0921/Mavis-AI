@@ -22,6 +22,7 @@ from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.executor import InitiativeExecutor
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.loops.service import LoopService
+from mavis.policy import outcomes
 from mavis.store.db import Session
 from mavis.store.models import Message
 from mavis.timers.service import WakeupService
@@ -168,6 +169,15 @@ class Routines:
             if lp.kind is not LoopKind.ROUTINE and lp.due_at is not None
             and start.astimezone(UTC) <= lp.due_at < end.astimezone(UTC)
         ]
+        # Recently failed actions and tasks come first: they need the user's decision (hotfix4 H1). The
+        # same computed list the `pending` tool shows, so the brief never says a failed thing is set.
+        try:
+            failed = [BriefItem(f"{outcomes.HEADING}: {i.summary}: {i.outcome}, {i.reason}", not i.tainted)
+                      for i in await outcomes.recently_failed(user.id)]
+        except Exception:  # noqa: BLE001 - like a broken source, it must not kill the brief
+            log.exception("routines.recently_failed_failed")
+            failed = []
+        items = failed + items
         gathered_at = timeutil.now()
         served: list[BriefSource] = []
         for src in list(_sources):

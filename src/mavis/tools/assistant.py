@@ -6,19 +6,23 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from mavis import bus
 from mavis.config import get_settings
 from mavis.domain import timeutil
+from mavis.domain.args import ToolArgs
+from mavis.domain.errors import ActionFailed, FailureKind
 from mavis.domain.events import Trust
 from mavis.domain.localtime import LocalTimes, wall_clock
 from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.policy import RiskClass
+from mavis.domain.results import ToolOutput
 from mavis.domain.tasks import ApprovalStatus
 from mavis.domain.timefmt import DueStatus, relative_due, relative_past
 from mavis.loops import service as loops_service
 from mavis.memory import service as memory_service
+from mavis.policy import outcomes
 from mavis.policy.risk import wrap_untrusted
 from mavis.store.repo import approvals, policy_rules, tasks, users
 from mavis.store.repo import loops as loops_repo
@@ -44,11 +48,11 @@ async def to_utc(user_id: int, dt: datetime) -> datetime:
 MAX_WAKE_AHEAD = timedelta(days=366)
 
 
-class RememberArgs(BaseModel):
+class RememberArgs(ToolArgs):
     fact: str = Field(min_length=2, max_length=1000, description="The fact to remember, as a sentence")
 
 
-class ForgetArgs(BaseModel):
+class ForgetArgs(ToolArgs):
     needle: str = Field(min_length=2, max_length=200, description="Word or phrase to delete")
 
 
@@ -69,19 +73,19 @@ class TrackLoopArgs(LocalTimes):
     importance: int = Field(default=3, ge=1, le=5, description="1 (minor) to 5 (critical)")
 
 
-class NoArgs(BaseModel):
+class NoArgs(ToolArgs):
     pass
 
 
-class CancelTaskArgs(BaseModel):
+class CancelTaskArgs(ToolArgs):
     task_id: int
 
 
-class KnowArgs(BaseModel):
+class KnowArgs(ToolArgs):
     topic: str | None = Field(default=None, description="Person/topic to focus on; empty = general")
 
 
-class PolicyRuleArgs(BaseModel):
+class PolicyRuleArgs(ToolArgs):
     tool: str = Field(description="Tool name the rule applies to, e.g. calendar_create_event")
     field: str = Field(description="Argument name to inspect, e.g. attendees")
     contains: str = Field(min_length=2, description="Text that must appear in that argument")
@@ -117,26 +121,32 @@ def _preview_loop(args: TrackLoopArgs) -> str:
     return f"Keep track of this {args.kind.value.replace('_', ' ').lower()}: {args.title}"
 
 
-async def forget(user_id: int, args: ForgetArgs) -> str:
+async def forget(user_id: int, args: ForgetArgs) -> ToolOutput:
     n = await memory_service.get_memory().forget(user_id, args.needle)
-    return f"Forgot {n} memories matching '{args.needle}'."
+    return ToolOutput(f"Forgot {n} memories matching '{args.needle}'.")
 
 
-async def wake_me(user_id: int, args: WakeMeArgs) -> str:
+async def wake_me(user_id: int, args: WakeMeArgs) -> ToolOutput:
     at = await to_utc(user_id, args.at)
+    # a soft failure is an ActionFailed (the model reads the sentence; an approved run reports it as
+    # failed, never as "Done")
     if at <= timeutil.now():
-        return "That time is in the past; pick a future time."
+        raise ActionFailed("That time is in the past; pick a future time.",
+                           reason="that time had already passed", kind=FailureKind.INVALID_ARGUMENT)
     if at > timeutil.now() + MAX_WAKE_AHEAD:
-        return "That time is more than a year away; pick a nearer time."
+        raise ActionFailed("That time is more than a year away; pick a nearer time.",
+                           reason="that time is more than a year away", kind=FailureKind.INVALID_ARGUMENT)
     key = f"remind:{user_id}:{at:%Y%m%d%H%M}:{hashlib.sha1(args.reason.encode()).hexdigest()[:8]}"
     wakeup_id = await timers_service.WakeupService().wake_me(
         user_id, at, f"Reminder the user asked for: {args.reason}", kind="agent",
         reminder=True, dedupe_key=key,
     )
-    return f"Wakeup #{wakeup_id} set for {at.isoformat()}."
+    # args.at is the user's wall clock (the registry attached their zone), so it reads as they said it
+    return ToolOutput(f"Reminder set for {args.at:%a %d %b, %H:%M}.",
+                      f"Wakeup #{wakeup_id} set for {at.isoformat()}.")
 
 
-async def track_loop(user_id: int, args: TrackLoopArgs) -> str:
+async def track_loop(user_id: int, args: TrackLoopArgs) -> ToolOutput:
     due = await to_utc(user_id, args.due_at) if args.due_at else None
     loop = await loops_service.LoopService(bus.get_bus()).upsert(
         user_id,
@@ -145,7 +155,7 @@ async def track_loop(user_id: int, args: TrackLoopArgs) -> str:
                    # the user asked for it in chat (and approved it when the turn was tainted)
                    trust=Trust.USER, origin=LoopOrigin.CONVERSATION),
     )
-    return f"Tracking loop #{loop.id}: {loop.title}"
+    return ToolOutput(f"Keeping track of: {loop.title}", f"Tracking loop #{loop.id}.")
 
 
 async def list_tasks(user_id: int, args: NoArgs) -> str:
@@ -157,11 +167,13 @@ async def list_tasks(user_id: int, args: NoArgs) -> str:
     )
 
 
-async def cancel_task(user_id: int, args: CancelTaskArgs) -> str:
+async def cancel_task(user_id: int, args: CancelTaskArgs) -> ToolOutput:
     if not await tasks.cancel(user_id, args.task_id):
-        return f"Task #{args.task_id} is not active (or not yours)."
+        raise ActionFailed(f"Task #{args.task_id} is not active (or not yours).",
+                           reason=f"task #{args.task_id} was not running, so there was nothing to cancel",
+                           kind=FailureKind.NOT_FOUND)
     await approvals.reject_open_for_task(args.task_id)
-    return f"Task #{args.task_id} cancelled."
+    return ToolOutput(f"Task #{args.task_id} cancelled.")
 
 
 async def what_do_you_know(user_id: int, args: KnowArgs) -> str:
@@ -171,12 +183,12 @@ async def what_do_you_know(user_id: int, args: KnowArgs) -> str:
     return ctx.render() or "I don't know much yet."
 
 
-async def add_policy_rule(user_id: int, args: PolicyRuleArgs) -> str:
+async def add_policy_rule(user_id: int, args: PolicyRuleArgs) -> ToolOutput:
     rule_id = await policy_rules.add(user_id, args.tool, args.field, args.contains, args.description)
-    return f"Rule #{rule_id} saved: {args.description}"
+    return ToolOutput(f"Rule saved: {args.description}", f"Rule #{rule_id}.")
 
 
-class PendingArgs(BaseModel):
+class PendingArgs(ToolArgs):
     include_done_recent: bool = Field(default=False,
                                       description="Also list what was finished in the last day")
 
@@ -233,6 +245,11 @@ async def pending(user_id: int, args: PendingArgs) -> str:
         jobs.append(f"- task #{t.id} [{str(t.status).lower()}] {goal}")
     if jobs:
         sections.append("Background work:\n" + "\n".join(jobs))
+    failed, failed_untrusted = outcomes.render_recently_failed(
+        await outcomes.recently_failed(user_id, now), now, tz, source="pending")
+    if failed:
+        sections.insert(0, failed)  # what went wrong comes first: it needs the user's decision
+        shown_untrusted.extend([True] if failed_untrusted else [])
     if args.include_done_recent:
         done = []
         for lp in await loops_repo.list_done_since(user_id, now - DONE_RECENT):
@@ -244,6 +261,19 @@ async def pending(user_id: int, args: PendingArgs) -> str:
     if shown_untrusted and (run := current_run.get()) is not None:
         run.saw_untrusted()  # only when third-party text is actually shown
     return "\n\n".join(sections) or NOTHING_OPEN
+
+
+class AcknowledgeArgs(ToolArgs):
+    refs: list[str] = Field(min_length=1, description=(
+        "Refs from the pending tool's \"Recently failed\" list, e.g. [\"approval:9\", \"task:14\"]"))
+
+
+async def acknowledge_failure(user_id: int, args: AcknowledgeArgs) -> ToolOutput:
+    n = await outcomes.acknowledge(user_id, args.refs)
+    if not n:
+        raise ActionFailed("Nothing matched those refs; call pending to see the current list.",
+                           reason="there was nothing like that left to clear", kind=FailureKind.NOT_FOUND)
+    return ToolOutput("Okay, I'll stop bringing that up.", f"Acknowledged {n} item(s).")
 
 
 _CONV = frozenset({"conversation"})
@@ -262,9 +292,15 @@ TOOLS = [
     MavisTool("track_loop", "Track an open loop: commitment, waiting-on, goal, concern, routine or watch.",
               TrackLoopArgs, RiskClass.WRITE_SELF, track_loop, _CONV, priority=55,
               preview=_preview_loop, on_taint=TaintPolicy.APPROVE),
-    MavisTool("pending", "What is pending: open items with how due they are, approvals waiting for the "
-              "user's OK and background work. Call it for any question about what is open, due or left.",
+    MavisTool("pending", "What is pending: actions and tasks that recently failed, open items with how "
+              "due they are, approvals waiting for the user's OK and background work. Call it for any "
+              "question about what is open, due, left or whether something went through.",
               PendingArgs, RiskClass.READ, pending, _CONV, priority=70),
+    MavisTool("acknowledge_failure", "Stop listing a recently failed action or task once the user has "
+              "seen it and decided (they said to leave it, or will handle it themselves).",
+              AcknowledgeArgs, RiskClass.WRITE_SELF, acknowledge_failure, _CONV, priority=30,
+              preview=lambda a: f"Stop reminding you about: {', '.join(a.refs)}",
+              on_taint=TaintPolicy.APPROVE),
     MavisTool("list_tasks", "List the background jobs Mavis is running for the user (not their Google "
               "Tasks to-do list; that is tasks_list).", NoArgs,
               RiskClass.READ, list_tasks, _CONV, priority=40),

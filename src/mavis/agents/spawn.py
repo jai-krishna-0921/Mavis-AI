@@ -16,6 +16,7 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from mavis.agents.react import react_loop
+from mavis.agents.specialists.base import outcome_of, wrap_up_budget
 from mavis.config import get_settings
 from mavis.domain.errors import BudgetExceeded
 from mavis.domain.tasks import StepOutcome
@@ -81,10 +82,8 @@ async def spawn_agent(
             result = await react_loop(
                 lc_tools, messages, max_steps=budget.max_steps, tier=budget.tier, temperature=0.3,
                 name=f"spawn:{role}", priority="background", fallback=True, tainted=tainted,
+                **wrap_up_budget(budget.timeout_s),
             )
     except TimeoutError as exc:
         raise BudgetExceeded(f"worker {role!r} ran longer than {budget.timeout_s:g}s") from exc
-    return StepOutcome(
-        ok=bool(result.text), text=result.text, error=None if result.text else "empty answer",
-        tainted=bool(getattr(result, "tainted", False)),
-    )
+    return outcome_of(result)

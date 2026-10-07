@@ -23,7 +23,7 @@ DASHES = ("—", "–")
 def test_builtin_specialists_registered():
     assert {"research", "knowledge", "inbox", "calendar"} <= set(SPECIALISTS)
     assert get_specialist("research").tool_names == ("web_search", "web_extract")
-    assert get_specialist("research").max_steps == 6
+    assert get_specialist("research").steps_setting == "research_max_steps"  # hotfix4: configurable
     assert get_specialist("knowledge").max_steps == 4
     for name in ("inbox", "calendar"):
         spec = get_specialist(name)

@@ -14,7 +14,12 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from mavis.domain.errors import ActionFailed, ConnectionRequired, IntegrationError
+from mavis.domain.errors import (
+    ActionFailed,
+    ConnectionRequired,
+    IntegrationError,
+    failure_text,
+)
 from mavis.domain.integrations import ToolResult, UserRef
 from mavis.domain.localtime import provider_args
 from mavis.tools.integrations.actions import (
@@ -28,6 +33,7 @@ from mavis.tools.integrations.actions import (
 )
 from mavis.tools.integrations.base import IntegrationProvider, render_result
 from mavis.tools.integrations.connections import ConnectionCache
+from mavis.tools.integrations.failures import adapter_kind, classify
 from mavis.tools.integrations.mail_render import RENDERERS
 from mavis.tools.integrations.workspace_render import RENDERERS as WORKSPACE_RENDERERS
 from mavis.tools.registry import MavisTool, TaintPolicy, ToolContext, ToolRegistry, contextual
@@ -77,15 +83,32 @@ async def gated(
     try:
         result = await call_action(ctx, action, args, provider=provider, cache=cache)
     except IntegrationError as exc:
+        kind = adapter_kind(exc.status)
         raise ActionFailed(
-            f"{name} is unreachable right now ({exc}). Tell the user and offer to try again later.",
-            reason=f"{name} is unreachable right now",
+            f"{failure_text(kind, name)} ({exc}). Tell the user and offer to try again later.",
+            reason=failure_text(kind, name), kind=kind,
         ) from exc
     if not result.ok:
-        raise ActionFailed(f"{action} failed: {result.error}", reason=str(result.error or f"{action} failed"))
+        raise failed_action(action, result)
     if render is not None:
         return render(result.data)
     return render_result(result)
+
+
+def failed_action(action: str, result: ToolResult) -> ActionFailed:
+    """The one way a provider failure becomes an ActionFailed (hotfix4 H3): the user-facing `reason` is
+    built from the classified kind; the provider's own detail goes to the model only."""
+    kind, field = result.error_kind, result.error_field
+    if kind is None:
+        kind, field = classify(result.error)
+    spec = ACTIONS[action]
+    # only one of OUR argument names is ever named to the user, never provider text
+    leaf = (field or "").split(".")[-1].split("[")[0]
+    field = leaf if leaf in spec.args_model.model_fields else None
+    name = display_name(spec.capability)
+    reason = failure_text(kind, name, field)
+    detail = (result.error or "no detail").strip()
+    return ActionFailed(f"{action} failed ({kind.value}): {detail}", reason=reason, kind=kind, field=field)
 
 
 async def action_data(

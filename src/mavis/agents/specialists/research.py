@@ -12,5 +12,6 @@ RESEARCH = Specialist(
     ),
     tier=Tier.SMART,
     tool_names=("web_search", "web_extract"),
-    max_steps=6,
+    max_steps=10,
+    steps_setting="research_max_steps",  # configurable; on the limit it wraps up with what it found
 )

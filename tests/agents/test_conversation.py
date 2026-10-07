@@ -192,10 +192,13 @@ async def test_approved_start_task_from_a_tainted_turn_is_tainted(user, channel,
     fake_llm.push_text("Want me to dig in? Waiting for your OK.")
     await run_turn(_event(user.id, "research the laptops on that page"))
     [pending] = await approvals.open_for_user(user.id)
+    # the APPROVAL task records the chat turn that queued it (hotfix4 H1: a failure blocks its loops)
+    assert (await tasks.get(pending.task_id)).turn_ref == "tg:update:1"
     await approvals.claim(pending.id, {ApprovalStatus.PENDING}, ApprovalStatus.EXECUTED)
     out = await get_registry().execute_approved(pending.id)  # what the approval gate does on OK
     [task] = await _user_tasks(user.id)
-    assert out == chat_tools.START_TASK_RESULT.format(id=task.id) and task.tainted is True
+    assert out.user_text == chat_tools.START_TASK_USER.format(id=task.id) and task.tainted is True
+    assert "Tell the user" not in out.user_text and "Tell the user" in out.text  # model note: model only
 
 
 async def test_turn_after_a_tainted_reply_starts_tainted(user, channel, fake_llm, fake_memory, jobs, tools):
