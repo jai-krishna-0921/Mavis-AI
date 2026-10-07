@@ -1,3 +1,5 @@
+import pytest
+
 from mavis.config import Settings, get_settings
 
 
@@ -33,3 +35,12 @@ def test_postgres_url_is_not_sqlite(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     s = Settings(database_url="postgresql+psycopg://u:p@localhost/mavis")
     assert not s.is_sqlite
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("", None), ("  ", None), ("-1000000000000001", -1000000000000001)]
+)
+def test_optional_test_chat_id_treats_blank_as_unset(settings, monkeypatch, raw, expected) -> None:
+    monkeypatch.setenv("TEST_TELEGRAM_CHAT_ID", raw)
+    get_settings.cache_clear()
+    assert get_settings().test_telegram_chat_id == expected

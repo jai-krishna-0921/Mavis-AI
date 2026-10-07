@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     # (channels.test_sink.active_test_chat).
     live_test_enabled: bool = False
     test_telegram_chat_id: int | None = None
+
+    @field_validator("test_telegram_chat_id", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, v: object) -> object:
+        # compose passes unset optional vars as "" (${VAR:-}); for an optional id that means "not set"
+        return None if isinstance(v, str) and not v.strip() else v
 
     # --- bus / worker ---------------------------------------------------------
     bus_claim_idle_ms: int = 900_000  # redeliver an unacked message after this idle time (> longest handler)
