@@ -53,14 +53,17 @@ set_key ENV prod force
 set_key PUBLIC_BASE_URL "https://$MAVIS_HOST" force
 set_key DOMAIN "$MAVIS_HOST" force
 if [[ "$WEBHOOK" == 1 ]]; then set_key TELEGRAM_MODE webhook force; else set_key TELEGRAM_MODE polling force; fi
+# Owner-supplied keys follow the local env file (a rotated or upgraded key must reach the box);
+# an empty local value never blanks the box. Generated secrets below are preserved instead.
 for k in OLLAMA_API_KEY TAVILY_API_KEY COMPOSIO_API_KEY TELEGRAM_BOT_TOKEN ALLOWED_TELEGRAM_CHAT_IDS \
          LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY; do
-  set_key "$k" "$(envget "$DEMO_ENV" "$k")"
+  v="$(envget "$DEMO_ENV" "$k")"
+  if [[ -n "$v" ]]; then set_key "$k" "$v" force; else set_key "$k" ""; fi
 done
 tz="$(envget "$DEMO_ENV" DEFAULT_TIMEZONE)"
 [[ -z "$tz" ]] || set_key DEFAULT_TIMEZONE "$tz"
 set_key COMPOSIO_WEBHOOK_SECRET ""
-set_key LLM_MAX_CONCURRENCY 1
+set_key LLM_MAX_CONCURRENCY 3 force  # paid Ollama tier: several concurrent requests
 set_key POSTGRES_PASSWORD "$(openssl rand -hex 24)"
 set_key NEO4J_PASSWORD "$(openssl rand -hex 24)"
 set_key TELEGRAM_WEBHOOK_SECRET "$(openssl rand -hex 24)"

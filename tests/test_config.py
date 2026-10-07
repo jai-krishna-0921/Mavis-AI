@@ -4,8 +4,9 @@ from mavis.config import Settings, get_settings
 def test_defaults(settings) -> None:
     assert settings.agent_name == "Mavis"
     assert settings.default_timezone == "Asia/Kolkata"
-    assert settings.model_fast == "gpt-oss:20b"
-    assert settings.model_smart == "gpt-oss:120b"
+    assert settings.model_fast == "deepseek-v4.1-flash"
+    assert settings.model_smart == "glm-5.3"
+    assert settings.llm_max_concurrency == 3
     assert settings.ollama_base_url == "https://ollama.com/v1"
     assert settings.ping_daily_budget == 6
     assert (settings.quiet_start, settings.quiet_end) == (23, 7)

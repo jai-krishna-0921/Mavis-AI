@@ -8,6 +8,18 @@ from mavis.llm.models import Tier
 from tests.fakes.llm import FakeLLM
 
 
+@pytest.fixture(autouse=True)
+def _pinned_models(monkeypatch) -> None:
+    """These tests exercise the routing, fallback and limiter mechanics, not the production model choice:
+    pin a known model set (gpt-oss primaries take reasoning_effort; one LLM slot) so they do not move when
+    the defaults do."""
+    monkeypatch.setenv("MODEL_FAST", "gpt-oss:20b")
+    monkeypatch.setenv("MODEL_SMART", "gpt-oss:120b")
+    monkeypatch.setenv("MODEL_FAST_FALLBACKS", '["gemma4:31b", "gpt-oss:120b"]')
+    monkeypatch.setenv("MODEL_SMART_FALLBACKS", '["gpt-oss:20b"]')
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "1")
+
+
 class Sample(BaseModel):
     name: str
     n: int

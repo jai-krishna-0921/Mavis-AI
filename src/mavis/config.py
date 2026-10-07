@@ -22,13 +22,13 @@ class Settings(BaseSettings):
     # --- LLM (Ollama Cloud, OpenAI-compatible) --------------------------------
     ollama_api_key: str = ""
     ollama_base_url: str = "https://ollama.com/v1"
-    model_fast: str = "gpt-oss:20b"
-    model_smart: str = "gpt-oss:120b"
+    model_fast: str = "deepseek-v4.1-flash"
+    model_smart: str = "glm-5.3"
     # tried in order ONLY on model-specific errors (404 / 5xx); timeouts and 429 are account-wide
-    model_fast_fallbacks: list[str] = ["gemma4:31b", "gpt-oss:120b"]
-    model_smart_fallbacks: list[str] = ["gpt-oss:20b"]
+    model_fast_fallbacks: list[str] = ["glm-5.3-flash", "gpt-oss:120b"]
+    model_smart_fallbacks: list[str] = ["kimi-k3", "deepseek-v4.1-flash"]
     # process-wide cap on in-flight LLM calls (Ollama Cloud free tier 429s on concurrent requests)
-    llm_max_concurrency: int = 1
+    llm_max_concurrency: int = 3
     llm_timeout_fast_s: float = 30.0
     llm_timeout_smart_s: float = 60.0
     # after a client-side timeout the request still runs server-side and holds the account's slot
