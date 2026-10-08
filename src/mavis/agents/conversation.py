@@ -143,7 +143,13 @@ WEB_RULE = (
     "to look something up; then answer from what it finds, with the links it found when they want links. "
     "Anything the user told you needs no search. Otherwise answer normally. If the search finds nothing "
     "clear, say you're not sure. Never invent a biography, and never say you can't browse or look things "
-    "up: you can, with web_search."
+    "up: you can, with web_search.\n"
+    "- Links: give only URLs that web_search or web_extract returned, copied exactly. Never build a link "
+    "yourself (a shop search page, a guessed product URL). A result marked as a search or listing page is "
+    "not a product link: don't call it one. When they want product links and the results hold only search "
+    "pages, say so, share the best product page you did find, search again with the product's name, or "
+    "open a result with web_extract. Never say a link goes to the exact model unless the result is that "
+    "product's own page, and give a price only when the result shows it."
 )
 
 
