@@ -119,13 +119,21 @@ async def test_an_outward_promise_ends_as_a_card_not_prose(user, fake_llm, env, 
     assert await _texts() == []  # the card is the only prompt
 
 
-async def test_only_one_reprompt_and_a_missing_card_is_not_pointed_at(user, fake_llm, env, ran):
+async def test_only_one_reprompt_and_the_answer_is_never_cut(user, fake_llm, env, ran):
     fake_llm.push_text("I'll block 2 to 3 pm. Just tap Approve below.")
-    fake_llm.push_text("Sure thing, 2 to 3 pm it is. Tap the Approve button when ready.")
+    fake_llm.push_text("Want me to block 2 to 3 pm? Say yes and I'll put it in.")
     await run_turn(_event(user.id, "can you block around 2 pm?"))
     assert len(fake_llm.calls) == 2 and ran == []
-    [text] = await _texts()
-    assert "Approve" not in text and "Tap" not in text and text.startswith("Sure thing")
+    assert await _texts() == ["Want me to block 2 to 3 pm? Say yes and I'll put it in."]
+
+
+async def test_a_stubborn_answer_is_sent_whole_never_trimmed(user, fake_llm, env):
+    """Fix round 1: code never deletes sentences; the re-prompt is the only remedy."""
+    fake_llm.push_text("Tap the button when ready. It costs 4.5k, see https://shop.example/a.b.")
+    fake_llm.push_text("Tap the button when ready. It costs 4.5k, see https://shop.example/a.b.")
+    await run_turn(_event(user.id, "is that desk worth it?"))
+    assert len(fake_llm.calls) == 2
+    assert await _texts() == ["Tap the button when ready. It costs 4.5k, see https://shop.example/a.b."]
 
 
 async def test_a_reprompt_that_fails_keeps_the_turn_alive(user, fake_llm, env, monkeypatch):
@@ -142,10 +150,21 @@ async def test_a_reprompt_that_fails_keeps_the_turn_alive(user, fake_llm, env, m
         return await real(*a, **k)
 
     monkeypatch.setattr(conversation, "react_loop", flaky)
-    fake_llm.push_text("Let me set that reminder. Tap approve.")
+    fake_llm.push_text("Let me set that reminder. Tap the button.")
     await run_turn(_event(user.id, "remind me to stretch at 4"))
-    [text] = await _texts()
-    assert "approve" not in text.lower()
+    assert await _texts() == ["Let me set that reminder. Tap the button."]
+
+
+@pytest.mark.parametrize("said,reply", [
+    ("did HR approve my leave?", "Yes, HR approved your leave on 3.5 days notice. Enjoy it!"),
+    ("what does the standing desk need?", "It costs 4.5k and needs your manager's approval. Want links?"),
+    ("is the visa through?", "The embassy approved it on Mon 5 Oct, per the email you forwarded."),
+])
+async def test_ordinary_approval_words_are_not_card_claims(user, fake_llm, env, said, reply):
+    fake_llm.push_text(reply)
+    await run_turn(_event(user.id, said))
+    assert len(fake_llm.calls) == 1
+    assert await _texts() == [reply]
 
 
 # --- replies that need no second look -----------------------------------------------------------------------
@@ -206,6 +225,7 @@ RISK = {"wake_me": RiskClass.WRITE_SELF, "calendar_create_event": RiskClass.WRIT
 @pytest.mark.parametrize("user_text,reply,ui,tools", [
     ("Hi", "Let me create the event without the guest.", False, ["calendar_create_event"]),
     ("ok", "Just tap Approve.", True, []),
+    ("did they approve it?", "Yes, they approved it yesterday.", False, []),
     ("remind me to pay rent", "I'll remind you tomorrow.", False, ["wake_me"]),
     ("email ravi the deck", "Done, I've emailed Ravi the deck.", False, ["mail_send"]),
     ("hey", "Here's what's in your email today: two invoices.", False, []),  # talking about a read
@@ -228,11 +248,5 @@ def test_check_is_quiet_once_an_action_ran_or_a_card_was_shown():
     assert not ran.reprompt and not carded.reprompt and not waiting.reprompt
 
 
-@pytest.mark.parametrize("reply,expected", [
-    ("Sure thing! I'll block 2 to 3 pm. Just tap Approve to confirm.", "Sure thing! I'll block 2 to 3 pm."),
-    ("Done.\nTap the button below.", "Done."),
-    ("Tap approve.", claims.UI_FALLBACK),
-])
-def test_strip_ui_claims(reply, expected):
-    assert claims.strip_ui_claims(reply) == expected
-    assert "—" not in claims.UI_FALLBACK and "—" not in claims.REPROMPT
+def test_reprompt_copy_has_no_dashes():
+    assert "\u2014" not in claims.REPROMPT and "\u2013" not in claims.REPROMPT
