@@ -45,7 +45,8 @@ def test_every_dir_the_dockerfile_copies_is_not_dockerignored():
     copied = set()
     for ln in (ROOT / "Dockerfile").read_text().splitlines():
         if ln.startswith("COPY ") and "--from" not in ln:
-            copied.update(p.rstrip("/").removeprefix("./") for p in ln.split()[1:-1] if not p.startswith("--"))
+            args = [p for p in ln.split()[1:-1] if not p.startswith("--")]
+            copied.update(p.rstrip("/").removeprefix("./") for p in args)
     ignored = set(_ignored_paths())
     assert sorted(copied & ignored) == [], "the build would fail: COPY of an ignored path"
 
