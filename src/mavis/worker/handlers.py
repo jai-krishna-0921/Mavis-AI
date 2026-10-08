@@ -9,7 +9,7 @@ Every call re-registers everything and appends nothing twice.
 
 from __future__ import annotations
 
-from mavis.access import invite_commands
+from mavis.access import budgets, invite_commands
 from mavis.access.commands import register_command_gate
 from mavis.access.gate import register_access_gate
 from mavis.agents import onboarding
@@ -31,4 +31,5 @@ def register_default_handlers() -> None:
     register_access_gate()  # before any handler runs: strangers never reach routing
     register_command_gate()
     invite_commands.register()
+    budgets.register()
     onboarding.register()

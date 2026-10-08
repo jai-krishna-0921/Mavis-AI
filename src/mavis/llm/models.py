@@ -27,7 +27,7 @@ from pydantic import BaseModel, ValidationError
 
 from mavis import bus
 from mavis.config import get_settings
-from mavis.domain.errors import LLMError
+from mavis.domain.errors import BudgetExceededLLM, LLMError
 from mavis.llm import policy
 from mavis.llm.limiter import SharedProviderState, get_limiter, spawn
 from mavis.llm.tracing import callbacks
@@ -575,6 +575,29 @@ def _prefer_secondary(tier: Tier, priority: Priority) -> bool:
     return _ollama.unavailable_s() > s.llm_bg_overflow_after_s
 
 
+async def _budget_gate(tier: Tier, priority: Priority) -> Tier:
+    """Spec 9.3 at the call site: soft cap degrades background, hard cap keeps chat on FAST and refuses
+    background, runaway refuses everything. No user bound (system work) means no budget."""
+    from mavis.access.budgets import BudgetState, notify_once, state_for
+    from mavis.llm.context import llm_user_id
+
+    uid = llm_user_id.get()
+    if not uid:
+        return tier
+    state = await state_for(uid)
+    if state is BudgetState.OK:
+        return tier
+    if state is BudgetState.RUNAWAY or (state is BudgetState.HARD and priority != "interactive"):
+        await notify_once(uid, state)
+        raise BudgetExceededLLM(f"daily budget {state.name.lower()}")
+    if priority == "best_effort":
+        raise BudgetExceededLLM("daily budget soft cap")
+    if state is BudgetState.HARD:
+        await notify_once(uid, state)
+        return Tier.FAST
+    return Tier.FAST if priority != "interactive" else tier  # SOFT: background on FAST, chat unchanged
+
+
 async def _invoke_chain(
     messages: list[BaseMessage],
     tier: Tier,
@@ -588,6 +611,7 @@ async def _invoke_chain(
     `prepare(chat_model)` (identity, or `.bind_tools(...)`), each attempt under `_call` (limiter,
     deadline, Ollama cooldown/backoff). Falls back to another model only on model-specific errors,
     and once to the secondary provider when Ollama is saturated or unreachable. Raises LLMError."""
+    tier = await _budget_gate(tier, priority)
     chain = _chain(tier, _use_fallback(priority, fallback))
     cfg = run_config(name)
     out = None
@@ -689,6 +713,7 @@ async def structured[T: BaseModel](
     timeouts/429/connection errors retry the same model after cooldown/backoff, or go once to the
     secondary provider if configured (same tool-calling / JSON-mode path via ChatOpenAI).
     """
+    tier = await _budget_gate(tier, priority)
     messages = _messages(system, user)
     chain = _chain(tier, _use_fallback(priority, fallback))
     tried_secondary = False

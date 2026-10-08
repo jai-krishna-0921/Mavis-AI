@@ -103,6 +103,13 @@ class Settings(BaseSettings):
     inbound_pending_rate_per_min: float = 5.0
     inbound_pending_burst: int = 3
 
+    # --- budgets (spec 9.3), USD per user per local day ------------------------
+    budget_enforced: bool = True
+    budget_soft_usd: dict[str, float] = {"standard": 0.30, "trusted": 1.00}
+    budget_hard_usd: dict[str, float] = {"standard": 0.60, "trusted": 2.00}
+    budget_runaway_factor: float = 1.5
+    llm_monthly_ceiling_usd: float = 60.0  # Ollama Pro credits; 70% alerts the owner, 90% soft-caps standard
+
     # --- storage --------------------------------------------------------------
     data_dir: Path = Path("data")
     database_url: str = ""  # empty => sqlite in data_dir; prod: postgresql+psycopg://...
