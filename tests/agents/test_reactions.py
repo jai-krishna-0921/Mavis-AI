@@ -50,6 +50,29 @@ def test_split_reaction(text, clean, emoji):
     assert split_reaction(text) == (clean, emoji)
 
 
+@pytest.mark.parametrize("text", [
+    "Nice!\n[react \U0001f525]",
+    "Nice!\n[reaction: \U0001f525]",
+    "Nice!\n(react: \U0001f525)",
+    "Nice!\n[Reaction = \U0001f525]",
+    "Nice!\nreact: \U0001f525",
+    "Nice!\nReaction: \U0001f525",
+    "Nice! [react-\U0001f525]",
+    "Nice!\n[reacting: \U0001f525 ]",
+])
+def test_near_miss_markers_are_stripped_and_read(text):
+    assert split_reaction(text) == ("Nice!", FIRE)
+
+
+@pytest.mark.parametrize("text", [
+    "How did they react: badly?",  # prose, not a marker line
+    "I'll react to that later.",
+    "Chemical reaction: exothermic",
+])
+def test_prose_about_reacting_is_left_alone(text):
+    assert split_reaction(text) == (text, None)
+
+
 def test_several_markers_last_valid_wins_and_all_are_stripped():
     text = "[react: \U0001f914] Hmm.\nThat works.\n[react: \U0001f44f]"
     assert split_reaction(text) == ("Hmm.\nThat works.", "\U0001f44f")
@@ -74,12 +97,29 @@ def test_frequency_rule(recent, candidate, ok):
     assert allowed(candidate, recent) is ok
 
 
-async def test_log_keeps_recent_outcomes_in_memory(settings):
+async def test_log_keeps_recent_outcomes_per_event(settings):
     log = reactions.ReactionLog()
-    for outcome in ["", FIRE, "", "", "\U0001f44f", "", ""]:
-        await log.record(1, outcome)
-    assert await log.recent(1) == [FIRE, "", "", "\U0001f44f", "", ""][-reactions.HISTORY:]
-    assert await log.recent(2) == []
+    outcomes = ["", FIRE, "", "", "\U0001f44f", "", ""]
+    for i, outcome in enumerate(outcomes):
+        await log.record(1, f"e{i}", outcome)
+    assert await log.recent(1) == outcomes
+    assert await log.landed(1) == {"e1": FIRE, "e4": "\U0001f44f"}
+    assert await log.recent(2) == [] and await log.landed(2) == {}
+
+
+async def test_log_records_one_outcome_per_event(settings):
+    log = reactions.ReactionLog()
+    await log.record(1, "e1", FIRE)
+    await log.record(1, "e1", "")  # an inline retry of the same message
+    assert await log.recent(1) == [FIRE] and await log.outcome(1, "e1") == FIRE
+    assert await log.outcome(1, "nope") is None
+
+
+async def test_log_is_bounded(settings):
+    log = reactions.ReactionLog()
+    for i in range(reactions.HISTORY + 5):
+        await log.record(1, f"e{i}", "")
+    assert len(await log.recent(1)) == reactions.HISTORY
 
 
 def test_prompt_rule_lists_only_allowed_emoji_and_the_marker():

@@ -103,7 +103,7 @@ async def test_mood_reaction_replaces_seen_cue(user, channel):
     from mavis.agents import reactions
 
 
-    assert await reactions.apply(user.id, 111, 5, "\U0001f525") == "\U0001f525"
+    assert await reactions.apply(user.id, 111, 5, "\U0001f525", "e5") == "\U0001f525"
     assert channel.reactions == [(111, 5, "\U0001f525")]  # replaces the seen cue, no separate clear
 
 
@@ -111,7 +111,7 @@ async def test_no_mood_clears_seen_cue(user, channel):
     from mavis.agents import reactions
 
 
-    assert await reactions.apply(user.id, 111, 5, None) == ""
+    assert await reactions.apply(user.id, 111, 5, None, "e5") == ""
     assert channel.reactions == [(111, 5, None)]
 
 
@@ -122,7 +122,7 @@ async def test_no_seen_cue_configured_means_nothing_to_clear(user, channel, monk
     monkeypatch.setenv("PRESENCE_REACTION", "")
     get_settings.cache_clear()
 
-    assert await reactions.apply(user.id, 111, 5, None) == ""
+    assert await reactions.apply(user.id, 111, 5, None, "e5") == ""
     assert channel.reactions == []
 
 
@@ -133,10 +133,13 @@ async def test_rejected_mood_falls_back_to_clearing(user):
     set_channel(ch)
     try:
 
-        assert await reactions.apply(user.id, 111, 5, "\U0001f525") == ""
+        assert await reactions.apply(user.id, 111, 5, "\U0001f525", "e5") == ""
         assert ch.reactions == [(111, 5, None)]
         # nothing landed, so the next message may still get one
         assert await reactions._log.recent(user.id) == [""]
+        # a retry of the same message does not settle twice
+        assert await reactions.apply(user.id, 111, 5, "\U0001f525", "e5") == ""
+        assert ch.reactions == [(111, 5, None)]
     finally:
         set_channel(None)
 
@@ -145,10 +148,10 @@ async def test_rate_limit_blocks_consecutive_reactions(user, channel):
     from mavis.agents import reactions
 
 
-    assert await reactions.apply(user.id, 111, 5, "\U0001f525") == "\U0001f525"
-    assert await reactions.apply(user.id, 111, 6, "\U0001f44f") == ""
-    assert await reactions.apply(user.id, 111, 7, "\U0001f44f") == ""
-    assert await reactions.apply(user.id, 111, 8, "\U0001f44f") == "\U0001f44f"
+    assert await reactions.apply(user.id, 111, 5, "\U0001f525", "e5") == "\U0001f525"
+    assert await reactions.apply(user.id, 111, 6, "\U0001f44f", "e6") == ""
+    assert await reactions.apply(user.id, 111, 7, "\U0001f44f", "e7") == ""
+    assert await reactions.apply(user.id, 111, 8, "\U0001f44f", "e8") == "\U0001f44f"
     assert channel.reactions[1:3] == [(111, 6, None), (111, 7, None)]
 
 
@@ -161,6 +164,6 @@ async def test_mood_waits_for_a_slow_seen_cue(user, channel):
 
     task = asyncio.create_task(slow_ack())
     presence.track_ack("ev1", task)
-    assert await reactions.apply(user.id, 111, 5, "\U0001f525", ack_key="ev1") == "\U0001f525"
+    assert await reactions.apply(user.id, 111, 5, "\U0001f525", "ev1") == "\U0001f525"
     assert channel.reactions == [(111, 5, "\N{EYES}"), (111, 5, "\U0001f525")]  # the mood lands last
     assert "ev1" not in presence._acks

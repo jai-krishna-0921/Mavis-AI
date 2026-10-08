@@ -326,7 +326,7 @@ async def _settle_reaction(event: Event, user_id: int, chat_id: int | None, mood
     """Replace the "seen" cue with the mood reaction, or clear it (T1.3). Best effort."""
     target = _reaction_target(event, chat_id)
     if target is not None:
-        await reactions.apply(user_id, *target, mood, ack_key=event.id)
+        await reactions.apply(user_id, *target, mood, event.id)
 
 
 async def run_turn(event: Event) -> None:
@@ -342,6 +342,7 @@ async def run_turn(event: Event) -> None:
     await initiative_hook("loops.on_user_message", lambda i: i.loops.on_user_message(user.id, text))
     if await commands.run_command(event):
         current_route.set("CONNECT")
+        await _settle_reaction(event, user.id, user.telegram_chat_id, None)
         return
 
     # Retry after the reply was enqueued: don't call the LLM again (it could split differently).
@@ -361,6 +362,7 @@ async def run_turn(event: Event) -> None:
                             tainted=tainted or previous_tainted(history))
         await attach_queued_approvals(user.id, text, tainted=tainted,  # it may have died before this
                                       turn_ref=event.id)
+        await _settle_reaction(event, user.id, user.telegram_chat_id, None)  # no-op if already settled
         return
 
     history = await messages.recent(user.id, HISTORY_LIMIT)
@@ -383,6 +385,7 @@ async def run_turn(event: Event) -> None:
         return
 
     if await _approval_reply(event, user.id, text, history):
+        await _settle_reaction(event, user.id, user.telegram_chat_id, None)
         return
 
     hint = ""
@@ -417,10 +420,15 @@ async def run_turn(event: Event) -> None:
             system = f"{system}\n\n{TOOL_RULES}"
             if any(t.name == "web_search" for t in tools):
                 system = f"{system}\n{WEB_RULE}"
-        if _reaction_target(event, user.telegram_chat_id) is not None:
+        reacting = _reaction_target(event, user.telegram_chat_id) is not None
+        if reacting:
             system = f"{system}\n\n{reactions.REACTION_RULE}"
         prompt: list[BaseMessage] = [SystemMessage(system)]
-        prompt += to_langchain(history, now, user.timezone)
+        # past reactions replay as their turn's marker line, so the history shows the format in use
+        prompt += to_langchain(history, now, user.timezone,
+                               reactions=await reactions.landed(user.id) if reacting else None)
+        if reacting:
+            prompt.append(SystemMessage(reactions.REACTION_REMINDER))
 
         connect_texts: list[str] = []
         token = current_turn.set(TurnInfo(event_id=event.id))
