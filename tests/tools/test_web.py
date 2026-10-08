@@ -207,3 +207,37 @@ async def test_tavily_answer_truncated(tavily_key):
         return_value=httpx.Response(200, json={"answer": "x" * 900, "results": []}))
     rows = await web.tavily_search("q", 3)
     assert len(rows[0]["snippet"]) == 500
+
+
+@pytest.mark.parametrize("url,is_search", [
+    ("https://www.amazon.in/s?k=electric+standing+desk", True),
+    ("https://www.flipkart.com/search?q=standing%20desk", True),
+    ("https://www.ikea.com/in/en/search/?q=desk", True),
+    ("https://shop.example.com/results/desks", True),
+    ("https://www.amazon.in/Flexispot-E7-Standing-Desk/dp/B08XYZ1234", False),
+    ("https://www.flipkart.com/flexispot-e7/p/itm123?pid=DSKXYZ", False),
+    ("https://siemens.com/tc", False),
+    ("https://example.com/blog/best-search-engines", False),
+])
+def test_search_and_listing_pages_are_told_apart_from_product_pages(url, is_search):
+    assert web.looks_like_search_page(url) is is_search
+
+
+@respx.mock
+async def test_search_marks_result_urls_that_are_only_search_pages(tavily_key):
+    """Live E2E 2026-10-08: "links" to Amazon search pages were presented as links to the exact model."""
+    respx.post("https://api.tavily.com/search").mock(return_value=httpx.Response(200, json={"results": [
+        {"title": "Standing desk", "url": "https://www.amazon.in/s?k=standing+desk", "content": "results"},
+        {"title": "E7 Pro", "url": "https://www.amazon.in/Flexispot-E7/dp/B08XYZ1234",
+         "content": "Rs 14,999"},
+    ]}))
+    out = await web.web_search(1, web.SearchArgs(query="electric standing desk under 15k"))
+    assert "https://www.amazon.in/s?k=standing+desk" + web.SEARCH_PAGE_NOTE in out
+    assert "dp/B08XYZ1234\n" in out and "dp/B08XYZ1234" + web.SEARCH_PAGE_NOTE not in out
+
+
+def test_the_web_rule_grounds_links_in_results():
+    from mavis.agents.conversation import WEB_RULE
+
+    assert "only URLs that web_search or web_extract returned" in WEB_RULE
+    assert "Never build a link" in WEB_RULE and "search or listing page" in WEB_RULE

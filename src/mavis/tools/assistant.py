@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field
 
 from mavis import bus
+from mavis.agents import cancellation
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.args import ToolArgs
@@ -18,7 +19,7 @@ from mavis.domain.localtime import LocalTimes, wall_clock
 from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.policy import RiskClass
 from mavis.domain.results import ToolOutput
-from mavis.domain.tasks import ApprovalStatus
+from mavis.domain.tasks import ApprovalStatus, TaskStatus
 from mavis.domain.timefmt import DueStatus, relative_due, relative_past
 from mavis.loops import service as loops_service
 from mavis.memory import service as memory_service
@@ -172,11 +173,11 @@ async def list_tasks(user_id: int, args: NoArgs) -> str:
 
 
 async def cancel_task(user_id: int, args: CancelTaskArgs) -> ToolOutput:
-    if not await tasks.cancel(user_id, args.task_id):
+    # The one cancel path (status claim, approvals, cancel flag and hooks, card) shared with the button.
+    if not await cancellation.cancel_by_user(user_id, args.task_id):
         raise ActionFailed(f"Task #{args.task_id} is not active (or not yours).",
                            reason=f"task #{args.task_id} was not running, so there was nothing to cancel",
                            kind=FailureKind.NOT_FOUND)
-    await approvals.reject_open_for_task(args.task_id)
     return ToolOutput(f"Task #{args.task_id} cancelled.")
 
 
@@ -215,6 +216,18 @@ def _loop_line(lp: Loop, now: datetime, tz: str, shown_untrusted: list[bool]) ->
     return _URGENCY.index(due.status), timeutil.ensure_utc(lp.due_at) or far, line
 
 
+async def _task_state(task) -> str:
+    """What a background task is doing, in words that cannot be mistaken for "waiting on your yes".
+    AWAITING_APPROVAL also covers a pause for an account connection: only an open card is a wait for OK."""
+    status = str(task.status).lower()
+    if task.status != TaskStatus.AWAITING_APPROVAL:
+        return status
+    card = await approvals.next_open(task.id)
+    if card is not None:
+        return f"waiting for your OK on card #{card.id}"
+    return "paused, waiting for an account to be connected; nothing needs your OK"
+
+
 async def pending(user_id: int, args: PendingArgs) -> str:
     """Everything open for the user, computed now: live loops by urgency, approvals waiting on them and
     background work. The single source of truth for "what's pending"."""
@@ -246,7 +259,7 @@ async def pending(user_id: int, args: PendingArgs) -> str:
         if t.tainted:
             goal = wrap_untrusted(goal, "pending")
             shown_untrusted.append(True)
-        jobs.append(f"- task #{t.id} [{str(t.status).lower()}] {goal}")
+        jobs.append(f"- task #{t.id} [{await _task_state(t)}] {goal}")
     if jobs:
         sections.append("Background work:\n" + "\n".join(jobs))
     failed, failed_untrusted = outcomes.render_recently_failed(

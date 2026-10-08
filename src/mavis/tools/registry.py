@@ -34,7 +34,7 @@ from mavis.domain.localtime import has_datetimes, localize_args
 from mavis.domain.policy import Capability, RiskClass
 from mavis.domain.results import ToolOutput
 from mavis.domain.tasks import ApprovalStatus
-from mavis.domain.terms import grounded_in, terms
+from mavis.domain.terms import from_user_not_sources, grounded_in, same_request, terms
 from mavis.policy.risk import truncate, wrap_untrusted
 from mavis.store.db import utcnow
 from mavis.store.repo import approvals, audit, policy_rules, tasks
@@ -47,6 +47,7 @@ _terms = terms  # select()'s overlap vocabulary (domain.terms)
 
 NEVER_AUTO_APPROVE = frozenset({"add_policy_rule", "forget"})
 _PREVIEW_IN_RESULT_CHARS = 500
+SAME_REQUEST_WINDOW = timedelta(minutes=30)  # an older card is stale: a repeat after that is a new request
 ALREADY_WAITING_RESULT = (
     "ALREADY_AWAITING_APPROVAL #{id}: this same action is already waiting for the user's OK on an "
     "earlier card. Nothing new was queued and it has NOT been done yet. Tell the user it's waiting on "
@@ -105,13 +106,22 @@ class ToolRun:
     # not by the whole replayed window that `tainted` covers. None: same as `tainted` (task loops).
     self_tainted: bool | None = None
     user_words: str = ""  # the user's own message this turn: the provenance of a self-only request
+    # Third-party text that reached the prompt (tainted replies in the window, this run's untrusted reads):
+    # an argument is the user's when it repeats nothing from it. None: unknown (hook context), then only an
+    # argument made of the user's own words counts.
+    untrusted_sources: list[str] | None = None
     untrusted_seen: bool = False  # an untrusted_output tool returned during the current step
     untrusted_reads: int = 0  # every time third-party text reached the model in this run (never reset)
     queued_approvals: list[int] = field(default_factory=list)
     spawned: int = 0  # workers started in the current outermost model step (reset by react_loop)
     memo: dict[str, Any] = field(default_factory=dict)  # per-run cache for `prepare` lookups (file metadata)
 
-    def saw_untrusted(self) -> None:
+    def saw_untrusted(self, text: str = "") -> None:
+        if self.untrusted_sources is not None:
+            if text:
+                self.untrusted_sources.append(text)
+            else:
+                self.untrusted_sources = None  # third-party text of unknown wording: back to strict
         self.untrusted_seen = True
         self.untrusted_reads += 1
 
@@ -124,6 +134,11 @@ class ToolRun:
     def self_taint(self) -> bool:
         return self.tainted if self.self_tainted is None else self.self_tainted
 
+
+# Capabilities a step must do without (the user never asked for them and they are not connected): their
+# tools are not offered to the step's loop. Set by the orchestrator around a re-run of one step.
+excluded_capabilities: ContextVar[frozenset[Capability]] = ContextVar("excluded_capabilities",
+                                                                      default=frozenset())
 
 current_run: ContextVar[ToolRun | None] = ContextVar("current_run", default=None)
 
@@ -142,11 +157,21 @@ def self_only_tainted() -> bool:
     return run is not None and run.self_taint()
 
 
-def _user_worded(tool: MavisTool, args: BaseModel, run: ToolRun) -> bool:
-    """Every provenance argument the tool declares is the user's own words this turn (domain.terms)."""
+def _user_worded(tool: MavisTool, args: BaseModel, run: ToolRun, *, relaxed: bool = False) -> bool:
+    """Every provenance argument the tool declares is the user's own words this turn (domain.terms).
+
+    Strict (default): every content term and identifier is one the user wrote. `relaxed` also accepts the
+    model's own natural wording that copies nothing from untrusted text (domain.terms.from_user_not_sources).
+    Only the CARD for a self-only action may use the relaxed rule; what a call stores is judged strictly, so
+    a paraphrase of planted text can skip a card but is never saved as the user's own."""
     values = [getattr(args, name, "") for name in tool.provenance]
     texts = [v for v in values if isinstance(v, str) and v.strip()]
-    return bool(texts) and len(texts) == len(values) and all(grounded_in(t, run.user_words) for t in texts)
+    if not texts or len(texts) != len(values):
+        return False
+    sources = run.untrusted_sources
+    return all(grounded_in(t, run.user_words) or (
+        relaxed and sources is not None and from_user_not_sources(t, run.user_words, sources))
+        for t in texts)
 
 
 def _gate_tainted(tool: MavisTool, args: BaseModel, risk: RiskClass) -> bool:
@@ -161,7 +186,8 @@ def _gate_tainted(tool: MavisTool, args: BaseModel, risk: RiskClass) -> bool:
     run = current_run.get()
     if run is None or not run.self_taint():
         return False
-    if _user_worded(tool, args, run):
+    # A durable trusted store (DOWNGRADE tools: remember) never gets the relaxed waiver.
+    if _user_worded(tool, args, run, relaxed=tool.on_taint is not TaintPolicy.DOWNGRADE):
         log.info("tool.taint_waived_user_words", tool=tool.name)
         return False
     return True
@@ -198,6 +224,24 @@ async def _queue_tainted(task_id: int | None) -> bool:
         return False
     task = await tasks.get(task_id)
     return bool(task is not None and task.tainted)
+
+
+async def _waiting_same_request(user_id: int, tool: MavisTool, arguments: dict, tainted: bool):
+    """A card already waiting for the same request in other words: tools that declare a provenance
+    argument (the text that says what the request is) compare it by content terms, so a re-asked request
+    ("yes go ahead" answered by a model that words the goal again) never makes a second card."""
+    if not tool.provenance:
+        return None
+    mine = " ".join(str(arguments.get(name) or "") for name in tool.provenance)
+    rest = approvals.equivalence_key({k: v for k, v in arguments.items() if k not in tool.provenance})
+    for row in await approvals.waiting_of_tool(user_id, tool.name, tainted=tainted):
+        theirs = " ".join(str((row.arguments or {}).get(name) or "") for name in tool.provenance)
+        other = {k: v for k, v in (row.arguments or {}).items() if k not in tool.provenance}
+        # the same words for another time or kind (a reminder at 5 and at 6) are another request
+        recent = utcnow() - row.created_at <= SAME_REQUEST_WINDOW
+        if recent and approvals.equivalence_key(other) == rest and same_request(mine, theirs):
+            return row
+    return None
 
 
 ToolFn = Callable[[int, Any], Awaitable[str | dict | list | ToolOutput]]
@@ -240,6 +284,36 @@ def contextual(fn: Callable[[ToolContext, Any], Awaitable[str | dict | list | To
     return wrapped
 
 
+def default_label(name: str) -> str:
+    """The humanised tool name: the card's "Last:" line when a tool has no progress_label."""
+    return name.replace("_", " ").strip()
+
+
+def host_of(url: str) -> str:
+    """Lower-cased host without "www.", or "" when the text is not a URL with a host."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit(str(url)).hostname or "").lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+async def _note_progress(tool: MavisTool, args: BaseModel, raw: Any) -> None:
+    """Tell the task's card what just ran, with a code-made label. Never fails the tool call."""
+    task_id = current_task_id.get()
+    if task_id is None or not get_settings().progress_card_enabled:
+        return
+    try:
+        label = tool.progress_label(args, raw) if tool.progress_label else default_label(tool.name)
+        from mavis.channels.progress_card import get_cards  # lazy: channels import the bus
+
+        await get_cards().tool_called(task_id, label)
+    except Exception as exc:  # noqa: BLE001 - cosmetic
+        log.debug("tool.progress_label_failed", tool=tool.name, error=type(exc).__name__)
+
+
 @dataclass(frozen=True)
 class MavisTool:
     name: str
@@ -275,6 +349,9 @@ class MavisTool:
     # When all of them come from the user's own words this turn, the call is the user's request and its
     # taint policy does not apply (see _gate_tainted). Empty: provenance never waives the policy.
     provenance: tuple[str, ...] = ()
+    # Code-made "Last:" line for the progress card (Phase 12). Gets the arguments and the raw return
+    # value; must never include page text, file contents or model prose (hosts, counts and exit codes only).
+    progress_label: Callable[[BaseModel, Any], str] | None = None
 
     def effective_risk(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn is not None else self.risk
@@ -354,12 +431,17 @@ class ToolRegistry:
     def names_for(self, agent: str) -> list[str]:
         return [t.name for t in self._tools.values() if agent in t.agents]
 
+    @staticmethod
+    def _excluded(tool: MavisTool) -> bool:
+        return tool.requires is not None and tool.requires in excluded_capabilities.get()
+
     def for_agent(self, agent: str, user_id: int, names: Iterable[str] | None = None) -> list[BaseTool]:
         wanted = set(names) if names is not None else None
         return [
             self._as_langchain(t, user_id)
             for t in self._tools.values()
             if agent in t.agents and self.available(t) and (wanted is None or t.name in wanted)
+            and not self._excluded(t)
         ]
 
     def select(
@@ -371,7 +453,8 @@ class ToolRegistry:
         words = _terms(query)
         banned = set(exclude)
         candidates = [t for t in self._tools.values()
-                      if agent in t.agents and self.available(t) and t.name not in banned]
+                      if agent in t.agents and self.available(t) and t.name not in banned
+                      and not self._excluded(t)]
         pinned: list[MavisTool] = []
         for name in always:
             t = self._tools.get(name)
@@ -512,6 +595,7 @@ class ToolRegistry:
         failed = False
         try:
             out = await (fn or tool.fn)(user_id, args)
+            await _note_progress(tool, args, out)
         except (ApprovalRequired, ConnectionRequired):
             raise
         except ActionFailed as exc:
@@ -533,7 +617,7 @@ class ToolRegistry:
             if tool.untrusted_output and not raise_errors:
                 # Third-party error text must never reach the model unwrapped.
                 if run is not None:
-                    run.saw_untrusted()
+                    run.saw_untrusted(str(exc))
                 return wrap_untrusted(truncate(f"Tool error: {exc}"), tool.name), ""
             raise
         finally:
@@ -548,7 +632,7 @@ class ToolRegistry:
         if not tool.untrusted_output:
             return text, user_text
         if run is not None:
-            run.saw_untrusted()
+            run.saw_untrusted(text)
         return wrap_untrusted(text, tool.name), user_text
 
     def _as_langchain(self, tool: MavisTool, user_id: int) -> BaseTool:
@@ -565,11 +649,15 @@ class ToolRegistry:
                         await approvals.waiting_equivalents(user_id, tool.name, req.arguments,
                                                             identity=tool.identity, tainted=tainted)),
                         None)
+                    if twin is None and existing is None:
+                        twin = await _waiting_same_request(user_id, tool, req.arguments, tainted)
                     if twin is not None:
                         # The same action already waits on the user (another task, or an earlier
                         # turn): one card per action, never a second one to approve twice.
                         log.info("tool.approval_already_waiting", tool=tool.name, approval_id=twin.id)
-                        return ALREADY_WAITING_RESULT.format(id=twin.id)
+                        shown = "" if twin.tainted else (
+                            f"\nThe waiting card says: {(twin.preview or '')[:_PREVIEW_IN_RESULT_CHARS]}")
+                        return ALREADY_WAITING_RESULT.format(id=twin.id) + shown
                     corrected = None if existing is not None else next(iter(
                         await approvals.waiting_same_target(user_id, tool.name, req.arguments,
                                                             target=tool.target, tainted=tainted,

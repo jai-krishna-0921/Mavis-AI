@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from mavis.agents.cancellation import stop_check_for_current_task
 from mavis.agents.react import react_loop
 from mavis.config import get_settings
 from mavis.domain import timeutil
@@ -32,6 +33,7 @@ class Specialist:
     # Custom runner (user_id, instruction, context) -> StepOutcome, used instead of the ReAct loop
     # (Phase 6 Docs / DeepResearch).
     runner: Callable[[int, str, str], Awaitable[StepOutcome]] | None = None
+    machine: bool = False  # uses the machine: card at once, longer clock (Phase 12)
 
 
 # Part of a background loop's wall clock kept for its wrap-up answer: at least 30 s (the LLM slot wait and
@@ -100,7 +102,7 @@ async def run_specialist(
             result = await react_loop(
                 tools, messages, max_steps=step_budget(spec), tier=spec.tier, temperature=0.2,
                 name=f"specialist:{spec.name}", priority="background", fallback=True, tainted=tainted,
-                **wrap_up_budget(spec.timeout_s),
+                **wrap_up_budget(spec.timeout_s), should_stop=stop_check_for_current_task(),
             )
     except TimeoutError as exc:
         raise BudgetExceeded(f"specialist {spec.name} ran longer than {spec.timeout_s:g}s") from exc

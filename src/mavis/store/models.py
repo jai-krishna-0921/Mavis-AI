@@ -76,6 +76,8 @@ class OutboxMessage(Base):
     text: Mapped[str] = mapped_column(Text, default="")
     buttons: Mapped[list[Any]] = mapped_column(JSON, default=list)
     document_path: Mapped[str | None] = mapped_column(String(1024))
+    photo_path: Mapped[str | None] = mapped_column(String(1024))
+    media: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
     proactive: Mapped[bool] = mapped_column(default=False)
     priority: Mapped[int] = mapped_column(Integer, default=0, index=True)  # 0 chat, 1 proactive, 2 broadcast
     dedupe_key: Mapped[str | None] = mapped_column(String(200), unique=True)
@@ -361,6 +363,21 @@ class Artifact(Base):
     mime: Mapped[str] = mapped_column(String(120))
     title: Mapped[str] = mapped_column(String(200), default="")
     size: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    delivered_at: Mapped[datetime | None] = mapped_column(default=None)  # sent to the user (once)
+
+
+class TaskCard(Base):
+    """The one live status message of a user task (Phase 12). Survives a resume on another worker."""
+
+    __tablename__ = "task_cards"
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int | None] = mapped_column(BigInteger)
+    state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    last_edit_at: Mapped[datetime | None] = mapped_column(default=None)
+    final: Mapped[bool] = mapped_column(default=False, server_default=sa_false())
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 

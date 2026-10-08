@@ -13,6 +13,10 @@ class ChannelRateLimited(Exception):
         self.retry_after = retry_after
 
 
+class MessageGone(Exception):
+    """The message to edit no longer exists (the user deleted it, or it is too old to edit)."""
+
+
 class Channel(Protocol):
     async def send_text(
         self, chat_id: int, text: str, buttons: list[list[Button]] | None = None
@@ -31,3 +35,12 @@ class Channel(Protocol):
 
     async def leave_chat(self, chat_id: int) -> None:
         """Leave a group or channel the bot was added to (Phase 11: private chats only)."""
+    async def edit_text(self, chat_id: int, message_id: int, text: str,
+                        buttons: list[list[Button]] | None = None) -> None:
+        """Replace a message's text and keyboard (None removes it). Unchanged text is success.
+        Raises MessageGone when the message cannot be edited any more, ChannelRateLimited on 429."""
+
+    async def send_photo(self, chat_id: int, path: str, caption: str = "") -> int: ...
+
+    async def send_media_group(self, chat_id: int, paths: list[str],
+                               captions: list[str] | None = None) -> list[int]: ...

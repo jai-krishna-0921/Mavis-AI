@@ -133,11 +133,11 @@ async def test_wake_me_track_loop_and_acknowledge_run_directly_under_window_tain
 async def test_remember_under_window_taint_runs_without_a_card_but_stays_unverified(
     user, channel, fake_llm, fake_memory, rec_bus, tools
 ):
-    """Fix round 1: no card, but the downgrade stays. "Jai prefers..." is not the user's wording
-    ("remember I prefer aisle seats"), so it may carry third-party content from the window."""
+    """Fix round 1: no card, but the downgrade stays. This fact repeats a phrase of the third-party
+    message in the window ("new mail from the bank"), so it may carry third-party content."""
     await _proactive_from_email(user.id, "New mail from the bank about your card.", 1)
     await _chat(user, fake_llm, "cool", 2)
-    fake_llm.push_ai(_call("remember", {"fact": "Jai prefers aisle seats"}))
+    fake_llm.push_ai(_call("remember", {"fact": "Jai prefers aisle seats; new mail from the bank"}))
     fake_llm.push_text("Noted.")
     await run_turn(_event(user.id, "remember I prefer aisle seats", 3))
     assert fake_memory.learned_trust == [Trust.UNTRUSTED]

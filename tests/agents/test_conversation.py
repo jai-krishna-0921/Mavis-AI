@@ -492,12 +492,14 @@ async def test_ok_after_a_prompt_older_than_two_hours_does_not_approve(user, cha
     assert (await approvals.get(aid)).status == ApprovalStatus.PENDING
 
 
-async def test_text_edit_during_a_recent_prompt_resumes_with_instructions(
+async def test_a_reply_to_the_card_with_a_change_resumes_with_instructions(
     user, channel, fake_llm, fake_memory, jobs, tools
 ):
     aid = await _prompted(user.id)
     fake_llm.push_structured(ApprovalReplyInterpretation(decision="edit", instructions="make it more formal"))
-    await run_turn(_event(user.id, "make it more formal"))
+    event = _event(user.id, "make it more formal")
+    event.payload["reply_to_text"] = "Ready when you are. Want me to go ahead?\n\nSend note: hi"
+    await run_turn(event)
     [resume] = jobs(JobKind.RESUME_TASK)
     assert resume.payload["decision"] == "edit" and resume.payload["instructions"] == "make it more formal"
     assert (await approvals.get(aid)).status == ApprovalStatus.RESOLVING

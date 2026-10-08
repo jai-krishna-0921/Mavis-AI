@@ -31,6 +31,8 @@ class Outbound(BaseModel):
     text: str = ""
     buttons: list[list[Button]] = Field(default_factory=list)  # rows of buttons
     document_path: str | None = None  # local path to an artefact to send as a file
+    photo_path: str | None = None  # local image sent as a photo (text is the caption)
+    media: list[str] = Field(default_factory=list)  # local images sent as one album (captions: text lines)
     proactive: bool = False
     dedupe_key: str | None = None
 

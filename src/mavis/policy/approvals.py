@@ -313,12 +313,36 @@ async def handle_approval_button(event: Event) -> None:
     await _resume(approval, decision)
 
 
+# A short message made ONLY of these words is a plain yes / no ("yes go ahead", "sounds good, do it"). Any
+# other word ("but", "make", a name, a question) makes it a message for the model, never an approval.
+_YES_WORDS = frozenset(
+    "yes yeah yep yup y ya ok okay k kk sure please pls go ahead do it that this send approve approved "
+    "ship sounds looks good great perfect fine cool thanks thank you definitely absolutely of course "
+    "lets let's let proceed confirm confirmed works right and for on now then".split())
+_NO_WORDS = frozenset(
+    "no nope nah n cancel stop dont don't do not never mind nevermind forget skip it that this please "
+    "thanks thank you rather".split())
+_NO_DECISIVE = frozenset("no nope nah n cancel stop dont don't not never nevermind forget skip".split())
+_YES_DECISIVE = frozenset(
+    "yes yeah yep yup y ya ok okay k kk sure go ahead approve approved proceed confirm confirmed ship "
+    "sounds good looks great perfect fine works absolutely definitely".split())
+_QUICK_MAX_WORDS = 6
+
+
 def quick_decision(text: str) -> ApprovalReplyInterpretation | None:
-    """Classify plain answers such as "ok", "send it" or "cancel" without a model call (else None)."""
+    """Classify plain answers such as "ok", "yes go ahead" or "cancel" without a model call (else None)."""
     key = _QUICK_STRIP.sub(" ", (text or "").lower().replace("’", "'")).strip()
     if not key and (text or "").strip() in ("👍", "✅"):
         key = "ok"
     decision = _QUICK.get(key)
+    if decision is None:
+        words = re.findall(r"[a-z']+", key)
+        if words and len(words) <= _QUICK_MAX_WORDS and not re.search(r"[?]", text or ""):
+            if all(w in _YES_WORDS for w in words) and any(w in _YES_DECISIVE for w in words) \
+                    and not any(w in _NO_DECISIVE for w in words):
+                decision = "approve"
+            elif all(w in _NO_WORDS for w in words) and any(w in _NO_DECISIVE for w in words):
+                decision = "cancel"
     return ApprovalReplyInterpretation(decision=decision) if decision else None
 
 

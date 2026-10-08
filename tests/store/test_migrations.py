@@ -101,7 +101,7 @@ def test_0012_loop_provenance_backfill(tmp_path) -> None:
 
 
 def test_single_migration_head() -> None:
-    """Parallel branches each add a revision: after a merge there must still be exactly one head."""
+    """Parallel branches each add revisions: after any merge there must still be exactly one head."""
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 

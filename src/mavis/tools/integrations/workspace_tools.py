@@ -16,9 +16,11 @@ import httpcore
 import httpx
 from pydantic import BaseModel
 
+from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed
 from mavis.store import artifacts
 from mavis.store.repo import tasks as tasks_repo
+from mavis.store.repo import users
 from mavis.tools import web
 from mavis.tools.integrations.actions import (
     DocAppendArgs,
@@ -119,11 +121,11 @@ async def _drive_read(ctx: ToolContext, args: BaseModel) -> str:
     return await drive_read(ctx, args)
 
 
-def _artifact_file(raw: str, user_id: int) -> tuple[Path, int | None]:
+def _artifact_file(raw: str, user_id: int, legacy_ok: bool = False) -> tuple[Path, int | None]:
     """(resolved path, size) of an artifact inside this user's artifacts directory; size None if outside
     it (another user's included) or missing."""
     try:
-        path = artifacts.guard(user_id, raw)
+        path = artifacts.guard(user_id, raw, legacy_ok=legacy_ok)
     except PermissionError:
         return Path(raw).resolve(), None
     if not path.is_file():
@@ -155,7 +157,8 @@ async def drive_upload(
     if artifact is None or artifact.user_id != ctx.user_id:
         raise ActionFailed(f"drive.upload failed: this task has no file #{args.artifact_id}",
                            reason="that file is not from this task")
-    path, size = await asyncio.to_thread(_artifact_file, artifact.path, ctx.user_id)
+    owner = (await users.get(ctx.user_id)).telegram_chat_id in get_settings().owner_telegram_chat_ids
+    path, size = await asyncio.to_thread(_artifact_file, artifact.path, ctx.user_id, owner)
     if size is None:
         raise ActionFailed("drive.upload failed: the file is missing", reason="the file is missing")
     if size > UPLOAD_LIMIT:

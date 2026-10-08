@@ -32,9 +32,12 @@ from langgraph.types import Command, Send, interrupt
 
 from mavis import bus
 from mavis.agents import persona, register
+from mavis.agents.cancellation import TaskCancelled
+from mavis.agents.commands import capability_requested
 from mavis.agents.spawn import spawn_agent
 from mavis.agents.specialists import SPECIALISTS, get_specialist
 from mavis.agents.specialists.base import current_deliverable, run_specialist
+from mavis.agents.task_clock import current_clock
 from mavis.channels.formatting import verbatim
 from mavis.config import get_settings
 from mavis.domain import timeutil
@@ -43,12 +46,15 @@ from mavis.domain.errors import ActionFailed, BudgetExceeded, ConnectionRequired
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.localtime import localize_args
 from mavis.domain.plans import CriticVerdict, Plan, PlanStep
-from mavis.domain.tasks import ApprovalStatus, StepOutcome, TaskKind, TaskStatus
+from mavis.domain.policy import Capability
+from mavis.domain.progress import StepState, final_of
+from mavis.domain.tasks import ApprovalStatus, StepOutcome, TaskKind, TaskOrigin, TaskStatus
 from mavis.llm import models as llm
 from mavis.policy.risk import UNTRUSTED_NOTE, wrap_untrusted
 from mavis.store.db import utcnow
 from mavis.store.repo import approvals, tasks, users
-from mavis.tools.registry import current_task_id, get_registry, tool_context
+from mavis.tools.integrations.actions import display_name
+from mavis.tools.registry import current_task_id, excluded_capabilities, get_registry, tool_context
 
 log = structlog.get_logger()
 
@@ -60,6 +66,7 @@ _BG = {"priority": "background", "fallback": True}
 PLANNER_PROMPT = """You are Mavis's planner. Break the user's goal into 1-6 steps for specialist agents.
 Run independent steps in parallel by leaving depends_on empty; add depends_on only when a step needs another
 step's output. Use short ids s1, s2, ...
+Give every step a short plain "title" (at most 8 words, no links), for example "Search for standing desks".
 
 Available agents:
 {specialists}
@@ -221,8 +228,13 @@ async def planner(state: OrchestratorState) -> dict:
     if context and state.get("tainted"):
         context = wrap_untrusted(context, "task_context")
     plan = await make_plan(state["goal"], context)
+    data = plan.model_dump()
+    clock = current_clock.get()
+    if clock is not None and plan_is_machine(plan):
+        data["clock_s"] = clock.extend_to(get_settings().machine_task_timeout_s)  # the stale sweep reads it
     # Status is owned by the task runner (QUEUED -> RUNNING claim); this never revives a finished task.
-    await tasks.save_plan(state["task_id"], plan.model_dump())
+    await tasks.save_plan(state["task_id"], data)
+    await start_card_now(state["task_id"], plan)
     return {"plan": plan.model_dump(), "todo": [s.id for s in plan.steps], "revision": 0, "feedback": {}}
 
 
@@ -289,6 +301,38 @@ async def run_step_agent(
     return await run_specialist(get_specialist(step.agent), user_id, step.instruction, context, tainted=taint)
 
 
+UNREQUESTED_SKIP_NOTE = ("Part of the work could have used {names}, which is not connected and was not asked "
+                         "for, so I did it without. Everything else is delivered as gathered.")
+MAX_UNREQUESTED_SKIPS = 1  # one re-run: tools already run in the failed attempt run again
+
+
+async def _run_step_without_unrequested(step: PlanStep, inp: StepInput, skipped: list[Capability]):
+    """Run a step; an account it reaches for that the user never named is not a reason to stop.
+
+    The task's goal says which accounts the user asked for. A step that needs
+    another one (a planner or specialist adding Notion to a research task) is re-run without the tools of
+    that account, so nothing waits on a connection nobody wanted and what was gathered is delivered. A
+    requested account still pauses the task for the connect prompt."""
+    asked = inp["goal"]  # the user's goal, not the planner-written step (injected text can steer that)
+    token = excluded_capabilities.set(excluded_capabilities.get())
+    try:
+        while True:
+            try:
+                note = ("\n\nNot available and not needed: "
+                        f"{', '.join(sorted(display_name(c) for c in skipped))}. Work without it."
+                        if skipped else "")
+                return await run_step_agent(step, inp["user_id"], _step_context(inp) + note)
+            except ConnectionRequired as exc:
+                if capability_requested(exc.capability, asked) or len(skipped) >= MAX_UNREQUESTED_SKIPS:
+                    raise
+                log.info("orchestrator.unrequested_connection_skipped", task_id=inp["task_id"],
+                         step=step.id, capability=exc.capability.value)
+                skipped.append(exc.capability)
+                excluded_capabilities.set(excluded_capabilities.get() | {exc.capability})
+    finally:
+        excluded_capabilities.reset(token)
+
+
 def _result_body(step_id: str, res: dict) -> str:
     if res.get("ok"):
         body = str(res.get("text") or "")[:_STEP_DIGEST_CHARS]
@@ -308,19 +352,55 @@ def _step_context(inp: StepInput) -> str:
     return "\n\n".join(parts)
 
 
+def plan_is_machine(plan: Plan) -> bool:
+    """A plan that uses a machine specialist: its card is sent at once and its clock is longer."""
+    return any(getattr(SPECIALISTS.get(s.agent), "machine", False) for s in plan.steps)
+
+
+def step_state_of(outcome: StepOutcome) -> StepState:
+    if not outcome.ok:
+        return StepState.FAILED
+    return StepState.PARTIAL if outcome.partial else StepState.DONE
+
+
+def _cards():
+    from mavis.channels.progress_card import hook_cards  # lazy: channels import the bus
+
+    return hook_cards()
+
+
+def card_wanted(task: Any) -> bool:
+    """USER-origin TASK-kind tasks get a live card (when enabled); initiative and approval tasks never."""
+    return (get_settings().progress_card_enabled and str(task.origin) == TaskOrigin.USER.value
+            and str(task.kind) == TaskKind.TASK.value)
+
+
+async def start_card_now(task_id: int, plan: Plan) -> None:
+    """Machine plans (and PROGRESS_CARD_AFTER_S=0) show the card as soon as the plan exists, before the
+    first step starts. Other tasks get it from the runner once they have run PROGRESS_CARD_AFTER_S."""
+    if get_settings().progress_card_after_s > 0 and not plan_is_machine(plan):
+        return
+    task = await tasks.get(task_id)
+    if task is not None and card_wanted(task):
+        await _cards().start(task_id, task.user_id, task.goal, plan.steps, tainted=bool(task.tainted))
+
+
 async def run_step(inp: StepInput) -> dict:
     step = PlanStep.model_validate(inp["step"])
     tainted = bool(inp.get("tainted", False))
     token = current_task_id.set(inp["task_id"])
     deliverable_token = current_deliverable.set(inp.get("deliverable", "message"))
     taint_token = step_tainted.set(tainted)
+    await _cards().step_started(inp["task_id"], step.id)
+    skipped: list[Capability] = []
     try:
-        outcome = await run_step_agent(step, inp["user_id"], _step_context(inp))
+        outcome = await _run_step_without_unrequested(step, inp, skipped)
     except BudgetExceeded as exc:
         outcome = StepOutcome(ok=False, error=f"step ran out of budget: {exc}")
     except ConnectionRequired as exc:
         log.info("orchestrator.step_needs_connection", task_id=inp["task_id"], step=step.id,
                  capability=exc.capability.value)
+        await _cards().step_finished(inp["task_id"], step.id, StepState.WAITING)
         return {
             "results": {step.id: {"ok": False, "text": "", "artifacts": [], "round": inp["revision"],
                                   "agent": step.agent, "tainted": tainted,
@@ -330,6 +410,8 @@ async def run_step(inp: StepInput) -> dict:
         }
     except LLMError as exc:
         outcome = StepOutcome(ok=False, error=f"model error: {exc}")
+    except TaskCancelled:
+        outcome = StepOutcome(ok=False, error="cancelled")  # finish then loses its claim to the cancel
     except Exception as exc:  # noqa: BLE001 - one broken step must not sink the whole task
         log.warning("orchestrator.step_crashed", task_id=inp["task_id"], step=step.id,
                     error_type=type(exc).__name__, error=_err(exc))
@@ -339,11 +421,16 @@ async def run_step(inp: StepInput) -> dict:
         current_deliverable.reset(deliverable_token)
         step_tainted.reset(taint_token)
     log.info("orchestrator.step_done", task_id=inp["task_id"], step=step.id, ok=outcome.ok)
-    return {
+    await _cards().step_finished(inp["task_id"], step.id, step_state_of(outcome))
+    update: dict[str, Any] = {
         "results": {step.id: {**outcome.model_dump(), "tainted": outcome.tainted or tainted,
                               "round": inp["revision"], "agent": step.agent}},
         "artifacts": outcome.artifacts,
     }
+    if skipped:
+        names = ", ".join(sorted({display_name(c) for c in skipped}))
+        update["action_results"] = [UNREQUESTED_SKIP_NOTE.format(names=names)]
+    return update
 
 
 # --- review ------------------------------------------------------------------------
@@ -682,6 +769,7 @@ async def finish(state: OrchestratorState) -> dict:
     if not await tasks.claim(task_id, active, status, **fields):
         log.info("orchestrator.finish_skipped", task_id=task_id)
         return {}
+    await _cards().finalize(task_id, final_of(status.value))
     task = await tasks.get(task_id)
     await bus.get_bus().publish(Event(
         id=f"task:{task_id}:completed", user_id=user_id, type=EventType.TASK_COMPLETED,
