@@ -185,3 +185,18 @@ async def test_whats_left_turn_calls_pending_and_ignores_stale_history(db, chann
     assert "Book the venue" in result.content and "Renew passport" not in result.content
     await OutboxSender(channel).run_once()
     assert channel.texts == ["Still open: Book the venue."]
+
+
+async def test_a_task_paused_for_a_connection_is_not_reported_as_waiting_for_the_users_ok(user, clock):
+    """Live E2E 2026-10-08: [awaiting_approval] on a connect pause read as "research done, waiting on
+    your yes". Only an open card is a wait for OK."""
+    clock.set(NOW)
+    paused = await tasks.create(user.id, goal="Compare GATE coaching")
+    await tasks.set_status(paused, TaskStatus.AWAITING_APPROVAL)
+    carded = await tasks.create(user.id, goal="Send the summary")
+    await tasks.set_status(carded, TaskStatus.AWAITING_APPROVAL)
+    aid = await approvals.create(user.id, carded, "mail_send", {}, "Send email", NOW + timedelta(hours=48))
+    out, _ = await _run(user.id)
+    assert f"task #{paused} [paused, waiting for an account to be connected; nothing needs your OK]" in out
+    assert f"task #{carded} [waiting for your OK on card #{aid}]" in out
+    assert "awaiting_approval" not in out

@@ -129,6 +129,23 @@ def capability_from_text(text: str) -> Capability | None:
     return None
 
 
+def capabilities_named(text: str) -> set[Capability]:
+    """Every account the text names (an email, the calendar, Slack, Notion, a Google app). What a user
+    asked for is what they named: a capability outside this set was never requested."""
+    named = {capability for pattern, capability in _KEYWORDS if pattern.search(text or "")}
+    if _GOOGLE_WORDS.search(text or ""):
+        named.add(GOOGLE_ANCHOR)
+    return named
+
+
+def capability_requested(capability: Capability, text: str) -> bool:
+    """Did the text ask for this account? Google capabilities count as one family when Workspace is on."""
+    named = capabilities_named(text)
+    if capability in named:
+        return True
+    return workspace_enabled() and is_google(capability) and any(is_google(c) for c in named)
+
+
 # The connect tool's own vocabulary (registry-style term overlap, domain.terms): asking to link something.
 _CONNECT_VERBS = terms("connect reconnect link relink unlink authorize authorise integrate")
 _CONNECT_OBJECTS = terms("account connection integration")
