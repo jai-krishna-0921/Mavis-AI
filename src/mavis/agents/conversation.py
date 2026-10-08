@@ -24,6 +24,7 @@ the agent: it only applies when the prompt is among the last 2 assistant message
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from contextvars import ContextVar
 from datetime import timedelta
 
@@ -332,8 +333,9 @@ async def bind_claims(result: ReactResult, tools: list[BaseTool], text: str, use
     except LLMError:
         log.warning("simple_turn.claim_reprompt_failed", exc_info=True)
         again = None
-    merged = result if again is None else ReactResult(
-        text=again.text or result.text, steps=result.steps + again.steps, messages=again.messages,
+    # replace(): fields this merge does not know about come from the final answer
+    merged = result if again is None else dataclasses.replace(
+        again, text=again.text or result.text, steps=result.steps + again.steps,
         tools_called=[*result.tools_called, *again.tools_called],
         queued_approvals=[*result.queued_approvals, *again.queued_approvals],
         unqueued_approvals=[*result.unqueued_approvals, *again.unqueued_approvals],
