@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, LinkPreviewOptions
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, RetryAfter
 
-from mavis.channels.base import ChannelRateLimited
+from mavis.channels.base import ChannelRateLimited, MessageGone
 from mavis.channels.formatting import to_plain, to_telegram_html
 from mavis.channels.text import TELEGRAM_LIMIT, split_text
 from mavis.domain.messages import Button
@@ -19,6 +19,8 @@ from mavis.domain.messages import Button
 _CHUNK_LIMIT = 3500  # leave room for HTML tags under Telegram's 4096 cap
 
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+_NOT_MODIFIED = "not modified"
+_GONE = ("message to edit not found", "message can't be edited", "message_id_invalid")
 
 log = structlog.get_logger(__name__)
 
@@ -116,6 +118,50 @@ class TelegramChannel:
         except RetryAfter as exc:
             raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
         return msg.message_id
+
+    async def edit_text(self, chat_id: int, message_id: int, text: str,
+                        buttons: list[list[Button]] | None = None) -> None:
+        await self._ensure()
+        body = to_telegram_html(text)[:TELEGRAM_LIMIT]
+        try:
+            await self._bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, text=body, parse_mode="HTML",
+                link_preview_options=_NO_PREVIEW, reply_markup=self._markup(buttons),
+            )
+        except RetryAfter as exc:
+            raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
+        except BadRequest as exc:
+            message = str(exc).lower()
+            if _NOT_MODIFIED in message:
+                return
+            if any(g in message for g in _GONE):
+                raise MessageGone(str(exc)) from exc
+            raise
+
+    async def send_photo(self, chat_id: int, path: str, caption: str = "") -> int:
+        await self._ensure()
+        try:
+            with open(path, "rb") as fh:  # noqa: ASYNC230 - small local read handed to PTB
+                msg = await self._bot.send_photo(chat_id=chat_id, photo=fh, caption=caption[:1024] or None)
+        except RetryAfter as exc:
+            raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
+        return msg.message_id
+
+    async def send_media_group(self, chat_id: int, paths: list[str],
+                               captions: list[str] | None = None) -> list[int]:
+        await self._ensure()
+        caps = list(captions or [""] * len(paths))
+        handles = [open(p, "rb") for p in paths[:10]]  # noqa: ASYNC230, SIM115 - closed below
+        try:
+            media = [InputMediaPhoto(media=h, caption=(c[:1024] or None))
+                     for h, c in zip(handles, caps[: len(handles)], strict=True)]
+            msgs = await self._bot.send_media_group(chat_id=chat_id, media=media)
+        except RetryAfter as exc:
+            raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
+        finally:
+            for h in handles:
+                h.close()
+        return [m.message_id for m in msgs]
 
     async def send_typing(self, chat_id: int) -> None:
         await self._ensure()

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from mavis.channels.base import MessageGone
 from mavis.channels.formatting import to_plain
 from mavis.channels.text import split_text
 from mavis.config import get_settings
@@ -14,7 +15,7 @@ from mavis.domain.messages import Button
 
 @dataclass
 class SentItem:
-    kind: Literal["text", "document", "typing"]
+    kind: Literal["text", "document", "typing", "photo", "album"]
     chat_id: int
     text: str = ""
     buttons: list[list[Button]] = field(default_factory=list)
@@ -26,6 +27,10 @@ class FakeChannel:
         self.sent: list[SentItem] = []
         self.fail_next: list[Exception] = []
         self.reactions: list[tuple[int, int, str]] = []  # (chat_id, message_id, emoji)
+        self.edits: list[tuple[int, int, str, list[list[Button]]]] = []  # (chat, message, text, buttons)
+        self.photos: list[tuple[int, str, str]] = []  # (chat_id, path, caption)
+        self.albums: list[tuple[int, list[str], list[str]]] = []  # (chat_id, paths, captions)
+        self.gone: set[int] = set()  # message ids whose edit raises MessageGone
         self._next_id = 1
 
     @property
@@ -60,6 +65,27 @@ class FakeChannel:
     async def send_typing(self, chat_id: int) -> None:
         self.sent.append(SentItem("typing", chat_id))
 
+    async def edit_text(self, chat_id: int, message_id: int, text: str,
+                        buttons: list[list[Button]] | None = None) -> None:
+        self._maybe_fail()
+        if message_id in self.gone:
+            raise MessageGone(f"message {message_id} not found")
+        self.edits.append((chat_id, message_id, text, buttons or []))
+
+    async def send_photo(self, chat_id: int, path: str, caption: str = "") -> int:
+        self._maybe_fail()
+        self.photos.append((chat_id, path, caption))
+        self.sent.append(SentItem("photo", chat_id, caption, path=path))
+        return self._id()
+
+    async def send_media_group(self, chat_id: int, paths: list[str],
+                               captions: list[str] | None = None) -> list[int]:
+        self._maybe_fail()
+        caps = list(captions or [""] * len(paths))
+        self.albums.append((chat_id, list(paths), caps))
+        self.sent.append(SentItem("album", chat_id, " | ".join(caps)))
+        return [self._id() for _ in paths]
+
     async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
         self.reactions.append((chat_id, message_id, emoji))
 
@@ -86,3 +112,8 @@ class ConsoleChannel(FakeChannel):
         msg_id = await super().send_document(chat_id, path, caption)
         print(f"\n{get_settings().agent_name}: 📎 {path} {caption}")
         return msg_id
+
+    async def edit_text(self, chat_id: int, message_id: int, text: str,
+                        buttons: list[list[Button]] | None = None) -> None:
+        await super().edit_text(chat_id, message_id, text, buttons)
+        print(f"\n{get_settings().agent_name} (edit): {to_plain(text)}")

@@ -10,7 +10,7 @@ from typing import Any
 import structlog
 
 from mavis.bus.base import EventBus
-from mavis.channels.test_sink import active_test_chat
+from mavis.channels.test_sink import FIXTURE_PREFIX, MIRROR_HEADER, active_test_chat
 from mavis.config import get_settings
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.messages import InboundFile
@@ -86,6 +86,7 @@ async def ingest_update(data: dict[str, Any], bus: EventBus, answer: Answerer | 
     update_id = data.get("update_id")
     if update_id is None:
         return False
+    msg: dict[str, Any] | None = None
 
     if cq := data.get("callback_query"):
         await _answer(answer, cq.get("id"))
@@ -115,6 +116,15 @@ async def ingest_update(data: dict[str, Any], bus: EventBus, answer: Answerer | 
     if not _chat_allowed(chat_id):
         # the api role never sends, so no refusal reply: the owner reads chat_id from this log line
         log.warning("telegram.chat_not_allowed", chat_id=chat_id)
+        return False
+    file_info = payload.get("file")
+    if file_info and str(file_info.get("file_id", "")).startswith(FIXTURE_PREFIX) \
+            and chat_id != active_test_chat(get_settings()):
+        payload.pop("file")  # only the harness (webhook + secret, synthetic chat) may name a fixture
+    reply = (msg or {}).get("reply_to_message") if event_type is EventType.USER_MESSAGE else None
+    if (reply and (reply.get("from") or {}).get("is_bot")
+            and str(reply.get("text", "")).startswith(MIRROR_HEADER)):
+        log.info("telegram.mirror_reply_ignored", chat_id=chat_id)  # the owner answering a [test] copy
         return False
 
     user, _ = await users.get_or_create_by_chat(chat_id, sender.get("first_name"))

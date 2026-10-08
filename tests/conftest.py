@@ -516,3 +516,12 @@ def _reset_attention():
 
     rhythm.clear_evening_sources()
     first_sync.EXTRA_HANDLERS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_send_pacer():
+    from mavis.channels import pacing
+
+    pacing.set_pacer(None)
+    yield
+    pacing.set_pacer(None)
