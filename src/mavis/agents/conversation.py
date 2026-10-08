@@ -31,7 +31,7 @@ import structlog
 from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
-from mavis.agents import clarify, commands, persona
+from mavis.agents import claims, clarify, commands, persona
 from mavis.agents.react import ReactResult, _text_of, react_loop
 from mavis.agents.task_dispatch import enqueue_run
 from mavis.agents.turn_support import (
@@ -53,7 +53,7 @@ from mavis.agents.turn_support import (
 )
 from mavis.channels import presence
 from mavis.channels.formatting import strip_verbatim
-from mavis.domain.errors import ConnectionRequired
+from mavis.domain.errors import ConnectionRequired, LLMError
 from mavis.domain.events import Event
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.tasks import ApprovalStatus, TaskKind, TaskOrigin
@@ -115,6 +115,8 @@ TOOL_RULES = (
     "for their OK. When a tool answers QUEUED_FOR_APPROVAL, a card with the action and its buttons goes "
     "to them by itself: don't repeat it or ask them to approve or tap anything, and never say it was sent "
     "or done. Only a tool call makes a card; never promise one you didn't queue.\n"
+    "- Saying you'll do something is not doing it: call its tool in this same turn, or offer and ask "
+    "instead of announcing it. Never say something is done, set or waiting unless a tool said so.\n"
     "- Reminders: wake_me at the exact time they asked for.\n"
     "- When they agree to something you suggested (\"yes\", \"do that\", \"the second one\") or ask you "
     "to remember or remind them of something, call track_loop or wake_me in this same turn with the "
@@ -269,12 +271,72 @@ def _read_untrusted(tools_called: list[str]) -> bool:
         return True  # unknown tool: assume the worst
 
 
+def _is_card(message: ToolMessage) -> bool:
+    return _text_of(message.content).startswith(CARD_RESULT_PREFIXES)
+
+
 def card_only(result: ReactResult) -> bool:
     """Every tool result of the turn is an approval card (queued, or an updated card shown again): the
     card says all there is to say, so the model's prose would only repeat it."""
     outputs = [m for m in result.messages if isinstance(m, ToolMessage)]
-    return bool(outputs) and all(
-        _text_of(m.content).startswith(CARD_RESULT_PREFIXES) for m in outputs)
+    return bool(outputs) and all(_is_card(m) for m in outputs)
+
+
+def _card_shown(result: ReactResult) -> bool:
+    return bool(result.queued_approvals) or any(
+        isinstance(m, ToolMessage) and _is_card(m) for m in result.messages)
+
+
+CLAIM_DEADLINE_S = CHAT_DEADLINE_S / 2  # the re-prompt's own budget: it follows a whole turn
+
+
+async def bind_claims(result: ReactResult, tools: list[BaseTool], text: str, user_id: int, *,
+                      self_tainted: bool) -> ReactResult:
+    """Action claims are bound to what the turn did (track 1 T1.4, agents.claims).
+
+    A reply that talks about acting while no action tool ran, or points at an approval card that does not
+    exist, is re-prompted once with the same tools ("call the tool or say you won't"). After that, a
+    reply that still points at a missing card loses those sentences. The model's own words are otherwise
+    sent as written."""
+    reply = strip_stamps(result.text or "").strip()
+    if not tools or not reply:
+        return result
+    from mavis.tools.registry import get_registry
+
+    registry = get_registry()
+
+    def risk_of(name: str):
+        tool = registry.find(name)
+        return tool.risk if tool is not None else None
+
+    waiting = tuple(dict.fromkeys(a.tool for a in await approvals.open_for_user(user_id)))
+    found = claims.check(reply, text, tools, tools_called=result.tools_called,
+                         card_shown=_card_shown(result), waiting_tools=waiting, risk_of=risk_of)
+    if not found.reprompt:
+        return result
+    log.info("simple_turn.claim_reprompt", ui_claim=found.ui_claim, tools=found.tools)
+    try:
+        again = await react_loop(
+            tools, [*result.messages, found.note()], CHAT_MAX_STEPS, tier=llm.Tier.FAST, temperature=0.6,
+            name="simple_turn_claims", tainted=result.tainted,
+            self_tainted=self_tainted or result.read_untrusted, user_words=text, wrap_up=True,
+            deadline_s=CLAIM_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
+        )
+    except LLMError:
+        log.warning("simple_turn.claim_reprompt_failed", exc_info=True)
+        again = None
+    merged = result if again is None else ReactResult(
+        text=again.text or result.text, steps=result.steps + again.steps, messages=again.messages,
+        tools_called=[*result.tools_called, *again.tools_called],
+        queued_approvals=[*result.queued_approvals, *again.queued_approvals],
+        unqueued_approvals=[*result.unqueued_approvals, *again.unqueued_approvals],
+        tainted=result.tainted or again.tainted, read_untrusted=result.read_untrusted or again.read_untrusted,
+        wrapped_up=again.wrapped_up,
+    )
+    if not waiting and not _card_shown(merged) and claims.check(
+            merged.text, text, [], tools_called=[], card_shown=False, risk_of=risk_of).ui_claim:
+        merged.text = claims.strip_ui_claims(merged.text)
+    return merged
 
 
 def _route_for(tools_called: list[str]) -> str:
@@ -460,6 +522,7 @@ async def run_turn(event: Event) -> None:
                 tainted=carried_taint, self_tainted=self_taint, user_words=text, wrap_up=True,
                 deadline_s=CHAT_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
             )
+            result = await bind_claims(result, tools, text, user.id, self_tainted=self_taint)
         except ConnectionRequired as exc:
             result = None
             connect_texts = await _connect_prompt(event, user.id, exc)
