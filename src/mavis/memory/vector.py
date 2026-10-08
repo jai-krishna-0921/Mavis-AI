@@ -7,6 +7,7 @@ Point ids are deterministic so re-learning the same sentence is idempotent.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Protocol
@@ -21,6 +22,14 @@ log = structlog.get_logger()
 COLLECTION = "episodes"
 # the fence around the assistant's previous reply in LEARN text (mavis.memory.service.CONTEXT_OPEN/CLOSE)
 ASSISTANT_FENCE = ("<assistant_context>", "</assistant_context>")
+_OPEN, _CLOSE = (re.escape(m) for m in ASSISTANT_FENCE)
+_FENCED = re.compile(_OPEN + r".*?(?:" + _CLOSE + r"|$)", re.DOTALL)
+
+
+def strip_assistant_fence(text: str) -> str:
+    """`text` without any fenced assistant block (an unclosed one runs to the end); the rest, which is
+    the user's own words, is kept."""
+    return _FENCED.sub(" ", text).replace(ASSISTANT_FENCE[1], " ")
 
 
 def _ts(raw: object) -> datetime | None:
@@ -99,8 +108,8 @@ class QdrantVectorStore:
         unique: dict[str, str] = {}
         for t in texts:
             if any(marker in t for marker in ASSISTANT_FENCE):
-                log.error("memory.assistant_text_refused", user_id=user_id, kind=kind, source_ref=source_ref)
-                continue  # the assistant's words are never a memory source, whichever caller sent them
+                log.error("memory.assistant_text_stripped", user_id=user_id, kind=kind, source_ref=source_ref)
+                t = strip_assistant_fence(t)  # the assistant's words are never a memory source; the rest is
             if t and t.strip():
                 unique.setdefault(self.point_id(user_id, t), " ".join(t.split()))
         if not unique:

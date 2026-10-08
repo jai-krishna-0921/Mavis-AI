@@ -44,7 +44,7 @@ class LoopDraft(BaseModel):
 
 
 class ProfileUpdate(BaseModel):
-    field: str = Field(description="name | timezone | tone | goals | key_people | routines | dislikes | other")  # noqa: E501
+    field: str = Field(description="name | timezone | tone | brevity | goals | key_people | routines | dislikes | other")  # noqa: E501
     value: str
 
 
