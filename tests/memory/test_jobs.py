@@ -175,7 +175,6 @@ from datetime import datetime, timedelta  # noqa: E402
 from mavis.domain import timeutil  # noqa: E402
 from mavis.domain.events import Event, EventType, Trust  # noqa: E402
 from mavis.domain.wakeups import WakeupKind  # noqa: E402
-from mavis.llm import models as llm_models  # noqa: E402
 from mavis.timers.service import WakeupService  # noqa: E402
 
 
@@ -183,7 +182,9 @@ async def _learn_wakeups(user_id):
     return await WakeupService().pending(user_id, WakeupKind.SYSTEM_LEARN)
 
 
-async def test_chat_learn_is_not_before_the_interactive_grace_window(user, rec_bus, clock):
+async def test_chat_learn_is_queued_shortly_after_the_turn_not_after_a_grace_window(user, rec_bus, clock):
+    """The limiter queues best_effort work now, so LEARN needs no long delay (it used to wait out the
+    20 s grace window and was then refused anyway)."""
     from mavis.agents.turn_support import enqueue_learn
 
     ev = Event(id="tg:update:1", user_id=user.id, type=EventType.USER_MESSAGE, occurred_at=clock.t,
@@ -191,7 +192,7 @@ async def test_chat_learn_is_not_before_the_interactive_grace_window(user, rec_b
     await enqueue_learn(user.id, ev, "Jawahar is my friend", None)
     [job] = [j for j in rec_bus.jobs if j.kind is JobKind.LEARN]
     not_before = datetime.fromisoformat(job.payload["not_before"])
-    assert timedelta(seconds=llm_models.INTERACTIVE_GRACE_S) < not_before - clock.t <= timedelta(seconds=30)
+    assert timedelta(0) <= not_before - clock.t <= timedelta(seconds=10)
 
 
 async def test_early_learn_job_is_parked_on_a_wakeup_not_run(memory, user, monkeypatch, clock):
@@ -213,26 +214,78 @@ async def test_learn_wakeup_enqueues_the_job_again(user, rec_bus, clock):
     assert job.payload["source_ref"] == "tg:3"
 
 
-async def test_busy_learn_is_retried_twice_on_wakeups_then_dropped(memory, user, monkeypatch, clock):
+def _job(job_id, user_id, payload):
+    return Job(id=job_id, user_id=user_id, kind=JobKind.LEARN, payload=payload)
+
+
+async def _fail_learn(memory, monkeypatch):
     async def busy(*a, **k):
         raise LLMError("LLM slot reserved for interactive work")
 
     monkeypatch.setattr(memory, "learn", busy)
+
+
+async def test_busy_learn_is_retried_with_growing_then_capped_delay(memory, user, monkeypatch, clock):
+    await _fail_learn(memory, monkeypatch)
     payload = {"text": "x", "source_ref": "tg:4", "trust": "user"}
-    await jobs.handle_learn(Job(id="learn:tg:4", user_id=user.id, kind=JobKind.LEARN, payload=payload))
-    [w1] = await _learn_wakeups(user.id)
-    assert timeutil.ensure_utc(w1.due_at) - clock.t == timedelta(minutes=3)
-    assert w1.payload["learn"]["retry"] == 1
+    delays = []
+    seen = set()
+    for n in range(8):
+        await jobs.handle_learn(_job(f"learn:tg:4:w{n}", user.id, payload))
+        [w] = [w for w in await _learn_wakeups(user.id) if w.id not in seen]
+        seen.add(w.id)
+        delays.append(timeutil.ensure_utc(w.due_at) - clock.t)
+        assert w.payload["learn"]["retry"] == n + 1
+        payload = w.payload["learn"]
+    assert delays[:3] == [timedelta(minutes=1), timedelta(minutes=3), timedelta(minutes=10)]
+    assert max(delays) == jobs.LEARN_RETRY_CAP  # then a steady cadence: bounded delay, never dropped
+    assert delays[-1] == jobs.LEARN_RETRY_CAP
 
-    await jobs.handle_learn(Job(id="learn:tg:4:r1", user_id=user.id, kind=JobKind.LEARN,
-                                payload=w1.payload["learn"]))
-    w2 = [w for w in await _learn_wakeups(user.id) if w.id != w1.id]
-    assert [timeutil.ensure_utc(w.due_at) - clock.t for w in w2] == [timedelta(minutes=10)]
-    assert w2[0].payload["learn"]["retry"] == 2
 
+async def test_learn_survives_many_failures_but_is_dropped_after_a_day(memory, user, monkeypatch, clock):
+    await _fail_learn(memory, monkeypatch)
+    first = clock.t - timedelta(hours=3)
+    payload = {"text": "x", "source_ref": "tg:5", "trust": "user", "retry": 40, "first_at": first.isoformat()}
+    await jobs.handle_learn(_job("learn:tg:5", user.id, payload))
+    assert len(await _learn_wakeups(user.id)) == 1  # 40 failures in, still queued
+
+    stale = clock.t - jobs.LEARN_MAX_AGE - timedelta(minutes=1)
+    old = {**payload, "source_ref": "tg:6", "first_at": stale.isoformat()}
     with capture_logs() as logs:
-        await jobs.handle_learn(Job(id="learn:tg:4:r2", user_id=user.id, kind=JobKind.LEARN,
-                                    payload=w2[0].payload["learn"]))
-    assert len(await _learn_wakeups(user.id)) == 2  # no third retry
+        await jobs.handle_learn(_job("learn:tg:6", user.id, old))
+    assert len(await _learn_wakeups(user.id)) == 1  # nothing new parked
     [final] = [e for e in logs if e["event"] == "memory.learn_dropped_final"]
-    assert final["job_id"] == "learn:tg:4:r2" and final["log_level"] == "error"  # loops lost too
+    assert final["log_level"] == "error"
+
+
+async def test_retried_learn_eventually_succeeds_once(memory, user, fake_llm, monkeypatch, clock):
+    """Fail twice, then the model answers: the facts are stored once, the job is marked seen."""
+    from mavis.store.repo import events
+
+    calls = {"n": 0}
+    real = memory.learn
+
+    async def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise LLMError("timed out waiting for an LLM slot")
+        return await real(*a, **k)
+
+    async def no_summary(uid):
+        return False
+
+    monkeypatch.setattr(memory, "learn", flaky)
+    monkeypatch.setattr(jobs, "maybe_summarize", no_summary)
+    fake_llm.push_structured(Extraction(
+        entities=[Entity(name="Priya", label="Person")],
+        relations=[Relation(subject="User", rel="SIBLING_OF", object="Priya",
+                            statement="Priya is the user's sister.")],
+    ))
+    payload = {"text": "Priya is my sister", "source_ref": "tg:7", "trust": "user"}
+    for n in range(3):
+        await jobs.handle_learn(_job(f"learn:tg:7:w{n}", user.id, payload))
+        parked = await _learn_wakeups(user.id)
+        if n < 2:
+            payload = max(parked, key=lambda w: w.id).payload["learn"]
+    assert calls["n"] == 3 and await events.seen("learn:tg:7")
+    assert len(await memory.graph.dump(user.id)) == 1

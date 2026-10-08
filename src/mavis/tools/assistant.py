@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -13,8 +14,8 @@ from mavis.agents import cancellation
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.args import ToolArgs
-from mavis.domain.errors import ActionFailed, FailureKind
-from mavis.domain.events import Trust
+from mavis.domain.errors import ActionFailed, FailureKind, LLMError
+from mavis.domain.events import Job, JobKind, Trust
 from mavis.domain.localtime import LocalTimes, wall_clock
 from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.policy import RiskClass
@@ -93,19 +94,37 @@ class PolicyRuleArgs(ToolArgs):
     description: str = Field(description="The rule in the user's words")
 
 
+REMEMBER_INLINE_S = 8.0  # a chat tool never waits longer than this for memory extraction
+
+
+async def _learn_now_or_later(user_id: int, text: str, source_ref: str, trust: Trust) -> None:
+    """Learn `text` from inside a chat turn without holding the turn: try for a few seconds, else hand it
+    to the durable LEARN queue (retried until it succeeds). The user's explicit "remember this" is
+    never lost to a busy model, and the reply never waits out the limiter queue."""
+    try:
+        await asyncio.wait_for(
+            memory_service.get_memory().learn(user_id, text, source_ref=source_ref, trust=trust),
+            REMEMBER_INLINE_S)
+        return
+    except (TimeoutError, LLMError):
+        pass
+    ref = f"{source_ref}:{hashlib.sha1(text.encode()).hexdigest()[:12]}"
+    await bus.get_bus().enqueue(Job(
+        id=f"learn:{ref}", user_id=user_id, kind=JobKind.LEARN,
+        payload={"text": text, "source_ref": ref, "trust": trust.value, "conversation": True,
+                 "anchor_at": timeutil.now().isoformat()}))
+
+
 async def remember(user_id: int, args: RememberArgs) -> str:
-    await memory_service.get_memory().learn(
-        user_id, f"The user asked me to remember: {args.fact}", source_ref="tool:remember", trust=Trust.USER
-    )
+    await _learn_now_or_later(user_id, f"The user asked me to remember: {args.fact}", "tool:remember",
+                              Trust.USER)
     return "Saved to memory."
 
 
 async def remember_untrusted(user_id: int, args: RememberArgs) -> str:
     """`remember` after third-party output: kept only as an unverified signal, never a trusted fact."""
-    await memory_service.get_memory().learn(
-        user_id, f"Third-party content asked me to remember: {args.fact}",
-        source_ref="tool:remember:untrusted", trust=Trust.UNTRUSTED,
-    )
+    await _learn_now_or_later(user_id, f"Third-party content asked me to remember: {args.fact}",
+                              "tool:remember:untrusted", Trust.UNTRUSTED)
     return (
         "Kept only as an unverified note, because this came after third-party content. It was NOT "
         "saved as a fact about the user. If it matters, ask the user to confirm it in their own words."
