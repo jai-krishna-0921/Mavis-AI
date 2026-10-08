@@ -180,11 +180,13 @@ async def test_reasoner_wakeup_about_connecting_a_service_is_dropped(user, recor
                   occurred_at=timeutil.now(), source="agent", payload=loop.model_dump(mode="json"),
                   trust=Trust.SYSTEM)
     await init.executor.apply(user, InitiativeDecision(
-        wakeups=[WakeupRequest(at=at(60 * 12), reason=reason, loop_id=loop.id)]), event)
+        wakeups=[WakeupRequest(at=at(60 * 12), reason=reason, loop_id=loop.id, about_connection=True)]),
+        event)
     assert await init.wakeups.pending(user.id, WakeupKind.AGENT) == []
 
 
 @pytest.mark.parametrize("wakeup_reason", [
+    "Sign in to Zoom before the call and check the calendar link",  # words a keyword rule would trip on
     "Look at the quarterly report once the numbers land",
     "Check whether the landlord answered",
     "Gmail digest: three threads are waiting on you",  # names a service but is not about connecting it
@@ -209,5 +211,61 @@ async def test_reasoner_notify_about_connecting_a_service_is_not_sent(user, reco
                   source="timer", payload={"kind": "agent"}, trust=Trust.SYSTEM)
     await init.executor.apply(user, InitiativeDecision(notify=NotifyIntent(
         urgency=3, intent="Tell the user Gmail still isn't linked and ask them to connect it",
-        dedupe_key="gmail-link")), event)
+        dedupe_key="gmail-link", about_connection=True)), event)
     assert sent == []
+
+
+# --- a LEARN retried after the reminder fired still sees it; a shared name alone is not one matter ---
+
+
+async def test_loop_draft_is_covered_by_a_reminder_that_already_fired(user, recording_bus, clock):
+    from mavis.domain.timeutil import to_local
+    from mavis.store.repo import wakeups as wakeups_repo
+
+    svc = LoopService(recording_bus)
+    wid = await reminder(user, 3, "Drink water")
+    clock.advance(minutes=10)
+    await wakeups_repo.fire_due(timeutil.now(), 10)  # it went off; LEARN (deferred) only runs now
+    assert wid
+    due = to_local(at(-7), user.timezone).replace(tzinfo=None)
+    await loops_from_extraction(svc, user.id, Extraction(loops=[
+        LoopDraft(kind="COMMITMENT", title="Remind User to drink water", due_at=due)]), conv())
+    assert await open_loops(svc, user) == []
+
+
+@pytest.mark.parametrize(("reminder_text", "title"), [
+    ("Call Raj", "Send Raj the proposal"),
+    ("Call Raj at 3", "Prepare the slides for Raj meeting"),
+    ("Lunch with Priya", "Book a table for Priya birthday dinner"),
+])
+async def test_sharing_a_persons_name_with_a_reminder_does_not_suppress_other_work(
+        user, recording_bus, clock, reminder_text, title):
+    from mavis.domain.timeutil import to_local
+
+    svc = LoopService(recording_bus)
+    await reminder(user, 3, reminder_text)
+    due = to_local(at(3), user.timezone).replace(tzinfo=None)
+    await loops_from_extraction(svc, user.id, Extraction(loops=[
+        LoopDraft(kind="COMMITMENT", title=title, due_at=due, entities=["Raj", "Priya"])]), conv())
+    assert len(await open_loops(svc, user)) == 1
+
+
+async def test_connection_proposal_is_allowed_while_the_user_has_a_connect_flow_open(
+        user, recording_bus, fake_memory, clock):
+    from mavis.domain.policy import Capability
+    from mavis.store.repo import connections
+
+    init = build_initiative(recording_bus, fake_memory, embed=no_embed)
+    loop = await init.loops.upsert(user.id, LoopUpsert(
+        kind=LoopKind.COMMITMENT, title="Send an email to test@example.com saying hi", importance=2,
+        trust=Trust.SYSTEM, origin=LoopOrigin.CONVERSATION))
+    event = Event(id=f"loop:{loop.id}:created", user_id=user.id, type=EventType.LOOP_CREATED,
+                  occurred_at=timeutil.now(), source="agent", payload=loop.model_dump(mode="json"),
+                  trust=Trust.SYSTEM)
+    request = WakeupRequest(at=at(60 * 12), reason="See whether the Gmail link went through",
+                            loop_id=loop.id, about_connection=True)
+    await init.executor.apply(user, InitiativeDecision(wakeups=[request]), event)
+    assert await init.wakeups.pending(user.id, WakeupKind.AGENT) == []
+    await connections.create_pending(user.id, Capability.GMAIL, "user ran /connect gmail", None)
+    await init.executor.apply(user, InitiativeDecision(wakeups=[request]), event)
+    assert len(await init.wakeups.pending(user.id, WakeupKind.AGENT)) == 1

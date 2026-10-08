@@ -109,7 +109,8 @@ class InitiativeExecutor:
             # always tainted: the reasoner's prompt carries untrusted history, memory and email
             await dispatch_task_requests(user.id, [task], TaskOrigin.INITIATIVE, bus=self._bus,
                                          tainted=True)
-        if decision.notify is not None and guards.is_connection_nudge(decision.notify.intent):
+        if decision.notify is not None and not await guards.connection_proposal_allowed(
+                user.id, decision.notify.about_connection):
             log.info("initiative.connection_nudge_dropped", event_id=event.id,
                      intent=decision.notify.intent[:80])
         elif decision.notify is not None:
@@ -185,7 +186,7 @@ class InitiativeExecutor:
         if event.source == "timer" and await self._rearm_without_change(user.id, state, event):
             log.info("initiative.wakeup_chain_stopped", event_id=event.id, subject=state.subject.key)
             return
-        if guards.is_connection_nudge(w.reason):
+        if not await guards.connection_proposal_allowed(user.id, w.about_connection):
             log.info("initiative.connection_nudge_dropped", event_id=event.id, reason=w.reason[:80])
             return
         loop_id = state.loop_id

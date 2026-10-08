@@ -191,10 +191,14 @@ async def test_proactive_swearing_without_a_sweary_chat_is_rewritten(user, clock
 
 
 async def test_proactive_message_keeps_a_stated_wish_for_short_messages(user, clock, fake_memory, fake_llm):
+    from mavis.domain.memory import ProfileUpdate
     from mavis.domain.messages import Role
+    from mavis.memory.profile import ProfileCard
     from mavis.store.repo import messages
+    from mavis.store.repo import profile as profile_repo
 
-    await messages.log(user.id, Role.USER, "I hate long messages, keep it short")
+    await messages.log(user.id, Role.USER, "hello")
+    await profile_repo.save(user.id, ProfileCard().apply([ProfileUpdate(field="brevity", value="short")]))
     fake_llm.push_structured(ComposedMessage(send=True, messages=["hi"]))
     await Composer(fake_memory).compose(user, "follow up on the interview", 2)
     assert "want short messages" in fake_llm.structured_calls[-1]["system"]

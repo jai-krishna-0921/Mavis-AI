@@ -345,38 +345,6 @@ def test_a_just_made_swear_is_not_mirrored_when_formal_or_upset(latest):
     assert not reg.latest_swore and "ONE casual swear" not in prompt_line(reg)
 
 
-@pytest.mark.parametrize("said", [
-    "btw I hate long messages",
-    "I really don't like lengthy replies",
-    "keep it short please",
-    "can you be brief with me",
-    "make replies concise",
-    "too long, tl;dr?",
-    "shorter please",
-    "just give me short answers, to the point",
-    "I can't stand wordy answers",
-])
-def test_a_wish_for_short_messages_is_recognised(said):
-    assert register.wants_brief(["hello", said, "thanks"])
-
-
-@pytest.mark.parametrize("said", [
-    "how long is the flight to Delhi",
-    "my long weekend starts Friday",
-    "keep an eye on my inbox",
-    "I hate waiting for the bus",
-    "give me a brief summary of the email",  # a one-off ask is not a standing wish about messages
-])
-def test_ordinary_talk_is_not_a_wish_for_short_messages(said):
-    assert not register.wants_brief(["hello", said])
-
-
-def test_the_latest_statement_about_length_wins():
-    assert not register.wants_brief(["I hate long messages", "actually for this one explain in detail"])
-    assert register.wants_brief(["explain in detail", "I hate long messages"])
-    assert not register.wants_brief(["keep it short", "no need to keep it short anymore"])
-
-
 def test_brief_is_added_to_every_register_line_including_proactive_and_empty():
     formal = "Good morning. Could you please summarise my inbox for me?"
     for texts in ([], ["lol ok"], ["fuck this"], [formal]):
@@ -387,17 +355,30 @@ def test_brief_is_added_to_every_register_line_including_proactive_and_empty():
     assert "short messages" not in prompt_line(measure(["fuck this"]))
 
 
-async def test_standing_brief_reads_the_card_and_the_whole_conversation(user):
+async def test_standing_brief_is_the_profile_preference_not_a_text_scan(user):
+    """Detection lives in LEARN (profile `brevity`); chat history is never pattern-matched."""
+    from mavis.domain.memory import ProfileUpdate
     from mavis.memory.profile import ProfileCard
     from mavis.store.repo import profile as profile_repo
 
-    assert not await register.standing_brief(user.id, [], NOW)
-    old = [_m("user", "btw I hate long messages", 60 * 60 * 30)]  # far outside the 12 h register window
-    assert await register.standing_brief(user.id, old, NOW)
-    assert not register.measure(register.user_texts(old, NOW)).brief  # the windowed sample alone misses it
-    await profile_repo.save(user.id, ProfileCard(dislikes=["long messages"]))
-    assert await register.standing_brief(user.id, [], NOW)
-    await profile_repo.save(user.id, ProfileCard(tone="short and casual"))
-    assert await register.standing_brief(user.id, [], NOW)
-    await profile_repo.save(user.id, ProfileCard(dislikes=["early meetings"]))
-    assert not await register.standing_brief(user.id, [], NOW)
+    assert not await register.standing_brief(user.id)
+    card = ProfileCard().apply([ProfileUpdate(field="brevity", value="short")])
+    await profile_repo.save(user.id, card)
+    assert await register.standing_brief(user.id)
+    await profile_repo.save(user.id, card.apply([ProfileUpdate(field="brevity", value="normal")]))
+    assert not await register.standing_brief(user.id)
+    await profile_repo.save(user.id, card.apply([ProfileUpdate(field="brevity", value="whatever")]))
+    assert await register.standing_brief(user.id)  # an unknown value is ignored, the stored one stands
+
+
+def test_nothing_in_the_register_module_scans_text_for_a_length_wish():
+    assert not hasattr(register, "wants_brief") and not hasattr(register, "_BRIEF")
+
+
+def test_brevity_is_a_profile_scalar_rendered_in_the_card():
+    from mavis.domain.memory import ProfileUpdate
+    from mavis.memory.profile import ProfileCard
+
+    card = ProfileCard().apply([ProfileUpdate(field="brevity", value="Short")])
+    assert card.brevity == "short" and "short messages" in card.render()
+    assert "short" not in ProfileCard().apply([ProfileUpdate(field="brevity", value="normal")]).render()

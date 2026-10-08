@@ -12,7 +12,8 @@ from mavis.domain.memory import ProfileUpdate
 from mavis.memory.tokens import estimate_tokens
 
 LIST_FIELDS = ("goals", "key_people", "routines", "dislikes", "other")
-SCALAR_FIELDS = ("name", "timezone", "tone")
+SCALAR_FIELDS = ("name", "timezone", "tone", "brevity")
+BREVITY_VALUES = ("short", "normal")
 MAX_ITEMS = 8
 MAX_TOKENS = 400
 _TITLES = {
@@ -33,6 +34,7 @@ class ProfileCard(BaseModel):
     name: str | None = None
     timezone: str | None = None
     tone: str | None = None
+    brevity: str | None = None  # "short": they asked for short messages (LEARN)
     goals: list[str] = Field(default_factory=list)
     key_people: list[str] = Field(default_factory=list)
     routines: list[str] = Field(default_factory=list)
@@ -67,6 +69,11 @@ class ProfileCard(BaseModel):
                     continue
                 data["timezone"] = value
                 data["stamps"][field] = when_s
+            elif field == "brevity":
+                if value.casefold() not in BREVITY_VALUES:
+                    continue
+                data[field] = value.casefold()
+                data["stamps"][field] = when_s
             elif field in SCALAR_FIELDS:
                 data[field] = value
                 data["stamps"][field] = when_s
@@ -97,6 +104,8 @@ class ProfileCard(BaseModel):
             lines.append(f"Timezone: {self.timezone}")
         if self.tone:
             lines.append(f"Prefers tone: {self.tone}")
+        if self.brevity == "short":
+            lines.append("Prefers short messages")
         for f in LIST_FIELDS:
             if lists[f]:
                 lines.append(f"{_TITLES[f]}: " + "; ".join(lists[f]))

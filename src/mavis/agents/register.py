@@ -184,49 +184,21 @@ def _hype(text: str) -> bool:
     return shouting or "!!" in text or bool(_ELONGATED.search(text))
 
 
-# A standing wish for short messages ("I hate long messages", "keep it short"): said once, it holds until
-# they say otherwise, so it is read from the whole conversation and the profile card, not the 12 h window.
-_BRIEF = re.compile(
-    r"\b(?:(?:hate|dislike|can'?t stand|don'?t (?:like|want)|not a fan of|no need for|stop sending|"
-    r"tired of|sick of|avoid)\s+(?:\w+\s+){0,3}?(?:long|lengthy|wordy|verbose|big|huge)\b"
-    r"|(?:keep|make|be|stay|reply|answer|respond|write)\b[^.!?\n]{0,24}?\b(?:short|brief|concise|crisp|terse)\b"
-    r"|(?:too|so) (?:long|wordy|verbose)|tl;?dr|shorter|short(?:er)? (?:replies|messages|answers)"
-    r"|to the point|less (?:words|text)|short and sweet|one[- ]liners?)",
-    re.IGNORECASE,
-)
-_NOT_BRIEF = re.compile(
-    r"\b(?:don'?t|do not|no need to|stop)\s+(?:keep|be|make)\b[^.!?\n]{0,16}\b(?:short|brief)", re.IGNORECASE)
-
-
-def wants_brief(texts: list[str]) -> bool:
-    """They asked for short messages (and have not taken it back since): the latest statement wins."""
-    asked = False
-    for t in texts:
-        if _NOT_BRIEF.search(t) or re.search(r"\b(?:longer|more detail|in detail|elaborate)\b", t, re.I):
-            asked = False
-        elif _BRIEF.search(t):
-            asked = True
-    return asked
-
-
-async def standing_brief(user_id: int, history: list, now: datetime) -> bool:
-    """They asked for short messages, in the profile card or anywhere in the conversation we hold (not
-    only the last 12 hours): a stated preference holds until they take it back."""
+async def standing_brief(user_id: int) -> bool:
+    """They asked for short messages: the profile preference LEARN wrote (profile card `brevity`). It holds
+    until they take it back, so it is not limited to the recent conversation. No text matching here."""
     from mavis.store.repo import profile as profile_repo  # lazy: keep this module free of the store
 
     try:
-        card = await profile_repo.get(user_id)
-        lines = [f"Keep replies {card.tone}" if card.tone else "", *(f"I hate {d}" for d in card.dislikes),
-                 *card.other]
+        return (await profile_repo.get(user_id)).brevity == "short"
     except Exception:  # noqa: BLE001 - a style hint must never break a turn
-        lines = []
-    return wants_brief([*lines, *user_texts(history, now, window=None)])
+        return False
 
 
 @dataclass(frozen=True)
 class Register:
     sample: int = 0  # user messages measured
-    brief: bool = False  # a standing wish for short messages (see wants_brief)
+    brief: bool = False  # a standing wish for short messages (profile card brevity)
     latest_swore: bool = False  # the latest message itself swears: mirror it now, not just "may"
     swears: bool = False  # swore recently and the latest message is not formal: swearing may be mirrored
     swear_share: float = 0.0  # share of measured messages with profanity ("in proportion")
@@ -238,8 +210,8 @@ class Register:
 
 def measure(texts: list[str], *, brief: bool = False) -> Register:
     """Measure the register of a user's messages, oldest first. The latest message weighs most:
-    a formal latest message turns swearing off even if they swore a minute ago. `brief`: a standing wish
-    for short messages known from outside this sample (the profile card, older conversation)."""
+    a formal latest message turns swearing off even if they swore a minute ago. `brief`: the profile card's
+    standing wish for short messages."""
     texts = [t for t in texts if t and t.strip()][-SAMPLE:]
     if not texts:
         return Register(brief=brief)
@@ -250,7 +222,7 @@ def measure(texts: list[str], *, brief: bool = False) -> Register:
     swears = not formal and not distressed and any(sweary[-SWEAR_RECENT:])
     return Register(
         sample=len(texts),
-        brief=brief or wants_brief(texts),
+        brief=brief,
         latest_swore=swears and sweary[-1],
         swears=swears,
         swear_share=sum(sweary) / len(texts),
