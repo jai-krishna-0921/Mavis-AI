@@ -525,3 +525,12 @@ def _reset_send_pacer():
     pacing.set_pacer(None)
     yield
     pacing.set_pacer(None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_progress_cards():
+    from mavis.channels import progress_card
+
+    progress_card.set_cards(None)
+    yield
+    progress_card.set_cards(None)
