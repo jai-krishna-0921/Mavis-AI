@@ -14,6 +14,7 @@ from mavis.domain.decisions import InitiativeDecision, NotifyIntent, WakeupReque
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.messages import TAINT_SUFFIX, Button, Outbound, Role
+from mavis.domain.tasks import TaskStatus
 from mavis.domain.wakeups import REMINDER_PREFIX, WakeupKind, WakeupStatus
 from mavis.initiative import guards, subjects
 from mavis.initiative.composer import Composer
@@ -183,6 +184,10 @@ class InitiativeExecutor:
             log.warning("initiative.wakeup_unbound_rejected", event_id=event.id, reason=w.reason[:80],
                         subject=state.subject.key if state else None)
             return
+        if state.subject.kind is SubjectKind.TASK and await self._task_check_not_needed(user.id, state):
+            log.info("initiative.task_wakeup_dropped", event_id=event.id, subject=state.subject.key,
+                     status=state.status)
+            return
         if event.source == "timer" and await self._rearm_without_change(user.id, state, event):
             log.info("initiative.wakeup_chain_stopped", event_id=event.id, subject=state.subject.key)
             return
@@ -208,6 +213,16 @@ class InitiativeExecutor:
                                         payload=payload)
         except ValueError as exc:
             log.warning("initiative.wakeup_failed", event_id=event.id, reason=w.reason[:80], error=str(exc))
+
+    async def _task_check_not_needed(self, user_id: int, state: SubjectState) -> bool:
+        """A task waiting on the user (a connection or an approval) changes only when they act, and the task
+        ends by itself after its TTL, so checking on it helps no one. A running task is checked on one
+        wakeup at a time."""
+        if state.status == TaskStatus.AWAITING_APPROVAL.value:
+            return True
+        key = state.subject.key
+        pending = await self._wakeups.pending(user_id, WakeupKind.AGENT)
+        return any(w.payload.get("subject") == key for w in pending)
 
     async def _rearm_without_change(self, user_id: int, state: SubjectState, event: Event) -> bool:
         """A run started by a timer may not set another wakeup for a subject whose state is the same as
