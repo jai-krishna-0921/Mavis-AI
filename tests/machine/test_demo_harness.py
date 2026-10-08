@@ -114,3 +114,61 @@ def test_target_chat_accepts_a_synthetic_chat(settings, monkeypatch):
     from mavis.config import get_settings
     get_settings.cache_clear()
     assert md.target_chat(get_settings()) == -1000000000000001
+
+
+def _demo_out(tmp_path):
+    out = tmp_path / "run1"
+    (out / "T1" / "screenshots").mkdir(parents=True)
+    for n in ("a.png", "b.png"):
+        (out / "T1" / "screenshots" / n).write_bytes(b"x")
+    (out / "report.html").write_text("<html></html>")
+    return out
+
+
+async def _queued():
+    from sqlalchemy import select
+
+    from mavis.store.db import Session
+    from mavis.store.models import OutboxMessage
+
+    async with Session() as s:
+        return list((await s.scalars(select(OutboxMessage))).all())
+
+
+async def test_report_goes_only_to_the_mirror_chat(db, settings, monkeypatch, tmp_path):
+    from mavis.store.repo import users
+
+    owner, _ = await users.get_or_create_by_chat(5001, "Owner")
+    other, _ = await users.get_or_create_by_chat(5002, "Other")
+    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", "[5002,5001]")
+    monkeypatch.setenv("TEST_MIRROR_CHAT_ID", "5001")
+    from mavis.config import get_settings
+
+    get_settings.cache_clear()
+    await md.report_to_owner(get_settings(), _demo_out(tmp_path), "all ok", [])
+    rows = await _queued()
+    assert rows and {r.user_id for r in rows} == {owner.id} and other.id not in {r.user_id for r in rows}
+
+
+async def test_report_is_not_sent_when_mirror_unset(db, settings, monkeypatch, tmp_path, capsys):
+    from mavis.store.repo import users
+
+    await users.get_or_create_by_chat(5002, "Other")
+    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", "[5002]")
+    monkeypatch.delenv("TEST_MIRROR_CHAT_ID", raising=False)
+    from mavis.config import get_settings
+
+    get_settings.cache_clear()
+    await md.report_to_owner(get_settings(), _demo_out(tmp_path), "all ok", [])
+    assert await _queued() == []
+    assert "TEST_MIRROR_CHAT_ID" in capsys.readouterr().out
+
+
+async def test_report_is_not_sent_when_mirror_has_no_user(db, settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", "[5001]")
+    monkeypatch.setenv("TEST_MIRROR_CHAT_ID", "5001")
+    from mavis.config import get_settings
+
+    get_settings.cache_clear()
+    await md.report_to_owner(get_settings(), _demo_out(tmp_path), "all ok", [])
+    assert await _queued() == []

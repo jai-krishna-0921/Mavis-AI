@@ -72,6 +72,9 @@ x-app: &app
   environment: *app-env
   volumes:
     - artifacts:/app/data/artifacts
+    # the test sink (written by the worker) and the demo reports: shared so `--verify-machine` sees the
+    # worker's sink and the reports survive a restart
+    - e2edata:/app/data/e2e
   restart: unless-stopped
   logging: *logging
   security_opt: ["no-new-privileges:true"]
@@ -223,5 +226,6 @@ volumes:
   qdrantdata:
   neo4jdata:
   artifacts:
+  e2edata:
   caddydata:
   caddyconfig:
