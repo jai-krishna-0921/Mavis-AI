@@ -116,9 +116,11 @@ async def test_long_edit_is_cut_before_conversion_so_tags_stay_closed(filler):
     assert not re.search(r"<[^>]*$", body)  # no half tag at the end
 
 
-@pytest.mark.parametrize("name,value", [("PROGRESS_EDIT_MIN_INTERVAL_S", "-1"), ("PROGRESS_CARD_AFTER_S", "-5"),
-                                        ("PROGRESS_MAX_SCREENSHOTS", "-2"), ("PROGRESS_MAX_SCREENSHOTS", "500"),
-                                        ("TELEGRAM_GLOBAL_SEND_RATE", "0"), ("PROGRESS_EDIT_MIN_INTERVAL_S", "9999")])
+@pytest.mark.parametrize("name,value", [
+    ("PROGRESS_EDIT_MIN_INTERVAL_S", "-1"), ("PROGRESS_CARD_AFTER_S", "-5"),
+    ("PROGRESS_MAX_SCREENSHOTS", "-2"),
+    ("PROGRESS_MAX_SCREENSHOTS", "500"), ("TELEGRAM_GLOBAL_SEND_RATE", "0"),
+    ("PROGRESS_EDIT_MIN_INTERVAL_S", "9999")])
 def test_progress_settings_reject_out_of_range(settings, monkeypatch, name, value):
     from pydantic import ValidationError
 
