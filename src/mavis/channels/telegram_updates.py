@@ -96,8 +96,8 @@ async def ingest_update(data: dict[str, Any], bus: EventBus, answer: Answerer | 
 
     if member := data.get("my_chat_member"):
         chat = member.get("chat") or {}
-        if chat.get("id") is None:
-            return False
+        if chat.get("id") is None or not _gate_in_worker():
+            return False  # allowlist mode keeps today's behaviour: membership changes are ignored
         status = str((member.get("new_chat_member") or {}).get("status", ""))
         return await bus.publish(Event(
             id=f"tg:update:{update_id}", user_id=0, type=EventType.CHAT_MEMBER, occurred_at=utcnow(),

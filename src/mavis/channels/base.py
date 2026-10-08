@@ -28,3 +28,6 @@ class Channel(Protocol):
         effort; callers swallow failures."""
 
     async def download_file(self, file_id: str, dest_path: str) -> str: ...
+
+    async def leave_chat(self, chat_id: int) -> None:
+        """Leave a group or channel the bot was added to (Phase 11: private chats only)."""

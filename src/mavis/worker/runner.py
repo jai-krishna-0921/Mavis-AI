@@ -20,6 +20,7 @@ from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Job, JobKind, Trust
 from mavis.domain.messages import Outbound
 from mavis.store.repo import outbox, users
+from mavis.worker import gates
 from mavis.worker.locks import lock, user_lock
 
 log = structlog.get_logger(__name__)
@@ -31,6 +32,8 @@ WORKER_GROUP = "workers"
 FALLBACK_TEXT = "Give me a sec, my brain is a bit slow right now. Try me again in a minute?"
 
 CHAT_EVENT_TYPES = frozenset({EventType.USER_MESSAGE, EventType.BUTTON_PRESSED})
+# Event types no handler claims, only an event gate (Phase 11): they must still reach run_gates.
+GATE_ONLY_TYPES = frozenset({EventType.RATE_LIMITED, EventType.CHAT_MEMBER})
 
 _ack_tasks: set[asyncio.Task] = set()  # strong refs so fire-and-forget acks are not GC'd
 
@@ -62,6 +65,7 @@ def clear_handlers() -> None:
     _event_handlers.clear()
     _job_handlers.clear()
     _startup_hooks.clear()
+    gates.clear_gates()
 
 
 async def run_startup_hooks() -> None:
@@ -109,7 +113,7 @@ async def _acknowledge(event: Event) -> None:
 
 async def handle_event(event: Event) -> None:
     handlers = list(_event_handlers.get(event.type, []))
-    if not handlers:
+    if not handlers and event.type not in GATE_ONLY_TYPES:
         log.debug("worker.no_handler", event_type=event.type)
         return
     with structlog.contextvars.bound_contextvars(event_id=event.id, user_id=event.user_id):
@@ -123,9 +127,12 @@ async def handle_event(event: Event) -> None:
         # The user lock is held across the inline retries (and their sleeps) so this user's next
         # event cannot overtake a retrying one. Other users run on the other consumer loops.
         async with _event_lock(event):
-            await run_with_inline_retries(
-                lambda: _run_handlers(event, handlers), what="event", ref=event.id
-            )
+            async def attempt() -> None:
+                # Event gates (access, commands, cooldowns) run before any handler, on every attempt
+                if await gates.run_gates(event):
+                    await _run_handlers(event, handlers)
+
+            await run_with_inline_retries(attempt, what="event", ref=event.id)
 
 
 setattr(handle_event, SELF_RETRYING, True)
