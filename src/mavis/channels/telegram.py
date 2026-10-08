@@ -37,6 +37,17 @@ def to_inline_button(b: Button) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=b.label, callback_data=b.data)
 
 
+def _fit_html(text: str) -> str:
+    """Markdown to Telegram HTML within the message limit. Cuts the markdown first and converts the cut,
+    so a tag is never sliced in half (HTML escapes can grow the text, so shrink until it fits)."""
+    cut = text[:TELEGRAM_LIMIT]
+    body = to_telegram_html(cut)
+    while len(body) > TELEGRAM_LIMIT and len(cut) > 1:
+        cut = cut[: max(1, int(len(cut) * 0.9))]
+        body = to_telegram_html(cut)
+    return body
+
+
 class TelegramChannel:
     def __init__(self, token: str, bot: Any | None = None) -> None:
         self._bot = bot or Bot(token)
@@ -122,7 +133,7 @@ class TelegramChannel:
     async def edit_text(self, chat_id: int, message_id: int, text: str,
                         buttons: list[list[Button]] | None = None) -> None:
         await self._ensure()
-        body = to_telegram_html(text)[:TELEGRAM_LIMIT]
+        body = _fit_html(text)
         try:
             await self._bot.edit_message_text(
                 chat_id=chat_id, message_id=message_id, text=body, parse_mode="HTML",
