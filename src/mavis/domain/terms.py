@@ -125,15 +125,29 @@ def from_user_not_sources(text: str, user_words: str, sources: list[str]) -> boo
     return not copied_from(text, user_words, sources)
 
 
-SAME_REQUEST = 0.5  # share of content terms two wordings must have in common to be one request
+SAME_REQUEST = 0.75  # share of content terms two wordings must have in common to be one request
+_NEGATION = re.compile(r"\b(not|no|never|stop|without|cannot|dont|don't|doesn't|won't|can't|isn't)\b", re.I)
+_WHEN_WORDS = frozenset(
+    "monday tuesday wednesday thursday friday saturday sunday today tomorrow tonight yesterday am pm noon "
+    "midnight morning evening january february march april may june july august september october november "
+    "december jan feb mar apr jun jul aug sep sept oct nov dec".split())
+
+
+def _specifics(text: str) -> set[str]:
+    """What must be identical for two wordings to be one request: every number (amounts, dates, times),
+    day and month names, and every identifier."""
+    words = _WORD_RE.findall(text.lower())
+    return {w for w in words if any(ch.isdigit() for ch in w) or w in _WHEN_WORDS} | identifiers(text)
 
 
 def same_request(a: str, b: str) -> bool:
-    """Two wordings of one request ("research X and compare fees" ~ "compare X: fees"): at least half of
-    their combined content terms are shared, and at least two. The dedupe of cards a user would otherwise
-    approve twice."""
+    """Two wordings of one request ("research X and compare fees" ~ "compare X: fees"). Strict, because a
+    correction must never be swallowed by an older card: the same numbers, dates, times and identifiers,
+    the same negation, and at least three quarters of the combined content terms shared (two or more)."""
     ta, tb = terms(a), terms(b)
     if not ta or not tb:
+        return False
+    if _specifics(a) != _specifics(b) or bool(_NEGATION.search(a)) != bool(_NEGATION.search(b)):
         return False
     shared = {t for t in ta if _same(t, tb)}
     return len(shared) >= 2 and len(shared) / len(ta | tb) >= SAME_REQUEST

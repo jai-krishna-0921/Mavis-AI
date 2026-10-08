@@ -47,6 +47,7 @@ _terms = terms  # select()'s overlap vocabulary (domain.terms)
 
 NEVER_AUTO_APPROVE = frozenset({"add_policy_rule", "forget"})
 _PREVIEW_IN_RESULT_CHARS = 500
+SAME_REQUEST_WINDOW = timedelta(minutes=30)  # an older card is stale: a repeat after that is a new request
 ALREADY_WAITING_RESULT = (
     "ALREADY_AWAITING_APPROVAL #{id}: this same action is already waiting for the user's OK on an "
     "earlier card. Nothing new was queued and it has NOT been done yet. Tell the user it's waiting on "
@@ -237,7 +238,8 @@ async def _waiting_same_request(user_id: int, tool: MavisTool, arguments: dict, 
         theirs = " ".join(str((row.arguments or {}).get(name) or "") for name in tool.provenance)
         other = {k: v for k, v in (row.arguments or {}).items() if k not in tool.provenance}
         # the same words for another time or kind (a reminder at 5 and at 6) are another request
-        if approvals.equivalence_key(other) == rest and same_request(mine, theirs):
+        recent = utcnow() - row.created_at <= SAME_REQUEST_WINDOW
+        if recent and approvals.equivalence_key(other) == rest and same_request(mine, theirs):
             return row
     return None
 
@@ -653,7 +655,9 @@ class ToolRegistry:
                         # The same action already waits on the user (another task, or an earlier
                         # turn): one card per action, never a second one to approve twice.
                         log.info("tool.approval_already_waiting", tool=tool.name, approval_id=twin.id)
-                        return ALREADY_WAITING_RESULT.format(id=twin.id)
+                        shown = "" if twin.tainted else (
+                            f"\nThe waiting card says: {(twin.preview or '')[:_PREVIEW_IN_RESULT_CHARS]}")
+                        return ALREADY_WAITING_RESULT.format(id=twin.id) + shown
                     corrected = None if existing is not None else next(iter(
                         await approvals.waiting_same_target(user_id, tool.name, req.arguments,
                                                             target=tool.target, tainted=tainted,

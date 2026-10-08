@@ -160,3 +160,129 @@ async def test_the_same_reminder_words_for_another_time_is_its_own_card(user, ch
         fake_llm.push_text("Waiting on your OK.")
         await run_turn(_event(user.id, "yes do that", n))
     assert [a.tool for a in await approvals.open_for_user(user.id)] == ["wake_me", "wake_me"]
+
+
+# --- review fix: a bare yes approves a sensitive card only when it cannot be about anything else -----------
+
+
+async def _yes(user, fake_llm, text="yes"):
+    fake_llm.push_text("Sure.")
+    await run_turn(_event(user.id, text, 9))
+
+
+async def test_yes_still_approves_a_clean_outward_card_shown_alone(user, channel, fake_llm, fake_memory, jobs,
+                                                                   tools):
+    aid = await _prompted(user.id)
+    await _yes(user, fake_llm)
+    [resume] = jobs(JobKind.RESUME_TASK)
+    assert resume.payload["approval_id"] == aid
+
+
+async def test_yes_after_a_question_does_not_approve_an_outward_card(user, channel, fake_llm, fake_memory,
+                                                                     jobs, tools):
+    await messages.log(user.id, Role.ASSISTANT, "Want me to also move your 3pm?", proactive=True)
+    aid = await _prompted(user.id)
+    await _yes(user, fake_llm)
+    assert jobs(JobKind.RESUME_TASK) == []
+    assert (await approvals.get(aid)).status == ApprovalStatus.PENDING
+    assert any("Tap Approve" in t for t in await _sent_texts(user.id))
+
+
+async def _sent_texts(user_id):
+    return [m.content for m in await messages.recent(user_id, 20) if m.role == "assistant"]
+
+
+async def test_yes_after_a_recent_other_assistant_message_does_not_approve(user, channel, fake_llm,
+                                                                           fake_memory,
+                                                                           jobs, tools):
+    aid = await _prompted(user.id)
+    # a second assistant message right before the yes (the card is no longer alone)
+    await messages.log(user.id, Role.ASSISTANT, "Your research is ready.")
+    await _yes(user, fake_llm)
+    assert jobs(JobKind.RESUME_TASK) == []
+    assert (await approvals.get(aid)).status == ApprovalStatus.PENDING
+
+
+async def test_yes_does_not_approve_a_tainted_outward_card(user, channel, fake_llm, fake_memory, jobs, tools):
+    from sqlalchemy import update
+
+    from mavis.store.db import Session
+    from mavis.store.models import PendingApproval
+
+    aid = await _prompted(user.id)
+    async with Session() as s:
+        await s.execute(update(PendingApproval).where(PendingApproval.id == aid).values(tainted=True))
+        await s.commit()
+    await _yes(user, fake_llm)
+    assert jobs(JobKind.RESUME_TASK) == []
+
+
+async def test_yes_after_tapping_edit_does_not_approve_the_unedited_card(user, channel, fake_llm, fake_memory,
+                                                                         jobs, tools):
+    aid = await _prompted(user.id)
+    await approvals.claim(aid, {ApprovalStatus.PENDING}, ApprovalStatus.AWAITING_EDIT)
+    await messages.log(user.id, Role.ASSISTANT, EDIT_QUESTION)
+    await _yes(user, fake_llm)
+    assert jobs(JobKind.RESUME_TASK) == []
+    assert (await approvals.get(aid)).status == ApprovalStatus.AWAITING_EDIT
+
+
+async def test_a_reply_to_the_card_with_yes_is_always_accepted(user, channel, fake_llm, fake_memory, jobs,
+                                                               tools):
+    aid = await _prompted(user.id)
+    await messages.log(user.id, Role.ASSISTANT, "Also, want the summary?", proactive=True)
+    event = _event(user.id, "yes", 9)
+    event.payload["reply_to_text"] = "Ready when you are. Want me to go ahead?\n\nSend note: hi"
+    await run_turn(event)
+    [resume] = jobs(JobKind.RESUME_TASK)
+    assert resume.payload["approval_id"] == aid
+
+
+async def test_yes_within_a_minute_of_another_assistant_message_before_the_card_does_not_approve(
+    user, channel, fake_llm, fake_memory, jobs, tools
+):
+    await messages.log(user.id, Role.ASSISTANT, "Here is the summary you asked for.", proactive=True)
+    aid = await _prompted(user.id)
+    await _yes(user, fake_llm)
+    assert jobs(JobKind.RESUME_TASK) == []
+    assert (await approvals.get(aid)).status == ApprovalStatus.PENDING
+
+
+@pytest.mark.parametrize("a,b,same", [
+    ("Dentist appointment Monday 3pm", "Dentist appointment Tuesday 3pm", False),
+    ("Dentist appointment Monday 3pm", "Dentist appointment Monday 4pm", False),
+    ("send the reports to Ravi", "do not send the reports to Ravi", False),
+    ("pay the rent of 45000", "pay the rent of 54000", False),
+    ("email ravi@x.com the deck", "email priya@x.com the deck", False),
+    ("Research GATE CS coaching institutes in Chennai and compare fees and reviews",
+     "Compare GATE coaching institutes in Chennai: fees, reviews", True),
+    ("Remind me to drink water", "Reminder: drink water", True),
+    ("plan a trip to Ladakh", "plan a trip to Goa", False),
+])
+def test_same_request_is_strict(a, b, same):
+    from mavis.domain.terms import same_request
+
+    assert same_request(a, b) is same
+
+
+async def test_a_repeat_after_half_an_hour_is_a_new_request(user, channel, fake_llm, fake_memory, jobs,
+                                                            tools):
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    from mavis.store.db import Session, utcnow
+    from mavis.store.models import PendingApproval
+
+    goals = ["Research GATE CS coaching institutes in Chennai and compare fees and reviews",
+             "Compare GATE coaching institutes in Chennai: fees, reviews"]
+    for n, goal in enumerate(goals, 1):
+        fake_llm.push_ai(_call("read_page", {}, f"r{n}"))
+        fake_llm.push_ai(_call("start_task", {"goal": goal}, f"s{n}"))
+        fake_llm.push_text("Waiting on your OK.")
+        await run_turn(_event(user.id, "yes do that", n))
+        if n == 1:
+            async with Session() as s:
+                await s.execute(update(PendingApproval).values(created_at=utcnow() - timedelta(minutes=45)))
+                await s.commit()
+    assert len(await approvals.open_for_user(user.id)) == 2

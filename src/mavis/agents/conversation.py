@@ -430,6 +430,47 @@ def _edit_question_is_latest(history: list[Message]) -> bool:
     return any(approval_flow.EDIT_QUESTION in t for t in _recent_assistant(history, 1))
 
 
+YES_QUIET_S = 60  # no other assistant message this close before a yes that approves a sensitive card
+
+
+def _self_only_card(approval: PendingApproval) -> bool:
+    from mavis.tools.registry import SELF_ONLY, get_registry
+
+    tool = get_registry().find(approval.tool)
+    return tool is not None and tool.risk in SELF_ONLY
+
+
+def _plain_yes_may_approve(approval: PendingApproval, history: list[Message]) -> bool:
+    """May a bare text "yes" approve this card? Self-only cards: yes (the card is the newest message).
+    Outward, spending and destructive cards: only when the yes cannot be about something else, i.e. the
+    user wrote it after the card was shown, nothing else was said by us in the minute before it, the message
+    before the card was not a question (the yes may answer that), the card is clean and was not sent to Edit.
+    Otherwise the user is asked to tap Approve. A Telegram reply to the card is always accepted."""
+    if _self_only_card(approval):
+        return True
+    if approval.status != ApprovalStatus.PENDING or approval.tainted or approval.prompted_at is None:
+        return False
+    users_ = [m for m in history if m.role == Role.USER.value]
+    if not users_:
+        return False
+    said_at = users_[-1].created_at
+    if said_at <= approval.prompted_at:
+        return False
+    before = [m for m in history if m.created_at < said_at and m.role == Role.ASSISTANT.value]
+    preview = strip_verbatim(approval.preview or "").strip()
+    card = next((m for m in reversed(before) if preview and preview in m.content), None)
+    if card is None:
+        return False
+    others = [m for m in before if m is not card]
+    if any((said_at - m.created_at).total_seconds() < YES_QUIET_S for m in others):
+        return False
+    earlier = [m for m in others if m.created_at <= card.created_at]
+    return not (earlier and earlier[-1].content.rstrip().endswith("?"))
+
+
+TAP_TO_APPROVE = "That one needs a tap, not a text. Tap Approve on the card if you want me to go ahead."
+
+
 async def _approval_reply(event: Event, user_id: int, text: str, history: list[Message]) -> bool:
     """A text message that decides the card waiting on the user, or False (an ordinary turn).
 
@@ -451,6 +492,15 @@ async def _approval_reply(event: Event, user_id: int, text: str, history: list[M
     if interp.decision == "approve" and not (prompt_is_latest(approval, history) or on_card):
         log.info("conversation.approve_not_latest", approval_id=approval.id)
         return False  # something was said after the prompt: this "yes" may answer that instead
+    waiting = [a for a in await approvals.open_for_user(user_id)
+               if a.status in (ApprovalStatus.PENDING, ApprovalStatus.AWAITING_EDIT)]
+    if (interp.decision == "approve" and not on_card and len(waiting) == 1  # several: apply_reply asks which
+            and not _plain_yes_may_approve(approval, history)):
+        log.info("conversation.yes_needs_tap", approval_id=approval.id)
+        await approval_flow.say(user_id, TAP_TO_APPROVE, approval_flow.approval_buttons(approval.id),
+                                dedupe_key=f"reply:{event.id}:tap")
+        current_route.set("APPROVAL_REPLY")
+        return True
     ack = await approval_flow.apply_reply(approval, interp)
     if ack is None:  # unrelated: an ordinary message after all
         return False

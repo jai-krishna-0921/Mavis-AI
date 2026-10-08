@@ -303,17 +303,17 @@ async def run_step_agent(
 
 UNREQUESTED_SKIP_NOTE = ("Part of the work could have used {names}, which is not connected and was not asked "
                          "for, so I did it without. Everything else is delivered as gathered.")
-MAX_UNREQUESTED_SKIPS = 3
+MAX_UNREQUESTED_SKIPS = 1  # one re-run: tools already run in the failed attempt run again
 
 
 async def _run_step_without_unrequested(step: PlanStep, inp: StepInput, skipped: list[Capability]):
     """Run a step; an account it reaches for that the user never named is not a reason to stop.
 
-    The task's goal and the step's instruction say which accounts the user asked for. A step that needs
+    The task's goal says which accounts the user asked for. A step that needs
     another one (a planner or specialist adding Notion to a research task) is re-run without the tools of
     that account, so nothing waits on a connection nobody wanted and what was gathered is delivered. A
     requested account still pauses the task for the connect prompt."""
-    asked = f"{inp['goal']}\n{step.instruction}"
+    asked = inp["goal"]  # the user's goal, not the planner-written step (injected text can steer that)
     token = excluded_capabilities.set(excluded_capabilities.get())
     try:
         while True:
