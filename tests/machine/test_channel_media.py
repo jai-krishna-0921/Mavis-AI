@@ -101,3 +101,30 @@ async def test_telegram_photo_and_album(tmp_path):
     assert ids == [902, 903, 904]
     album = bot.calls[1][1]["media"]
     assert [m.caption for m in album] == ["a", "b", "c"]
+
+
+@pytest.mark.parametrize("filler", ["a", "<", "**x** ", "`c` & "])
+async def test_long_edit_is_cut_before_conversion_so_tags_stay_closed(filler):
+    import re
+
+    bot = _Bot()
+    await TelegramChannel("t", bot=bot).edit_text(40, 8, "**start** " + filler * 5000)
+    body = bot.calls[0][1]["text"]
+    assert len(body) <= 4096
+    for tag in ("b", "code", "i"):
+        assert len(re.findall(rf"<{tag}>", body)) == len(re.findall(rf"</{tag}>", body))
+    assert not re.search(r"<[^>]*$", body)  # no half tag at the end
+
+
+@pytest.mark.parametrize("name,value", [("PROGRESS_EDIT_MIN_INTERVAL_S", "-1"), ("PROGRESS_CARD_AFTER_S", "-5"),
+                                        ("PROGRESS_MAX_SCREENSHOTS", "-2"), ("PROGRESS_MAX_SCREENSHOTS", "500"),
+                                        ("TELEGRAM_GLOBAL_SEND_RATE", "0"), ("PROGRESS_EDIT_MIN_INTERVAL_S", "9999")])
+def test_progress_settings_reject_out_of_range(settings, monkeypatch, name, value):
+    from pydantic import ValidationError
+
+    from mavis.config import get_settings
+
+    monkeypatch.setenv(name, value)
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError):
+        get_settings()
