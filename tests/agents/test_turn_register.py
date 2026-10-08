@@ -107,3 +107,35 @@ async def test_names_and_mild_words_cost_no_rewrite_call(
     assert channel.texts == [reply]
     assert len(fake_llm.calls) == 1
     assert "may swear" not in fake_llm.calls[0][0].content
+
+
+async def test_brevity_preference_reaches_the_model_from_old_talk_and_from_the_card(
+        db, channel, fake_llm, memory, bus):
+    """Live E2E: the user said 'I hate long messages' and kept getting 5 to 8 line replies. The wish was
+    only a line in the profile card or an old message: now it is a rule in the prompt."""
+    from mavis.domain.messages import Role
+    from mavis.memory.profile import ProfileCard
+    from mavis.store.repo import messages
+    from mavis.store.repo import profile as profile_repo
+
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+
+    async def turn(n: int, text: str) -> str:
+        fake_llm.push_text("ok")
+        await run_turn(_event(user.id, text, n))
+        return fake_llm.calls[-1][0].content
+
+    assert "want short messages" not in await turn(1, "how do I split 47000 between rent and savings")
+    await profile_repo.save(user.id, ProfileCard(dislikes=["long messages"]))
+    assert "want short messages" in await turn(2, "and what about coaching fees")
+    await profile_repo.save(user.id, ProfileCard(dislikes=["early meetings"]))
+    assert "want short messages" not in await turn(3, "and rent?")
+    await messages.log(user.id, Role.USER, "keep it short, I hate walls of text", event_id="tg:update:900")
+    assert "want short messages" in await turn(4, "so what do I do")
+    assert "want short messages" not in await turn(5, "ok explain in detail please")  # taken back
+
+
+async def test_just_made_swear_is_mirrored_in_the_prompt(db, channel, fake_llm, memory, bus):
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    system = await _turns(user.id, fake_llm, ["fuck this week man, so much shit to do"])
+    assert "ONE casual swear" in system

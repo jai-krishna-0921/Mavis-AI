@@ -188,3 +188,13 @@ async def test_proactive_swearing_without_a_sweary_chat_is_rewritten(user, clock
     fake_llm.push_text("Dentist at 5, big day.")
     msg = await Composer(fake_memory).compose(user, "dentist reminder", 2)
     assert msg.messages == ["Dentist at 5, big day.", "Good luck!"]
+
+
+async def test_proactive_message_keeps_a_stated_wish_for_short_messages(user, clock, fake_memory, fake_llm):
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    await messages.log(user.id, Role.USER, "I hate long messages, keep it short")
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["hi"]))
+    await Composer(fake_memory).compose(user, "follow up on the interview", 2)
+    assert "want short messages" in fake_llm.structured_calls[-1]["system"]

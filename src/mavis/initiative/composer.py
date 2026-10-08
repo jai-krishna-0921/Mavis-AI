@@ -112,7 +112,8 @@ class Composer:
         with contextlib.suppress(Exception):  # the name is a nicety, never block a ping on it
             card_name = (await profile_repo.get(user.id)).name
         # proactive: never asks for a name and never says a greeting is fine (None omits that line)
-        their_register = register.measure(register.user_texts(recent, now))
+        their_register = register.measure(register.user_texts(recent, now),
+                                          brief=await register.standing_brief(user.id, recent, now))
         system = persona.system_prompt(
             user, now, recall, known_name=card_name, ask_name=False,
             prior_turns=len(persona.recent_messages(recent, now)) or None,
