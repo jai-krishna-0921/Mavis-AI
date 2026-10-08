@@ -183,3 +183,18 @@ async def test_empty_allowlist_in_dev_warns_once(client, monkeypatch) -> None:
         await client.post("/webhooks/telegram", json=update(52))
         await client.post("/webhooks/telegram", json=update(53))
     assert [e["event"] for e in logs].count("telegram.allowlist_empty_allowing_all") == 1
+
+
+@pytest.mark.parametrize(("env", "secret", "refused"), [
+    ("prod", "x" * 31, True), ("prod", "x" * 32, False), ("dev", "short", False), ("prod", "", False)])
+def test_short_webhook_secret_is_refused_in_prod_only(settings, monkeypatch, env, secret, refused) -> None:
+    from mavis.api.app import check_webhook_secret
+
+    monkeypatch.setenv("ENV", env)
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", secret)
+    get_settings.cache_clear()
+    if refused:
+        with pytest.raises(RuntimeError, match="at least 32"):
+            check_webhook_secret(get_settings())
+    else:
+        check_webhook_secret(get_settings())

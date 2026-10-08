@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -94,3 +95,28 @@ async def modify_nested(user_id: int, key: str, change: Callable[[dict], dict]) 
         u.state = state
         await s.commit()
         return merged
+
+
+async def purge_strangers(cutoff: datetime, keep_chat_ids: frozenset[int] = frozenset()) -> int:
+    """Delete pending users (never activated, never redeemed a code) created before `cutoff`, with every row
+    that points at them. Bounds the growth of stranger rows in invite mode. Returns how many were removed."""
+    from sqlalchemy import delete
+
+    from mavis.store.models import Base, InviteRedemption
+
+    async with Session() as s:
+        ids = list(await s.scalars(
+            select(User.id).where(User.status == "pending", User.created_at < cutoff,
+                                  User.activated_at.is_(None), User.is_test.is_(False),
+                                  User.id.notin_(select(InviteRedemption.user_id)))))
+        if keep_chat_ids:
+            kept = set(await s.scalars(select(User.id).where(User.telegram_chat_id.in_(keep_chat_ids))))
+            ids = [i for i in ids if i not in kept]
+        if not ids:
+            return 0
+        for table in reversed(Base.metadata.sorted_tables):
+            if table.name != "users" and "user_id" in table.c:
+                await s.execute(delete(table).where(table.c.user_id.in_(ids)))
+        await s.execute(delete(User).where(User.id.in_(ids)))
+        await s.commit()
+        return len(ids)

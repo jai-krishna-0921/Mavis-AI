@@ -69,27 +69,42 @@ async def _say_once(user_id: int, text: str, kind: str, window_s: float, event: 
         await outbox.enqueue_now(Outbound(user_id=user_id, text=text, dedupe_key=f"gate:{kind}:{event.id}"))
 
 
-async def _failures(user_id: int, now: datetime, *, add: bool) -> int:
-    """Failed code attempts by this user in the last hour (kept in the user's state row)."""
+async def _failures(user_id: int, now: datetime, *, add: bool, event_id: str = "") -> int:
+    """Failed code attempts by this user in the last hour (in the user state row). Counting is idempotent
+    per event id: a retry of the same bad-code update adds nothing."""
     cutoff = now - timedelta(hours=1)
-    count = {"n": 0}
+    res = {"n": 0, "added": False}
 
     def change(cur: dict) -> dict:
         hits = [t for t in (cur.get("fails") or []) if (p := _parse(t)) is not None and p > cutoff]
-        if add:
+        seen = list(cur.get("fail_events") or [])
+        if add and event_id not in seen:
             hits.append(now.isoformat())
-        count["n"] = len(hits)
-        return {**cur, "fails": hits}
+            seen = (seen + [event_id])[-20:]
+            res["added"] = True
+        res["n"] = len(hits)
+        return {**cur, "fails": hits, "fail_events": seen}
 
     await users.modify_nested(user_id, _STATE_KEY, change)
-    if add and (client := bus.get_redis()) is not None:
-        try:  # global failed-attempt counter for the owner alert (Task 16 reads it)
-            key = f"mavis:gate:fails:{now:%Y%m%d%H}"
-            await client.incr(key)
-            await client.expire(key, 7200)
-        except Exception as exc:  # noqa: BLE001
-            log.debug("gate.fail_counter_failed", error=type(exc).__name__)
-    return count["n"]
+    if res["added"]:
+        await _count_global_failure(now)
+    return res["n"]
+
+
+async def _count_global_failure(now: datetime) -> None:
+    """Failed attempts across all chats, per hour, in Redis. Log-only signal (no lockout: a code has about 50
+    bits of entropy and the per-chat limit already applies); the owner alert in Task 16 reads the counter."""
+    if (client := bus.get_redis()) is None:
+        return
+    try:
+        key = f"mavis:gate:fails:{now:%Y%m%d%H}"
+        n = await client.incr(key)
+        await client.expire(key, 7200)
+        limit = get_settings().invite_fail_alert_per_hour
+        if n == limit:  # once per hour, when the line is crossed
+            log.warning("gate.global_failed_codes_high", count=n, per_hour=limit)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("gate.fail_counter_failed", error=type(exc).__name__)
 
 
 async def activate(user_id: int, invite: InviteCode, now: datetime) -> User:
@@ -121,7 +136,7 @@ async def _pending(user: User, event: Event) -> bool:
         return False
     invite = await invites.redeem(code, user.id, now)
     if invite is None:
-        await _failures(user.id, now, add=True)
+        await _failures(user.id, now, add=True, event_id=event.id)
         await outbox.enqueue_now(Outbound(user_id=user.id, text=CODE_NOT_VALID_TEXT,
                                           dedupe_key=f"gate:badcode:{event.id}"))
         return False
@@ -194,5 +209,18 @@ async def access_gate(event: Event) -> bool:
     return False
 
 
+async def purge_strangers() -> int:
+    """Drop pending rows older than PENDING_RETENTION_DAYS (they never held content). Runs at worker start."""
+    s = get_settings()
+    n = await users.purge_strangers(utcnow() - timedelta(days=s.pending_retention_days),
+                                    frozenset(s.owner_telegram_chat_ids))
+    if n:
+        log.info("gate.strangers_purged", count=n)
+    return n
+
+
 def register_access_gate() -> None:
+    from mavis.worker.runner import register_startup_hook
+
     register_event_gate("access", access_gate, order=10)
+    register_startup_hook(purge_strangers)

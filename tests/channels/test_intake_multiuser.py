@@ -89,3 +89,32 @@ async def test_allowlist_mode_is_unchanged(db, settings, recording_bus):
 
 async def test_allowlist_mode_still_admits_groups_as_before(db, settings, recording_bus):
     assert await ingest_update(_msg(301, -4003, "group", "hi"), recording_bus, _noop)
+
+
+async def _albumed(bus, chat: int, n: int, base: int) -> int:
+    return sum([await ingest_update(_msg(base + i, chat, "private", f"photo {i}"), bus, _noop)
+                for i in range(n)])
+
+
+async def test_active_user_album_of_15_is_not_dropped(db, invite_mode, recording_bus):
+    u, _ = await users.get_or_create_by_chat(6501, "Lena")
+    await users.update(u.id, status="active")
+    assert await _albumed(recording_bus, 6501, 15, 1000) == 15
+    assert [e.type for e in _take(recording_bus)] == [EventType.USER_MESSAGE] * 15
+
+
+async def test_owner_is_never_rate_limited_even_in_a_flood(db, invite_mode, recording_bus, monkeypatch):
+    monkeypatch.setenv("OWNER_TELEGRAM_CHAT_IDS", "[6502]")
+    from mavis.config import get_settings
+    get_settings.cache_clear()
+    assert await _albumed(recording_bus, 6502, 300, 2000) == 300
+    assert all(e.type is EventType.USER_MESSAGE for e in _take(recording_bus))
+
+
+async def test_a_flood_from_an_active_user_is_slowed_with_a_notice_not_silently(db, invite_mode,
+                                                                                 recording_bus):
+    u, _ = await users.get_or_create_by_chat(6503, "Sam")
+    await users.update(u.id, status="active")
+    await _albumed(recording_bus, 6503, 80, 3000)
+    types = [e.type for e in _take(recording_bus)]
+    assert types.count(EventType.USER_MESSAGE) == 60 and EventType.RATE_LIMITED in types

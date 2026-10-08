@@ -87,8 +87,8 @@ class Settings(BaseSettings):
     invite_fail_alert_per_hour: int = 50  # failed attempts across all chats before the owner is alerted
     pending_reply_every_h: float = 24.0
     pending_retention_days: int = 14
-    inbound_rate_per_min: float = 20.0
-    inbound_burst: int = 10
+    inbound_rate_per_min: float = 120.0  # active users: far above any human, albums and forwards fit
+    inbound_burst: int = 60
     inbound_pending_rate_per_min: float = 5.0
     inbound_pending_burst: int = 3
 

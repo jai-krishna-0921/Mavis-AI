@@ -146,7 +146,8 @@ async def ingest_update(data: dict[str, Any], bus: EventBus, answer: Answerer | 
     # The owner is grandfathered: a listed owner chat is never "pending", whatever its row says yet.
     pending = (user.status != "active" and not is_test_chat(chat_id, s)
                and chat_id not in s.owner_telegram_chat_ids)
-    if s.access_mode == "invite" or (s.access_mode == "shadow" and pending):
+    owner = chat_id in s.owner_telegram_chat_ids
+    if not owner and (s.access_mode == "invite" or (s.access_mode == "shadow" and pending)):
         if not await get_inbound_limiter().allow(chat_id, pending=pending):
             minute = int(occurred.timestamp() // 60)
             return await bus.publish(Event(

@@ -175,3 +175,64 @@ async def test_default_wiring_registers_the_gate_and_defaults_admit(db, settings
     register_default_handlers()
     u, _ = await users.get_or_create_by_chat(7779, "Eli")
     assert await gates.run_gates(_ev(u.id, "hi", 1)) is True
+
+
+async def test_crash_between_redeem_and_activate_is_recovered_by_the_retry(pending, channel, monkeypatch):
+    u = await pending(6201, "Mina")
+    row, plain = await invites.mint(created_by=1, uses=1)
+    real = gate.activate
+    calls = {"n": 0}
+
+    async def flaky(user_id, invite, now):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("db went away")  # after redeem committed
+        return await real(user_id, invite, now)
+
+    monkeypatch.setattr(gate, "activate", flaky)
+    with pytest.raises(RuntimeError):
+        await gate.access_gate(_ev(u.id, plain, 1))
+    assert (await users.get(u.id)).status == "pending"
+    assert await gate.access_gate(_ev(u.id, plain, 1)) is False  # the event retry
+    fresh = await users.get(u.id)
+    assert fresh.status == "active" and fresh.invite_id == row.id
+    assert (await invites.list_active())[0].uses == 1  # one use, not two
+    assert gate.CODE_NOT_VALID_TEXT not in await _sent(channel)
+    assert (fresh.state or {}).get("access_gate", {}).get("fails") in (None, [])
+
+
+async def test_a_retried_bad_code_event_counts_once(pending):
+    u = await pending(6202, "Ola")
+    ev = _ev(u.id, "MAV-AAAAA-BBBBB", 7)
+    for _ in range(4):
+        await gate.access_gate(ev)
+    assert len((await users.get(u.id)).state["access_gate"]["fails"]) == 1
+    await gate.access_gate(_ev(u.id, "MAV-AAAAA-CCCCC", 8))
+    assert len((await users.get(u.id)).state["access_gate"]["fails"]) == 2
+
+
+async def test_global_failed_code_counter_warns_once_at_the_limit(pending, fake_redis, monkeypatch):
+    monkeypatch.setenv("INVITE_FAIL_ALERT_PER_HOUR", "3")
+    from mavis.config import get_settings
+    get_settings.cache_clear()
+    warnings: list[str] = []
+    monkeypatch.setattr(gate.log, "warning", lambda event, **kw: warnings.append(event))
+    for i in range(5):  # five different chats, one bad code each: no chat reaches its own limit
+        u = await pending(6300 + i, f"n{i}")
+        await gate.access_gate(_ev(u.id, "MAV-AAAAA-BBBBB", 100 + i))
+    assert warnings == ["gate.global_failed_codes_high"]
+
+
+async def test_startup_purge_drops_stale_strangers(pending, monkeypatch):
+    from datetime import timedelta
+
+    from mavis.store.db import Session
+    from mavis.store.models import User
+
+    stale, fresh = await pending(6401, "Stale"), await pending(6402, "Fresh")
+    async with Session() as s:
+        (await s.get(User, stale.id)).created_at = utcnow() - timedelta(days=15)
+        await s.commit()
+    assert await gate.purge_strangers() == 1
+    assert await users.get_by_chat(6401) is None and await users.get_by_chat(6402) is not None
+    assert fresh
