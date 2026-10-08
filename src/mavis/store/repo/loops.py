@@ -199,6 +199,59 @@ def similar_titles(a: str, b: str, entities_a: list[str] | None = None,
     return len(smaller) >= 2 and smaller <= larger and not ((larger - smaller) & names)
 
 
+MATTER_STOPWORDS = frozenset("remind reminder user asked set scheduled schedule please keep time".split())
+# words too common to identify a matter on their own
+MATTER_GENERIC = frozenset("meeting message email appointment session reminder task thing".split())
+MATTER_STEM = 5  # "block" == "blocked", "stretch" == "stretching"
+MATTER_DISTINCTIVE = 7  # a single shared word this long identifies the matter ("plumber", "stretch")
+SAME_MOMENT_WINDOW = timedelta(minutes=10)
+
+
+def _stems(text: str) -> dict[str, int]:
+    """stem -> length of the longest word with that stem"""
+    out: dict[str, int] = {}
+    for tok in title_tokens(text):
+        if tok not in MATTER_STOPWORDS:
+            out[tok[:MATTER_STEM]] = max(out.get(tok[:MATTER_STEM], 0), len(tok))
+    return out
+
+
+def _people(text: str, entities: list[str] | None) -> set[str]:
+    """Stems of capitalised words that can be a person (not a date word, an acronym or the user)."""
+    words = re.findall(r"[^\W\d_]+", text)
+    names = {w.casefold() for w in words[1:] if w[:1].isupper() and not w.isupper()}
+    for e in entities or []:
+        names |= set(normalise_title(e).split())
+    return {n[:MATTER_STEM] for n in names if n not in _DUP_STOPWORDS and n != "user"}
+
+
+def same_matter(a: str, b: str, entities_a: list[str] | None = None,
+                entities_b: list[str] | None = None, *, one_word: bool = True) -> bool:
+    """Two texts (loop titles, reminder reasons) that name the same thing in different words, for use when
+    they are ALSO at the same moment: they share two content words (or one distinctive word) and neither
+    names a different person than the other. "Remind Arjun to drink water" / "Remind User to drink water
+    (asked Thu...)", "Keep 2 to 3 PM blocked for solo focus" / "Focus block scheduled". Not "Call mom" /
+    "Call Tom". `one_word=False` (two loops): one shared word is never enough ("Dentist appointment" /
+    "Call the dentist")."""
+    sa, sb = _stems(a), _stems(b)
+    shared = set(sa) & set(sb)
+    if not shared:
+        return False
+    # two different people named (Raj vs Priya) are two matters; a name on one side only is usually the
+    # user's own ("Remind Arjun to drink water" / "Remind User to drink water")
+    names_a = _people(a, entities_a) - shared
+    names_b = _people(b, entities_b) - shared
+    if names_a and names_b:
+        return False
+    if len(shared) >= 2:
+        return True
+    if not one_word:
+        return False
+    [stem] = shared
+    generic = {g[:MATTER_STEM] for g in MATTER_GENERIC}
+    return max(sa[stem], sb[stem]) >= MATTER_DISTINCTIVE and stem not in generic
+
+
 def _due_close(a: datetime | None, b: datetime | None) -> bool:
     if a is None or b is None:
         return True
@@ -218,6 +271,11 @@ async def find_open_duplicate(user_id: int, data: LoopUpsert) -> Loop | None:
             return loop
         if fuzzy is None and _due_close(loop.due_at, due) and similar_titles(
                 loop.title, data.title, loop.entities, data.entities):
+            fuzzy = loop
+        # the same moment written by two writers (the tool and LEARN) in different words
+        if fuzzy is None and loop.due_at is not None and due is not None and \
+                abs(timeutil.ensure_utc(loop.due_at) - due) <= SAME_MOMENT_WINDOW and \
+                same_matter(loop.title, data.title, loop.entities, data.entities, one_word=False):
             fuzzy = loop
     return fuzzy
 
