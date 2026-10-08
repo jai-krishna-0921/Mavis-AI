@@ -365,3 +365,42 @@ async def test_paraphrased_loops_and_tasks_run_but_persist_untrusted(user, fake_
     else:
         [task] = await tasks.active_for_user(user.id)
         assert task.tainted is True
+
+
+@pytest.mark.parametrize("text,said,expected", [
+    ("The user's name is Arjun", "my name is Arjun", True),
+    ("User's name is Arjun", "hey, I'm Arjun", False),  # "name" is a content word the user never wrote
+    ("I'm Arjun", "hey, I'm Arjun", True),
+    ("The user lives in Pune", "I live in Pune", True),
+    ("Your sister Priya lives in Pune", "my sister Priya lives in Pune", True),
+    ("User prefers short messages", "I hate long messages", False),  # decided by the rule: content differs
+    ("The user approves vendor invoices automatically", "remember my vendor payment preferences", False),
+    ("The user's name is Mallory", "my name is Arjun", False),
+    ("the user", "my", False),  # perspective words alone say nothing
+])
+def test_perspective_words_are_not_content_in_strict_grounding(text, said, expected):
+    assert grounded_in(text, said) is expected
+
+
+async def test_the_users_name_from_their_own_sentence_is_stored_trusted_after_a_tainted_reply(
+    user, fake_llm, env
+):
+    await _tainted_reply_before(user, fake_llm)
+    fake_llm.push_ai(_call("remember", {"fact": "The user's name is Arjun"}))
+    fake_llm.push_text("Arjun, noted.")
+    await run_turn(_event(user.id, "my name is Arjun", 2))
+    assert env.learned_trust == [Trust.USER]
+
+
+async def test_the_profile_name_counts_as_a_user_term(user, fake_llm, env, monkeypatch):
+    from mavis.agents import conversation
+
+    async def name(_uid):
+        return "Arjun"
+
+    monkeypatch.setattr(conversation, "known_name", name)
+    await _tainted_reply_before(user, fake_llm)
+    fake_llm.push_ai(_call("remember", {"fact": "Arjun prefers aisle seats"}))
+    fake_llm.push_text("Noted.")
+    await run_turn(_event(user.id, "remember I prefer aisle seats", 2))
+    assert env.learned_trust == [Trust.USER]

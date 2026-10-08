@@ -650,7 +650,9 @@ async def run_turn(event: Event) -> None:
         try:
             result = await react_loop(
                 tools, prompt, CHAT_MAX_STEPS, tier=llm.Tier.FAST, temperature=0.6, name="simple_turn",
-                tainted=carried_taint, self_tainted=self_taint, user_words=text, wrap_up=True,
+                tainted=carried_taint, self_tainted=self_taint, wrap_up=True,
+                # the profile name is written only from trusted learning: a term the user owns
+                user_words=f"{text} {card_name or ''}",
                 untrusted_sources=sources,
                 deadline_s=CHAT_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
             )
