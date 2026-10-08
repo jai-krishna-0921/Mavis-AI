@@ -49,44 +49,54 @@ def _service(word: str) -> Capability | None:
 
 
 def _command_of(name: str) -> tuple[str, str] | None:
-    """(real command, service word glued to it) for a slash word the model wrote, or None if not ours."""
+    """(real command, service word glued to it) for a slash word that is NOT one of ours but plainly
+    means one, or None. A known command is never passed here: it is left exactly as written."""
     low = name.lower()
-    if low in KNOWN_COMMANDS:
-        return low, ""
-    parts = re.split(r"[_-]", low, maxsplit=1)
-    head, tail = parts[0], parts[1] if len(parts) > 1 else ""
-    if head in KNOWN_COMMANDS:
+    head, sep, tail = re.split(r"([_-])", low, maxsplit=1) if re.search(r"[_-]", low) else (low, "", "")
+    # Telegram-style /connect_google: the part after "_" is the argument, kept even when it is not a
+    # service here (/connect google then opens the menu); after "-" only a service splits (/connect-four
+    # is not ours)
+    if head in KNOWN_COMMANDS and tail and (sep == "_" or _service(tail) is not None):
         return head, tail
     for cmd in ("disconnect", "connect"):  # glued service: /connectgmail
         if low.startswith(cmd) and _service(low[len(cmd):]) is not None:
             return cmd, low[len(cmd):]
-    close = difflib.get_close_matches(low, KNOWN_COMMANDS, n=1, cutoff=0.75)  # /connection, /conect
+    close = difflib.get_close_matches(low, KNOWN_COMMANDS, n=1, cutoff=0.8)  # /connection, /conect
     if close:
         return close[0], ""
     return ("connect", "") if low in _CONNECT_SYNONYMS else None
 
 
+# Code spans, fenced blocks and verbatim spans are shown as written: commands inside them are never touched.
+_KEEP_AS_IS = re.compile("```.*?(?:```|$)|`[^`\n]+`|\x0e.*?(?:\x0f|$)", re.DOTALL)
+
+
 def canonical_commands(text: str) -> str:
-    """Slash commands in a reply match the real ones (track 1 T1.4, hotfix4 H6): /connect_google,
-    /connectgmail, /link or /connection become /connect google, /connect gmail, /connect, /connections;
-    the service word is the one /connect reads (google when Google Workspace is on). Words that are not
-    near any command of ours (a path, "and/or") are left alone."""
+    """Slash commands in a reply are real ones (track 1 T1.4, hotfix4 H6). Only a slash token that is not
+    a command of ours but plainly means one is rewritten, and only that token: /connect_google ->
+    /connect google, /connectgmail -> /connect gmail, /connection -> /connections, /link -> /connect.
+    Known commands, their arguments, everything after the token, code and verbatim spans stay as
+    written; slash words not near any command ("and/or", a path) are left alone."""
 
     def fix(m: re.Match[str]) -> str:
+        if m.group(1).lower() in KNOWN_COMMANDS:
+            return m.group(0)
         found = _command_of(m.group(1))
         if found is None:
             return m.group(0)
         cmd, glued = found
-        gap, arg = m.group(2) or "", m.group(3) or ""
-        tail = f"{gap}{arg}"
-        if cmd in ("connect", "disconnect"):
-            if (cap := _service(glued)) is not None:
-                return f"/{cmd} {connect_word(cap)}{tail}"
-            if (cap := _service(arg)) is not None:
-                return f"/{cmd} {connect_word(cap)}"
-        return f"/{cmd}{tail}"
+        if (cap := _service(glued)) is not None:
+            glued = connect_word(cap)
+        arg = f" {glued}" if glued else ""
+        return f"/{cmd}{arg}{m.group(2) or ''}{m.group(3) or ''}"
 
-    return _SLASH.sub(fix, text or "")
+    out, last = [], 0
+    for held in _KEEP_AS_IS.finditer(text or ""):
+        out.append(_SLASH.sub(fix, text[last:held.start()]))
+        out.append(held.group(0))
+        last = held.end()
+    out.append(_SLASH.sub(fix, (text or "")[last:]))
+    return "".join(out)
 
 
 def parse_command(text: str) -> tuple[str, list[str]] | None:
