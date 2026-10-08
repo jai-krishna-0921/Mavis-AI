@@ -6,12 +6,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore",
+                                      populate_by_name=True)
 
     # --- identity -------------------------------------------------------------
     agent_name: str = "Mavis"  # the agent persona; "Mavis" is the project/package name
@@ -48,7 +49,14 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
     telegram_mode: Literal["polling", "webhook"] = "polling"
-    allowed_telegram_chat_ids: list[int] = Field(default_factory=list)
+    # Owner chats (admin commands, alerts). OWNER_TELEGRAM_CHAT_IDS; the old ALLOWED_TELEGRAM_CHAT_IDS
+    # name is read as an alias for one release (contract D). In ACCESS_MODE=allowlist this is still the
+    # allowlist; in invite mode it only marks the owner.
+    owner_telegram_chat_ids: list[int] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("OWNER_TELEGRAM_CHAT_IDS", "ALLOWED_TELEGRAM_CHAT_IDS",
+                                      "owner_telegram_chat_ids"),
+    )
     # The live E2E harness's own chat: admitted beside the allowlist, and every send to it goes to a log
     # sink (data_dir/test_sink.jsonl), never to Telegram, so tests never write into a real user's chat.
     # Off unless enabled, and the id must be synthetic (below -10**15) and not allowlisted
@@ -65,6 +73,20 @@ class Settings(BaseSettings):
     # --- bus / worker ---------------------------------------------------------
     bus_claim_idle_ms: int = 900_000  # redeliver an unacked message after this idle time (> longest handler)
     worker_concurrency: int = 4  # consumer loops per stream per worker process
+
+    # --- multi-user access (Phase 11, spec 2026-10-08 sections 4, 7, 8) ------
+    # allowlist: today's behaviour (owner chats only). shadow: allowlist enforced, the invite gate only
+    # logs what it would do. invite: the invite gate decides.
+    access_mode: Literal["allowlist", "shadow", "invite"] = "allowlist"
+    worker_scheduler: Literal["legacy", "mailbox"] = "legacy"
+    llm_limiter: Literal["local", "redis"] = "local"
+    invite_max_active: int = 20  # unexpired, unrevoked codes at once
+    invite_max_uses: int = 25  # per code
+    invite_default_days: int = 14
+    invite_fail_limit_per_hour: int = 5  # failed code attempts per chat
+    invite_fail_alert_per_hour: int = 50  # failed attempts across all chats before the owner is alerted
+    pending_reply_every_h: float = 24.0
+    pending_retention_days: int = 14
 
     # --- storage --------------------------------------------------------------
     data_dir: Path = Path("data")
@@ -157,6 +179,11 @@ class Settings(BaseSettings):
     # --- admin ----------------------------------------------------------------
     admin_user: str = "admin"
     admin_password: str = ""
+
+    @property
+    def allowed_telegram_chat_ids(self) -> list[int]:
+        """Read-only alias of owner_telegram_chat_ids (kept one release for older readers)."""
+        return self.owner_telegram_chat_ids
 
     @property
     def db_url(self) -> str:

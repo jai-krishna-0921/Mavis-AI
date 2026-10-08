@@ -108,7 +108,7 @@ async def test_empty_secret_rejects_everything(db, bus, monkeypatch, mode) -> No
 
 
 async def test_disallowed_chat_ignored(client, bus, monkeypatch) -> None:
-    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", "[999]")
+    monkeypatch.setenv("OWNER_TELEGRAM_CHAT_IDS", "[999]")
     get_settings.cache_clear()
     r = await client.post("/webhooks/telegram", json=update(8, chat_id=100))
     assert r.json()["published"] is False
@@ -154,7 +154,7 @@ async def test_command_parsing(client, bus, text, command) -> None:
 ])
 async def test_allowlist_policy(client, bus, monkeypatch, env, allowed, chat_id, published) -> None:
     monkeypatch.setenv("ENV", env)
-    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", allowed)
+    monkeypatch.setenv("OWNER_TELEGRAM_CHAT_IDS", allowed)
     get_settings.cache_clear()
     r = await client.post("/webhooks/telegram", json=update(50, chat_id=chat_id))
     assert r.status_code == 200 and r.json()["published"] is published

@@ -18,7 +18,7 @@ OWNER = 111
 def test_chat(settings, monkeypatch):
     monkeypatch.setattr(settings, "live_test_enabled", True)
     monkeypatch.setattr(settings, "test_telegram_chat_id", TEST_CHAT)
-    monkeypatch.setattr(settings, "allowed_telegram_chat_ids", [OWNER])
+    monkeypatch.setattr(settings, "owner_telegram_chat_ids", [OWNER])
     return settings
 
 
@@ -84,7 +84,7 @@ async def test_test_path_is_off_unless_enabled_and_synthetic(test_chat, monkeypa
                                                              allowlist):
     monkeypatch.setattr(test_chat, "live_test_enabled", enabled)
     monkeypatch.setattr(test_chat, "test_telegram_chat_id", chat)
-    monkeypatch.setattr(test_chat, "allowed_telegram_chat_ids", allowlist)
+    monkeypatch.setattr(test_chat, "owner_telegram_chat_ids", allowlist)
     assert active_test_chat() is None
     set_channel(None)
     try:
