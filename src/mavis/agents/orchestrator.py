@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -184,10 +185,20 @@ async def _drive(task_id: int, user_id: int, graph_input: Any) -> None:
 async def _fail(task_id: int, user_id: int, reason: str) -> None:
     if not await tasks.claim(task_id, _LIVE, TaskStatus.FAILED, error=reason):
         return  # cancelled (or finished) meanwhile: say nothing about a task the user stopped
+    from mavis.initiative import task_delivery  # lazy: delivery imports the ping policy
+
+    # Files are the work: whatever the task made goes out even when it fails, and the line names them.
+    await task_delivery.deliver_pending_artifacts(user_id, task_id)
+    names = [Path(a.path).name for a in await tasks.artifacts_for(task_id) if a.delivered_at is not None]
+    sent_line = f" I'd already sent you {_join_names(names)}." if names else ""
     await _cards().finalize(task_id, CardFinal.FAILED)
-    await approval_flow.say(user_id, f"Hit a snag on that task: {reason}. Want me to try again?",
+    await approval_flow.say(user_id, f"Hit a snag on that task: {reason}.{sent_line} Want me to try again?",
                             dedupe_key=f"task:{task_id}:failed")
     await _close_approvals(task_id, user_id)
+
+
+def _join_names(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
 fail_task = _fail  # public name for the approval sweep

@@ -111,6 +111,7 @@ class Settings(BaseSettings):
     initiative_act_enabled: bool = True
     task_timeout_max_s: float = 1200  # no task clock is ever extended past this
     machine_task_timeout_s: float = 900  # clock for a plan with a machine specialist (Phase 12)
+    machine_file_max_mb: int = 50  # Telegram's bot upload limit; bigger files are named, not attached
 
     # --- progress cards (Phase 12 slice A, spec 2026-10-08 section 8) ----------
     progress_card_enabled: bool = True  # false: the single fixed "Still on it" line, as before
