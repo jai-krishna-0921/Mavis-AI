@@ -291,3 +291,33 @@ async def test_tone_down_rejects_a_rewrite_that_loses_names_links_or_still_swear
     monkeypatch.setattr(register.llm, "complete", rewrite)
     text = "Asha says the shit report is at https://ex.com/a and `run.sh`."
     assert await register.tone_down(text) == text
+
+
+@pytest.mark.parametrize("text,masked", [
+    ("you lot are Niggers, he wrote", "you lot are N*****s, he wrote"),
+    ("called him a Kike twice", "called him a K**e twice"),
+    ("that Tranny joke was vile", "that T****y joke was vile"),
+    ("NIGGER was scrawled on it", "N****R was scrawled on it"),
+    ("some Raghead remark", "some R*****d remark"),
+])
+def test_unambiguous_slurs_are_masked_whatever_the_capitalisation(text, masked):
+    assert register.mask_slurs(text) == masked
+
+
+def test_only_ambiguous_entries_get_the_proper_noun_exception():
+    assert register.mask_slurs("a plate of Faggots and peas") == "a plate of Faggots and peas"  # a dish
+    assert register.mask_slurs("those faggots, he said") == "those f*****s, he said"
+
+
+@pytest.mark.parametrize("text", [
+    "lunch with Mr. Bastard at noon",
+    "Dr. Dick will see you at 3",
+    "ask Mrs. Hell about the keys",
+    "see St. Shitake church",
+])
+def test_honorifics_are_not_sentence_ends(text):
+    assert not register.has_profanity(text)
+
+
+def test_a_real_sentence_end_still_counts():
+    assert register.has_profanity("It broke. Bastard thing.")
