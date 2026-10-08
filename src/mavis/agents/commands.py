@@ -7,6 +7,7 @@ import re
 from mavis.domain.events import Event
 from mavis.domain.messages import Role
 from mavis.domain.policy import Capability
+from mavis.domain.terms import terms
 from mavis.tools.integrations.actions import (
     DISPLAY_NAMES,
     GOOGLE_ANCHOR,
@@ -56,6 +57,23 @@ def capability_from_text(text: str) -> Capability | None:
         if pattern.search(text or ""):
             return capability
     return None
+
+
+# The connect tool's own vocabulary (registry-style term overlap, domain.terms): asking to link something.
+_CONNECT_VERBS = terms("connect reconnect link relink unlink authorize authorise integrate")
+_CONNECT_OBJECTS = terms("account connection integration")
+
+
+def wants_connect(text: str) -> bool:
+    """The message asks to link an account: a connect verb AND a service it names (or "account").
+
+    connect_account sends the user a link by itself, so it is offered to a chat turn only then (track 1
+    T1.4); a missing link found while acting goes through ConnectionRequired instead. "Amazon links"
+    has the verb's word but names no service, so it is not a connect request."""
+    words = terms(text or "")
+    if not words & _CONNECT_VERBS:
+        return False
+    return capability_from_text(text) is not None or bool(words & _CONNECT_OBJECTS)
 
 
 def _flow(flow: ConnectFlow | None) -> ConnectFlow:

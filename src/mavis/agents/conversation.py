@@ -74,8 +74,17 @@ current_route: ContextVar[str | None] = ContextVar("current_route", default=None
 
 CHAT_TOOL_LIMIT = 10
 # each only when available; track_loop and wake_me carry agreements and reminders (LEARN does not)
-CHAT_ALWAYS = ("start_task", "connect_account", "pending", "web_search", "track_loop", "wake_me")
+CHAT_ALWAYS = ("start_task", "pending", "web_search", "track_loop", "wake_me")
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
+# Sends the user a link by itself: offered only when they ask to connect something (commands.wants_connect).
+CONNECT_TOOL = "connect_account"
+# Tool focus (track 1 T1.4): the tools of approvals queued, executed or failed within the last FOCUS_TURNS
+# user turns stay offered whatever the new message's words ("hi", then "do it without the guest"), and
+# a running background task keeps the tools that manage it.
+FOCUS_TURNS = 3
+FOCUS_APPROVAL_STATUSES = (ApprovalStatus.PENDING, ApprovalStatus.AWAITING_EDIT, ApprovalStatus.RESOLVING,
+                           ApprovalStatus.EXECUTED, ApprovalStatus.FAILED)
+TASK_FOCUS_TOOLS = ("list_tasks", "cancel_task")
 # Offered together: mail_search returns short previews only, so without mail_read a question about an
 # email (one a brief mentioned, say) cannot be answered from its text; mail_read needs search's ids.
 CHAT_COMPANIONS = {"mail_search": "mail_read", "mail_read": "mail_search"}
@@ -123,25 +132,50 @@ TOOLS_GUIDE = TOOL_RULES  # name kept for callers of the chat-tools slice
 # Added only when web_search is offered. Web results are untrusted (they taint the turn), so search only
 # when the question needs the outside world, not for everything.
 WEB_RULE = (
-    "- Use web_search only when they ask about a specific named real-world person, organisation, product, "
-    "price, event or news, or ask you to look something up; then answer from what it finds. Anything the "
-    "user told you needs no search. Otherwise answer normally. If the search finds nothing clear, say "
-    "you're not sure. Never invent a biography."
+    "- Use web_search when they ask about a specific named real-world person, organisation, product, place, "
+    "price, event or news, about anything live or current (prices, scores, weather, opening hours, "
+    "what's new), when they want links, product options or where to buy something, or when they ask you "
+    "to look something up; then answer from what it finds, with the links it found when they want links. "
+    "Anything the user told you needs no search. Otherwise answer normally. If the search finds nothing "
+    "clear, say you're not sure. Never invent a biography, and never say you can't browse or look things "
+    "up: you can, with web_search."
 )
 
 
-def chat_tools(user_id: int, query: str = "") -> list[BaseTool]:
-    """The tools a chat turn may use (at most CHAT_TOOL_LIMIT). Never raises: no tools = plain reply."""
+def chat_tools(user_id: int, query: str = "", *, focus: tuple[str, ...] = (),
+               connect: bool = False) -> list[BaseTool]:
+    """The tools a chat turn may use (at most CHAT_TOOL_LIMIT, plus any `focus` tools, which are always
+    offered). connect_account only when `connect` (the user asked to link an account). Never raises: no
+    tools = plain reply."""
     try:
         from mavis.tools.registry import get_registry
 
         registry = get_registry()
+        always = tuple(dict.fromkeys((*CHAT_ALWAYS, *((CONNECT_TOOL,) if connect else ()), *focus)))
+        exclude = CHAT_EXCLUDED if connect else CHAT_EXCLUDED | {CONNECT_TOOL}
         tools = registry.select("conversation", user_id, query=query, limit=CHAT_TOOL_LIMIT,
-                                always=CHAT_ALWAYS, exclude=CHAT_EXCLUDED)
+                                always=always, exclude=exclude)
         return _with_companions(registry, user_id, tools)
     except Exception:  # noqa: BLE001 - tools are an extra; the turn must still answer
         log.warning("simple_turn.tools_unavailable", exc_info=True)
         return []
+
+
+async def focus_tools(user_id: int, history: list[Message]) -> tuple[str, ...]:
+    """Tools the conversation is about, whatever the new message says: those of approvals queued,
+    executed or failed since the FOCUS_TURNS-th user message before this one, and the task-management
+    tools while a background task runs. Never raises (focus is an extra)."""
+    try:
+        sent = [m.created_at for m in history if m.role == Role.USER.value]
+        prior = sent[:-1][-FOCUS_TURNS:]  # the newest user message is the one being answered
+        since = prior[0] if prior else (sent[-1] if sent else utcnow())
+        names = [a.tool for a in await approvals.touched_since(user_id, since, FOCUS_APPROVAL_STATUSES)]
+        if any(t.kind == TaskKind.TASK for t in await tasks.active_for_user(user_id)):
+            names += TASK_FOCUS_TOOLS
+        return tuple(dict.fromkeys(names))
+    except Exception:  # noqa: BLE001
+        log.warning("simple_turn.focus_failed", exc_info=True)
+        return ()
 
 
 def _with_companions(registry, user_id: int, tools: list[BaseTool]) -> list[BaseTool]:
@@ -409,7 +443,8 @@ async def run_turn(event: Event) -> None:
             ask_name=persona.should_ask_name(name, history, now, user.timezone),
             prior_turns=max(len(recent) - 1, 0),  # the current message is already in history
         )
-        tools = chat_tools(user.id, query=f"{text}\n{previous or ''}")
+        tools = chat_tools(user.id, query=f"{text}\n{previous or ''}",
+                           focus=await focus_tools(user.id, history), connect=commands.wants_connect(text))
         if tools:
             system = f"{system}\n\n{TOOL_RULES}"
             if any(t.name == "web_search" for t in tools):
