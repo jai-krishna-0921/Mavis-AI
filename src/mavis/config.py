@@ -81,6 +81,13 @@ class Settings(BaseSettings):
     access_mode: Literal["allowlist", "shadow", "invite"] = "allowlist"
     worker_scheduler: Literal["legacy", "mailbox"] = "legacy"
     llm_limiter: Literal["local", "redis"] = "local"
+    # shared limiter (owner decision: Ollama Pro = 3 concurrent calls across all processes)
+    llm_global_slots: int = 3
+    llm_bg_max_slots: int = 1  # background + best_effort together; chat keeps the rest
+    llm_best_effort_max_slots: int = 0
+    llm_user_max_slots: int = 2  # per user while someone else waits
+    llm_overflow_wait_s: float = 8.0  # interactive calls overflow to the secondary provider past this wait
+    llm_bg_overflow_after_s: float = 60.0  # background overflows only after a long primary backoff
     invite_max_active: int = 20  # unexpired, unrevoked codes at once
     invite_max_uses: int = 25  # per code
     invite_default_days: int = 14

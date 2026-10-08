@@ -832,3 +832,11 @@ async def test_best_effort_waiter_gets_a_spare_slot_but_not_the_last_one(monkeyp
     if size > 2:
         lim.release()  # now two are free: a best_effort caller may take one of them
         await asyncio.wait_for(lim.acquire("best_effort", 1), 1)
+
+
+async def test_local_limiter_is_the_default_backend(settings):
+    from mavis.llm.limiter import LocalLimiterAdapter, get_limiter, reset_limiters
+
+    reset_limiters()
+    assert isinstance(get_limiter(False), LocalLimiterAdapter)
+    assert isinstance(get_limiter(True), LocalLimiterAdapter)
