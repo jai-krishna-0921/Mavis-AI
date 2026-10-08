@@ -97,11 +97,19 @@ async def redeliver(user_id: int, task_id: int) -> None:
 
 
 async def on_progress(event: Event) -> None:
-    """A long user-requested task: one fixed line, no LLM call (it would queue behind the running task)."""
+    """A long user-requested task: one fixed line, no LLM call (it would queue behind the running task).
+
+    Only when the user has written since the task started (track 1 T1.1): the start ack already said the
+    result will follow, so a user who is away gets the result and nothing in between; one who is chatting
+    meanwhile learns it is still running."""
     p = event.payload
     if p.get("origin") != TaskOrigin.USER:
         return
     task_id = int(p["task_id"])
+    task = await tasks.get(task_id)
+    if task is None or not await messages.has_user_message_since(event.user_id, task.created_at):
+        log.info("task.progress_skipped_user_away", task_id=task_id)
+        return
     async with Session() as s:
         await outbox.enqueue(s, Outbound(user_id=event.user_id, text=PROGRESS_TEXT,
                                          dedupe_key=f"task:{task_id}:progress"))

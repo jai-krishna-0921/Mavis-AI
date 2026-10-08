@@ -437,6 +437,17 @@ async def resolved_since(user_id: int, since: datetime, statuses: Iterable[Appro
         return list(await s.scalars(stmt.order_by(PendingApproval.resolved_at, PendingApproval.id)))
 
 
+async def touched_since(user_id: int, since: datetime, statuses: Iterable[ApprovalStatus]
+                        ) -> list[PendingApproval]:
+    """Approvals in one of `statuses` that were queued or resolved at or after `since`, oldest first:
+    the actions a conversation has been about lately (chat tool focus, track 1 T1.4)."""
+    stmt = select(PendingApproval).where(
+        PendingApproval.user_id == user_id, PendingApproval.status.in_([x.value for x in statuses]),
+        (PendingApproval.created_at >= since) | (PendingApproval.resolved_at >= since))
+    async with Session() as s:
+        return list(await s.scalars(stmt.order_by(PendingApproval.id)))
+
+
 async def acknowledge(user_id: int, approval_ids: Iterable[int]) -> int:
     ids = list(approval_ids)
     if not ids:

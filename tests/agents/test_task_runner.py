@@ -196,17 +196,22 @@ async def test_timeout_marks_failed_and_tells_user(
 async def test_timeout_does_not_overwrite_a_cancel(
     user, fake_llm, rec_bus, sent, memory_checkpointer, monkeypatch
 ):
-    monkeypatch.setattr(get_settings(), "task_timeout_s", 0.1)
+    # The cancel must land before the wall clock runs out (graph compile, checkpointer and planner take
+    # time on a loaded machine): the step cancels, then outlives a timeout that cannot beat it there.
+    monkeypatch.setattr(get_settings(), "task_timeout_s", 1.0)
     tid = await tasks.create(user.id, goal="slow thing")
+    cancelled = asyncio.Event()
 
     async def _slow_step(step, user_id, context):
         await tasks.cancel(user_id, tid)
-        await asyncio.sleep(1)
+        cancelled.set()
+        await asyncio.sleep(5)
         return StepOutcome(ok=True, text="late")
 
     monkeypatch.setattr(og, "run_step_agent", _slow_step)
     fake_llm.push_structured(_one_step_plan())
     await orchestrator.run_task(tid)
+    assert cancelled.is_set()  # the ordering this test is about: cancel first, timeout after
     assert (await tasks.get(tid)).status == TaskStatus.CANCELLED
     assert sent == []
 

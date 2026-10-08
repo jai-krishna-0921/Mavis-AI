@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import re
+import unicodedata
 from collections.abc import Callable
 
 _FENCE = re.compile(r"^\s*```")
@@ -31,7 +32,7 @@ _HELD = re.compile("\x02(\\d+)\x02")
 # and "to" instead of dashes. One simple rule, no word lists:
 #   - ASCII hyphen-minus (U+002D) is never touched.
 #   - Every other Unicode dash (category Pd) is normalised:
-#       between two digits with no or thin spacing      -> "-"   (15:00–16:00 -> 15:00-16:00)
+#       between two digits with no or thin spacing      -> "-"   (15:00 – 16:00 -> 15:00-16:00)
 #       right after a **bold** label at a line/bullet start -> ":"
 #       at a line start -> a "- " bullet; at a line end -> dropped
 #       with a space on either side elsewhere             -> ", "
@@ -68,7 +69,7 @@ def _spaced(m: re.Match[str]) -> str:
 def _normalize_plain(line: str) -> str:
     if not any(d in line for d in DASHES):
         return line
-    line = _DIGITS.sub(r"\1-\2", line)
+    line = _DIGITS.sub("-", line)  # a range: its thin spacing goes too (15:00-16:00)
     line = _BOLD_LABEL.sub(r"\1: ", line, count=1)
     line = _LEADING.sub(r"\1- ", line)
     line = _TRAILING.sub("", line)
@@ -76,8 +77,38 @@ def _normalize_plain(line: str) -> str:
     return re.sub(_PD, "-", line)
 
 
+# --- Unicode space and hyphen variants (track 1 T1.4, hotfix4 H6) ---------------------------------
+#
+# Part of the same one output pass. One general rule, no word lists, by Unicode property:
+#   - every space separator (category Zs: no-break, narrow no-break, thin, em, ideographic...) -> " "
+#   - hyphens that join words (U+2010 hyphen, U+2011 non-breaking hyphen) -> "-" (U+2212 minus is a
+#     sign, not a hyphen: it stays)
+#   - invisible break hints (soft hyphen, zero-width space, word joiner, BOM) -> removed
+#     (zero-width joiners stay: emoji sequences and some scripts need them)
+# Applies to quoted text too (the change is invisible there), never to inline code, URLs or verbatim spans.
+_ZS = "".join(c for c in map(chr, range(0x110000)) if unicodedata.category(c) == "Zs" and c != " ")
+_VARIANTS = str.maketrans({**dict.fromkeys(_ZS, " "), "\u2010": "-", "\u2011": "-",
+                           "\u00ad": None, "\u200b": None, "\u2060": None, "\ufeff": None})
+_VARIANT_CHARS = frozenset(_ZS) | {"\u2010", "\u2011", "\u00ad", "\u200b", "\u2060", "\ufeff"}
+_VARIANT_HOLD = re.compile(r"`[^`\n]+`|https?://[^\s<>`]+|\x02\d+\x02")
+
+
+def normalize_variants(line: str) -> str:
+    """Unicode space and hyphen variants -> plain ASCII space and hyphen (code, URLs and held spans kept)."""
+    if not any(c in _VARIANT_CHARS for c in line):
+        return line
+    out, last = [], 0
+    for m in _VARIANT_HOLD.finditer(line):
+        out.append(line[last:m.start()].translate(_VARIANTS))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(line[last:].translate(_VARIANTS))
+    return "".join(out)
+
+
 def normalize_line(line: str) -> str:
-    """Dash normalisation for one line; quoted text, inline code, URLs and held spans are untouched."""
+    """Dash and Unicode-variant normalisation for one line; quoted text (dashes only), inline code, URLs
+    and held spans are untouched."""
     held: list[str] = []
 
     def hold(m: re.Match[str]) -> str:
@@ -85,7 +116,8 @@ def normalize_line(line: str) -> str:
         return f"\x01{len(held) - 1}\x01"
 
     out = _normalize_plain(_HOLD.sub(hold, line.replace("\x01", "")))
-    return _KEEP.sub(lambda m: held[int(m.group(1))], out)
+    # after the dash rules, which read thin and narrow spaces around a dash between digits as no space
+    return normalize_variants(_KEEP.sub(lambda m: held[int(m.group(1))], out))
 
 
 def normalize_dashes(text: str) -> str:

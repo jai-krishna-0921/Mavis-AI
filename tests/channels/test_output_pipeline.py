@@ -51,8 +51,9 @@ GOLDEN = [
     ("- **Flights** \u2013 booked for Tuesday", "- **Flights**: booked for Tuesday"),
     ("1. __Visa__\u2014submitted", "1. __Visa__: submitted"),
     ("Free 15:00\u201316:00 today", "Free 15:00-16:00 today"),
-    (f"Free 15:00{THIN}\u2013{THIN}16:00 today", f"Free 15:00{THIN}-{THIN}16:00 today"),
-    (f"Pages 3{NNBSP}\u2013{NNBSP}5", f"Pages 3{NNBSP}-{NNBSP}5"),
+    # a range's thin spacing goes with its dash (hotfix4 H6: no narrow or thin spaces reach the user)
+    (f"Free 15:00{THIN}\u2013{THIN}16:00 today", "Free 15:00-16:00 today"),
+    (f"Pages 3{NNBSP}\u2013{NNBSP}5", "Pages 3-5"),
     ("From 2020\u20132024", "From 2020-2024"),
     ("Open Mon\u2013Fri", "Open Mon-Fri"),
     ("I checked \u2014 nothing new came in.", "I checked, nothing new came in."),
