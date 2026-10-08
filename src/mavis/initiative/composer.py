@@ -112,11 +112,11 @@ class Composer:
         with contextlib.suppress(Exception):  # the name is a nicety, never block a ping on it
             card_name = (await profile_repo.get(user.id)).name
         # proactive: never asks for a name and never says a greeting is fine (None omits that line)
+        their_register = register.measure(register.user_texts(recent, now))
         system = persona.system_prompt(
             user, now, recall, known_name=card_name, ask_name=False,
             prior_turns=len(persona.recent_messages(recent, now)) or None,
-            register_line=register.prompt_line(register.measure(register.user_texts(recent, now)),
-                                               proactive=True),
+            register_line=register.prompt_line(their_register, proactive=True),
         ) + "\n" + COMPOSER_RULES
         history = (
             "\n".join(f"{'User' if m.role == Role.USER else 'You'}: "
@@ -146,6 +146,8 @@ class Composer:
         for b in draft.messages:
             # typography: at the channel; an echoed replay stamp (T1) is not content
             b = register.mask_slurs(strip_stamps(scrub_untrusted_origin(b) if untrusted else b)).strip()
+            if b and register.unmirrored(their_register, b, proactive=True):
+                b = await register.tone_down(b, priority="background")
             if b:
                 bubbles.append(b)
         bubbles = bubbles[:MAX_BUBBLES]

@@ -180,3 +180,11 @@ async def test_composer_masks_slurs_in_bubbles(user, clock, fake_memory, fake_ll
     fake_llm.push_structured(ComposedMessage(send=True, messages=["what a retard move by the bank"]))
     msg = await Composer(fake_memory).compose(user, "bank news", 2)
     assert "retard" not in msg.messages[0] and "r****d" in msg.messages[0]
+
+
+async def test_proactive_swearing_without_a_sweary_chat_is_rewritten(user, clock, fake_memory, fake_llm):
+    bubbles = ["Dentist at 5, hell of a day.", "Good luck!"]
+    fake_llm.push_structured(ComposedMessage(send=True, messages=bubbles))
+    fake_llm.push_text("Dentist at 5, big day.")
+    msg = await Composer(fake_memory).compose(user, "dentist reminder", 2)
+    assert msg.messages == ["Dentist at 5, big day.", "Good luck!"]

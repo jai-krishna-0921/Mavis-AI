@@ -45,8 +45,9 @@ _CANONICAL = {e.replace(_VS16, ""): e for e in ALLOWED}
 REACTION_RULE = (
     "Reacting\n"
     "- Like a friend tapping a reaction, you can react to their message with one emoji. Most messages "
-    "get none: only when it really fits. Never when they're upset, stressed, angry with you or in a "
-    "crisis, never on health, money trouble or bad news, and not on plain formal requests.\n"
+    "get none, but real good news, a laugh or a thank-you usually earns one. Never when they're upset, "
+    "stressed, angry with you or in a crisis, never on health, money trouble or bad news, and not on "
+    "plain formal requests.\n"
     "- To react, end your reply with one last line: [react: EMOJI]. Use only these: "
     + "; ".join(f"{label} {' '.join(emoji)}" for label, emoji in MOODS)
     + ". Otherwise add nothing."
