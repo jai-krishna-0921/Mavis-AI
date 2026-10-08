@@ -174,6 +174,22 @@ async def run_worker(bus: EventBus, consumer: str, concurrency: int | None = Non
     """
     n = max(1, concurrency or get_settings().worker_concurrency)
     await run_startup_hooks()
+    s = get_settings()
+    if s.worker_scheduler == "mailbox":
+        from mavis import bus as bus_mod
+        from mavis.worker.mailbox import MemoryMailbox, RedisMailbox
+        from mavis.worker.scheduler import Scheduler
+
+        client = bus_mod.get_redis()
+        backend = (RedisMailbox(client, lease_ms=s.mailbox_lease_ms, take=s.coalesce_max_messages,
+                                cap=s.mailbox_cap) if client is not None
+                   else MemoryMailbox(lease_ms=s.mailbox_lease_ms, take=s.coalesce_max_messages,
+                                      cap=s.mailbox_cap))
+        sched = Scheduler(backend, reap_on_idle=client is None)
+        mail_loops = [bus.consume_events(WORKER_GROUP, f"{consumer}-{i}", sched.intake) for i in range(n)]
+        mail_loops += [bus.consume_jobs(WORKER_GROUP, f"{consumer}-{i}", handle_job) for i in range(n)]
+        await asyncio.gather(*mail_loops, *sched.executors(consumer))
+        return
     loops = []
     for i in range(n):
         name = f"{consumer}-{i}"

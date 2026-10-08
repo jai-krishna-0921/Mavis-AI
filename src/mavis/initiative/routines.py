@@ -15,6 +15,7 @@ from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import NotifyIntent
 from mavis.domain.events import Trust
+from mavis.domain.jitter import user_offset
 from mavis.domain.loops import LoopKind, LoopOrigin, LoopUpsert
 from mavis.domain.messages import Role
 from mavis.domain.timefmt import due_label
@@ -232,6 +233,7 @@ class Routines:
 
     async def _schedule_morning(self, user, loop_id: int | None, next_day: bool) -> int:
         at = await self.next_morning_time(user, next_day=next_day)
+        at += user_offset(user.id)  # spread the fan-out over the first minutes
         local_day = timeutil.to_local(at, user.timezone).date().isoformat()
         return await self._wakeups.wake_me(
             user.id, at, MORNING_TITLE, loop_id, WakeupKind.ROUTINE,
