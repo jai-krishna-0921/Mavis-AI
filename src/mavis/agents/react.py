@@ -89,6 +89,7 @@ async def react_loop(
     tainted: bool = False,
     self_tainted: bool | None = None,
     user_words: str = "",
+    untrusted_sources: list[str] | None = None,
     wrap_up: bool = False,
     deadline_s: float | None = None,
     tool_timeout_s: float | None = None,
@@ -129,6 +130,7 @@ async def react_loop(
     if parent is None:
         run.self_tainted = self_tainted
         run.user_words = user_words
+        run.untrusted_sources = untrusted_sources
     first_approval = len(run.queued_approvals)
     first_read = run.untrusted_reads
     token = current_run.set(run)

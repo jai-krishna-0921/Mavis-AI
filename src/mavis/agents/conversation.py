@@ -48,6 +48,7 @@ from mavis.agents.turn_support import (
     previous_reply,
     previous_tainted,
     reply_event_id,
+    tainted_texts,
     to_langchain,
     user_text,
     window_tainted,
@@ -142,7 +143,13 @@ WEB_RULE = (
     "to look something up; then answer from what it finds, with the links it found when they want links. "
     "Anything the user told you needs no search. Otherwise answer normally. If the search finds nothing "
     "clear, say you're not sure. Never invent a biography, and never say you can't browse or look things "
-    "up: you can, with web_search."
+    "up: you can, with web_search.\n"
+    "- Links: give only URLs that web_search or web_extract returned, copied exactly. Never build a link "
+    "yourself (a shop search page, a guessed product URL). A result marked as a search or listing page is "
+    "not a product link: don't call it one. When they want product links and the results hold only search "
+    "pages, say so, share the best product page you did find, search again with the product's name, or "
+    "open a result with web_extract. Never say a link goes to the exact model unless the result is that "
+    "product's own page, and give a price only when the result shows it."
 )
 
 
@@ -283,11 +290,21 @@ def _is_card(message: ToolMessage) -> bool:
     return _text_of(message.content).startswith(CARD_RESULT_PREFIXES)
 
 
-def card_only(result: ReactResult) -> bool:
-    """Every tool result of the turn is an approval card (queued, or an updated card shown again): the
-    card says all there is to say, so the model's prose would only repeat it."""
+SUBSTANTIVE_CHARS = 140
+
+
+def substantive(prose: str) -> bool:
+    """Prose that answers the user rather than pointing at a card: longer than a nudge, or carrying figures.
+    A card is additive to such a reply, never a replacement for it."""
+    return len(prose) > SUBSTANTIVE_CHARS or any(ch.isdigit() for ch in prose)
+
+
+def card_only(result: ReactResult, prose: str = "") -> bool:
+    """Every tool result of the turn is an approval card (queued, or an updated card shown again) and the
+    model's prose only points at it ("tap Approve"): the card says all there is to say. Substantive prose
+    (an analysis, an answer) is kept: the card follows it."""
     outputs = [m for m in result.messages if isinstance(m, ToolMessage)]
-    return bool(outputs) and all(_is_card(m) for m in outputs)
+    return bool(outputs) and all(_is_card(m) for m in outputs) and not substantive(prose)
 
 
 def _card_shown(result: ReactResult) -> bool:
@@ -299,7 +316,7 @@ CLAIM_DEADLINE_S = CHAT_DEADLINE_S / 2  # the re-prompt's own budget: it follows
 
 
 async def bind_claims(result: ReactResult, tools: list[BaseTool], text: str, user_id: int, *,
-                      self_tainted: bool) -> ReactResult:
+                      self_tainted: bool, sources: list[str] | None = None) -> ReactResult:
     """Action claims are bound to what the turn did (track 1 T1.4, agents.claims).
 
     A reply that talks about acting while no action tool ran, or points at an approval card that does not
@@ -327,6 +344,7 @@ async def bind_claims(result: ReactResult, tools: list[BaseTool], text: str, use
             tools, [*result.messages, found.note()], CHAT_MAX_STEPS, tier=llm.Tier.FAST, temperature=0.6,
             name="simple_turn_claims", tainted=result.tainted,
             self_tainted=self_tainted or result.read_untrusted, user_words=text, wrap_up=True,
+            untrusted_sources=None if result.read_untrusted else sources,
             deadline_s=CLAIM_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
         )
     except LLMError:
@@ -401,14 +419,88 @@ def prompt_is_latest(approval: PendingApproval, history: list[Message]) -> bool:
         approval_flow.EDIT_QUESTION in t for t in latest)
 
 
+def _replies_to_card(approval: PendingApproval, event: Event) -> bool:
+    """The user used Telegram's reply on the card's own message."""
+    replied = str(event.payload.get("reply_to_text") or "")
+    preview = strip_verbatim(approval.preview or "").strip()
+    return bool(replied and preview and preview in replied)
+
+
+def _edit_question_is_latest(history: list[Message]) -> bool:
+    return any(approval_flow.EDIT_QUESTION in t for t in _recent_assistant(history, 1))
+
+
+YES_QUIET_S = 60  # no other assistant message this close before a yes that approves a sensitive card
+
+
+def _self_only_card(approval: PendingApproval) -> bool:
+    from mavis.tools.registry import SELF_ONLY, get_registry
+
+    tool = get_registry().find(approval.tool)
+    return tool is not None and tool.risk in SELF_ONLY
+
+
+def _plain_yes_may_approve(approval: PendingApproval, history: list[Message]) -> bool:
+    """May a bare text "yes" approve this card? Self-only cards: yes (the card is the newest message).
+    Outward, spending and destructive cards: only when the yes cannot be about something else, i.e. the
+    user wrote it after the card was shown, nothing else was said by us in the minute before it, the message
+    before the card was not a question (the yes may answer that), the card is clean and was not sent to Edit.
+    Otherwise the user is asked to tap Approve. A Telegram reply to the card is always accepted."""
+    if _self_only_card(approval):
+        return True
+    if approval.status != ApprovalStatus.PENDING or approval.tainted or approval.prompted_at is None:
+        return False
+    users_ = [m for m in history if m.role == Role.USER.value]
+    if not users_:
+        return False
+    said_at = users_[-1].created_at
+    if said_at <= approval.prompted_at:
+        return False
+    before = [m for m in history if m.created_at < said_at and m.role == Role.ASSISTANT.value]
+    preview = strip_verbatim(approval.preview or "").strip()
+    card = next((m for m in reversed(before) if preview and preview in m.content), None)
+    if card is None:
+        return False
+    others = [m for m in before if m is not card]
+    if any((said_at - m.created_at).total_seconds() < YES_QUIET_S for m in others):
+        return False
+    earlier = [m for m in others if m.created_at <= card.created_at]
+    return not (earlier and earlier[-1].content.rstrip().endswith("?"))
+
+
+TAP_TO_APPROVE = "That one needs a tap, not a text. Tap Approve on the card if you want me to go ahead."
+
+
 async def _approval_reply(event: Event, user_id: int, text: str, history: list[Message]) -> bool:
+    """A text message that decides the card waiting on the user, or False (an ordinary turn).
+
+    Who may decide: a plain yes / no (approval_flow.quick_decision; yes only while the card is the newest
+    message). A free-text CHANGE is an edit of the card only when it is plausibly one: the message after
+    tapping Edit (the edit question is the newest message), or sent as a reply to the card itself. Anything
+    else a pending card sees is a normal message, whatever the model would make of it."""
     approval = await approval_awaiting_reply(user_id, history)
     if approval is None:
         return False
-    interp = await approval_flow.interpret_reply(approval, text)
-    if interp.decision == "approve" and not prompt_is_latest(approval, history):
+    quick = approval_flow.quick_decision(text)
+    on_card = _replies_to_card(approval, event)
+    if quick is None:
+        editing = approval.status == ApprovalStatus.AWAITING_EDIT and _edit_question_is_latest(history)
+        if not (editing or on_card):
+            log.info("conversation.card_reply_not_an_edit", approval_id=approval.id)
+            return False
+    interp = quick or await approval_flow.interpret_reply(approval, text)
+    if interp.decision == "approve" and not (prompt_is_latest(approval, history) or on_card):
         log.info("conversation.approve_not_latest", approval_id=approval.id)
         return False  # something was said after the prompt: this "yes" may answer that instead
+    waiting = [a for a in await approvals.open_for_user(user_id)
+               if a.status in (ApprovalStatus.PENDING, ApprovalStatus.AWAITING_EDIT)]
+    if (interp.decision == "approve" and not on_card and len(waiting) == 1  # several: apply_reply asks which
+            and not _plain_yes_may_approve(approval, history)):
+        log.info("conversation.yes_needs_tap", approval_id=approval.id)
+        await approval_flow.say(user_id, TAP_TO_APPROVE, approval_flow.approval_buttons(approval.id),
+                                dedupe_key=f"reply:{event.id}:tap")
+        current_route.set("APPROVAL_REPLY")
+        return True
     ack = await approval_flow.apply_reply(approval, interp)
     if ack is None:  # unrelated: an ordinary message after all
         return False
@@ -521,6 +613,9 @@ async def run_turn(event: Event) -> None:
         self_taint = previous_tainted(history) or hooked
         # LEARN sees only the user's text and the previous reply, so its trust keeps the per-turn rule.
         learn_taint = previous_tainted(history) or hooked
+        # What an argument must not copy: the tainted replies in the window. Hook context (the inbox digest)
+        # has no text here, so then only an argument made of the user's own words is theirs.
+        sources = None if hooked else tainted_texts(history)
         now = utcnow()
         name = user.name or card_name
         recent = persona.recent_messages(history, now)
@@ -555,10 +650,14 @@ async def run_turn(event: Event) -> None:
         try:
             result = await react_loop(
                 tools, prompt, CHAT_MAX_STEPS, tier=llm.Tier.FAST, temperature=0.6, name="simple_turn",
-                tainted=carried_taint, self_tainted=self_taint, user_words=text, wrap_up=True,
+                tainted=carried_taint, self_tainted=self_taint, wrap_up=True,
+                # the profile name is written only from trusted learning: a term the user owns
+                user_words=f"{text} {card_name or ''}",
+                untrusted_sources=sources,
                 deadline_s=CHAT_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
             )
-            result = await bind_claims(result, tools, text, user.id, self_tainted=self_taint)
+            result = await bind_claims(result, tools, text, user.id, self_tainted=self_taint,
+                                        sources=sources)
         except ConnectionRequired as exc:
             result = None
             connect_texts = await _connect_prompt(event, user.id, exc)
@@ -589,7 +688,7 @@ async def run_turn(event: Event) -> None:
         if register.unmirrored(their_register, reply):  # formal, upset or never swore: no swearing (T1.2)
             reply = await register.tone_down(reply)
         bubbles = persona.split_bubbles(reply) or [reply]
-        if card_only(result):
+        if card_only(result, reply):
             # The card (preview + buttons, rendered by code) is the only prompt: no prose bubble repeats it.
             log.info("simple_turn.card_only", queued=result.queued_approvals)
             bubbles = []
