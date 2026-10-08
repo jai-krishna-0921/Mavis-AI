@@ -96,16 +96,14 @@ async def test_phishing_reminder_is_stored_untrusted_and_fires_scrubbed(user, fa
     [w] = await _reminders(user.id)
     assert w.payload.get("untrusted") is True
 
-    from tests.initiative.test_qa_hardening import build, spy_notify
+    from tests.initiative.test_qa_hardening import _proactive, build
 
     init = build(recording_bus, env)
-    calls = spy_notify(init, monkeypatch)
     event = wakeup_event(w)
     assert event.trust is Trust.UNTRUSTED
     await init.handler.handle(event)
-    [call] = calls
-    assert call["untrusted"] is True
-    assert "evil.example" not in call["intent"].intent  # never relayed verbatim
+    [text] = await _proactive(user.id)  # fixed reminder path, delivered
+    assert text.startswith("\u23f0 Reminder") and "evil.example" not in text  # never relayed verbatim
 
 
 async def test_planted_track_instruction_becomes_an_untrusted_loop(user, fake_llm, env):
