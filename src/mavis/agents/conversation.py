@@ -405,11 +405,12 @@ async def run_turn(event: Event) -> None:
         now = utcnow()
         name = user.name or card_name
         recent = persona.recent_messages(history, now)
+        their_register = register.measure(register.user_texts(history, now))
         system = persona.system_prompt(
             user, now, context=context, connections=connections, known_name=name,
             ask_name=persona.should_ask_name(name, history, now, user.timezone),
             prior_turns=max(len(recent) - 1, 0),  # the current message is already in history
-            register_line=register.prompt_line(register.measure(register.user_texts(history, now))),
+            register_line=register.prompt_line(their_register),
         )
         tools = chat_tools(user.id, query=f"{text}\n{previous or ''}")
         if tools:
@@ -455,6 +456,8 @@ async def run_turn(event: Event) -> None:
         # the optional mood reaction rides on the reply as a marker line (T1.3); it never reaches the text
         reply, mood = reactions.split_reaction(register.mask_slurs(strip_stamps(result.text or "")))
         reply = reply.strip() or WRAP_UP_FALLBACK
+        if register.unmirrored(their_register, reply):  # formal, upset or never swore: no swearing (T1.2)
+            reply = await register.tone_down(reply)
         bubbles = persona.split_bubbles(reply) or [reply]
 
         async with Session() as s:

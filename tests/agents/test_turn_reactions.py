@@ -19,12 +19,12 @@ def _event(user_id: int, text: str, n: int, source: str = "telegram", message_id
 
 async def test_reaction_marker_is_stripped_and_lands(db, channel, fake_llm, memory, bus):
     user, _ = await users.get_or_create_by_chat(77, "Jai")
-    fake_llm.push_text(f"Hell yes, offer in hand!\n[react: {FIRE}]")
+    fake_llm.push_text(f"Yes! Offer in hand!\n[react: {FIRE}]")
     await run_turn(_event(user.id, "got the job!!", 1, message_id=500))
     await OutboxSender(channel).run_once()
-    assert channel.texts == ["Hell yes, offer in hand!"]
+    assert channel.texts == ["Yes! Offer in hand!"]
     assert channel.reactions == [(77, 500, FIRE)]
-    assert (await messages.recent(user.id))[-1].content == "Hell yes, offer in hand!"
+    assert (await messages.recent(user.id))[-1].content == "Yes! Offer in hand!"
     assert "[react: EMOJI]" in fake_llm.calls[-1][0].content  # the model was offered the choice
 
 

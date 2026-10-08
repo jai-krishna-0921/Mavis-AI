@@ -129,3 +129,32 @@ def test_slurs_are_masked_in_outgoing_text(text, masked):
 def test_mask_slurs_leaves_ordinary_swearing_alone():
     text = "fuck it, that's shit luck. Let's go."
     assert register.mask_slurs(text) == text
+
+
+@pytest.mark.parametrize("latest", [
+    "fuck. my dog died this morning",
+    "shit, dad's in the hospital, they think it's a stroke",
+    "i got laid off today and i'm scared as hell",
+    "my grandma passed away last night",
+    "crying in the car, the biopsy came back as cancer",
+])
+def test_distress_in_the_latest_message_turns_swearing_off(latest):
+    reg = measure(["lol this week is shit", latest])
+    assert reg.distressed and not reg.swears
+    line = prompt_line(reg).lower()
+    assert "upset" in line and "no swearing" in line and "may swear" not in line
+
+
+def test_distress_earlier_does_not_mute_a_later_happy_message():
+    reg = measure(["my phone died lol", "fuck yeah, fixed it"])
+    assert not reg.distressed and reg.swears
+
+
+def test_distress_mutes_proactive_swearing_too():
+    reg = measure(["fuck yes", "shit, my mom is in the ICU"])
+    assert "don't swear" in prompt_line(reg, proactive=True).lower()
+
+
+def test_hell_counts_as_mild_swearing_but_hello_does_not():
+    assert register.has_profanity("hell yes")
+    assert not register.has_profanity("hello, shell company")

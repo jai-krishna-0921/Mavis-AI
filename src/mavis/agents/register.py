@@ -5,8 +5,8 @@ hyped or calm. The word lists here are measured signals that feed the prompt, ne
 model writes its own words. Persona rules (agents/persona.py) set the limits: never insult the user,
 never slurs, never sexual content, step down when they are upset.
 
-`mask_slurs` is the one deterministic guard on outgoing text: a slur never reaches the user, whatever
-the model wrote.
+Two guards on outgoing text: `mask_slurs` (a slur never reaches the user, whatever the model wrote) and
+`tone_down` (one rewrite call, only when a reply swears although their register does not allow it).
 """
 
 from __future__ import annotations
@@ -14,6 +14,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+
+import structlog
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from mavis.llm import models as llm
+
+log = structlog.get_logger(__name__)
 
 WINDOW = timedelta(hours=12)  # the "recent" register; older talk does not set today's tone
 SAMPLE = 8  # user messages measured
@@ -23,7 +30,7 @@ SWEAR_RECENT = 3  # swearing is mirrored only when they swore in one of their la
 # has a masked spelling ("f*ck", "sh!t"). Substrings never count ("shitake", "Scunthorpe", "class").
 _SWEAR_WORDS = frozenset({
     "ass", "arse", "asshole", "arsehole", "bastard", "bitch", "bitching", "bloody", "bollocks",
-    "bullshit", "crap", "crappy", "damn", "damned", "dammit", "dick", "dickhead", "goddamn", "piss",
+    "bullshit", "crap", "crappy", "hell", "damn", "damned", "dammit", "dick", "dickhead", "goddamn", "piss",
     "pissed", "prick", "screwed", "sod", "wtf", "ffs", "stfu", "omfg", "fml", "af", "jfc",
     "bc", "mc", "bkl", "bsdk", "chutiya", "chutiye", "saala", "saale", "kamina", "harami",
 })
@@ -48,6 +55,17 @@ _SLANG = frozenset({
 })
 _ELONGATED = re.compile(r"([a-z])\1{2,}", re.IGNORECASE)  # "gooo", "yesss"
 _EMOJI = re.compile("[\U0001f300-\U0001faff☀-➿]")
+
+# Distress: a hard moment in the latest message (loss, illness, fear, a job or a relationship ending).
+# A measured signal only: it turns swearing and jokes off for this reply; the model reads the rest.
+_DISTRESS = re.compile(
+    r"\b(?:died|dying|death|passed away|funeral|hospital|icu|stroke|cancer|tumou?r|biopsy|"
+    r"heart attack|accident|surgery|emergency|diagnos\w*|miscarriage|suicid\w*|self[- ]harm|"
+    r"scared|terrified|afraid|panic\w*|anxious|anxiety|depress\w*|crying|cried|in tears|grief|grieving|"
+    r"heartbroken|broke up|break ?up|divorce|laid off|got fired|lost my (?:job|mom|mum|dad|father|mother)|"
+    r"can'?t (?:cope|breathe|think straight)|falling apart)\b",
+    re.IGNORECASE,
+)
 
 # Slurs: masked in outgoing text whatever the register (a guard, not a style signal).
 _SLURS = re.compile(
@@ -105,6 +123,7 @@ class Register:
     formal: bool = False  # the latest message reads formal
     casual: bool = False  # most measured messages are casual
     hype: bool = False  # the latest message is high energy
+    distressed: bool = False  # the latest message sounds like a hard moment: no swearing, no jokes
 
 
 def measure(texts: list[str]) -> Register:
@@ -115,14 +134,16 @@ def measure(texts: list[str]) -> Register:
         return Register()
     latest = texts[-1]
     formal = _formal(latest)
+    distressed = bool(_DISTRESS.search(latest))
     sweary = [has_profanity(t) for t in texts]
     return Register(
         sample=len(texts),
-        swears=not formal and any(sweary[-SWEAR_RECENT:]),
+        swears=not formal and not distressed and any(sweary[-SWEAR_RECENT:]),
         swear_share=sum(sweary) / len(texts),
         formal=formal,
         casual=not formal and sum(_casual(t) for t in texts) * 2 >= len(texts),
-        hype=_hype(latest),
+        hype=_hype(latest) and not distressed,
+        distressed=distressed,
     )
 
 
@@ -155,6 +176,9 @@ def prompt_line(reg: Register, *, proactive: bool = False) -> str:
     if reg.sample == 0:
         return ""
     energy = " High energy right now: match it, short and punchy." if reg.hype else ""
+    if reg.distressed:
+        return ("They sound upset or shaken right now: no swearing at all (not even echoing their own words) "
+                "and no jokes, even if they swore. Slow down, be kind and plain, then be useful.")
     if reg.formal:
         return ("Their register right now: formal. Answer clear and polite, no slang and no swearing, "
                 f"even if they swore earlier.{energy}")
@@ -177,3 +201,34 @@ def _mask(m: re.Match[str]) -> str:
 
 def mask_slurs(text: str) -> str:
     return _SLURS.sub(_mask, text)
+
+
+def unmirrored(reg: Register, text: str, *, proactive: bool = False) -> bool:
+    """The reply swears although their register does not allow it (formal, upset, or they never swore).
+    Chat turns with nothing measured are left to the prompt; proactive messages need a sweary chat."""
+    if reg.swears or (reg.sample == 0 and not proactive):
+        return False
+    return has_profanity(text)
+
+
+TONE_DOWN = (
+    "Rewrite the chat message you are given so it has no swearing and no crude words. Keep everything "
+    "else the same: meaning, facts, warmth, length, emoji, line breaks and any line that is just ---. "
+    "Reply with the rewritten message only."
+)
+
+
+async def tone_down(text: str, *, priority: llm.Priority = "interactive") -> str:
+    """One rewrite without the swearing; the original when the rewrite fails or still swears."""
+    try:
+        out = await llm.complete([SystemMessage(TONE_DOWN), HumanMessage(text)], tier=llm.Tier.FAST,
+                                 temperature=0.2, name="tone_down", priority=priority)
+    except Exception as exc:  # noqa: BLE001 - the reply still goes out
+        log.warning("register.tone_down_failed", error=type(exc).__name__)
+        return text
+    out = mask_slurs(out).strip()
+    if not out or has_profanity(out):
+        log.info("register.tone_down_kept_original")
+        return text
+    log.info("register.toned_down")
+    return out
