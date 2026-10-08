@@ -9,6 +9,7 @@ import structlog
 
 from mavis.channels import get_channel
 from mavis.channels.base import Channel, ChannelRateLimited
+from mavis.channels.pacing import get_pacer
 from mavis.store.db import utcnow
 from mavis.store.models import OutboxMessage
 from mavis.store.repo import outbox, users
@@ -33,6 +34,8 @@ class OutboxSender:
         while delivered < limit:
             pass_delivered = 0
             for row in await outbox.due(now, limit - delivered):
+                if await get_pacer().reserve(None) > 0:
+                    break  # global rate reached: leave the rest for the next pass (no claim, no attempt)
                 if not await outbox.claim(row.id, now):
                     continue  # another sender owns it
                 if await self._attempt(row, now):
@@ -66,7 +69,13 @@ class OutboxSender:
             raise RuntimeError(f"user {row.user_id} has no chat id")
         msg = outbox.to_outbound(row)
         ids: list[int] = []
-        if msg.document_path:
+        if msg.media:
+            caps = msg.text.split("\n") if msg.text else []
+            caps = (caps + [""] * len(msg.media))[: len(msg.media)]
+            ids += await self.channel.send_media_group(user.telegram_chat_id, msg.media, caps)
+        elif msg.photo_path:
+            ids.append(await self.channel.send_photo(user.telegram_chat_id, msg.photo_path, msg.text))
+        elif msg.document_path:
             ids.append(await self.channel.send_document(user.telegram_chat_id, msg.document_path, msg.text))
         elif msg.text:
             ids += await self.channel.send_text(user.telegram_chat_id, msg.text, msg.buttons or None)

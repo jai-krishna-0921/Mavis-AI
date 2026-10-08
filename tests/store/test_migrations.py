@@ -98,3 +98,15 @@ def test_0012_loop_provenance_backfill(tmp_path) -> None:
     assert got.pop("tool:track_loop") == ("untrusted", "conversation")  # trust not determinable: safe default
     assert got.pop("onboarding") == ("system", "routine")
     assert set(got.values()) == {("untrusted", "unknown")}
+
+
+def test_single_migration_head() -> None:
+    """Parallel branches each add revisions: after any merge there must still be exactly one head."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    from mavis.store.migrate import MIGRATIONS_DIR
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
+    assert len(ScriptDirectory.from_config(cfg).get_heads()) == 1
