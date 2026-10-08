@@ -40,9 +40,12 @@ async def test_deliver_pending_helper(db, channel) -> None:
     assert channel.texts == ["one", "two"]
 
 
-async def test_delivers_document_with_caption(db, channel, tmp_path) -> None:
+async def test_delivers_document_with_caption(db, channel, settings) -> None:
+    from mavis.store import artifacts
+
     uid = await _user()
-    f = tmp_path / "deck.pptx"
+    artifacts.user_dir(uid).mkdir(parents=True, exist_ok=True)
+    f = artifacts.user_dir(uid) / "deck.pptx"
     f.write_bytes(b"x")
     await outbox.enqueue_now(Outbound(user_id=uid, text="Your deck", document_path=str(f)))
     await OutboxSender(channel).run_once()

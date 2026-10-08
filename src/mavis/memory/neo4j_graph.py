@@ -18,6 +18,7 @@ from mavis.memory.names import USER_KEY, is_user, node_key, normalize_name, sani
 
 _DEDUPE = "reduce(acc = [], a IN coalesce(n.{f}, []) + ${p} | CASE WHEN a IN acc THEN acc ELSE acc + a END)"
 
+Q_USER_INDEX = "CREATE INDEX entity_user IF NOT EXISTS FOR (n:Entity) ON (n.user_id)"
 Q_INDEX = "CREATE INDEX entity_user_key IF NOT EXISTS FOR (n:Entity) ON (n.user_id, n.key)"
 Q_ENSURE_USER = (
     "MERGE (n:Entity:User {user_id:$u, key:$key}) "
@@ -111,6 +112,7 @@ def q_neighborhood(hops: int) -> str:
     return (
         "MATCH (s:Entity {user_id:$u}) WHERE s.key IN $keys "
         f"MATCH p=(s)-[*1..{h}]-(:Entity) WHERE all(r IN relationships(p) WHERE r.valid_to IS NULL) "
+        "AND all(n IN nodes(p) WHERE n.user_id = $u) "
         "UNWIND relationships(p) AS r WITH DISTINCT r "
         "RETURN r.statement AS st, r.confidence AS conf, r.valid_from AS vf "
         "ORDER BY r.valid_from DESC LIMIT $limit"
@@ -172,6 +174,7 @@ class Neo4jGraphStore:
 
     async def init(self) -> None:
         await self._run(Q_INDEX)
+        await self._run(Q_USER_INDEX)
 
     async def _key_for(self, user_id: int, name: str) -> str:
         if is_user(name):

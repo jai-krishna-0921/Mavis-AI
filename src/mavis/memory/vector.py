@@ -82,13 +82,26 @@ class QdrantVectorStore:
 
     async def init(self) -> None:
         if await self._client.collection_exists(COLLECTION):
+            await self._ensure_tenant_index()
             return
         dim = await asyncio.to_thread(lambda: self._embedder.dim)
         await self._client.create_collection(
             COLLECTION, vectors_config=models.VectorParams(size=dim, distance=models.Distance.COSINE)
         )
-        if self._remote:  # payload indexes are a no-op (with a warning) in embedded mode
-            await self._client.create_payload_index(COLLECTION, "user_id", models.PayloadSchemaType.INTEGER)
+        await self._ensure_tenant_index()
+
+    async def _ensure_tenant_index(self) -> None:
+        """user_id is the tenant key: Qdrant co-locates one user's vectors (spec 6.1). A no-op in embedded
+        mode; if the server cannot change an existing index the old one stays and the filter isolates."""
+        if not self._remote:  # payload indexes are a no-op (with a warning) in embedded mode
+            return
+        try:
+            await self._client.create_payload_index(
+                COLLECTION, "user_id",
+                models.IntegerIndexParams(type=models.IntegerIndexType.INTEGER, is_tenant=True, lookup=True,
+                                          range=False))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vector.tenant_index_unsupported", error=type(exc).__name__)
 
     async def add(
         self, user_id: int, texts: list[str], kind: str, source_ref: str = "", at: datetime | None = None

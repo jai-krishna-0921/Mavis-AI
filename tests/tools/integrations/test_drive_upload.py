@@ -61,9 +61,17 @@ def drive(provider):
 PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 
+def _mine(user):
+    from mavis.store import artifacts
+
+    d = artifacts.user_dir(user.id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 async def _artifact(user, settings, name="deck.pptx", size=10, mime=PPTX) -> tuple[int, int]:
     tid = await tasks.create(user.id, goal="make a deck")
-    path = settings.artifacts_dir / name
+    path = _mine(user) / name
     path.write_bytes(b"x" * size)
     aid = await tasks.add_artifact(tid, user.id, "pptx", str(path), mime, title="Q3 deck")
     return tid, aid
@@ -78,7 +86,7 @@ async def test_uploads_an_artifact_of_this_task(user, settings, drive, cache):
     _, action, args = drive.executed[-1]
     assert action == "drive.upload_file" and args["name"] == "Q3 deck.pptx" and args["mime"] == PPTX
     assert args["path"].endswith("deck.pptx")
-    assert workspace_guard.created_by(tid) == {"drive-file-1"}
+    assert await workspace_guard.created_by(tid) == {"drive-file-1"}
 
 
 async def test_refuses_another_tasks_artifact(user, settings, drive, cache):
@@ -174,7 +182,7 @@ async def test_refuses_another_users_artifact(user, settings, drive, cache):
 
 async def test_title_without_extension_gets_the_files_suffix(user, settings, drive, cache):
     tid = await tasks.create(user.id, goal="g")
-    path = settings.artifacts_dir / "a.csv"
+    path = _mine(user) / "a.csv"
     path.write_text("a,b")
     aid = await tasks.add_artifact(tid, user.id, "csv", str(path), "text/csv", title="data report")
     await drive_upload(ToolContext(user_id=user.id, task_id=tid), DriveUploadArgs(artifact_id=aid),
