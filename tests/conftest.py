@@ -35,6 +35,7 @@ TEST_ENV = {
     "ATTENTION_STRICT_ERRORS": "true",
     "GOOGLE_WORKSPACE_ENABLED": "false",  # spec 7: off in tests unless a test opts in (workspace_on)
     "DEMO_TIME_SCALE": "1.0",
+    "FANOUT_JITTER_S": "0",  # exact wakeup times in tests; the jitter tests pass a span
     "ACCESS_MODE": "allowlist",  # Phase 11: invite gate off unless a test opts in (invite_mode)
     "WORKER_SCHEDULER": "legacy",
     "LLM_LIMITER": "local",

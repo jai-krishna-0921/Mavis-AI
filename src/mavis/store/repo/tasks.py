@@ -123,6 +123,14 @@ async def running_count(user_id: int) -> int:
         return int(n or 0)
 
 
+async def running_count_all() -> int:
+    """RUNNING planned tasks across all users (the global concurrency cap)."""
+    async with Session() as s:
+        n = await s.scalar(select(func.count(Task.id)).where(
+            Task.status == TaskStatus.RUNNING.value, Task.kind != TaskKind.APPROVAL.value))
+        return int(n or 0)
+
+
 async def stale_running(user_id: int, started_before: datetime) -> list[Task]:
     """RUNNING tasks whose current run began before `started_before` (a run that never finished)."""
     async with Session() as s:

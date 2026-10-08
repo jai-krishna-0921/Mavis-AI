@@ -103,6 +103,20 @@ class Settings(BaseSettings):
     inbound_pending_rate_per_min: float = 5.0
     inbound_pending_burst: int = 3
 
+    # --- scheduler (spec 7) ----------------------------------------------------
+    chat_executors: int = 6
+    bg_executors: int = 3
+    coalesce_window_s: float = 3.0
+    coalesce_max_messages: int = 5
+    coalesce_max_chars: int = 2000
+    mailbox_lease_ms: int = 120_000
+    mailbox_cap: int = 200
+    task_global_concurrency: int = 3
+    fanout_jitter_s: int = 600
+    stream_maxlen: int = 20_000
+    db_pool_size: int = 10
+    db_max_overflow: int = 10
+
     # --- budgets (spec 9.3), USD per user per local day ------------------------
     budget_enforced: bool = True
     budget_soft_usd: dict[str, float] = {"standard": 0.30, "trusted": 1.00}
