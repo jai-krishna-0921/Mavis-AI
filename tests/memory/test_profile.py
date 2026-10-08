@@ -62,3 +62,24 @@ def test_remove_matching_blank_needle_is_noop():
     for needle in ("", "  "):
         out, changed = card.remove_matching(needle)
         assert not changed and out.key_people == ["Jawahar (friend)"]
+
+
+# --- a deferred LEARN does not overwrite a newer profile value ---------------------------------------------
+def test_older_statement_does_not_overwrite_a_newer_scalar():
+    from datetime import UTC, datetime, timedelta
+
+    from mavis.domain.memory import ProfileUpdate
+    from mavis.memory.profile import ProfileCard
+
+    t0 = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
+    card = ProfileCard().apply([ProfileUpdate(field="name", value="Arjun")], at=t0 + timedelta(days=1))
+    late = card.apply([ProfileUpdate(field="name", value="Jai"), ProfileUpdate(field="tone", value="dry")], at=t0)
+    assert late.name == "Arjun" and late.tone == "dry"  # name stale, an unset field still takes the old value
+    newer = late.apply([ProfileUpdate(field="name", value="Arjun K")], at=t0 + timedelta(days=2))
+    assert newer.name == "Arjun K"
+    same_moment = newer.apply([ProfileUpdate(field="name", value="X")], at=t0 + timedelta(days=2))
+    assert same_moment.name == "X"
+    # list fields are additive: order of arrival does not matter
+    both = ProfileCard().apply([ProfileUpdate(field="goals", value="GATE")], at=t0 + timedelta(days=1)).apply(
+        [ProfileUpdate(field="goals", value="GRE")], at=t0)
+    assert set(both.goals) == {"GATE", "GRE"}

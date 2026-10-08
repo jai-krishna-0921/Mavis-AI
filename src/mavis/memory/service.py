@@ -272,7 +272,7 @@ class MemoryService:
         facts = [r.statement for r in resolution.relations]
         if trusted:
             for rel in resolution.relations:
-                await self.graph.upsert_relation(user_id, rel, source_ref=source_ref)
+                await self.graph.upsert_relation(user_id, rel, source_ref=source_ref, at=anchor)
             await self.vector.add(user_id, facts, kind="fact", source_ref=source_ref, at=anchor)
             episode = user_message_of(text)
         else:
@@ -287,7 +287,7 @@ class MemoryService:
             )
 
         if trusted and extraction.profile_updates:
-            await profile_repo.save(user_id, card.apply(extraction.profile_updates))
+            await profile_repo.save(user_id, card.apply(extraction.profile_updates, at=anchor))
         self.invalidate(user_id)
 
         final = extraction.model_copy(
