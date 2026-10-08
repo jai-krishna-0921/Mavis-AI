@@ -15,6 +15,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY README.md alembic.ini ./
 COPY src ./src
+COPY scripts ./scripts
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
@@ -31,7 +32,7 @@ RUN apt-get update \
  && useradd --create-home --uid 10001 mavis
 WORKDIR /app
 COPY --from=builder --chown=mavis:mavis /app /app
-RUN mkdir -p /app/data/artifacts && chown -R mavis:mavis /app/data
+RUN mkdir -p /app/data/artifacts /app/data/e2e && chown -R mavis:mavis /app/data
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

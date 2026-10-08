@@ -107,3 +107,48 @@ async def test_workspace_guard_without_redis_keeps_the_local_copy(db):
     await wg.record_created(5, ["f1"])
     await wg.record_created(None, ["ignored"])
     assert await wg.created_by(5) == {"f1"} and await wg.created_by(6) == set()
+
+
+async def test_legacy_flat_files_stay_readable_by_the_owner_only(db, settings, monkeypatch):
+    from mavis.config import get_settings
+
+    flat = settings.artifacts_dir / "old-deck.pptx"
+    flat.write_bytes(b"PK")
+    assert artifacts.guard(1, flat, legacy_ok=True) == flat.resolve()
+    with pytest.raises(PermissionError):
+        artifacts.guard(1, flat)  # not the owner: refused
+    with pytest.raises(PermissionError):
+        artifacts.guard(1, settings.artifacts_dir / "gone.pptx", legacy_ok=True)  # must exist
+    other = artifacts.user_dir(2)
+    other.mkdir(parents=True, exist_ok=True)
+    (other / "x.pdf").write_bytes(b"x")
+    with pytest.raises(PermissionError):
+        artifacts.guard(1, other / "x.pdf", legacy_ok=True)  # another user's directory is never legacy
+    assert get_settings()
+
+
+async def test_owner_gets_a_legacy_document_and_a_stranger_does_not(db, channel, settings, monkeypatch):
+    from mavis.channels.outbox_sender import OutboxSender
+    from mavis.config import get_settings
+    from mavis.domain.messages import Outbound
+    from mavis.store.repo import outbox
+
+    monkeypatch.setenv("OWNER_TELEGRAM_CHAT_IDS", "[5301]")
+    get_settings.cache_clear()
+    owner, _ = await users.get_or_create_by_chat(5301, "Priya")
+    guest, _ = await users.get_or_create_by_chat(5302, "Tomas")
+    flat = settings.artifacts_dir / "report.pdf"
+    flat.write_bytes(b"pdf")
+    for u in (owner, guest):
+        await outbox.enqueue_now(Outbound(user_id=u.id, text="f", document_path=str(flat),
+                                          dedupe_key=f"d{u.id}"))
+    await OutboxSender(channel).run_once()
+    assert [m.path for m in channel.sent if m.kind == "document"] == [str(flat)]
+
+
+async def test_staged_files_land_in_the_users_directory(db, settings, tmp_path):
+    src = tmp_path / "report.html"
+    src.write_text("<p>hi</p>")
+    out = artifacts.stage(7, src, task_id=3, name="r.html")
+    assert out == artifacts.user_dir(7, 3) / "r.html" and out.read_text() == "<p>hi</p>"
+    assert artifacts.guard(7, out) == out.resolve()

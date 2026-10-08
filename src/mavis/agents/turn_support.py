@@ -158,6 +158,11 @@ def window_tainted(history: list[Message]) -> bool:
     return any(m.role == Role.ASSISTANT.value and is_tainted(m) for m in history)
 
 
+def tainted_texts(history: list[Message]) -> list[str]:
+    """The third-party shaped assistant messages of the replayed window: what an argument must not copy."""
+    return [m.content for m in history if m.role == Role.ASSISTANT.value and is_tainted(m)]
+
+
 def clarified_request(history: list[Message]) -> str | None:
     """The user message a clarifying question was about, if the last assistant reply was one."""
     last_user = max((i for i, m in enumerate(history) if m.role == Role.USER.value), default=None)

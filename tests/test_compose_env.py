@@ -1,0 +1,75 @@
+"""Shared contract C: every env var prod needs must be whitelisted in docker-compose.prod.yml x-app-env.
+
+Plans add their keys to PASSTHROUGH. The compose file whitelists variables, so a key missing here never
+reaches the containers (339e301)."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+PASSTHROUGH: set[str] = {
+    # Phase 12 slice A
+    "PROGRESS_CARD_ENABLED", "PROGRESS_CARD_AFTER_S", "PROGRESS_EDIT_MIN_INTERVAL_S",
+    "PROGRESS_MAX_SCREENSHOTS", "TELEGRAM_GLOBAL_SEND_RATE", "TEST_MIRROR_CHAT_ID",
+    "TASK_TIMEOUT_MAX_S", "MACHINE_TASK_TIMEOUT_S", "MACHINE_FILE_MAX_MB",
+}
+
+
+def app_env_keys() -> set[str]:
+    text = (ROOT / "docker-compose.prod.yml").read_text()
+    block = text.split("x-app-env: &app-env", 1)[1].split("\n\n", 1)[0]
+    return set(re.findall(r"^\s{2}([A-Z][A-Z0-9_]+):", block, flags=re.M))
+
+
+def test_every_passthrough_key_is_in_app_env():
+    missing = sorted(PASSTHROUGH - app_env_keys())
+    assert missing == [], f"add to x-app-env in docker-compose.prod.yml: {missing}"
+
+
+def test_passthrough_keys_are_settings_fields():
+    from mavis.config import Settings
+
+    fields = {name.upper() for name in Settings.model_fields}
+    assert sorted(PASSTHROUGH - fields) == []
+
+
+def _ignored_paths() -> list[str]:
+    return [ln.strip() for ln in (ROOT / ".dockerignore").read_text().splitlines()
+            if ln.strip() and not ln.startswith("#")]
+
+
+def test_every_dir_the_dockerfile_copies_is_not_dockerignored():
+    copied = set()
+    for ln in (ROOT / "Dockerfile").read_text().splitlines():
+        if ln.startswith("COPY ") and "--from" not in ln:
+            args = [p for p in ln.split()[1:-1] if not p.startswith("--")]
+            copied.update(p.rstrip("/").removeprefix("./") for p in args)
+    ignored = set(_ignored_paths())
+    assert sorted(copied & ignored) == [], "the build would fail: COPY of an ignored path"
+
+
+def test_sink_and_reports_volume_is_shared_by_api_and_worker():
+    import yaml
+
+    doc = yaml.safe_load((ROOT / "docker-compose.prod.yml").read_text())
+    app_volumes = doc["x-app"]["volumes"]
+    assert any(v.endswith(":/app/data/e2e") for v in app_volumes)
+    for svc in ("api", "worker"):
+        assert doc["services"][svc]["volumes"] == app_volumes or "volumes" not in doc["services"][svc]
+    assert "e2edata" in doc["volumes"]
+
+
+def test_sink_file_lives_in_the_shared_volume():
+    from pathlib import Path as P
+
+    from mavis.channels.test_sink import sink_path
+
+    assert sink_path(P("/app/data")).parent == P("/app/data/e2e")
+
+
+def test_verify_machine_runs_in_the_worker_that_writes_the_sink():
+    text = (ROOT / "deploy/aws/deploy.sh").read_text()
+    assert "exec -T worker python -m scripts.machine_demo" in text

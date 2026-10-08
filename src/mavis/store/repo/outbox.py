@@ -30,6 +30,8 @@ async def enqueue(session: AsyncSession, msg: Outbound) -> int:
         text=msg.text,
         buttons=[[b.model_dump() for b in row] for row in msg.buttons],
         document_path=msg.document_path,
+        photo_path=msg.photo_path,
+        media=list(msg.media),
         proactive=msg.proactive,
         dedupe_key=msg.dedupe_key,
     )
@@ -137,6 +139,8 @@ def to_outbound(row: OutboxMessage) -> Outbound:
         text=row.text,
         buttons=[[Button(**b) for b in r] for r in row.buttons or []],
         document_path=row.document_path,
+        photo_path=row.photo_path,
+        media=list(row.media or []),
         proactive=row.proactive,
         dedupe_key=row.dedupe_key,
     )

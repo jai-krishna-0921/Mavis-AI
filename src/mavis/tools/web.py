@@ -12,7 +12,7 @@ import re
 import socket
 from collections import OrderedDict
 from html import unescape
-from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpcore
 import httpx
@@ -23,7 +23,7 @@ from mavis.config import get_settings
 from mavis.domain.args import ToolArgs
 from mavis.domain.policy import Capability, RiskClass
 from mavis.domain.tasks import TaskOrigin
-from mavis.tools.registry import MavisTool, current_run, current_task_id
+from mavis.tools.registry import MavisTool, current_run, current_task_id, host_of
 
 log = structlog.get_logger()
 
@@ -104,12 +104,34 @@ async def search(query: str, max_results: int = 5) -> list[SearchHit]:
     return [SearchHit(**r) for r in rows]
 
 
+_SEARCH_KEYS = frozenset({"q", "k", "s", "query", "search", "keyword", "keywords", "field-keywords", "text",
+                          "searchterm", "search_query", "wd"})
+_SEARCH_SEGMENTS = frozenset({"s", "search", "searchresults", "results", "sr", "find", "browse"})
+SEARCH_PAGE_NOTE = " (a search or listing page, not a product page)"
+
+
+def looks_like_search_page(url: str) -> bool:
+    """A results or listing page of a shop or engine (amazon.in/s?k=desk, /search?q=x), not the thing itself.
+
+    A user who asked for product links wants the page of the product: the model is told which result URLs
+    are only searches so it does not hand them over as product links."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    keys = {k.lower() for k, _ in parse_qsl(parts.query)}
+    segments = {seg.lower() for seg in parts.path.split("/") if seg}
+    return bool(keys & _SEARCH_KEYS) or bool(segments & _SEARCH_SEGMENTS)
+
+
 async def web_search(user_id: int, args: SearchArgs) -> str:
     rows = [h.model_dump() for h in await search(args.query, args.max_results)]
     record_search_urls(current_task_id.get(), [str(r["url"]) for r in rows])  # web_extract may open these
     if not rows:
         return "No results."
-    return "\n".join(f"[{i}] {r['title']}: {r['url']}\n{r['snippet']}" for i, r in enumerate(rows, start=1))
+    return "\n".join(
+        f"[{i}] {r['title']}: {r['url']}{SEARCH_PAGE_NOTE if looks_like_search_page(str(r['url'])) else ''}"
+        f"\n{r['snippet']}" for i, r in enumerate(rows, start=1))
 
 
 # ---------------------------------------------------------------- SSRF guard
@@ -380,7 +402,7 @@ TOOLS = [
         description="Search the web. Returns numbered results with title, URL and snippet.",
         args_model=SearchArgs, risk=RiskClass.READ, fn=web_search, requires=Capability.WEB,
         agents=frozenset({"conversation", "research", "knowledge", "spawn"}),
-        untrusted_output=True, priority=70,
+        untrusted_output=True, priority=70, progress_label=lambda a, out: "searched the web",
     ),
     MavisTool(
         name="web_extract",
@@ -389,6 +411,6 @@ TOOLS = [
         # Not "conversation": chat reads mail and calendar, so a model-chosen URL fetch there could
         # carry private data out in a query string. Research runs on tainted-aware task loops.
         agents=frozenset({"research", "spawn"}),
-        untrusted_output=True, priority=40,
+        untrusted_output=True, priority=40, progress_label=lambda a, out: f"opened {host_of(a.url)}",
     ),
 ]

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from mavis.agents.cancellation import stop_check_for_current_task
 from mavis.agents.react import react_loop
 from mavis.agents.specialists.base import outcome_of, wrap_up_budget
 from mavis.config import get_settings
@@ -82,7 +83,7 @@ async def spawn_agent(
             result = await react_loop(
                 lc_tools, messages, max_steps=budget.max_steps, tier=budget.tier, temperature=0.3,
                 name=f"spawn:{role}", priority="background", fallback=True, tainted=tainted,
-                **wrap_up_budget(budget.timeout_s),
+                **wrap_up_budget(budget.timeout_s), should_stop=stop_check_for_current_task(),
             )
     except TimeoutError as exc:
         raise BudgetExceeded(f"worker {role!r} ran longer than {budget.timeout_s:g}s") from exc

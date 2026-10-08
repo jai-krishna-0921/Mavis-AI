@@ -27,9 +27,12 @@ from mavis.domain import timeutil
 from mavis.domain.messages import Button
 
 log = structlog.get_logger()
-SINK_FILE = "test_sink.jsonl"
+SINK_FILE = "e2e/test_sink.jsonl"  # inside e2e/ so one shared volume carries the sink and the demo reports
 SYNTHETIC_BELOW = -(10**15)
 _warned: set[tuple] = set()
+FIXTURE_DIR = Path(__file__).resolve().parents[3] / "scripts" / "fixtures" / "machine" / "files"
+FIXTURE_PREFIX = "fixture:"
+MIRROR_HEADER = "[test]"
 
 
 def active_test_chat(s: Settings | None = None) -> int | None:
@@ -38,7 +41,7 @@ def active_test_chat(s: Settings | None = None) -> int | None:
     chat = s.test_telegram_chat_id
     if not s.live_test_enabled or chat is None:
         return None
-    if chat in s.allowed_telegram_chat_ids:
+    if chat in s.owner_telegram_chat_ids:
         reason = "the test chat is in ALLOWED_TELEGRAM_CHAT_IDS (a real user's replies would be swallowed)"
     elif chat >= SYNTHETIC_BELOW:
         reason = f"the test chat id must be below {SYNTHETIC_BELOW} so it can never be a real Telegram chat"
@@ -53,6 +56,14 @@ def active_test_chat(s: Settings | None = None) -> int | None:
 def is_test_chat(chat_id: int | None, s: Settings | None = None) -> bool:
     """True when `chat_id` is an enabled, safe synthetic test chat (contract E)."""
     return chat_id is not None and chat_id == active_test_chat(s)
+
+
+def _mirror_chat(s: Settings) -> int | None:
+    """The owner's chat to mirror into: set, allowlisted, and never the test chat itself."""
+    chat = s.test_mirror_chat_id
+    if chat is None or chat not in s.owner_telegram_chat_ids:
+        return None
+    return chat
 
 
 def sink_path(data_dir: Path) -> Path:
@@ -70,6 +81,11 @@ class SinkChannel:
     def __init__(self, inner: Channel, test_chat_id: int) -> None:
         self._inner, self._test = inner, test_chat_id
         self._next_id = 1
+        self._mirror_ids: dict[int, int] = {}  # sink message id -> mirrored message id
+
+    def _is_test(self, chat_id: int) -> bool:
+        """Shared contract E: the single place that decides whether a chat is the sink's."""
+        return chat_id == self._test
 
     def _is_test(self, chat_id: int) -> bool:
         return chat_id == self._test
@@ -84,17 +100,76 @@ class SinkChannel:
         self._next_id += 1
         return -self._next_id  # never a real Telegram message id
 
+    async def _mirror_send(self, sink_id: int, text: str) -> None:
+        """Copy a test-chat message into the owner's chat with the [test] header and no buttons."""
+        chat = _mirror_chat(get_settings())
+        if chat is None:
+            return
+        try:
+            ids = await self._inner.send_text(chat, f"{MIRROR_HEADER} {text}")
+            if ids:
+                self._mirror_ids[sink_id] = ids[-1]
+        except Exception as exc:  # noqa: BLE001 - the mirror is cosmetic; the sink row is the record
+            log.warning("channel.test_mirror_failed", error=type(exc).__name__)
+
     async def send_text(self, chat_id: int, text: str,
                         buttons: list[list[Button]] | None = None) -> list[int]:
         if not self._is_test(chat_id):
             return await self._inner.send_text(chat_id, text, buttons)
         labels = [[b.label for b in row] for row in (buttons or [])]
-        return [self._record("text", chat_id, text, buttons=labels)]
+        sink_id = self._record("text", chat_id, text, buttons=labels)
+        await self._mirror_send(sink_id, text)
+        return [sink_id]
 
     async def send_document(self, chat_id: int, path: str, caption: str = "") -> int:
         if not self._is_test(chat_id):
             return await self._inner.send_document(chat_id, path, caption)
-        return self._record("document", chat_id, caption, path=path)
+        sink_id = self._record("document", chat_id, caption, path=path)
+        if (chat := _mirror_chat(get_settings())) is not None:
+            try:
+                await self._inner.send_document(chat, path, f"{MIRROR_HEADER} {caption}".strip())
+            except Exception as exc:  # noqa: BLE001
+                log.warning("channel.test_mirror_failed", error=type(exc).__name__)
+        return sink_id
+
+    async def edit_text(self, chat_id: int, message_id: int, text: str,
+                        buttons: list[list[Button]] | None = None) -> None:
+        if not self._is_test(chat_id):
+            await self._inner.edit_text(chat_id, message_id, text, buttons)
+            return
+        labels = [[b.label for b in row] for row in (buttons or [])]
+        self._record("edit", chat_id, text, message_id=message_id, buttons=labels)
+        chat, mirrored = _mirror_chat(get_settings()), self._mirror_ids.get(message_id)
+        if chat is not None and mirrored is not None:
+            try:
+                await self._inner.edit_text(chat, mirrored, f"{MIRROR_HEADER} {text}")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("channel.test_mirror_failed", error=type(exc).__name__)
+
+    async def send_photo(self, chat_id: int, path: str, caption: str = "") -> int:
+        if not self._is_test(chat_id):
+            return await self._inner.send_photo(chat_id, path, caption)
+        sink_id = self._record("photo", chat_id, caption, path=path)
+        if (chat := _mirror_chat(get_settings())) is not None:
+            try:
+                await self._inner.send_photo(chat, path, f"{MIRROR_HEADER} {caption}".strip())
+            except Exception as exc:  # noqa: BLE001
+                log.warning("channel.test_mirror_failed", error=type(exc).__name__)
+        return sink_id
+
+    async def send_media_group(self, chat_id: int, paths: list[str],
+                               captions: list[str] | None = None) -> list[int]:
+        if not self._is_test(chat_id):
+            return await self._inner.send_media_group(chat_id, paths, captions)
+        caps = list(captions or [""] * len(paths))
+        sink_id = self._record("album", chat_id, " | ".join(caps), paths=list(paths))
+        if (chat := _mirror_chat(get_settings())) is not None:
+            try:
+                mirrored = [f"{MIRROR_HEADER} {c}".strip() for c in caps]
+                await self._inner.send_media_group(chat, paths, mirrored)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("channel.test_mirror_failed", error=type(exc).__name__)
+        return [sink_id]
 
     async def send_typing(self, chat_id: int) -> None:
         if not self._is_test(chat_id):
@@ -105,7 +180,16 @@ class SinkChannel:
             await self._inner.react(chat_id, message_id, emoji)
 
     async def download_file(self, file_id: str, dest_path: str) -> str:
-        return await self._inner.download_file(file_id, dest_path)
+        if not file_id.startswith(FIXTURE_PREFIX):
+            return await self._inner.download_file(file_id, dest_path)
+        name = file_id[len(FIXTURE_PREFIX):]
+        root = FIXTURE_DIR.resolve()
+        src = (root / name).resolve()
+        if name != Path(name).name or not src.is_relative_to(root) or not src.is_file():
+            raise ValueError(f"unknown fixture {name!r}")
+        Path(dest_path).parent.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 - small local copy
+        Path(dest_path).write_bytes(src.read_bytes())  # noqa: ASYNC240
+        return dest_path
 
     async def leave_chat(self, chat_id: int) -> None:
         if not self._is_test(chat_id):

@@ -4,9 +4,10 @@ Existing users become active (they were admitted by the allowlist); a user whose
 OWNER_TELEGRAM_CHAT_IDS (or the old ALLOWED_TELEGRAM_CHAT_IDS) becomes tier owner. composio_user_id stays
 NULL for them, which means the legacy `mavis-<id>` identity (spec 6.2), so connected accounts keep working.
 
-NOTE: final order is 0014 ledger, 0015 programs, 0016-0019 connectors, then this one as 0020.
-TEMP: down_revision is 0013_task_outcomes so this branch's own tests run. At merge (last) set it to
-"0019_fact_suppressions" (test_single_migration_head guards that there is one head).
+NOTE: final order is 0014_progress_cards (main), 0015 ledger, 0016 programs, 0017-0021 connectors, then
+this one as 0022.
+TEMP: down_revision is 0014_progress_cards so this branch's own tests run. At merge (last) set it to
+the connectors head (0021) (test_single_migration_head guards that there is one head).
 """
 
 from __future__ import annotations
@@ -17,8 +18,8 @@ import os
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0020_multiuser_access"
-down_revision = "0013_task_outcomes"
+revision = "0022_multiuser_access"
+down_revision = "0014_progress_cards"
 branch_labels = None
 depends_on = None
 

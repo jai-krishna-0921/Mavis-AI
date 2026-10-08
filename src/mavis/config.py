@@ -59,13 +59,13 @@ class Settings(BaseSettings):
                                       "owner_telegram_chat_ids"),
     )
     # The live E2E harness's own chat: admitted beside the allowlist, and every send to it goes to a log
-    # sink (data_dir/test_sink.jsonl), never to Telegram, so tests never write into a real user's chat.
+    # sink (data_dir/e2e/test_sink.jsonl), never to Telegram, so tests never write into a real user's chat.
     # Off unless enabled, and the id must be synthetic (below -10**15) and not allowlisted
     # (channels.test_sink.active_test_chat).
     live_test_enabled: bool = False
     test_telegram_chat_id: int | None = None
 
-    @field_validator("test_telegram_chat_id", mode="before")
+    @field_validator("test_telegram_chat_id", "test_mirror_chat_id", mode="before")
     @classmethod
     def _blank_is_unset(cls, v: object) -> object:
         # compose passes unset optional vars as "" (${VAR:-}); for an optional id that means "not set"
@@ -148,6 +148,23 @@ class Settings(BaseSettings):
     task_step_parallelism: int = 1
     spawn_max_per_step: int = 3  # spawned workers one model step may start
     initiative_act_enabled: bool = True
+    task_timeout_max_s: float = 1200  # no task clock is ever extended past this
+    machine_task_timeout_s: float = 900  # clock for a plan with a machine specialist (Phase 12)
+    machine_file_max_mb: int = 50  # Telegram's bot upload limit; bigger files are named, not attached
+
+    # --- progress cards (Phase 12 slice A, spec 2026-10-08 section 8) ----------
+    progress_card_enabled: bool = True  # false: the single fixed "Still on it" line, as before
+    # tasks that finish sooner get no card (0 for machine plans)
+    progress_card_after_s: float = Field(4.0, ge=0, le=600)
+    # at most one card edit per chat per interval
+    progress_edit_min_interval_s: float = Field(3.0, ge=0, le=60)
+    # milestone photos per task (approval photos not counted)
+    progress_max_screenshots: int = Field(4, ge=0, le=10)
+    # messages per second across all chats (shared with the outbox)
+    telegram_global_send_rate: float = Field(25.0, gt=0, le=1000)
+    # Demo suite mirror: the owner's real chat (must be in ALLOWED_TELEGRAM_CHAT_IDS). Sends to the test
+    # chat are copied there with a "[test]" header and no buttons. Unset: no mirror.
+    test_mirror_chat_id: int | None = None
 
     # --- sandbox --------------------------------------------------------------
     sandbox_backend: Literal["auto", "docker", "agentcore", "local"] = "auto"

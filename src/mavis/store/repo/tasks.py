@@ -295,3 +295,23 @@ async def artifacts_for(task_id: int) -> list[Artifact]:
     async with Session() as s:
         rows = await s.scalars(select(Artifact).where(Artifact.task_id == task_id).order_by(Artifact.id))
         return list(rows)
+
+
+async def mark_delivered(artifact_id: int) -> bool:
+    """Set delivered_at once. True only for the call that set it (concurrent senders lose)."""
+    async with Session() as s:
+        res = await s.execute(
+            update(Artifact).where(Artifact.id == artifact_id, Artifact.delivered_at.is_(None))
+            .values(delivered_at=utcnow())
+        )
+        await s.commit()
+        return (res.rowcount or 0) == 1
+
+
+async def undelivered_artifacts(task_id: int) -> list[Artifact]:
+    async with Session() as s:
+        rows = await s.scalars(
+            select(Artifact).where(Artifact.task_id == task_id, Artifact.delivered_at.is_(None))
+            .order_by(Artifact.id)
+        )
+        return list(rows)

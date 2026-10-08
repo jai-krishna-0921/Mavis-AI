@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Sync the repo to the box, write a production .env, build on the box, start the stack, migrate.
 #   deploy.sh              full deploy; the api sets the Telegram webhook (stop any local `mavis dev` first)
+#   deploy.sh --verify-machine  after deploying, run the machine demo suite on the box (mirrored to the owner)
 #   deploy.sh --no-webhook TELEGRAM_MODE=polling: nothing on the box touches Telegram (use before migrate-data)
 set -euo pipefail
 # shellcheck source=deploy/aws/common.sh
@@ -9,10 +10,12 @@ need ssh rsync openssl
 state_require
 
 WEBHOOK=1
+VERIFY_MACHINE=0
 for a in "$@"; do
   case "$a" in
     --no-webhook) WEBHOOK=0 ;;
-    *) die "unknown argument: $a (usage: deploy.sh [--no-webhook])" ;;
+    --verify-machine) VERIFY_MACHINE=1 ;;
+    *) die "unknown argument: $a (usage: deploy.sh [--no-webhook] [--verify-machine])" ;;
   esac
 done
 [[ -f "$DEMO_ENV" ]] || die "demo env file not found: $DEMO_ENV (set DEMO_ENV=...)"
@@ -56,7 +59,7 @@ if [[ "$WEBHOOK" == 1 ]]; then set_key TELEGRAM_MODE webhook force; else set_key
 # Owner-supplied keys follow the local env file (a rotated or upgraded key must reach the box);
 # an empty local value never blanks the box. Generated secrets below are preserved instead.
 for k in OLLAMA_API_KEY TAVILY_API_KEY COMPOSIO_API_KEY TELEGRAM_BOT_TOKEN ALLOWED_TELEGRAM_CHAT_IDS \
-         LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY; do
+         LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY TEST_MIRROR_CHAT_ID; do
   v="$(envget "$DEMO_ENV" "$k")"
   if [[ -n "$v" ]]; then set_key "$k" "$v" force; else set_key "$k" ""; fi
 done
@@ -132,3 +135,9 @@ else
   log "TELEGRAM_MODE=polling: no webhook set. Run deploy/aws/webhook.sh set after migrate-data."
 fi
 log "health: https://$MAVIS_HOST/healthz (certificate is issued on first request, give it a minute)"
+
+if [[ "$VERIFY_MACHINE" == 1 ]]; then
+  log "running the machine demo suite on the box (mirrored to the owner's chat when TEST_MIRROR_CHAT_ID is set)"
+  compose_remote exec -T worker python -m scripts.machine_demo --all --report-to-owner \
+    || log "demo suite reported failures (reports are in the e2edata volume, /app/data/e2e in the worker)"
+fi
