@@ -107,3 +107,9 @@ def render_card(state: CardState, now: float) -> tuple[str, list[list[Button]]]:
     if state.live_url:
         row.append(Button(label="Watch live", url=state.live_url))
     return "\n".join(lines), [row]
+
+
+def final_of(status: str) -> CardFinal:
+    """The card's outcome word for a terminal task status (anything unknown reads as Couldn't finish)."""
+    return {"done": CardFinal.DONE, "partial": CardFinal.PARTIAL, "cancelled": CardFinal.CANCELLED}.get(
+        str(status), CardFinal.FAILED)

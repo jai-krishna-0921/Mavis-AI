@@ -32,6 +32,7 @@ class Specialist:
     # Custom runner (user_id, instruction, context) -> StepOutcome, used instead of the ReAct loop
     # (Phase 6 Docs / DeepResearch).
     runner: Callable[[int, str, str], Awaitable[StepOutcome]] | None = None
+    machine: bool = False  # uses the machine: card at once, longer clock (Phase 12)
 
 
 # Part of a background loop's wall clock kept for its wrap-up answer: at least 30 s (the LLM slot wait and

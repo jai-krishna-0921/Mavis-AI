@@ -17,11 +17,13 @@ from langgraph.types import Command
 
 from mavis import bus
 from mavis.agents import checkpointing, interrupts
-from mavis.agents.orchestrator_graph import build_orchestrator, initial_state
+from mavis.agents.orchestrator_graph import build_orchestrator, card_wanted, initial_state
 from mavis.agents.task_dispatch import enqueue_run
 from mavis.channels.formatting import verbatim
 from mavis.config import get_settings
 from mavis.domain.events import Event, EventType, Trust
+from mavis.domain.plans import Plan
+from mavis.domain.progress import CardFinal
 from mavis.domain.tasks import TaskKind, TaskStatus
 from mavis.llm.tracing import callbacks
 from mavis.policy import approvals as approval_flow
@@ -103,7 +105,11 @@ async def resume_task(task_id: int, resume_value: dict) -> None:
 
 async def _drive(task_id: int, user_id: int, graph_input: Any) -> None:
     s = get_settings()
-    progress = asyncio.create_task(_progress_after(task_id, user_id, s.task_progress_after_s))
+    task_row = await tasks.get(task_id)
+    if task_row is not None and card_wanted(task_row):
+        progress = asyncio.create_task(_card_after(task_id, user_id, s.progress_card_after_s))
+    else:
+        progress = asyncio.create_task(_progress_after(task_id, user_id, s.task_progress_after_s))
     result: dict | None = None
     limit = asyncio.timeout(s.task_timeout_s)
     try:
@@ -135,6 +141,7 @@ async def _drive(task_id: int, user_id: int, graph_input: Any) -> None:
                 # AWAITING_APPROVAL covers every "waiting for the user" pause (approval or connect).
                 # Claimed from RUNNING, so a cancel that landed meanwhile stands and nothing is prompted.
                 if await tasks.claim(task_id, TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL):
+                    await _cards().tool_called(task_id, "waiting for your OK")
                     if not await interrupts.dispatch_interrupt(task_id, user_id, pending[0].value):
                         log.error("task.unhandled_interrupt", task_id=task_id, payload=pending[0].value)
         await _report_executed_after_stop(task_id, user_id)
@@ -146,6 +153,7 @@ async def _drive(task_id: int, user_id: int, graph_input: Any) -> None:
 async def _fail(task_id: int, user_id: int, reason: str) -> None:
     if not await tasks.claim(task_id, _LIVE, TaskStatus.FAILED, error=reason):
         return  # cancelled (or finished) meanwhile: say nothing about a task the user stopped
+    await _cards().finalize(task_id, CardFinal.FAILED)
     await approval_flow.say(user_id, f"Hit a snag on that task: {reason}. Want me to try again?",
                             dedupe_key=f"task:{task_id}:failed")
     await _close_approvals(task_id, user_id)
@@ -188,6 +196,33 @@ async def _report_executed_after_stop(task_id: int, user_id: int) -> None:
             + verbatim(ap.preview),
             dedupe_key=f"approval:{ap.id}:ran_after_stop",
         )
+
+
+def _cards():
+    from mavis.channels.progress_card import hook_cards  # lazy: channels import the bus
+
+    return hook_cards()
+
+
+async def _card_after(task_id: int, user_id: int, delay_s: float) -> None:
+    """Send the card once the plan exists and the task has run `delay_s` (machine plans: at once)."""
+    from mavis.agents.orchestrator_graph import plan_is_machine
+
+    waited = 0.0
+    while True:
+        task = await tasks.get(task_id)
+        if task is None or task.status not in _LIVE:
+            return
+        if task.plan:
+            plan = Plan.model_validate(task.plan)
+            if _cards().has_card(task_id):
+                return  # the planner started it already (machine plan or no delay)
+            if waited >= delay_s or plan_is_machine(plan):
+                await _cards().start(task_id, user_id, task.goal, plan.steps, tainted=bool(task.tainted))
+                return
+        pause = min(1.0, max(0.05, delay_s - waited))
+        await asyncio.sleep(pause)
+        waited += pause
 
 
 async def _progress_after(task_id: int, user_id: int, delay_s: float) -> None:
