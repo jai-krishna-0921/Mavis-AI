@@ -19,6 +19,7 @@ from mavis.config import get_settings
 from mavis.domain.errors import LLMError, StartupRefused
 from mavis.domain.events import Event, EventType, Job, JobKind, Trust
 from mavis.domain.messages import Outbound
+from mavis.llm.context import bind_user
 from mavis.store.repo import outbox, users
 from mavis.worker import gates
 from mavis.worker.locks import lock, user_lock
@@ -116,6 +117,18 @@ async def _acknowledge(event: Event) -> None:
         log.warning("worker.ack_failed", error=type(exc).__name__)
 
 
+def _purpose(event: Event) -> str:
+    """What an LLM call made while handling this event is for (usage metering, spec 9.2)."""
+    if event.type in CHAT_EVENT_TYPES:
+        return "chat"
+    return {EventType.EMAIL_RECEIVED: "attention", EventType.WAKEUP: "initiative"}.get(event.type, "other")
+
+
+def _job_purpose(job: Job) -> str:
+    return {JobKind.RUN_TASK: "task", JobKind.RESUME_TASK: "task", JobKind.LEARN: "memory",
+            JobKind.CONSOLIDATE: "memory"}.get(job.kind, "other")
+
+
 async def handle_event(event: Event) -> None:
     handlers = list(_event_handlers.get(event.type, []))
     if not handlers and event.type not in GATE_ONLY_TYPES:
@@ -134,8 +147,9 @@ async def handle_event(event: Event) -> None:
         async with _event_lock(event):
             async def attempt() -> None:
                 # Event gates (access, commands, cooldowns) run before any handler, on every attempt
-                if await gates.run_gates(event):
-                    await _run_handlers(event, handlers)
+                with bind_user(event.user_id, _purpose(event)):
+                    if await gates.run_gates(event):
+                        await _run_handlers(event, handlers)
 
             await run_with_inline_retries(attempt, what="event", ref=event.id)
 
@@ -148,7 +162,8 @@ async def handle_job(job: Job) -> None:
     if fn is None:
         log.warning("worker.no_job_handler", kind=job.kind)
         return
-    with structlog.contextvars.bound_contextvars(job_id=job.id, user_id=job.user_id, kind=job.kind.value):
+    with structlog.contextvars.bound_contextvars(job_id=job.id, user_id=job.user_id, kind=job.kind.value), \
+            bind_user(job.user_id, _job_purpose(job)):
         await fn(job)
 
 

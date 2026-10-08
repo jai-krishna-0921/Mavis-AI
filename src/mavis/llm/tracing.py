@@ -31,5 +31,7 @@ def _handler() -> Any | None:
 
 
 def callbacks() -> list[Any]:
+    from mavis.llm.usage import UsageCallback
+
     handler = _handler()
-    return [handler] if handler else []
+    return [UsageCallback(), *([handler] if handler else [])]
