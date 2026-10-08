@@ -130,15 +130,18 @@ async def test_wake_me_track_loop_and_acknowledge_run_directly_under_window_tain
     assert await approvals.open_for_user(user.id) == []
 
 
-async def test_remember_under_window_taint_is_kept_as_the_users_fact(
+async def test_remember_under_window_taint_runs_without_a_card_but_stays_unverified(
     user, channel, fake_llm, fake_memory, rec_bus, tools
 ):
+    """Fix round 1: no card, but the downgrade stays. "Jai prefers..." is not the user's wording
+    ("remember I prefer aisle seats"), so it may carry third-party content from the window."""
     await _proactive_from_email(user.id, "New mail from the bank about your card.", 1)
     await _chat(user, fake_llm, "cool", 2)
     fake_llm.push_ai(_call("remember", {"fact": "Jai prefers aisle seats"}))
     fake_llm.push_text("Noted.")
     await run_turn(_event(user.id, "remember I prefer aisle seats", 3))
-    assert fake_memory.learned_trust == [Trust.USER]
+    assert fake_memory.learned_trust == [Trust.UNTRUSTED]
+    assert await approvals.open_for_user(user.id) == []
 
 
 # --- what can steer THIS turn still counts ----------------------------------------------------------------
@@ -269,7 +272,7 @@ async def test_the_model_sees_the_tool_ran_not_queued(user, channel, fake_llm, f
 
 @pytest.mark.parametrize("text,said,expected", [
     ("Research standing desks suitable for back pain, budget under 30k", "research standing desks for back "
-     "pain under 30k", True),
+     "pain under 30k", False),  # "suitable", "budget": words the user never wrote
     ("Remind me to call Ravi", "remind me at 5 to call ravi", True),
     ("Find standing tables on Amazon with links", "could you find amazon links for standing tables", True),
     ("Provide specs and budget options for standing tables", "yeah sure, would love that", False),
