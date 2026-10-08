@@ -11,8 +11,10 @@ when the interval ends even if nothing else happens (a long tool call never stra
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import structlog
 
@@ -25,6 +27,21 @@ from mavis.domain.progress import CardFinal, CardState, StepState, card_from_pla
 from mavis.store.repo import task_cards, users
 
 log = structlog.get_logger(__name__)
+_EARLY_MAX_TASKS = 500  # tasks whose pre-card updates are kept (each is dropped at start or finalize)
+_EARLY_MAX_CHANGES = 100
+
+
+def _cosmetic(method: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
+    """A card problem (database, channel, bad state) is logged and never fails the task that fed it."""
+
+    @functools.wraps(method)
+    async def wrapper(self: Any, task_id: int, *args: Any, **kwargs: Any) -> None:
+        try:
+            await method(self, task_id, *args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("progress_card.failed", op=method.__name__, task_id=task_id, error=type(exc).__name__)
+
+    return wrapper
 
 
 class _Live:
@@ -44,6 +61,9 @@ class ProgressCards:
         self._live: dict[int, _Live] = {}
         self._locks: dict[int, asyncio.Lock] = {}
         self._timers: dict[int, asyncio.Task[None]] = {}  # pending deferred flush per task
+        # Updates that arrive before the card exists (the card waits PROGRESS_CARD_AFTER_S): replayed at
+        # start, so the first render already shows a running or finished step truthfully.
+        self._early: dict[int, list[Callable[[CardState], None]]] = {}
 
     @property
     def channel(self) -> Channel:
@@ -68,6 +88,7 @@ class ProgressCards:
         self._live[task_id] = live
         return live
 
+    @_cosmetic
     async def start(self, task_id: int, user_id: int, goal: str, steps: list[PlanStep], *,
                     tainted: bool) -> None:
         async with self._lock(task_id):
@@ -77,20 +98,22 @@ class ProgressCards:
             if user.telegram_chat_id is None:
                 return
             state = card_from_plan(task_id, goal, steps, tainted=tainted, now=self._wall())
+            for change in self._early.pop(task_id, []):
+                change(state)
             text, buttons = render_card(state, self._wall())
-            try:
-                ids = await self.channel.send_text(user.telegram_chat_id, text, buttons)
-            except Exception as exc:  # noqa: BLE001 - a card problem must never fail the task
-                log.warning("progress_card.start_failed", task_id=task_id, error=type(exc).__name__)
-                return
+            ids = await self.channel.send_text(user.telegram_chat_id, text, buttons)
             live = _Live(state, user_id, user.telegram_chat_id, ids[-1] if ids else None, text, self._clock())
             self._live[task_id] = live
             await task_cards.save(task_id, user_id, live.chat_id, live.message_id, state.model_dump(), False)
 
+    @_cosmetic
     async def _update(self, task_id: int, change: Callable[[CardState], None]) -> None:
         async with self._lock(task_id):
             live = await self._load(task_id)
-            if live is None or live.state.final is not None:
+            if live is None:
+                self._remember_early(task_id, change)
+                return
+            if live.state.final is not None:
                 return
             change(live.state)
             live.dirty = True
@@ -123,14 +146,17 @@ class ProgressCards:
     async def set_live_url(self, task_id: int, url: str | None) -> None:
         await self._update(task_id, lambda s: setattr(s, "live_url", url))
 
+    @_cosmetic
     async def flush(self, task_id: int) -> None:
         async with self._lock(task_id):
             live = await self._load(task_id)
             if live is not None and live.dirty:
                 await self._maybe_edit(task_id, live, force=False)
 
+    @_cosmetic
     async def finalize(self, task_id: int, final: CardFinal) -> None:
         async with self._lock(task_id):
+            self._early.pop(task_id, None)
             live = await self._load(task_id)
             if live is None or live.state.final is not None:
                 return
@@ -174,6 +200,13 @@ class ProgressCards:
             await task_cards.save(task_id, live.user_id, live.chat_id, live.message_id,
                                   live.state.model_dump(), False)
 
+    def _remember_early(self, task_id: int, change: Callable[[CardState], None]) -> None:
+        if task_id not in self._early and len(self._early) >= _EARLY_MAX_TASKS:
+            self._early.pop(next(iter(self._early)))
+        changes = self._early.setdefault(task_id, [])
+        changes.append(change)
+        del changes[:-_EARLY_MAX_CHANGES]
+
     def _defer(self, task_id: int, wait: float) -> None:
         if task_id in self._timers:
             return
@@ -214,3 +247,20 @@ def get_cards() -> ProgressCards:
 def set_cards(c: ProgressCards | None) -> None:
     global _cards
     _cards = c
+
+
+class _NoCards:
+    """Hooks when PROGRESS_CARD_ENABLED is off: every call is a no-op (today's behaviour)."""
+
+    def has_card(self, task_id: int) -> bool:
+        return False
+
+    async def _noop(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    start = step_started = step_finished = tool_called = file_sent = set_live_url = finalize = flush = _noop
+
+
+def hook_cards() -> ProgressCards | _NoCards:
+    """The cards the task runner feeds: the real service when cards are on, a no-op otherwise."""
+    return get_cards() if get_settings().progress_card_enabled else _NoCards()

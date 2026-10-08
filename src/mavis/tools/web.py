@@ -23,7 +23,7 @@ from mavis.config import get_settings
 from mavis.domain.args import ToolArgs
 from mavis.domain.policy import Capability, RiskClass
 from mavis.domain.tasks import TaskOrigin
-from mavis.tools.registry import MavisTool, current_run, current_task_id
+from mavis.tools.registry import MavisTool, current_run, current_task_id, host_of
 
 log = structlog.get_logger()
 
@@ -380,7 +380,7 @@ TOOLS = [
         description="Search the web. Returns numbered results with title, URL and snippet.",
         args_model=SearchArgs, risk=RiskClass.READ, fn=web_search, requires=Capability.WEB,
         agents=frozenset({"conversation", "research", "knowledge", "spawn"}),
-        untrusted_output=True, priority=70,
+        untrusted_output=True, priority=70, progress_label=lambda a, out: "searched the web",
     ),
     MavisTool(
         name="web_extract",
@@ -389,6 +389,6 @@ TOOLS = [
         # Not "conversation": chat reads mail and calendar, so a model-chosen URL fetch there could
         # carry private data out in a query string. Research runs on tainted-aware task loops.
         agents=frozenset({"research", "spawn"}),
-        untrusted_output=True, priority=40,
+        untrusted_output=True, priority=40, progress_label=lambda a, out: f"opened {host_of(a.url)}",
     ),
 ]

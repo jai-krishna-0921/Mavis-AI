@@ -43,7 +43,8 @@ from mavis.domain.errors import ActionFailed, BudgetExceeded, ConnectionRequired
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.localtime import localize_args
 from mavis.domain.plans import CriticVerdict, Plan, PlanStep
-from mavis.domain.tasks import ApprovalStatus, StepOutcome, TaskKind, TaskStatus
+from mavis.domain.progress import StepState, final_of
+from mavis.domain.tasks import ApprovalStatus, StepOutcome, TaskKind, TaskOrigin, TaskStatus
 from mavis.llm import models as llm
 from mavis.policy.risk import UNTRUSTED_NOTE, wrap_untrusted
 from mavis.store.db import utcnow
@@ -224,6 +225,7 @@ async def planner(state: OrchestratorState) -> dict:
     plan = await make_plan(state["goal"], context)
     # Status is owned by the task runner (QUEUED -> RUNNING claim); this never revives a finished task.
     await tasks.save_plan(state["task_id"], plan.model_dump())
+    await start_card_now(state["task_id"], plan)
     return {"plan": plan.model_dump(), "todo": [s.id for s in plan.steps], "revision": 0, "feedback": {}}
 
 
@@ -309,12 +311,46 @@ def _step_context(inp: StepInput) -> str:
     return "\n\n".join(parts)
 
 
+def plan_is_machine(plan: Plan) -> bool:
+    """A plan that uses a machine specialist: its card is sent at once and its clock is longer."""
+    return any(getattr(SPECIALISTS.get(s.agent), "machine", False) for s in plan.steps)
+
+
+def step_state_of(outcome: StepOutcome) -> StepState:
+    if not outcome.ok:
+        return StepState.FAILED
+    return StepState.PARTIAL if outcome.partial else StepState.DONE
+
+
+def _cards():
+    from mavis.channels.progress_card import hook_cards  # lazy: channels import the bus
+
+    return hook_cards()
+
+
+def card_wanted(task: Any) -> bool:
+    """USER-origin TASK-kind tasks get a live card (when enabled); initiative and approval tasks never."""
+    return (get_settings().progress_card_enabled and str(task.origin) == TaskOrigin.USER.value
+            and str(task.kind) == TaskKind.TASK.value)
+
+
+async def start_card_now(task_id: int, plan: Plan) -> None:
+    """Machine plans (and PROGRESS_CARD_AFTER_S=0) show the card as soon as the plan exists, before the
+    first step starts. Other tasks get it from the runner once they have run PROGRESS_CARD_AFTER_S."""
+    if get_settings().progress_card_after_s > 0 and not plan_is_machine(plan):
+        return
+    task = await tasks.get(task_id)
+    if task is not None and card_wanted(task):
+        await _cards().start(task_id, task.user_id, task.goal, plan.steps, tainted=bool(task.tainted))
+
+
 async def run_step(inp: StepInput) -> dict:
     step = PlanStep.model_validate(inp["step"])
     tainted = bool(inp.get("tainted", False))
     token = current_task_id.set(inp["task_id"])
     deliverable_token = current_deliverable.set(inp.get("deliverable", "message"))
     taint_token = step_tainted.set(tainted)
+    await _cards().step_started(inp["task_id"], step.id)
     try:
         outcome = await run_step_agent(step, inp["user_id"], _step_context(inp))
     except BudgetExceeded as exc:
@@ -322,6 +358,7 @@ async def run_step(inp: StepInput) -> dict:
     except ConnectionRequired as exc:
         log.info("orchestrator.step_needs_connection", task_id=inp["task_id"], step=step.id,
                  capability=exc.capability.value)
+        await _cards().step_finished(inp["task_id"], step.id, StepState.WAITING)
         return {
             "results": {step.id: {"ok": False, "text": "", "artifacts": [], "round": inp["revision"],
                                   "agent": step.agent, "tainted": tainted,
@@ -340,6 +377,7 @@ async def run_step(inp: StepInput) -> dict:
         current_deliverable.reset(deliverable_token)
         step_tainted.reset(taint_token)
     log.info("orchestrator.step_done", task_id=inp["task_id"], step=step.id, ok=outcome.ok)
+    await _cards().step_finished(inp["task_id"], step.id, step_state_of(outcome))
     return {
         "results": {step.id: {**outcome.model_dump(), "tainted": outcome.tainted or tainted,
                               "round": inp["revision"], "agent": step.agent}},
@@ -681,6 +719,7 @@ async def finish(state: OrchestratorState) -> dict:
     if not await tasks.claim(task_id, active, status, **fields):
         log.info("orchestrator.finish_skipped", task_id=task_id)
         return {}
+    await _cards().finalize(task_id, final_of(status.value))
     task = await tasks.get(task_id)
     await bus.get_bus().publish(Event(
         id=f"task:{task_id}:completed", user_id=user_id, type=EventType.TASK_COMPLETED,

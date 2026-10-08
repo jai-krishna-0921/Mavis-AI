@@ -165,3 +165,42 @@ async def test_start_failure_is_swallowed(setup):
     ch.fail_next.append(RuntimeError("network down"))
     await cards.start(tid, u.id, "g", STEPS, tainted=False)
     assert not cards.has_card(tid) and await task_cards.get(tid) is None
+
+
+@pytest.mark.parametrize("finished", [[], ["s1"]])
+async def test_updates_before_the_card_show_in_its_first_render(setup, finished):
+    cards, ch, _clock, u, tid = setup
+    await cards.step_started(tid, "s1")
+    for step_id in finished:
+        await cards.step_finished(tid, step_id, StepState.DONE)
+        await cards.step_started(tid, "s2")
+    await cards.tool_called(tid, "searched the web")
+    await cards.start(tid, u.id, "g", STEPS, tainted=False)
+    first = ch.texts[0]
+    if finished:
+        assert "✅ 1. Look up train times" in first and "⏳ 2. Pick the fastest" in first
+    else:
+        assert "⏳ 1. Look up train times" in first and "▫️ 2. Pick the fastest" in first
+    assert "Last: searched the web" in first
+
+
+async def test_finalize_without_a_card_drops_early_updates(setup):
+    cards, ch, _clock, u, tid = setup
+    await cards.step_started(tid, "s1")
+    await cards.finalize(tid, CardFinal.DONE)
+    await cards.start(tid, u.id, "g", STEPS, tainted=False)
+    assert "▫️ 1. Look up train times" in ch.texts[0]
+
+
+@pytest.mark.parametrize("op", ["step_started", "tool_called", "finalize"])
+async def test_a_store_error_never_reaches_the_caller(setup, monkeypatch, op):
+    cards, _ch, _clock, u, tid = setup
+    await cards.start(tid, u.id, "g", STEPS, tainted=False)
+    cards._live.clear()  # force a reload from the store
+
+    async def broken(_task_id):
+        raise RuntimeError("database is gone")
+
+    monkeypatch.setattr(task_cards, "get", broken)
+    arg = {"step_started": "s1", "tool_called": "opened a.example", "finalize": CardFinal.DONE}[op]
+    await getattr(cards, op)(tid, arg)
