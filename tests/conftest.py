@@ -155,6 +155,14 @@ def _reset_initiative_wiring():
     wiring.set_current(None)
 
 
+@pytest.fixture(autouse=True)
+def _reset_reaction_log(monkeypatch):
+    """Reaction outcomes (the frequency rule's memory) must not leak between tests."""
+    from mavis.agents import reactions
+
+    monkeypatch.setattr(reactions, "_log", reactions.ReactionLog())
+
+
 @pytest.fixture
 async def user(db):
     from mavis.store.repo import users

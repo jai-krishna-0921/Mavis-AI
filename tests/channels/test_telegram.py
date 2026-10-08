@@ -130,5 +130,10 @@ async def test_react_calls_set_message_reaction() -> None:
         bot.calls.append(("reaction", chat_id, message_id, reaction))
 
     bot.set_message_reaction = set_message_reaction
-    await TelegramChannel("token", bot=bot).react(5, 42, "\N{EYES}")
-    assert ("reaction", 5, 42, "\N{EYES}") in bot.calls
+    channel = TelegramChannel("token", bot=bot)
+    await channel.react(5, 42, "\N{EYES}")
+    await channel.react(5, 42, None)
+    sent = [c for c in bot.calls if c[0] == "reaction"]
+    assert sent[0][:3] == ("reaction", 5, 42)
+    assert [r.emoji for r in sent[0][3]] == ["\N{EYES}"]  # one ReactionTypeEmoji
+    assert sent[1] == ("reaction", 5, 42, [])  # an empty list clears it

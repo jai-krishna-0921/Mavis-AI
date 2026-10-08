@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, ReactionTypeEmoji
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, RetryAfter
 
@@ -124,9 +124,11 @@ class TelegramChannel:
         except Exception as exc:  # noqa: BLE001 - typing is cosmetic
             log.debug("telegram.typing_failed", error=type(exc).__name__)
 
-    async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
+    async def react(self, chat_id: int, message_id: int, emoji: str | None) -> None:
+        """One emoji reaction (bots get one per message; it replaces the earlier one), or clear it."""
         await self._ensure()
-        await self._bot.set_message_reaction(chat_id=chat_id, message_id=message_id, reaction=emoji)
+        reaction = [ReactionTypeEmoji(emoji)] if emoji else []
+        await self._bot.set_message_reaction(chat_id=chat_id, message_id=message_id, reaction=reaction)
 
     async def download_file(self, file_id: str, dest_path: str) -> str:
         await self._ensure()

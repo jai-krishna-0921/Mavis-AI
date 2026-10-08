@@ -32,7 +32,7 @@ import structlog
 from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
-from mavis.agents import claims, clarify, commands, persona
+from mavis.agents import claims, clarify, commands, persona, reactions, register
 from mavis.agents.react import ReactResult, _text_of, react_loop
 from mavis.agents.task_dispatch import enqueue_run
 from mavis.agents.turn_support import (
@@ -427,6 +427,21 @@ async def _approval_reply(event: Event, user_id: int, text: str, history: list[M
 # --- the turn --------------------------------------------------------------------------------------
 
 
+def _reaction_target(event: Event, chat_id: int | None) -> tuple[int, int] | None:
+    """(chat_id, message_id) when this turn answers a Telegram message that can carry a reaction."""
+    message_id = event.payload.get("message_id")
+    if event.source != "telegram" or message_id is None or chat_id is None:
+        return None
+    return chat_id, int(message_id)
+
+
+async def _settle_reaction(event: Event, user_id: int, chat_id: int | None, mood: str | None) -> None:
+    """Replace the "seen" cue with the mood reaction, or clear it (T1.3). Best effort."""
+    target = _reaction_target(event, chat_id)
+    if target is not None:
+        await reactions.apply(user_id, *target, mood, event.id)
+
+
 async def run_turn(event: Event) -> None:
     text = user_text(event)
     current_route.set(None)
@@ -440,6 +455,7 @@ async def run_turn(event: Event) -> None:
     await initiative_hook("loops.on_user_message", lambda i: i.loops.on_user_message(user.id, text))
     if await commands.run_command(event):
         current_route.set("CONNECT")
+        await _settle_reaction(event, user.id, user.telegram_chat_id, None)
         return
 
     # Retry after the reply was enqueued: don't call the LLM again (it could split differently).
@@ -459,6 +475,7 @@ async def run_turn(event: Event) -> None:
                             tainted=tainted or previous_tainted(history))
         await attach_queued_approvals(user.id, text, tainted=tainted,  # it may have died before this
                                       turn_ref=event.id)
+        await _settle_reaction(event, user.id, user.telegram_chat_id, None)  # no-op if already settled
         return
 
     history = await messages.recent(user.id, HISTORY_LIMIT)
@@ -477,9 +494,11 @@ async def run_turn(event: Event) -> None:
         # The request still carries information (people, titles); the hooks skip its ambiguous time.
         await enqueue_learn(user.id, event, text, previous, clarified_request(history),
                             tainted=previous_tainted(history))
+        await _settle_reaction(event, user.id, user.telegram_chat_id, None)
         return
 
     if await _approval_reply(event, user.id, text, history):
+        await _settle_reaction(event, user.id, user.telegram_chat_id, None)
         return
 
     hint = ""
@@ -505,10 +524,12 @@ async def run_turn(event: Event) -> None:
         now = utcnow()
         name = user.name or card_name
         recent = persona.recent_messages(history, now)
+        their_register = register.measure(register.user_texts(history, now))
         system = persona.system_prompt(
             user, now, context=context, connections=connections, known_name=name,
             ask_name=persona.should_ask_name(name, history, now, user.timezone),
             prior_turns=max(len(recent) - 1, 0),  # the current message is already in history
+            register_line=register.prompt_line(their_register),
         )
         tools = chat_tools(user.id, query=f"{text}\n{previous or ''}",
                            focus=await focus_tools(user.id, history), connect=commands.wants_connect(text))
@@ -519,8 +540,15 @@ async def run_turn(event: Event) -> None:
             if any(t.name in EVENT_TOOLS for t in tools):
                 minutes = get_settings().default_event_minutes
                 system = f"{system}\n{DURATION_RULE.format(minutes=minutes)}"
+        reacting = _reaction_target(event, user.telegram_chat_id) is not None
+        if reacting:
+            system = f"{system}\n\n{reactions.REACTION_RULE}"
         prompt: list[BaseMessage] = [SystemMessage(system)]
-        prompt += to_langchain(history, now, user.timezone)
+        # past reactions replay as their turn's marker line, so the history shows the format in use
+        prompt += to_langchain(history, now, user.timezone,
+                               reactions=await reactions.landed(user.id) if reacting else None)
+        if reacting:
+            prompt.append(SystemMessage(reactions.REACTION_REMINDER))
 
         connect_texts: list[str] = []
         token = current_turn.set(TurnInfo(event_id=event.id))
@@ -547,14 +575,19 @@ async def run_turn(event: Event) -> None:
             await initiative_hook("quiet.after_assistant_message",
                                   lambda i: i.quiet.after_assistant_message(user.id, connect_texts[-1]))
             current_route.set("CONNECT")
+            await _settle_reaction(event, user.id, user.telegram_chat_id, None)
             return
         if result.tools_called:
             log.info("simple_turn.tools", tools=result.tools_called, steps=result.steps,
                      tainted=result.tainted, wrapped_up=result.wrapped_up,
                      queued=result.queued_approvals)
         # replayed messages carry stamps (T1); one echoed at the start of a line is not content
-        reply = strip_stamps(result.text or "").strip() or WRAP_UP_FALLBACK
+        # the optional mood reaction rides on the reply as a marker line (T1.3); it never reaches the text
+        reply, mood = reactions.split_reaction(register.mask_slurs(strip_stamps(result.text or "")))
+        reply = reply.strip() or WRAP_UP_FALLBACK
         reply = commands.canonical_commands(reply)  # /connect_google -> the command that exists
+        if register.unmirrored(their_register, reply):  # formal, upset or never swore: no swearing (T1.2)
+            reply = await register.tone_down(reply)
         bubbles = persona.split_bubbles(reply) or [reply]
         if card_only(result):
             # The card (preview + buttons, rendered by code) is the only prompt: no prose bubble repeats it.
@@ -578,3 +611,4 @@ async def run_turn(event: Event) -> None:
         await initiative_hook("quiet.after_assistant_message",
                               lambda i: i.quiet.after_assistant_message(user.id, bubbles[-1]))
     current_route.set(_route_for(result.tools_called))
+    await _settle_reaction(event, user.id, user.telegram_chat_id, mood)

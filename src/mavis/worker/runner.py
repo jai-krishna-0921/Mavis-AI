@@ -119,6 +119,7 @@ async def handle_event(event: Event) -> None:
         ack = asyncio.create_task(_acknowledge(event))
         _ack_tasks.add(ack)
         ack.add_done_callback(_ack_tasks.discard)
+        presence.track_ack(event.id, ack)  # the turn's mood reaction waits for it (T1.3)
         # The user lock is held across the inline retries (and their sleeps) so this user's next
         # event cannot overtake a retrying one. Other users run on the other consumer loops.
         async with _event_lock(event):

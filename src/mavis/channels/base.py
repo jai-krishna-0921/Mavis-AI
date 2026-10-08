@@ -23,7 +23,8 @@ class Channel(Protocol):
 
     async def send_typing(self, chat_id: int) -> None: ...
 
-    async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
-        """React to a user message. Best effort; callers swallow failures."""
+    async def react(self, chat_id: int, message_id: int, emoji: str | None) -> None:
+        """Set the bot's reaction on a user message (replacing any earlier one); None clears it. Best
+        effort; callers swallow failures."""
 
     async def download_file(self, file_id: str, dest_path: str) -> str: ...
