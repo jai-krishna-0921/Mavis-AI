@@ -29,7 +29,7 @@ import structlog
 from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.tools import BaseTool
 
-from mavis.agents import clarify, commands, persona
+from mavis.agents import clarify, commands, persona, register
 from mavis.agents.react import react_loop
 from mavis.agents.task_dispatch import enqueue_run
 from mavis.agents.turn_support import (
@@ -393,6 +393,7 @@ async def run_turn(event: Event) -> None:
             user, now, context=context, connections=connections, known_name=name,
             ask_name=persona.should_ask_name(name, history, now, user.timezone),
             prior_turns=max(len(recent) - 1, 0),  # the current message is already in history
+            register_line=register.prompt_line(register.measure(register.user_texts(history, now))),
         )
         tools = chat_tools(user.id, query=f"{text}\n{previous or ''}")
         if tools:
@@ -432,7 +433,7 @@ async def run_turn(event: Event) -> None:
                      tainted=result.tainted, wrapped_up=result.wrapped_up,
                      queued=result.queued_approvals)
         # replayed messages carry stamps (T1); one echoed at the start of a line is not content
-        reply = strip_stamps(result.text or "").strip() or WRAP_UP_FALLBACK
+        reply = register.mask_slurs(strip_stamps(result.text or "")).strip() or WRAP_UP_FALLBACK
         bubbles = persona.split_bubbles(reply) or [reply]
 
         async with Session() as s:

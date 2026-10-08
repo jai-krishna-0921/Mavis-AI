@@ -699,3 +699,9 @@ async def test_failed_provider_body_never_reaches_the_user(user, fake_llm, rec_b
     assert (await approvals.get(aid)).status == ApprovalStatus.FAILED
     assert shown.startswith(f"Tried, but it failed: {service} ")
     assert "{" not in shown and "error" not in shown.lower()
+
+
+async def test_responder_masks_slurs(user, fake_llm):
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["Those retards at the bank fixed it."]))
+    out = await og.responder({"user_id": user.id, "goal": "check the bank", "kind": TaskKind.TASK})
+    assert "retard" not in out["final_messages"][0] and "r*****s" in out["final_messages"][0]

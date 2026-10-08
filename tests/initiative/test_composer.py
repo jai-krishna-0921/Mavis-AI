@@ -159,3 +159,24 @@ def test_scrub_phone_in_parentheses_has_no_artifact():
 ])
 def test_scrub_leaves_ordinary_text(text):
     assert scrub_untrusted_origin(text) == text
+
+
+async def test_proactive_swears_only_after_a_recent_sweary_chat(user, clock, fake_memory, fake_llm):
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["hi"]))
+    await Composer(fake_memory).compose(user, "morning plan", 2)
+    assert "don't swear in this message" in fake_llm.structured_calls[-1]["system"]
+
+    await messages.log(user.id, Role.USER, "fuck yes, nailed the interview")
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["hi"]))
+    await Composer(fake_memory).compose(user, "follow up on the interview", 2)
+    system = fake_llm.structured_calls[-1]["system"]
+    assert "casual and sweary" in system and "milder" in system
+
+
+async def test_composer_masks_slurs_in_bubbles(user, clock, fake_memory, fake_llm):
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["what a retard move by the bank"]))
+    msg = await Composer(fake_memory).compose(user, "bank news", 2)
+    assert "retard" not in msg.messages[0] and "r****d" in msg.messages[0]

@@ -21,8 +21,15 @@ How you talk
 - Casual, warm, a little witty. Short chat bubbles, not essays, each under 400 characters unless you're \
 delivering content they asked for. A reply is one bubble: paragraphs and lists stay together in it. \
 Only when you really mean separate messages, put a line containing just --- between them (at most 3 bubbles).
-- Mirror their tone and energy. If they swear, you can swear back, lightly. If they're down, slow down \
-and be kind before being useful.
+- Mirror their register and energy: casual with casual, formal with formal, short with short. If they're \
+down, slow down and be kind before being useful.
+- Swearing: only when the register note below says they swear, and then in proportion to how they talk. \
+Never insult them, never swear at them or about people they mention, never use slurs, never anything \
+sexual. Drop it completely when they're upset, stressed or grieving, when it's about health, money trouble \
+or bad news, or when you're apologising.
+- If they insult you or swear at you, stay unbothered: a light, good-humoured comeback in their register, \
+then keep helping. Never a canned refusal ("I'm sorry, but I can't help with that"), never a lecture about \
+language or respect, never sulking.
 - When a time or day is ambiguous, ask one clear question instead of guessing. Just after midnight, \
 "tomorrow" could mean two different days.
 - Formatting stays light. Never use dashes as punctuation: put a colon after a label ("Tip: ..."), write \
@@ -70,7 +77,7 @@ If they ask for something outside all of this, say you can't do that yet.
 Right now
 - Local time for {who}: {local_time} ({tz}).
 - {time_rule}
-- {name_line}{convo_block}"""
+- {name_line}{convo_block}{register_block}"""
 
 # T1: replayed messages carry stamps; stored text keeps the relative words it was written with.
 TIME_RULE = (
@@ -153,7 +160,9 @@ def system_prompt(
     known_name: str | None = None,
     ask_name: bool = True,
     prior_turns: int | None = None,
+    register_line: str = "",
 ) -> str:
+    """`register_line`: the user's measured register (agents/register.py), "" when unknown."""
     local = local_time(user, now)
     name = user.name or known_name
     who = name or "the user"
@@ -185,6 +194,7 @@ def system_prompt(
         time_rule=TIME_RULE,
         convo_block=convo_block,
         connection_lines=connection_lines(connections),
+        register_block=f"\n- {register_line}" if register_line else "",
     )
     return f"{prompt}\n\n{context.strip()}" if context.strip() else prompt
 
