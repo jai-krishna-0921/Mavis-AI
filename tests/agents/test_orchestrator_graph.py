@@ -647,7 +647,7 @@ async def _approve_once(user_id: int, tool: str, args: dict, preview: str) -> tu
 
 
 @pytest.mark.parametrize("user_text,note", [
-    ("Started background task #7.", "Tell the user you're on it and will report back."),
+    ("On it: compare laptops. I'll send it over when it's ready.", "Task #7 started. Tell the user."),
     ("Reminder set for Thu 08 Oct, 09:00.", "Wakeup #31 set for 2026-10-08T03:30:00+00:00."),
     ("", "QUEUE_ID=99. Do not mention ids to the user."),
 ])
@@ -664,7 +664,7 @@ async def test_receipt_shows_user_text_and_never_the_model_note(user, fake_llm, 
                                       risk=RiskClass.OUTWARD, fn=_do, agents=frozenset({"conversation"})))
     aid, out = await _approve_once(user.id, "send_note", {"text": "x"}, "Send note: x")
     shown = "\n".join(to_plain(m) for m in out["final_messages"])
-    assert shown == (f"Done ✓\n{user_text}" if user_text else "Done ✓")
+    assert shown == (user_text or "Done ✓")  # the tool's own receipt replaces the generic tick
     assert note not in shown
     assert note in (await approvals.get(aid)).result  # the model-facing record keeps the full result
 
