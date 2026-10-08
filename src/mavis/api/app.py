@@ -28,8 +28,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     s = get_settings()
     if s.telegram_mode == "webhook" and not s.telegram_webhook_secret:
         raise RuntimeError("TELEGRAM_WEBHOOK_SECRET is required in webhook mode")
-    if s.env == "prod" and not s.allowed_telegram_chat_ids:
-        raise RuntimeError("ALLOWED_TELEGRAM_CHAT_IDS is required when ENV=prod")
+    if s.env == "prod" and not s.owner_telegram_chat_ids:
+        raise RuntimeError("OWNER_TELEGRAM_CHAT_IDS is required when ENV=prod")
     if s.live_test_enabled and active_test_chat(s) is None:
         log.error("live_test.disabled_at_startup")  # misconfigured: the reason is logged, path stays off
     if s.is_sqlite:
@@ -57,7 +57,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(title="Mavis", lifespan=lifespan)
     app.include_router(health.router)
-    app.include_router(telegram.router, dependencies=[Depends(webhook_rate_limit)])
+    # The Telegram route is authenticated by its secret header and all traffic shares Telegram's IPs, so it is
+    # not behind the per-IP limiter (spec 9.1); intake applies a per-chat bucket instead.
+    app.include_router(telegram.router)
     app.include_router(connect.router)
     app.include_router(integrations.router, dependencies=[Depends(webhook_rate_limit)])
     return app
