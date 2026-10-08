@@ -256,6 +256,9 @@ class MemoryService:
         if trust is Trust.USER:  # the model sometimes misreads "by Tuesday": fix the plain cases in code
             extraction = apply_relative_day(extraction, user_message_of(text), anchor, user.timezone)
         said, context = _split_learn_text(text)
+        # The assistant's own words are never a memory source (only fenced context for the extractor):
+        # what is stored is the user's side of a chat turn, whatever its trust.
+        own_words = said if conversation else text
         if conversation and said != text.strip():  # an assistant reply was included as context (T3)
             extraction = grounded_in_user(extraction, said, context)
 
@@ -276,7 +279,7 @@ class MemoryService:
             # Third-party text: derived facts are signals (wrapped as untrusted in recall); no graph
             # relations, no profile or mood changes.
             await self.vector.add(user_id, facts, kind="signal", source_ref=source_ref, at=anchor)
-            episode = text
+            episode = own_words
         if len(episode.split()) >= MIN_EPISODE_WORDS:
             await self.vector.add(
                 user_id, [episode[:500]], kind="episode" if trusted else "signal", source_ref=source_ref,
