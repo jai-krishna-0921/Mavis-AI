@@ -33,6 +33,7 @@ dependencies = [
     "tavily-python>=0.8.4",
     "typer>=0.27.2",
     "tzdata>=2026.4",
+    "tzfpy>=0.16",
     "uvicorn[standard]>=0.54.0",
 ]
 

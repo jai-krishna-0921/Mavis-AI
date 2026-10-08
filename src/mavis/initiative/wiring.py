@@ -84,6 +84,9 @@ def wire_initiative(register_handlers: bool = True) -> Initiative:
     if init.loops_from_extraction not in memory.on_extraction:
         memory.on_extraction.append(init.loops_from_extraction)
     memory.set_loops_reader(init.loops)
+    from mavis.access.preferences import register_timezone_hook
+
+    register_timezone_hook(init.routines.on_timezone_change)
     if register_handlers:
         register(init.handler)
     return init

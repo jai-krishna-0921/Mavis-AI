@@ -12,6 +12,7 @@ from functools import lru_cache
 import structlog
 from qdrant_client import AsyncQdrantClient
 
+from mavis.access.preferences import register_timezone_hook
 from mavis.agents import context_hooks
 from mavis.agents.buttons import dispatch_button, register_button_handler
 from mavis.attention.baselines import Baselines
@@ -247,6 +248,12 @@ async def close_attention() -> None:
             log.warning("attention.close_failed", error=type(exc).__name__)
 
 
+async def _reanchor_evening(user_id: int, old: str, new: str) -> None:
+    """A changed time zone moves tomorrow's evening wrap to the new local time."""
+    await WakeupService().cancel_where(user_id, [WakeupKind.SYSTEM_EVENING_WRAP])
+    await get_evening().ensure(user_id)
+
+
 def register_attention() -> None:
     if not get_settings().attention_enabled:
         log.info("attention.disabled")  # the Phase 5 email path stays as it is
@@ -263,6 +270,7 @@ def register_attention() -> None:
     register_system_wakeup(WakeupKind.SYSTEM_EVENING_WRAP.value, get_evening().run)
     register_system_wakeup(WakeupKind.SYSTEM_ATTENTION_RETENTION.value, get_retention().run)
     register_startup_hook(heal_all)
+    register_timezone_hook(_reanchor_evening)
     routines.register_morning_hook(morning_maintenance)
     if pipeline.enrich not in hooks.ENRICHERS:
         hooks.ENRICHERS.append(pipeline.enrich)

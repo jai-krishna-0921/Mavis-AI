@@ -288,7 +288,7 @@ class AttentionPipeline:
         if m is None or m.amount <= 0:
             return None, NO_ANOMALY
         s = get_settings()
-        currency = m.currency or s.attention_currency
+        currency = m.currency or getattr(user, "currency", None) or s.attention_currency
         known = await self._baselines.counterparty_keys(user.id, currency)
         key = match_key(normalize_counterparty(m.counterparty), known)
         occurred = timeutil.ensure_utc(m.occurred_at) if m.occurred_at else received
