@@ -321,3 +321,64 @@ def test_honorifics_are_not_sentence_ends(text):
 
 def test_a_real_sentence_end_still_counts():
     assert register.has_profanity("It broke. Bastard thing.")
+
+
+# --- D8: a swear they just made is mirrored (not merely allowed); a stated wish for short messages holds ---
+
+
+def test_latest_swear_asks_for_a_mirrored_swear_but_older_swearing_only_allows_it():
+    now = measure(["yo", "fuck this week man, so much shit to do"])
+    assert now.swears and now.latest_swore
+    assert "ONE casual swear" in prompt_line(now) and "never at them" in prompt_line(now)
+    earlier = measure(["fuck this week", "anyway, what's on today"])
+    assert earlier.swears and not earlier.latest_swore
+    line = prompt_line(earlier)
+    assert "may swear" in line and "ONE casual swear" not in line
+
+
+@pytest.mark.parametrize("latest", [
+    "Good morning. Could you please summarise what I should prepare for Friday?",  # formal
+    "fuck. my dad died this morning",  # distress
+])
+def test_a_just_made_swear_is_not_mirrored_when_formal_or_upset(latest):
+    reg = measure(["fuck this week", latest])
+    assert not reg.latest_swore and "ONE casual swear" not in prompt_line(reg)
+
+
+def test_brief_is_added_to_every_register_line_including_proactive_and_empty():
+    formal = "Good morning. Could you please summarise my inbox for me?"
+    for texts in ([], ["lol ok"], ["fuck this"], [formal]):
+        reg = measure(texts, brief=True)
+        assert reg.brief
+        assert "short messages" in prompt_line(reg)
+        assert "short messages" in prompt_line(reg, proactive=True)
+    assert "short messages" not in prompt_line(measure(["fuck this"]))
+
+
+async def test_standing_brief_is_the_profile_preference_not_a_text_scan(user):
+    """Detection lives in LEARN (profile `brevity`); chat history is never pattern-matched."""
+    from mavis.domain.memory import ProfileUpdate
+    from mavis.memory.profile import ProfileCard
+    from mavis.store.repo import profile as profile_repo
+
+    assert not await register.standing_brief(user.id)
+    card = ProfileCard().apply([ProfileUpdate(field="brevity", value="short")])
+    await profile_repo.save(user.id, card)
+    assert await register.standing_brief(user.id)
+    await profile_repo.save(user.id, card.apply([ProfileUpdate(field="brevity", value="normal")]))
+    assert not await register.standing_brief(user.id)
+    await profile_repo.save(user.id, card.apply([ProfileUpdate(field="brevity", value="whatever")]))
+    assert await register.standing_brief(user.id)  # an unknown value is ignored, the stored one stands
+
+
+def test_nothing_in_the_register_module_scans_text_for_a_length_wish():
+    assert not hasattr(register, "wants_brief") and not hasattr(register, "_BRIEF")
+
+
+def test_brevity_is_a_profile_scalar_rendered_in_the_card():
+    from mavis.domain.memory import ProfileUpdate
+    from mavis.memory.profile import ProfileCard
+
+    card = ProfileCard().apply([ProfileUpdate(field="brevity", value="Short")])
+    assert card.brevity == "short" and "short messages" in card.render()
+    assert "short" not in ProfileCard().apply([ProfileUpdate(field="brevity", value="normal")]).render()

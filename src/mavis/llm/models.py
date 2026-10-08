@@ -27,6 +27,7 @@ from pydantic import BaseModel, ValidationError
 
 from mavis.config import get_settings
 from mavis.domain.errors import LLMError
+from mavis.llm import share
 from mavis.llm.tracing import callbacks
 
 log = structlog.get_logger(__name__)
@@ -154,11 +155,18 @@ RATE_LIMIT_BACKOFF_S = (5.0, 10.0, 20.0, 30.0)
 MAX_ATTEMPTS = 6  # same-model attempts per call (timeouts / 429s), always bounded by the deadline
 
 
-# best_effort work yields: while an interactive or background caller waits, or one used the slot
-# this recently, a best_effort acquire fails fast (LLMError) instead of taking the slot (one LEARN
-# attempt holds the only slot for timeout + cooldown, 75s in prod). Callers drop the failure. A chat
-# turn or a task makes several calls in a row with gaps between them, hence the grace window.
-INTERACTIVE_GRACE_S = 20.0
+# best_effort work (memory extraction, summaries, consolidation) must not cost a chat reply latency, but it
+# must also run: it is the only way the user's facts, loops and profile get learned. The policy lives in ONE
+# pure function, mavis.llm.share.best_effort_verdict (guaranteed share of the slots, rate-limited starts,
+# lull bonus, starvation escape); this limiter feeds it its counters. When best_effort cannot start it
+# QUEUES (lowest rank, deadline-bounded) instead of failing; a timer re-checks queued waiters because the
+# policy depends on elapsed time. With ONE slot there is nothing to share: it fails fast while any other
+# work is queued or ran within INTERACTIVE_GRACE_S and the caller's durable job retries it later.
+# A chat turn or a task makes several calls in a row with gaps between them (tool waits): the slot is held
+# only while a call is in flight, never across the gap.
+INTERACTIVE_GRACE_S = 20.0  # single-slot only: how long after other work best_effort keeps off the slot
+BEST_EFFORT_AGING_S = 45.0  # a best_effort waiter this old ranks with background work
+BEST_EFFORT_TICK_S = 1.0
 BACKGROUND_AGING_S = 30.0  # a background waiter this old ranks with interactive (no starvation)
 BACKGROUND_ACQUIRE_TIMEOUT_S = 600.0  # below BUS_CLAIM_IDLE_MS (15 min): never outlive a bus claim
 INTERACTIVE_DEADLINE_S = 45.0  # chain-wide budget (queue + attempts + 429 backoffs) for a FAST reply
@@ -178,83 +186,138 @@ class _Limiter:
 
     A freed slot goes to the oldest waiter of the best rank: interactive, then background, then
     best_effort; a background waiter that has waited >= BACKGROUND_AGING_S ranks with interactive,
-    so task work cannot starve behind chat. best_effort never ages and never waits behind or right
-    after other work: while a higher-rank caller is queued or one held a slot within
-    INTERACTIVE_GRACE_S, it may use spare slots but never the last free one (it fails fast with
-    LLMError instead).
+    so task work cannot starve behind chat, and a best_effort waiter that has waited
+    >= BEST_EFFORT_AGING_S ranks with background. See the rules above for best_effort.
     A running call is never preempted. Everything here is synchronous (no await between state
     changes), so release() cannot be interrupted by a second cancellation.
     """
 
     def __init__(self, size: int) -> None:
-        self._free = max(1, size)
+        self._size = max(1, size)
+        self._free = self._size
         self._waiters: list[_Waiter] = []
-        self._last_used = float("-inf")  # loop time a non-best_effort call last held a slot
+        self._last_used = float("-inf")  # loop time a non-best_effort call last started or ended
+        self._last_chat_start = float("-inf")
+        self._last_be_start = float("-inf")
+        self._be_inflight = 0
+        self._tick: asyncio.TimerHandle | None = None
 
     def touch(self) -> None:
-        """A non-best_effort call is using (or just used) a slot: best_effort keeps off it a while."""
+        """A non-best_effort call ended just now (the lull and, with one slot, the grace run from it)."""
         self._last_used = asyncio.get_running_loop().time()
 
     def _work_active(self, now: float) -> bool:
         return (any(w.rank < 2 and not w.fut.done() for w in self._waiters)
                 or now - self._last_used < INTERACTIVE_GRACE_S)
 
-    def _best_effort_blocked(self, now: float) -> bool:
-        """best_effort never takes the last free slot while higher-rank work is queued or recently ran:
-        that slot is kept for the chat's next call. Spare slots beyond it may be used (with one slot,
-        the last is the only one, so best_effort waits out the whole grace window)."""
-        return self._free <= 1 and self._work_active(now)
+    def _single_slot_blocked(self, now: float) -> bool:
+        return self._size == 1 and self._work_active(now)
 
-    async def acquire(self, priority: Priority, wait_s: float) -> None:
+    def _verdict(self, now: float, since: float | None = None) -> share.Verdict:
+        """The shared policy (mavis.llm.share) applied to this limiter's counters."""
+        if self._size == 1:
+            return share.Verdict(self._free > 0 and not self._work_active(now), share.TIMEOUT_S)
+        return share.best_effort_verdict(share.SlotState(
+            size=self._size, free=self._free, best_effort_inflight=self._be_inflight,
+            interactive_waiting=self._higher_waiting(),
+            chat_in_flight=self._size - self._free - self._be_inflight,
+            since_chat_activity_s=now - self._last_used, since_chat_start_s=now - self._last_chat_start,
+            since_best_effort_start_s=now - self._last_be_start,
+            waited_s=0.0 if since is None else now - since))
+
+    def _take(self, rank: int, now: float) -> None:
+        self._free -= 1
+        if rank == 2:
+            self._be_inflight += 1
+            self._last_be_start = now
+        else:
+            self._last_used = self._last_chat_start = now
+
+    def _higher_waiting(self) -> bool:
+        return any(w.rank < 2 and not w.fut.done() for w in self._waiters)
+
+    async def acquire(self, priority: Priority, wait_s: float) -> float | None:
+        """Take a slot (waiting up to `wait_s`). Returns the timeout the call must be clamped to (the
+        best_effort policy's), or None for no clamp beyond the caller's own."""
         loop = asyncio.get_running_loop()
+        now = loop.time()
         rank = _RANK[priority]
-        if rank == 2 and self._best_effort_blocked(loop.time()):
-            raise LLMError(_YIELDED)
-        if self._free > 0 and not self._waiters:
-            self._free -= 1
-            if rank < 2:
-                self.touch()
-            return
-        waiter = _Waiter(loop.create_future(), rank, loop.time())
+        if rank == 2:
+            if self._single_slot_blocked(now):
+                raise LLMError(_YIELDED)
+            verdict = self._verdict(now)
+            if not self._waiters and verdict.start:
+                self._take(rank, now)
+                return verdict.timeout_s
+        elif self._free > 0 and not self._higher_waiting():
+            # best_effort waiters never delay a higher rank: it takes the slot ahead of them
+            self._take(rank, now)
+            return None
+        waiter = _Waiter(loop.create_future(), rank, now)
         self._waiters.append(waiter)
         self._dispatch()
+        if rank == 2:
+            self._arm_tick()
         try:
-            await asyncio.wait_for(waiter.fut, max(wait_s, 0.0))
+            return await asyncio.wait_for(waiter.fut, max(wait_s, 0.0))
         except BaseException as exc:
             if waiter in self._waiters:
                 self._waiters.remove(waiter)
             elif waiter.fut.done() and not waiter.fut.cancelled() and waiter.fut.exception() is None:
-                self.release()  # slot was handed over just as we gave up: pass it on
+                self.release(best_effort=rank == 2)  # slot was handed over just as we gave up: pass it on
             if isinstance(exc, TimeoutError):
                 raise LLMError("timed out waiting for an LLM slot") from exc
             raise
 
-    def release(self) -> None:
+    def _arm_tick(self) -> None:
+        """Re-dispatch on a timer while best_effort callers wait: the policy is about elapsed time (start
+        gap, waiting age), which no acquire/release announces."""
+        if self._tick is not None or not any(w.rank == 2 and not w.fut.done() for w in self._waiters):
+            return
+        self._tick = asyncio.get_running_loop().call_later(BEST_EFFORT_TICK_S, self._on_tick)
+
+    def _on_tick(self) -> None:
+        self._tick = None
+        self._dispatch()
+        self._arm_tick()
+
+    def release(self, best_effort: bool = False) -> None:
         self._free += 1
+        if best_effort:
+            self._be_inflight = max(0, self._be_inflight - 1)
         self._dispatch()
 
     def _dispatch(self) -> None:
         """Hand free slots to live waiters. Never raises; dead (cancelled/timed-out) waiters are dropped."""
         now = asyncio.get_running_loop().time()
         self._waiters = [w for w in self._waiters if not w.fut.done()]
-        if self._best_effort_blocked(now):
+        if self._single_slot_blocked(now):
             self._fail_best_effort()
         while self._free > 0 and self._waiters:
-            pick = min(self._waiters, key=lambda w: (self._effective_rank(w, now), w.since))
-            if pick.rank == 2 and self._best_effort_blocked(now):
-                self._fail_best_effort()  # only the reserved slot is left
-                continue
+            ranked = sorted(self._waiters, key=lambda w: (self._effective_rank(w, now), w.since))
+            pick, verdict = None, share.NO
+            for w in ranked:
+                if w.rank < 2:
+                    pick, verdict = w, share.Verdict(True, None)  # type: ignore[arg-type]
+                    break
+                if (v := self._verdict(now, w.since)).start:
+                    pick, verdict = w, v
+                    break
+            if pick is None:
+                break  # only best_effort waiters are left and none may start yet
             self._waiters.remove(pick)
             if pick.fut.done():  # defensive: cancelled between the filter and here
                 continue
-            self._free -= 1
-            if pick.rank < 2:
-                self._last_used = now
-            pick.fut.set_result(None)
+            self._take(pick.rank, now)
+            pick.fut.set_result(None if pick.rank < 2 else verdict.timeout_s)
 
     @staticmethod
     def _effective_rank(w: _Waiter, now: float) -> int:
-        return 0 if w.rank == 1 and now - w.since >= BACKGROUND_AGING_S else w.rank
+        if w.rank == 1 and now - w.since >= BACKGROUND_AGING_S:
+            return 0
+        if w.rank == 2 and now - w.since >= BEST_EFFORT_AGING_S:
+            return 1
+        return w.rank
 
     def _fail_best_effort(self) -> None:
         for w in [w for w in self._waiters if w.rank == 2]:
@@ -401,15 +464,19 @@ async def _call[R](
             await _await_backoff(priority, deadline)
         left = deadline.check()
         lim = _limiter(secondary)
-        await lim.acquire(priority, left if priority == "interactive"
-                          else min(left, BACKGROUND_ACQUIRE_TIMEOUT_S))
+        clamp = await lim.acquire(priority, left if priority == "interactive"
+                                  else min(left, BACKGROUND_ACQUIRE_TIMEOUT_S))
         hold = 0.0
+        be = priority == "best_effort"
         try:
             try:
-                async with asyncio.timeout(deadline.check()):
+                # best_effort has its own short timeout and never holds the slot afterwards: it must not
+                # keep a third of the capacity busy (mavis.llm.share)
+                budget = deadline.check() if not be else min(deadline.check(), clamp or share.TIMEOUT_S)
+                async with asyncio.timeout(budget):
                     result = await op()
             except TimeoutError as exc:
-                if not secondary:
+                if not secondary and not be:
                     hold = _ollama.note_timeout()
                 if deadline.remaining() <= 0:
                     raise LLMError("LLM deadline exceeded") from exc
@@ -421,8 +488,9 @@ async def _call[R](
             if isinstance(exc, LLMError) or secondary:
                 raise
             if _is_timeout(exc):
-                hold = hold or _ollama.note_timeout()
-                log.warning("llm.timeout_cooldown", hold_s=hold)
+                if not be:
+                    hold = hold or _ollama.note_timeout()
+                    log.warning("llm.timeout_cooldown", hold_s=hold)
             elif _is_rate_limited(exc):
                 dur = _ollama.note_rate_limit(_retry_after_s(exc))
                 log.warning("llm.rate_limited", backoff_s=dur)
@@ -435,9 +503,9 @@ async def _call[R](
             if priority != "best_effort":
                 lim.touch()  # the grace window runs from the END of a chat or task call
             if hold > 0:
-                asyncio.get_running_loop().call_later(hold, lim.release)  # server still busy
+                asyncio.get_running_loop().call_later(hold, lim.release, be)  # server still busy
             else:
-                lim.release()
+                lim.release(be)
     assert last is not None
     raise last
 

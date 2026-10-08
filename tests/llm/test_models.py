@@ -3,7 +3,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from mavis.domain.errors import LLMError
-from mavis.llm import models
+from mavis.llm import models, share
 from mavis.llm.models import Tier
 from tests.fakes.llm import FakeLLM
 
@@ -803,32 +803,110 @@ def test_reasoning_effort_only_for_gpt_oss_models(settings) -> None:
     assert models.chat_model(Tier.FAST).reasoning_effort is None
 
 
-# --- several slots: best_effort may use spare capacity, never the last free slot while chat is active ----
+# --- several slots: the policy is mavis.llm.share (tested there); here the limiter applies it ----------
 
 
-@pytest.mark.parametrize("size", [2, 3, 5])
-async def test_best_effort_uses_spare_slots_right_after_chat_but_never_the_last(monkeypatch, size) -> None:
-    monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", 20.0)
+@pytest.fixture
+def fast_share(monkeypatch):
+    monkeypatch.setattr(share, "MIN_START_GAP_S", 0.0)
+    monkeypatch.setattr(share, "LULL_QUIET_S", 0.03)
+    monkeypatch.setattr(share, "ESCAPE_AFTER_S", 0.05)
+    monkeypatch.setattr(share, "ESCAPE_CHAT_GAP_S", 0.03)
+    monkeypatch.setattr(models, "BEST_EFFORT_TICK_S", 0.01)
+
+
+@pytest.mark.parametrize("size", [3, 5])
+async def test_best_effort_runs_next_to_a_busy_chat_it_does_not_wait_for_a_lull(fast_share, size) -> None:
+    """Live E2E: LEARN refused while chat was merely active. A guaranteed share runs beside a chat call."""
     lim = models._Limiter(size)
-    await lim.acquire("interactive", 1)  # a chat turn is running (holds one slot)
-    for _ in range(size - 2):  # every slot but the chat's and one spare for its next call
-        await asyncio.wait_for(lim.acquire("best_effort", 1), 1)
-    with pytest.raises(LLMError, match="interactive"):
-        await lim.acquire("best_effort", 1)  # only one slot left: it stays free for the chat
-    await asyncio.wait_for(lim.acquire("interactive", 1), 1)  # and the chat gets it at once
+    await lim.acquire("interactive", 1)  # a chat call is in flight right now
+    assert await asyncio.wait_for(lim.acquire("best_effort", 1), 1) == share.TIMEOUT_S
 
 
-@pytest.mark.parametrize("size", [2, 4])
-async def test_best_effort_waiter_gets_a_spare_slot_but_not_the_last_one(monkeypatch, size) -> None:
-    monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", 20.0)
-    lim = models._Limiter(size)
-    for _ in range(size):
-        await lim.acquire("background", 1)  # saturated by task work (counts as recent use)
+async def test_best_effort_waits_for_two_free_slots_and_keeps_the_last_one(fast_share) -> None:
+    lim = models._Limiter(3)
+    await lim.acquire("interactive", 1)
+    await lim.acquire("interactive", 1)  # one free: the chat's next call needs it
     be = asyncio.create_task(lim.acquire("best_effort", 5))
-    await asyncio.sleep(0)
-    lim.release()  # one slot frees: it is the last free one while work is active
+    await asyncio.sleep(0.02)
+    assert not be.done()
+    await asyncio.wait_for(lim.acquire("interactive", 1), 1)  # the chat still gets it at once
+    be.cancel()
+
+
+async def test_best_effort_share_is_one_of_three_slots(fast_share) -> None:
+    lim = models._Limiter(3)
+    await lim.acquire("interactive", 1)
+    await lim.acquire("best_effort", 1)
+    second = asyncio.create_task(lim.acquire("best_effort", 5))
+    await asyncio.sleep(0.02)
+    assert not second.done()  # cap 1 while a chat call runs
+    second.cancel()
+
+
+async def test_best_effort_never_delays_a_waiting_chat_call(fast_share) -> None:
+    lim = models._Limiter(3)
+    for _ in range(3):
+        await lim.acquire("interactive", 1)
+    be = asyncio.create_task(lim.acquire("best_effort", 5))
+    chat = asyncio.create_task(lim.acquire("interactive", 5))
+    await asyncio.sleep(0.01)
+    lim.release()
+    await asyncio.wait_for(chat, 1)  # the freed slot goes to the chat
+    assert not be.done()
+    be.cancel()
+
+
+async def test_old_waiter_takes_the_last_slot_by_timer_with_a_clamped_timeout(fast_share) -> None:
+    """Starvation escape: no acquire/release happens once the waiter is old enough; the timer must notice."""
+    lim = models._Limiter(3)
+    await lim.acquire("interactive", 1)
+    await lim.acquire("interactive", 1)  # exactly one free slot
+    be = asyncio.create_task(lim.acquire("best_effort", 5))
+    await asyncio.sleep(0.02)
+    assert not be.done()
+    assert await asyncio.wait_for(be, 1) == share.ESCAPE_TIMEOUT_S
+
+
+async def test_old_waiter_does_not_take_the_last_slot_while_a_chat_call_is_queued(fast_share) -> None:
+    lim = models._Limiter(3)
+    await lim.acquire("interactive", 1)
+    await lim.acquire("interactive", 1)
+    await lim.acquire("interactive", 1)
+    be = asyncio.create_task(lim.acquire("best_effort", 5))
+    chat = asyncio.create_task(lim.acquire("interactive", 5))
+    await asyncio.sleep(0.12)  # old enough, but a chat call is queued
+    assert not be.done() and not chat.done()
+    lim.release()
+    await asyncio.wait_for(chat, 1)
+    be.cancel()
+
+
+async def test_best_effort_timer_stops_when_nobody_waits(fast_share) -> None:
+    lim = models._Limiter(3)
+    for _ in range(3):
+        await lim.acquire("interactive", 1)
+    be = asyncio.create_task(lim.acquire("best_effort", 5))
+    await asyncio.sleep(0.03)
+    be.cancel()
+    await asyncio.sleep(0.05)
+    assert lim._tick is None
+
+
+async def test_best_effort_call_timeout_is_the_short_one_and_holds_no_cooldown(chain, monkeypatch) -> None:
+    """A timed-out LEARN call frees its slot at once and does not start the 45 s cooldown."""
+    log, scripts, settings = chain
+    monkeypatch.setattr(share, "TIMEOUT_S", 0.05)
+    models._limiters.clear()
+    settings.llm_max_concurrency = 3
+
+    class Slow(_Chat):
+        async def ainvoke(self, *a, **k):
+            await asyncio.sleep(5)
+
+    monkeypatch.setattr(models, "chat_model", lambda *a, **k: Slow("m", [], []))
     with pytest.raises(LLMError):
-        await asyncio.wait_for(be, 1)
-    if size > 2:
-        lim.release()  # now two are free: a best_effort caller may take one of them
-        await asyncio.wait_for(lim.acquire("best_effort", 1), 1)
+        await models.complete([HumanMessage("learn")], priority="best_effort")
+    lim = next(iter(models._limiters.values()))
+    assert lim._free == 3 and lim._be_inflight == 0
+    assert models._ollama.cooldown_until == 0.0

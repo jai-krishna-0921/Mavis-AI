@@ -27,7 +27,8 @@ from mavis.store.models import GraphEdge, GraphNode
 class GraphStore(Protocol):
     async def init(self) -> None: ...
     async def upsert_entity(self, user_id: int, entity: Entity) -> str: ...
-    async def upsert_relation(self, user_id: int, rel: Relation, source_ref: str = "") -> None: ...
+    async def upsert_relation(self, user_id: int, rel: Relation, source_ref: str = "",
+                              at: datetime | None = None) -> None: ...
     async def neighborhood(self, user_id: int, names: list[str], hops: int = 2, limit: int = 25) -> list[str]: ...
     async def entities(self, user_id: int) -> list[Entity]: ...
     async def dump(self, user_id: int) -> list[dict]: ...
@@ -110,8 +111,13 @@ class SqliteGraphStore:
             await s.commit()
             return key
 
-    async def upsert_relation(self, user_id: int, rel: Relation, source_ref: str = "") -> None:
+    async def upsert_relation(self, user_id: int, rel: Relation, source_ref: str = "",
+                              at: datetime | None = None) -> None:
+        """`at`: when the fact was SAID (a LEARN deferred by a busy model runs long after its turn). A
+        single-valued fact supersedes the current one only from that time on; one older than the current
+        edge is recorded as history (a closed interval ending where the newer fact began)."""
         r = sanitize_rel(rel.rel)
+        when = timeutil.ensure_utc(at) if at else _now()
         async with dbm.Session() as s:
             src = await self._key_or_create(s, user_id, rel.subject)
             dst = await self._key_or_create(s, user_id, rel.object)
@@ -130,11 +136,23 @@ class SqliteGraphStore:
                 edge.confidence = max(edge.confidence, rel.confidence)
                 edge.source_ref = source_ref or edge.source_ref
             else:
+                valid_to = None
                 if r in SINGLE_VALUED_RELS:
-                    for e in current:
-                        e.valid_to = _now()
+                    newer = [timeutil.ensure_utc(e.valid_from) for e in current
+                             if timeutil.ensure_utc(e.valid_from) > when]
+                    if newer:
+                        valid_to = min(newer)  # said before the current fact: history, not current
+                        past = await s.scalars(select(GraphEdge).where(
+                            GraphEdge.user_id == user_id, GraphEdge.src_key == src, GraphEdge.rel == r,
+                            GraphEdge.dst_key == dst, GraphEdge.valid_to.is_not(None)))
+                        if any(timeutil.ensure_utc(e.valid_from) == when for e in past):
+                            return  # a retry of a fact already recorded as history
+                    else:
+                        for e in current:
+                            e.valid_to = when
                 s.add(GraphEdge(user_id=user_id, src_key=src, rel=r, dst_key=dst, statement=rel.statement,
-                                confidence=rel.confidence, source_ref=source_ref))
+                                confidence=rel.confidence, source_ref=source_ref, valid_from=when,
+                                valid_to=valid_to))
             await s.commit()
 
     async def neighborhood(self, user_id: int, names: list[str], hops: int = 2, limit: int = 25) -> list[str]:

@@ -95,3 +95,9 @@ async def test_blank_text_skips_llm(monkeypatch):
 
     monkeypatch.setattr(models, "structured", never)
     assert await extract("   ", user_name="Jai", tz="Asia/Kolkata") == Extraction()
+
+
+def test_extraction_prompt_asks_for_a_brevity_preference():
+    from mavis.memory.extractor import SYSTEM_PROMPT
+
+    assert "brevity" in SYSTEM_PROMPT and '"short"' in SYSTEM_PROMPT
