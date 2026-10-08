@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from mavis.agents.cancellation import stop_check_for_current_task
 from mavis.agents.react import react_loop
 from mavis.config import get_settings
 from mavis.domain import timeutil
@@ -101,7 +102,7 @@ async def run_specialist(
             result = await react_loop(
                 tools, messages, max_steps=step_budget(spec), tier=spec.tier, temperature=0.2,
                 name=f"specialist:{spec.name}", priority="background", fallback=True, tainted=tainted,
-                **wrap_up_budget(spec.timeout_s),
+                **wrap_up_budget(spec.timeout_s), should_stop=stop_check_for_current_task(),
             )
     except TimeoutError as exc:
         raise BudgetExceeded(f"specialist {spec.name} ran longer than {spec.timeout_s:g}s") from exc

@@ -109,6 +109,8 @@ class Settings(BaseSettings):
     task_step_parallelism: int = 1
     spawn_max_per_step: int = 3  # spawned workers one model step may start
     initiative_act_enabled: bool = True
+    task_timeout_max_s: float = 1200  # no task clock is ever extended past this
+    machine_task_timeout_s: float = 900  # clock for a plan with a machine specialist (Phase 12)
 
     # --- progress cards (Phase 12 slice A, spec 2026-10-08 section 8) ----------
     progress_card_enabled: bool = True  # false: the single fixed "Still on it" line, as before

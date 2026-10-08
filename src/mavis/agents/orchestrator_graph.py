@@ -32,9 +32,11 @@ from langgraph.types import Command, Send, interrupt
 
 from mavis import bus
 from mavis.agents import persona
+from mavis.agents.cancellation import TaskCancelled
 from mavis.agents.spawn import spawn_agent
 from mavis.agents.specialists import SPECIALISTS, get_specialist
 from mavis.agents.specialists.base import current_deliverable, run_specialist
+from mavis.agents.task_clock import current_clock
 from mavis.channels.formatting import verbatim
 from mavis.config import get_settings
 from mavis.domain import timeutil
@@ -223,8 +225,12 @@ async def planner(state: OrchestratorState) -> dict:
     if context and state.get("tainted"):
         context = wrap_untrusted(context, "task_context")
     plan = await make_plan(state["goal"], context)
+    data = plan.model_dump()
+    clock = current_clock.get()
+    if clock is not None and plan_is_machine(plan):
+        data["clock_s"] = clock.extend_to(get_settings().machine_task_timeout_s)  # the stale sweep reads it
     # Status is owned by the task runner (QUEUED -> RUNNING claim); this never revives a finished task.
-    await tasks.save_plan(state["task_id"], plan.model_dump())
+    await tasks.save_plan(state["task_id"], data)
     await start_card_now(state["task_id"], plan)
     return {"plan": plan.model_dump(), "todo": [s.id for s in plan.steps], "revision": 0, "feedback": {}}
 
@@ -368,6 +374,8 @@ async def run_step(inp: StepInput) -> dict:
         }
     except LLMError as exc:
         outcome = StepOutcome(ok=False, error=f"model error: {exc}")
+    except TaskCancelled:
+        outcome = StepOutcome(ok=False, error="cancelled")  # finish then loses its claim to the cancel
     except Exception as exc:  # noqa: BLE001 - one broken step must not sink the whole task
         log.warning("orchestrator.step_crashed", task_id=inp["task_id"], step=step.id,
                     error_type=type(exc).__name__, error=_err(exc))

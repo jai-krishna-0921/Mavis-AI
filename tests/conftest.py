@@ -534,3 +534,12 @@ def _reset_progress_cards():
     progress_card.set_cards(None)
     yield
     progress_card.set_cards(None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_cancellation():
+    from mavis.agents import cancellation
+
+    cancellation.reset_for_tests()
+    yield
+    cancellation.reset_for_tests()

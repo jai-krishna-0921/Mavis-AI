@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +18,7 @@ import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
+from mavis.agents.cancellation import TaskCancelled
 from mavis.config import get_settings
 from mavis.domain.errors import ApprovalRequired, BudgetExceeded, ConnectionRequired, LLMError
 from mavis.llm import models as llm
@@ -91,6 +92,7 @@ async def react_loop(
     tool_timeout_s: float | None = None,
     wrap_up_timeout_s: float | None = None,
     digest_on_failed_wrap_up: bool = False,
+    should_stop: Callable[[], Awaitable[bool]] | None = None,
 ) -> ReactResult:
     """Call the model, run the tools it asks for, repeat until it answers in text.
 
@@ -110,6 +112,9 @@ async def react_loop(
     `wrap_up_timeout_s`. With `digest_on_failed_wrap_up`, a wrap-up that fails or times out, or a model
     error after some tool rounds, returns a plain digest of the tool results gathered so far instead of
     raising and discarding them (never for chat: raw tool output must not become a reply).
+
+    `should_stop` (task loops) is checked before every model call and every tool round; when it returns
+    True the loop raises TaskCancelled (the user cancelled the task), so nothing more runs.
     """
     by_name = {t.name: t for t in tools}
     history: list[BaseMessage] = list(messages)
@@ -127,6 +132,8 @@ async def react_loop(
     out_of_time = False
     try:
         while True:
+            if should_stop is not None and await should_stop():
+                raise TaskCancelled("task cancelled")
             final = wrap_up and steps > 0 and (
                 out_of_time or steps >= max_steps or (end is not None and time.monotonic() >= end)
             )
@@ -182,6 +189,8 @@ async def react_loop(
             steps += 1
             if steps > max_steps:
                 raise BudgetExceeded(f"more than {max_steps} tool rounds")
+            if should_stop is not None and await should_stop():
+                raise TaskCancelled("task cancelled")
             messages_out, connection = await _run_step(
                 calls, bad, by_name, tools_called, unqueued, default_timeout=tool_timeout_s, end=end
             )
