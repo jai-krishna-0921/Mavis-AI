@@ -59,7 +59,8 @@ async def _enqueue_artifact(s: AsyncSession, user_id: int, task_id: int, art: An
     await outbox.enqueue(s, msg)
 
 
-async def deliver_artifact_now(user_id: int, task_id: int, artifact_id: int, *, proactive: bool = False) -> bool:
+async def deliver_artifact_now(user_id: int, task_id: int, artifact_id: int, *,
+                               proactive: bool = False) -> bool:
     """Send one file of a task right away. True when this call sent it; never twice (key + delivered_at)."""
     art = next((a for a in await tasks.artifacts_for(task_id) if a.id == artifact_id), None)
     if art is None or art.user_id != user_id or art.delivered_at is not None:
