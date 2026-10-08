@@ -63,3 +63,57 @@ async def test_marker_only_reply_falls_back_to_text(db, channel, fake_llm, memor
     await run_turn(_event(user.id, "lol", 1, message_id=9))
     await OutboxSender(channel).run_once()
     assert channel.texts and "[react" not in channel.texts[0]
+
+
+async def test_landed_reactions_replay_as_markers_and_a_reminder_follows(db, channel, fake_llm, memory, bus):
+    from langchain_core.messages import AIMessage, SystemMessage
+
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    fake_llm.push_text(f"Huge!\n[react: {FIRE}]")
+    await run_turn(_event(user.id, "got the job", 1, message_id=10))
+    fake_llm.push_text("Ha, noted.")
+    await run_turn(_event(user.id, "and a raise", 2, message_id=11))  # rate-limited turn: no marker
+    fake_llm.push_text("Sure.")
+    await run_turn(_event(user.id, "ok", 3, message_id=12))
+    prompt = fake_llm.calls[-1]
+    replies = [m.content for m in prompt if isinstance(m, AIMessage)]
+    assert replies[0].endswith(f"Huge!\n[react: {FIRE}]")
+    assert not replies[1].endswith("]")
+    assert isinstance(prompt[-1], SystemMessage) and "[react: EMOJI]" in prompt[-1].content
+    stored = [m.content for m in await messages.recent(user.id) if m.role == "assistant"]
+    assert all("[react" not in c for c in stored)  # the store stays marker-free
+
+
+async def test_no_replay_or_reminder_without_a_reaction_target(db, channel, fake_llm, memory, bus):
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    fake_llm.push_text("Hi")
+    await run_turn(_event(user.id, "hi", 1, source="console"))
+    assert fake_llm.calls[-1][-1].content == "hi"
+
+
+async def test_early_returns_settle_the_seen_cue(db, channel, fake_llm, memory, bus, monkeypatch):
+    from mavis.agents import commands, conversation
+
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+
+    async def approval_reply(*a, **k):
+        return True
+
+    monkeypatch.setattr(conversation, "_approval_reply", approval_reply)
+    await run_turn(_event(user.id, "yes send it", 1, message_id=30))
+
+    async def command(event):
+        return True
+
+    monkeypatch.setattr(commands, "run_command", command)
+    await run_turn(_event(user.id, "/connections", 2, message_id=31))
+    assert channel.reactions == [(77, 30, None), (77, 31, None)]
+
+
+async def test_retry_does_not_settle_twice(db, channel, fake_llm, memory, bus):
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    fake_llm.push_text(f"Nice!\n[react: {FIRE}]")
+    event = _event(user.id, "won the match", 1, message_id=40)
+    await run_turn(event)
+    await run_turn(event)  # retry after the reply was enqueued
+    assert channel.reactions == [(77, 40, FIRE)]

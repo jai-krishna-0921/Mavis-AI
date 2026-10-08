@@ -53,8 +53,19 @@ REACTION_RULE = (
     + ". Otherwise add nothing."
 )
 
+REACTION_REMINDER = (
+    "[System note, not from the user] If a reaction fits their last message, end your reply with "
+    "[react: EMOJI]; most messages get none."
+)
+
+
 _FENCE = re.compile(r"^\s*```")
-_MARKER = re.compile(r"[^\S\n]*\[\s*react(?:ion)?\s*:\s*([^\]\n]{0,24}?)\s*\][^\S\n]*", re.IGNORECASE)
+# Tolerant: any bracketed react-like marker ("[react 🔥]", "(reaction: 🔥)", "[React = 🔥]") anywhere on a
+# line, or a bare "react: 🔥" line on its own whose value is not words ("Reaction: exothermic" is prose).
+_MARKER = re.compile(
+    r"[^\S\n]*[\[(]\s*react(?:ion|ing)?\s*[:=\-]?\s*([^\])\n]{0,24}?)\s*[\])][^\S\n]*", re.IGNORECASE
+)
+_BARE = re.compile(r"^\s*react(?:ion|ing)?\s*[:=]\s*([^\sA-Za-z0-9][^\s]{0,11}|none)\s*$", re.IGNORECASE)
 
 
 def normalize(raw: str | None) -> str | None:
@@ -73,6 +84,9 @@ def split_reaction(text: str) -> tuple[str, str | None]:
     for line in text.split("\n"):
         if _FENCE.match(line):
             in_fence = not in_fence
+        elif not in_fence and (bare := _BARE.match(line)):
+            found.append(bare.group(1))
+            continue
         elif not in_fence and _MARKER.search(line):
             found += _MARKER.findall(line)
             line = _MARKER.sub(" ", line).strip()
@@ -85,7 +99,7 @@ def split_reaction(text: str) -> tuple[str, str | None]:
 
 GAP = 2  # after a reaction, this many messages go without one
 REPEAT = 2  # the same emoji at most this many times running
-HISTORY = 6  # outcomes kept per user (oldest first), "" when nothing landed
+HISTORY = 20  # outcomes kept per user: the frequency rule and the replayed history (HISTORY_LIMIT)
 _TTL_S = 3 * 24 * 3600
 
 
@@ -98,7 +112,8 @@ def allowed(candidate: str | None, recent: list[str]) -> bool:
 
 
 class ReactionLog:
-    """The last HISTORY reaction outcomes per user: Redis when configured, else this process."""
+    """The last HISTORY reaction outcomes per user, one per answered message (event id): Redis when
+    configured, else this process. Entries are "event_id<TAB>emoji", newest last; "" = nothing landed."""
 
     def __init__(self) -> None:
         self._mem: dict[int, deque[str]] = {}
@@ -107,39 +122,68 @@ class ReactionLog:
     def _key(user_id: int) -> str:
         return f"mavis:reactions:{user_id}"
 
-    async def recent(self, user_id: int) -> list[str]:
+    async def _entries(self, user_id: int) -> list[tuple[str, str]]:
+        raw: list[str] | None = None
         client = get_redis()
         if client is not None:
             try:
-                return list(reversed(await client.lrange(self._key(user_id), 0, HISTORY - 1)))
+                raw = list(reversed(await client.lrange(self._key(user_id), 0, HISTORY - 1)))
             except Exception as exc:  # noqa: BLE001 - fall back to memory if redis blips
                 log.debug("reactions.redis_failed", error=type(exc).__name__)
-        return list(self._mem.get(user_id, ()))
+        if raw is None:
+            raw = list(self._mem.get(user_id, ()))
+        return [(e.partition("\t")[0], e.partition("\t")[2]) for e in raw]
 
-    async def record(self, user_id: int, outcome: str) -> None:
+    async def recent(self, user_id: int) -> list[str]:
+        """Outcomes, oldest first."""
+        return [emoji for _, emoji in await self._entries(user_id)]
+
+    async def landed(self, user_id: int) -> dict[str, str]:
+        """event id -> the reaction that landed on that message."""
+        return {key: emoji for key, emoji in await self._entries(user_id) if emoji}
+
+    async def outcome(self, user_id: int, event_id: str) -> str | None:
+        """What was recorded for `event_id` ("" for nothing), or None when it was never settled."""
+        return dict(await self._entries(user_id)).get(event_id)
+
+    async def record(self, user_id: int, event_id: str, outcome: str) -> None:
+        """Record once per event: a retry of the same message keeps the first outcome."""
+        if await self.outcome(user_id, event_id) is not None:
+            return
+        entry = f"{event_id}\t{outcome}"
         client = get_redis()
         if client is not None:
             try:
                 key = self._key(user_id)
-                await client.lpush(key, outcome)
+                await client.lpush(key, entry)
                 await client.ltrim(key, 0, HISTORY - 1)
                 await client.expire(key, _TTL_S)
                 return
             except Exception as exc:  # noqa: BLE001
                 log.debug("reactions.redis_failed", error=type(exc).__name__)
-        self._mem.setdefault(user_id, deque(maxlen=HISTORY)).append(outcome)
+        self._mem.setdefault(user_id, deque(maxlen=HISTORY)).append(entry)
 
 
 _log = ReactionLog()
 
 
-async def apply(user_id: int, chat_id: int, message_id: int, candidate: str | None,
-                ack_key: str | None = None) -> str:
-    """Land the mood reaction (or clear the "seen" one). Returns what landed ("" for nothing). Never
-    raises: reactions are cosmetic. `ack_key`: the event whose "seen" cue must land first."""
+async def landed(user_id: int) -> dict[str, str]:
+    """event id -> reaction that landed, for replaying past reactions in the chat history."""
     try:
-        if ack_key is not None:
-            await presence.ack_settled(ack_key)  # a late "seen" cue must not overwrite the mood
+        return await _log.landed(user_id)
+    except Exception as exc:  # noqa: BLE001 - cosmetic
+        log.debug("reactions.landed_failed", error=type(exc).__name__)
+        return {}
+
+
+async def apply(user_id: int, chat_id: int, message_id: int, candidate: str | None, event_id: str) -> str:
+    """Land the mood reaction on the message of `event_id` (or clear the "seen" one). Returns what landed
+    ("" for nothing). Settles once per event: a retried turn keeps the first outcome. Never raises."""
+    try:
+        await presence.ack_settled(event_id)  # a late "seen" cue must not overwrite the mood
+        settled = await _log.outcome(user_id, event_id)
+        if settled is not None:
+            return settled
         recent = await _log.recent(user_id)
         chosen = candidate if allowed(candidate, recent) else None
         if candidate and chosen is None:
@@ -149,7 +193,8 @@ async def apply(user_id: int, chat_id: int, message_id: int, candidate: str | No
             landed = chosen
         if not landed and get_settings().presence_reaction:
             await presence.clear(chat_id, message_id)  # the "seen" cue has done its job
-        await _log.record(user_id, landed)
+        await _log.record(user_id, event_id, landed)
+        log.info("reactions.settled", chosen=bool(candidate), landed=bool(landed))
         return landed
     except Exception as exc:  # noqa: BLE001 - cosmetic, must not fail the turn
         log.warning("reactions.apply_failed", error=type(exc).__name__)
