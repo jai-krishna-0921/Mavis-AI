@@ -26,6 +26,7 @@ from mavis.memory.consolidate import consolidate
 from mavis.memory.service import get_memory
 from mavis.memory.summaries import maybe_summarize
 from mavis.store.repo import events
+from mavis.store.repo import wakeups as wakeups_repo
 from mavis.worker.locks import lock
 from mavis.worker.runner import register_job_handler
 
@@ -33,6 +34,8 @@ log = structlog.get_logger(__name__)
 
 LEARN_RETRY_DELAYS = (timedelta(minutes=1), timedelta(minutes=3), timedelta(minutes=10))
 LEARN_RETRY_CAP = timedelta(minutes=15)  # steady cadence once the short delays are used up
+LEARN_COALESCE_ABOVE = 6  # parked LEARN texts of one user beyond which they are run as one extraction
+LEARN_BATCH_CHARS = 8000
 LEARN_MAX_AGE = timedelta(hours=24)  # a LEARN older than this is stale (relative dates, context): dropped
 _LEARN_REASON = "learn"
 
@@ -93,6 +96,8 @@ async def handle_learn(job: Job) -> None:
         # Redelivery guard: a re-run would extract again (differently) and re-fire hooks.
         if source_ref and await events.seen(marker):
             return
+        p, consumed = await _coalesce(job.user_id, p)
+        source_ref = str(p.get("source_ref", ""))
         try:
             await get_memory().learn(job.user_id, str(p.get("text", "")), source_ref,
                                      Trust(p.get("trust", Trust.USER.value)),
@@ -100,11 +105,53 @@ async def handle_learn(job: Job) -> None:
                                      anchor_at=_anchor(p))
         except LLMError as exc:
             await _defer_learn(job, p, exc)
+            await wakeups_repo.cancel_ids(consumed)  # the batch is parked again as one
             return
         if p.get("conversation", True):
             await maybe_summarize(job.user_id)
-        if source_ref:
-            await events.record(marker)
+        for ref in {source_ref, *p.get("merged_refs", [])} - {""}:
+            await events.record(f"learn:{ref}")
+        await wakeups_repo.cancel_ids(consumed)
+
+
+async def _coalesce(user_id: int, p: dict) -> tuple[dict, list[int]]:
+    """Demand beyond the best_effort share of the slots (many users, a long outage) piles up as parked LEARN
+    wakeups. Once more than LEARN_COALESCE_ABOVE of this user's, with the same trust and origin, wait, run
+    them as ONE extraction: their texts in order, each under its own source time, applied no earlier than
+    the newest statement. Returns the (possibly combined) payload and the parked wakeup ids it consumed."""
+    from mavis.store.repo import users as users_repo  # lazy: the job layer starts before the store is used
+
+    def group(x: dict) -> tuple:
+        return (x.get("trust", Trust.USER.value), bool(x.get("conversation", True)))
+
+    waiting = await wakeups_repo.list_pending(user_id, WakeupKind.SYSTEM_LEARN)
+    parked = [(w.id, w.payload["learn"]) for w in waiting
+              if isinstance(w.payload.get("learn"), dict) and group(w.payload["learn"]) == group(p)]
+    if len(parked) < LEARN_COALESCE_ABOVE:
+        return p, []
+    now = timeutil.now()
+    tz = (await users_repo.get(user_id)).timezone
+
+    def when(x: dict) -> datetime:
+        return _anchor(x) or now
+
+    items = sorted([*parked, (None, p)], key=lambda it: when(it[1]))
+    chosen, size = [], 0
+    for wid, item in reversed(items):  # newest first: what does not fit stays parked for the next batch
+        size += len(str(item.get("text", "")))
+        if chosen and size > LEARN_BATCH_CHARS:
+            break
+        chosen.append((wid, item))
+    chosen.reverse()
+    text = "\n".join(
+        f"[{timeutil.to_local(when(i), tz):%a %d %b %H:%M}]\n{i.get('text', '')}" for _, i in chosen)
+    refs = [str(i.get("source_ref", "")) for _, i in chosen if i.get("source_ref")]
+    firsts = [str(i["first_at"]) for _, i in chosen if i.get("first_at")]
+    merged = {**p, "text": text, "anchor_at": max(when(i) for _, i in chosen).isoformat(),
+              "merged_refs": refs, "retry": max(int(i.get("retry", 0)) for _, i in chosen),
+              "not_before": None, **({"first_at": min(firsts)} if firsts else {})}
+    log.info("memory.learn_coalesced", user_id=user_id, texts=len(chosen))
+    return merged, [wid for wid, _ in chosen if wid is not None]
 
 
 def _learn_retry_delay(retry: int) -> timedelta:
