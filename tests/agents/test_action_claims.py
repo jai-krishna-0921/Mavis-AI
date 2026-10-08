@@ -223,7 +223,10 @@ RISK = {"wake_me": RiskClass.WRITE_SELF, "calendar_create_event": RiskClass.WRIT
 
 
 @pytest.mark.parametrize("user_text,reply,ui,tools", [
-    ("Hi", "Let me create the event without the guest.", False, ["calendar_create_event"]),
+    ("Hi", "Let me create the event without the guest. Just tap Approve.", True, []),  # the incident
+    ("put a meeting with Sam on my calendar", "Done, the meeting is in.", False, ["calendar_create_event"]),
+    ("I'm so tired today", "Rough day? Want me to schedule a reminder to rest at 9?", False, []),
+    ("any tips for staying focused?", "Schedule deep work first and send email later.", False, []),
     ("ok", "Just tap Approve.", True, []),
     ("did they approve it?", "Yes, they approved it yesterday.", False, []),
     ("remind me to pay rent", "I'll remind you tomorrow.", False, ["wake_me"]),
