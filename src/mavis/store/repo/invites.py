@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import func, select, update
 
+from mavis.access import UserTier
 from mavis.access.codes import InviteError, code_hash, generate_code, hint, normalize
 from mavis.config import get_settings
 from mavis.store.db import Session, utcnow
@@ -19,6 +20,8 @@ def _active(now: datetime):
 async def mint(*, created_by: int | None, uses: int = 1, days: int | None = None, tier: str = "standard",
                tz: str | None = None, currency: str | None = None, label: str = "") -> tuple[InviteCode, str]:
     s = get_settings()
+    if tier not in {x.value for x in UserTier} or tier == UserTier.OWNER.value:
+        raise InviteError("invalid")  # unknown tier, or owner: an invite never mints an owner
     if uses < 1 or uses > s.invite_max_uses:
         raise InviteError("limit")
     now = utcnow()
@@ -69,6 +72,13 @@ async def redeem(code: str, user_id: int, now: datetime) -> InviteCode | None:
         return None
     digest = code_hash(canonical)
     async with Session() as s:
+        # Idempotent per (invite, user): a retry after a crash between redeem and activate gets the invite
+        # back without burning a second use. It is the user's own earlier redemption, so no oracle either.
+        prior = await s.scalar(
+            select(InviteCode).join(InviteRedemption, InviteRedemption.invite_id == InviteCode.id)
+            .where(InviteCode.code_hash == digest, InviteRedemption.user_id == user_id))
+        if prior is not None:
+            return prior
         res = await s.execute(
             update(InviteCode)
             .where(InviteCode.code_hash == digest, _active(now), InviteCode.uses < InviteCode.max_uses)

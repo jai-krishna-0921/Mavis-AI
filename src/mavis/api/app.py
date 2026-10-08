@@ -22,12 +22,26 @@ from mavis.tools.integrations.wiring import register_integrations
 log = structlog.get_logger(__name__)
 
 
+MIN_WEBHOOK_SECRET_CHARS = 32
+
+
+def check_webhook_secret(s) -> None:
+    """A short secret is guessable: warn everywhere, refuse to start in prod."""
+    n = len(s.telegram_webhook_secret)
+    if 0 < n < MIN_WEBHOOK_SECRET_CHARS:
+        log.warning("telegram.webhook_secret_too_short", length=n, minimum=MIN_WEBHOOK_SECRET_CHARS)
+        if s.env == "prod":
+            raise RuntimeError(f"TELEGRAM_WEBHOOK_SECRET must be at least {MIN_WEBHOOK_SECRET_CHARS} "
+                               "characters in prod")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     s = get_settings()
     if s.telegram_mode == "webhook" and not s.telegram_webhook_secret:
         raise RuntimeError("TELEGRAM_WEBHOOK_SECRET is required in webhook mode")
+    check_webhook_secret(s)
     if s.env == "prod" and not s.owner_telegram_chat_ids:
         raise RuntimeError("OWNER_TELEGRAM_CHAT_IDS is required when ENV=prod")
     if s.live_test_enabled and active_test_chat(s) is None:

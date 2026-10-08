@@ -103,6 +103,8 @@ async def _acknowledge(event: Event) -> None:
     message_id = event.payload.get("message_id")
     if event.type is not EventType.USER_MESSAGE or event.source != "telegram" or message_id is None:
         return
+    if event.payload.get("pending"):
+        return  # not admitted by the access gate yet: no reaction (a Telegram call) for strangers
     try:
         user = await users.get(event.user_id)
         if user.telegram_chat_id is not None:
