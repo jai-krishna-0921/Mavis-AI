@@ -357,7 +357,7 @@ async def test_connect_gate_interrupts_then_reruns_step_when_connected(user, fak
     attempts: list[str] = []
     monkeypatch.setattr(og, "run_step_agent", _connect_step(attempts, connected_after=1))
     fake_llm.push_structured(_plan(PlanStep(id="s1", agent="research", instruction="check my inbox")))
-    tid = await tasks.create(user.id, goal="anything from Jawahar?")
+    tid = await tasks.create(user.id, goal="anything from Jawahar in my email?")
     task = await tasks.get(tid)
     graph = _graph()
     cfg = _cfg(tid)
@@ -375,7 +375,7 @@ async def test_connect_gate_declined_continues_without(user, fake_llm, rec_bus, 
     attempts: list[str] = []
     monkeypatch.setattr(og, "run_step_agent", _connect_step(attempts, connected_after=99))
     fake_llm.push_structured(_plan(PlanStep(id="s1", agent="research", instruction="check my inbox")))
-    tid = await tasks.create(user.id, goal="anything from Jawahar?")
+    tid = await tasks.create(user.id, goal="anything from Jawahar in my email?")
     task = await tasks.get(tid)
     graph = _graph()
     cfg = _cfg(tid)
@@ -403,7 +403,7 @@ async def test_dependents_wait_for_the_connect_answer(user, fake_llm, rec_bus, m
     monkeypatch.setattr(og, "run_step_agent", _fake_step)
     fake_llm.push_structured(_plan(PlanStep(id="s1", agent="inbox", instruction="mail"),
                                    PlanStep(id="s2", agent="research", instruction="b", depends_on=["s1"])))
-    tid = await tasks.create(user.id, goal="g")
+    tid = await tasks.create(user.id, goal="check my email")
     graph = _graph()
     first = await graph.ainvoke(og.initial_state(await tasks.get(tid)), _cfg(tid))
     assert attempts == ["s1"]
@@ -420,7 +420,7 @@ async def test_sqlite_checkpointer_survives_a_restart(settings, user, fake_llm, 
     attempts: list[str] = []
     monkeypatch.setattr(og, "run_step_agent", _connect_step(attempts, connected_after=1))
     fake_llm.push_structured(_plan(PlanStep(id="s1", agent="research", instruction="check my inbox")))
-    tid = await tasks.create(user.id, goal="g")
+    tid = await tasks.create(user.id, goal="check my email")
     async with checkpointing.open_checkpointer() as saver:
         graph = og.build_orchestrator().compile(checkpointer=saver)
         first = await graph.ainvoke(og.initial_state(await tasks.get(tid)), _cfg(tid))
@@ -775,3 +775,24 @@ def test_the_registry_does_not_offer_an_excluded_accounts_tools(fresh_registry):
         assert {t.name for t in fresh_registry.select("knowledge", 1, "notes")} == {"what_do_you_know"}
     finally:
         excluded_capabilities.reset(token)
+
+
+async def test_an_account_named_only_by_the_planner_is_not_requested_and_reruns_once(
+    user, fake_llm, rec_bus, monkeypatch
+):
+    seen: list = []
+
+    async def _always(step, user_id, context):
+        from mavis.tools.registry import excluded_capabilities
+
+        seen.append(excluded_capabilities.get())
+        raise ConnectionRequired(Capability.NOTION, "look in your notes")
+
+    monkeypatch.setattr(og, "run_step_agent", _always)
+    fake_llm.push_structured(_plan(PlanStep(id="s1", agent="knowledge",
+                                         instruction="search my Notion notes")))
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["Done."]))
+    tid = await tasks.create(user.id, goal="compare GATE coaching institutes")
+    final = await _run(tid)
+    assert seen == [frozenset(), frozenset({Capability.NOTION})]  # one re-run, then it gives up
+    assert "__interrupt__" in final  # still failing after the skip: the old connect pause, not a loop
