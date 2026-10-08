@@ -120,3 +120,10 @@ async def purge_strangers(cutoff: datetime, keep_chat_ids: frozenset[int] = froz
         await s.execute(delete(User).where(User.id.in_(ids)))
         await s.commit()
         return len(ids)
+
+
+async def owners() -> list[User]:
+    """Active users of tier owner (who get the owner alerts and run the owner commands)."""
+    async with Session() as s:
+        return list(await s.scalars(select(User).where(User.tier == "owner", User.status == "active")
+                                    .order_by(User.id)))

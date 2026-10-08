@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import structlog
 
 from mavis import bus
-from mavis.access import UserStatus, UserTier
+from mavis.access import UserStatus, UserTier, budgets
 from mavis.access.codes import normalize
 from mavis.channels import get_channel
 from mavis.channels.test_sink import is_test_chat
@@ -182,6 +182,7 @@ async def access_gate(event: Event) -> bool:
     user = await users.get(event.user_id)
     if event.type is EventType.RATE_LIMITED:
         await _say_once(user.id, SLOW_DOWN_TEXT, "slow_down", 60, event)
+        await budgets.note_rate_limit_hit(user.id)
         return False
     if s.access_mode == "allowlist" or is_test_chat(user.telegram_chat_id, s):
         return True
@@ -195,6 +196,9 @@ async def access_gate(event: Event) -> bool:
             log.info("gate.shadow_would_drop", status=status, event_type=event.type)
         return True
     if status == UserStatus.ACTIVE:
+        if event.type is EventType.USER_MESSAGE and await budgets.in_cooldown(user.id):
+            await _say_once(user.id, SLOW_DOWN_TEXT, "slow_down", 60, event)
+            return False
         if (event.type is EventType.USER_MESSAGE
                 and (user.state or {}).get(_STATE_KEY, {}).get("activation_event") == event.id):
             return False  # a retry of the very message that redeemed the code is not a chat turn
