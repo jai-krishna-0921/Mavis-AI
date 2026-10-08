@@ -142,24 +142,50 @@ def self_only_tainted() -> bool:
     return run is not None and run.self_taint()
 
 
+def _user_worded(tool: MavisTool, args: BaseModel, run: ToolRun) -> bool:
+    """Every provenance argument the tool declares is the user's own words this turn (domain.terms)."""
+    values = [getattr(args, name, "") for name in tool.provenance]
+    texts = [v for v in values if isinstance(v, str) and v.strip()]
+    return bool(texts) and len(texts) == len(values) and all(grounded_in(t, run.user_words) for t in texts)
+
+
 def _gate_tainted(tool: MavisTool, args: BaseModel, risk: RiskClass) -> bool:
-    """Is this call third-party steered, for its taint policy?
+    """Does this call need its taint policy's CARD (TaintPolicy.APPROVE)?
 
     Outward, spending and destructive calls: the whole run's taint (the replayed window included).
     Self-only calls (READ / WRITE_SELF, their effects stay with the user): only what can steer this turn
-    (ToolRun.self_tainted), and not even that when every provenance argument the tool declares is drawn
-    from the user's own words this turn (domain.terms.grounded_in): then the request is the user's."""
+    (ToolRun.self_tainted), and not even that when the call is worded entirely in the user's own words
+    this turn. Skipping the card never changes the trust of what the call stores: see _persist_untrusted."""
     if risk not in SELF_ONLY:
         return _run_tainted()
     run = current_run.get()
     if run is None or not run.self_taint():
         return False
-    values = [getattr(args, name, "") for name in tool.provenance]
-    texts = [v for v in values if isinstance(v, str) and v.strip()]
-    if texts and len(texts) == len(values) and all(grounded_in(t, run.user_words) for t in texts):
+    if _user_worded(tool, args, run):
         log.info("tool.taint_waived_user_words", tool=tool.name)
         return False
     return True
+
+
+def _persist_untrusted(tool: MavisTool, args: BaseModel) -> bool:
+    """Is what this call stores (a fact, a loop, a reminder, a task) third-party shaped?
+
+    Yes whenever third-party text was anywhere in the run's prompt (the whole window, ToolRun.tainted),
+    unless the call is worded entirely in the user's own words this turn: then its content is theirs."""
+    run = current_run.get()
+    if run is None or not run.tainted:
+        return False
+    return not _user_worded(tool, args, run)
+
+
+# Set by the registry around one tool call (track 1 T1.1 fix round 1): the call persists content derived
+# from third-party text, so the tool stores it untrusted (a loop, a reminder that fires on the untrusted
+# path). Approved calls never set it: the user saw the card and said yes.
+current_call_untrusted: ContextVar[bool] = ContextVar("current_call_untrusted", default=False)
+
+
+def call_untrusted() -> bool:
+    return current_call_untrusted.get()
 
 
 async def _queue_tainted(task_id: int | None) -> bool:
@@ -411,11 +437,16 @@ class ToolRegistry:
             if not auto:
                 preview = tool.render_preview(args, await tool_context(user_id)) + note
                 raise ApprovalRequired(tool.name, preview, payload)
-        if (tool.on_taint is TaintPolicy.DOWNGRADE and tool.tainted_fn is not None
-                and _gate_tainted(tool, args, risk)):
+        untrusted = risk in SELF_ONLY and _persist_untrusted(tool, args)
+        if tool.on_taint is TaintPolicy.DOWNGRADE and tool.tainted_fn is not None and (
+                untrusted or _gate_tainted(tool, args, risk)):
             log.info("tool.taint_downgraded", tool=tool.name)
             return await self._run(tool, user_id, args, actor="agent", fn=tool.tainted_fn)
-        return await self._run(tool, user_id, args, actor="agent")
+        token = current_call_untrusted.set(untrusted)
+        try:
+            return await self._run(tool, user_id, args, actor="agent")
+        finally:
+            current_call_untrusted.reset(token)
 
     async def execute_approved(self, approval_id: int) -> Executed:
         """Run a tool the user explicitly approved. Bypasses the approval check only."""

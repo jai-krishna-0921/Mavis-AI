@@ -27,7 +27,7 @@ from mavis.policy.risk import wrap_untrusted
 from mavis.store.repo import approvals, policy_rules, tasks, users
 from mavis.store.repo import loops as loops_repo
 from mavis.timers import service as timers_service
-from mavis.tools.registry import MavisTool, TaintPolicy, ToolContext, current_run
+from mavis.tools.registry import MavisTool, TaintPolicy, ToolContext, call_untrusted, current_run
 
 
 def _local_tz(name: str) -> ZoneInfo:
@@ -137,9 +137,11 @@ async def wake_me(user_id: int, args: WakeMeArgs) -> ToolOutput:
         raise ActionFailed("That time is more than a year away; pick a nearer time.",
                            reason="that time is more than a year away", kind=FailureKind.INVALID_ARGUMENT)
     key = f"remind:{user_id}:{at:%Y%m%d%H%M}:{hashlib.sha1(args.reason.encode()).hexdigest()[:8]}"
+    # A reason derived from third-party text (registry.call_untrusted) fires on the untrusted path: the
+    # composer words it, scrubbed of links and addresses, never relayed verbatim as "your reminder".
     wakeup_id = await timers_service.WakeupService().wake_me(
         user_id, at, f"Reminder the user asked for: {args.reason}", kind="agent",
-        reminder=True, dedupe_key=key,
+        reminder=True, dedupe_key=key, payload={"untrusted": True} if call_untrusted() else None,
     )
     # args.at is the user's wall clock (the registry attached their zone), so it reads as they said it
     return ToolOutput(f"Reminder set for {args.at:%a %d %b, %H:%M}.",
@@ -152,8 +154,10 @@ async def track_loop(user_id: int, args: TrackLoopArgs) -> ToolOutput:
         user_id,
         LoopUpsert(kind=args.kind, title=args.title, due_at=due, entities=args.entities,
                    importance=args.importance, source="tool:track_loop",
-                   # the user asked for it in chat (and approved it when the turn was tainted)
-                   trust=Trust.USER, origin=LoopOrigin.CONVERSATION),
+                   # the user's own request (their words, or a card they approved); worded from
+                   # third-party text without a card, it is stored as untrusted (registry.call_untrusted)
+                   trust=Trust.UNTRUSTED if call_untrusted() else Trust.USER,
+                   origin=LoopOrigin.CONVERSATION),
     )
     return ToolOutput(f"Keeping track of: {loop.title}", f"Tracking loop #{loop.id}.")
 

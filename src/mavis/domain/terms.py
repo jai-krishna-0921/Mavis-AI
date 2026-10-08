@@ -1,9 +1,9 @@
 """Crude content terms of a text, and whether a model-written text comes from the user's own words.
 
 `terms` is the overlap vocabulary of tool selection (registry.select). `grounded_in` is the provenance
-test for self-only actions (track 1, T1.1): an argument the model wrote is the user's own request when
-its content terms are, for the most part, words the user wrote this turn, and every identifier in it
-(a URL, a host, an email address, a handle) appears in the user's words verbatim. It is a measured
+test for self-only actions (track 1, T1.1): an argument the model wrote is the user's own request only
+when every content term of it is a word the user wrote this turn, and every identifier in it (a URL, a
+host, an email address, a handle) appears in the user's words verbatim. It is a measured
 overlap, not a phrase list: it never decides what an action is about, only where its wording came from.
 """
 
@@ -23,8 +23,7 @@ _IDENTIFIER = re.compile(
     r"https?://\S+|www\.\S+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|@\w{2,}|\b[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}\b",
     re.IGNORECASE,
 )
-GROUNDED_SHARE = 0.6  # at least this share of the text's content terms must be the user's
-_PREFIX = 5  # "comparison" ~ "compare": two long terms with the same first letters are one word
+_PREFIX = 5  # "comparison" ~ "compar(e)": a stem of at least this length that begins the other term
 
 
 def terms(text: str) -> set[str]:
@@ -44,23 +43,30 @@ def terms(text: str) -> set[str]:
 def _same(term: str, theirs: set[str]) -> bool:
     if term in theirs:
         return True
-    return len(term) >= _PREFIX and any(len(t) >= _PREFIX and t[:_PREFIX] == term[:_PREFIX] for t in theirs)
+    return len(term) >= _PREFIX and any(
+        len(t) >= _PREFIX and (term.startswith(t) or t.startswith(term)) for t in theirs)
 
 
 def identifiers(text: str) -> set[str]:
     return {m.group(0).rstrip(".,;:!?)").lower() for m in _IDENTIFIER.finditer(text or "")}
 
 
+def foreign_terms(text: str, user_words: str) -> set[str]:
+    """Content terms of `text` the user did not write (stems of the same word count as written)."""
+    theirs = terms(user_words)
+    return {t for t in terms(text) if not _same(t, theirs)}
+
+
 def grounded_in(text: str, user_words: str) -> bool:
-    """`text` (written by the model) is drawn from `user_words` (written by the user)."""
-    if not text.strip() or not user_words.strip():
+    """`text` (written by the model) says nothing the user did not say in `user_words`.
+
+    Every content term of it (words and numbers, minus stopwords) is one the user wrote, and every
+    identifier in it (URL, host, email address, handle) appears in their words verbatim. Reordering, dropping
+    words and inflection are fine ("compare laptops" ~ "laptop comparison"); a single added content word
+    ("budget", "forward", "invoices", a number) is not: the text is then not purely theirs."""
+    if not text.strip() or not user_words.strip() or not terms(text):
         return False
     said = user_words.lower()
     if any(ident not in said for ident in identifiers(text)):
         return False
-    mine = terms(text)
-    if not mine:
-        return False
-    theirs = terms(user_words)
-    shared = sum(1 for t in mine if _same(t, theirs))
-    return shared / len(mine) >= GROUNDED_SHARE
+    return not foreign_terms(text, user_words)
