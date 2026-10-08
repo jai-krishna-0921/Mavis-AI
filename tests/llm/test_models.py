@@ -910,3 +910,56 @@ async def test_best_effort_call_timeout_is_the_short_one_and_holds_no_cooldown(c
     lim = next(iter(models._limiters.values()))
     assert lim._free == 3 and lim._be_inflight == 0
     assert models._ollama.cooldown_until == 0.0
+
+
+# --- E2E run 2 (R4): a background timeout never blocks interactive work -------------------------------
+
+
+async def test_background_timeout_marks_only_the_background_lane(chain) -> None:
+    log, scripts, s = chain
+    s.llm_timeout_cooldown_s = 0.5
+    scripts[s.model_fast] = [_timeout()]
+    task = asyncio.create_task(models.complete([HumanMessage("bg")], priority="background"))
+    await asyncio.sleep(0.05)
+    assert models._ollama.unavailable_s("interactive") <= 0  # chat sees a healthy account
+    assert models._ollama.unavailable_s("background") > 0
+    assert models.unavailable_s() > 0  # background drains still wait it out
+    await task
+
+
+async def test_interactive_timeout_still_marks_the_interactive_lane(chain) -> None:
+    log, scripts, s = chain
+    s.llm_timeout_cooldown_s = 0.5
+    scripts[s.model_fast] = [_timeout()]
+    task = asyncio.create_task(models.complete([HumanMessage("chat")]))
+    await asyncio.sleep(0.05)
+    assert models._ollama.unavailable_s("interactive") > 0
+    await task
+
+
+async def test_chat_takes_back_the_slot_a_timed_out_background_call_holds(chain) -> None:
+    """One slot, held 45 s after a background timeout: a chat reply must not wait for it."""
+    log, scripts, s = chain
+    s.llm_timeout_cooldown_s = 30
+    scripts[s.model_fast] = [_timeout()]  # the background attempt; its retry then queues for a slot
+    bg = asyncio.create_task(models.complete([HumanMessage("bg")], priority="background"))
+    await asyncio.sleep(0.05)
+    assert models._limiter()._free == 0  # the abandoned request still occupies the slot
+    t0 = asyncio.get_running_loop().time()
+    assert await asyncio.wait_for(models.complete([HumanMessage("chat")]), 2) == f"from {s.model_fast}"
+    assert asyncio.get_running_loop().time() - t0 < 1
+    bg.cancel()
+
+
+async def test_background_timeout_does_not_send_chat_to_the_secondary(secondary) -> None:
+    log, scripts, s = secondary
+    s.llm_timeout_cooldown_s = 0.5
+    models._ollama.note_timeout("background")
+    assert not models._prefer_secondary(Tier.FAST, "interactive")
+    models._ollama.note_timeout("interactive")
+    assert models._prefer_secondary(Tier.FAST, "interactive")
+
+
+async def test_rate_limit_backoff_stays_global(chain) -> None:
+    models._ollama.note_rate_limit(None)
+    assert models._ollama.unavailable_s("interactive") > 0 and models._ollama.unavailable_s("background") > 0
