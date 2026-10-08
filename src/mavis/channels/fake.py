@@ -26,6 +26,7 @@ class FakeChannel:
         self.sent: list[SentItem] = []
         self.fail_next: list[Exception] = []
         self.reactions: list[tuple[int, int, str | None]] = []  # (chat_id, message_id, emoji or None=clear)
+        self.left: list[int] = []  # chats the bot was told to leave
         self._next_id = 1
 
     @property
@@ -62,6 +63,9 @@ class FakeChannel:
 
     async def react(self, chat_id: int, message_id: int, emoji: str | None) -> None:
         self.reactions.append((chat_id, message_id, emoji))
+
+    async def leave_chat(self, chat_id: int) -> None:
+        self.left.append(chat_id)
 
     async def download_file(self, file_id: str, dest_path: str) -> str:
         Path(dest_path).parent.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 - test double

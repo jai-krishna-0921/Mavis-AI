@@ -106,3 +106,7 @@ class SinkChannel:
 
     async def download_file(self, file_id: str, dest_path: str) -> str:
         return await self._inner.download_file(file_id, dest_path)
+
+    async def leave_chat(self, chat_id: int) -> None:
+        if not self._is_test(chat_id):
+            await self._inner.leave_chat(chat_id)

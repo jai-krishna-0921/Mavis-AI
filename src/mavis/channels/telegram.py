@@ -130,6 +130,10 @@ class TelegramChannel:
         reaction = [ReactionTypeEmoji(emoji)] if emoji else []
         await self._bot.set_message_reaction(chat_id=chat_id, message_id=message_id, reaction=reaction)
 
+    async def leave_chat(self, chat_id: int) -> None:
+        await self._ensure()
+        await self._bot.leave_chat(chat_id=chat_id)
+
     async def download_file(self, file_id: str, dest_path: str) -> str:
         await self._ensure()
         Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
