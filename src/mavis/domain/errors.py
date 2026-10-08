@@ -108,3 +108,8 @@ class NoSuchConnection(IntegrationError):
 
 class WebhookVerificationError(IntegrationError):
     """Inbound webhook failed signature/timestamp verification."""
+
+
+class StartupRefused(RuntimeError):
+    """A startup check found a configuration that must not run. Unlike other startup-hook failures it stops
+    the process (a staging stack sharing the prod Composio key, for one)."""

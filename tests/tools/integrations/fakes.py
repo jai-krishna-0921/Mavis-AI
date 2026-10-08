@@ -64,7 +64,7 @@ class FakeProvider:
         self.retired.append(user.user_id)
         return 0
 
-    def parse_webhook(self, headers: dict[str, str], body: bytes) -> list[Event]:
+    async def parse_webhook(self, headers: dict[str, str], body: bytes) -> list[Event]:
         return []
 
 
