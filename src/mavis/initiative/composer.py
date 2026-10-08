@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import re
 
-from mavis.agents import persona
+from mavis.agents import persona, register
 from mavis.domain import timeutil
 from mavis.domain.decisions import ComposedMessage
 from mavis.domain.messages import Role
@@ -115,6 +115,8 @@ class Composer:
         system = persona.system_prompt(
             user, now, recall, known_name=card_name, ask_name=False,
             prior_turns=len(persona.recent_messages(recent, now)) or None,
+            register_line=register.prompt_line(register.measure(register.user_texts(recent, now)),
+                                               proactive=True),
         ) + "\n" + COMPOSER_RULES
         history = (
             "\n".join(f"{'User' if m.role == Role.USER else 'You'}: "
@@ -143,7 +145,7 @@ class Composer:
         bubbles = []
         for b in draft.messages:
             # typography: at the channel; an echoed replay stamp (T1) is not content
-            b = strip_stamps(scrub_untrusted_origin(b) if untrusted else b).strip()
+            b = register.mask_slurs(strip_stamps(scrub_untrusted_origin(b) if untrusted else b)).strip()
             if b:
                 bubbles.append(b)
         bubbles = bubbles[:MAX_BUBBLES]
