@@ -123,3 +123,17 @@ def from_user_not_sources(text: str, user_words: str, sources: list[str]) -> boo
     if 2 * len(foreign) > len(mine) or any(t.isdigit() for t in foreign):
         return False  # mostly the model's own words, not a request of theirs
     return not copied_from(text, user_words, sources)
+
+
+SAME_REQUEST = 0.5  # share of content terms two wordings must have in common to be one request
+
+
+def same_request(a: str, b: str) -> bool:
+    """Two wordings of one request ("research X and compare fees" ~ "compare X: fees"): at least half of
+    their combined content terms are shared, and at least two. The dedupe of cards a user would otherwise
+    approve twice."""
+    ta, tb = terms(a), terms(b)
+    if not ta or not tb:
+        return False
+    shared = {t for t in ta if _same(t, tb)}
+    return len(shared) >= 2 and len(shared) / len(ta | tb) >= SAME_REQUEST

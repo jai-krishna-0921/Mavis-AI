@@ -120,6 +120,18 @@ async def waiting_equivalents(user_id: int, tool: str, arguments: dict, *, ident
                 and equivalence_key(r.arguments or {}, identity) == want]
 
 
+async def waiting_of_tool(user_id: int, tool: str, *, tainted: bool) -> list[PendingApproval]:
+    """This user's approvals of one tool still waiting on them, of the given taint, oldest first."""
+    async with Session() as s:
+        rows = await s.scalars(
+            select(PendingApproval)
+            .where(PendingApproval.user_id == user_id, PendingApproval.tool == tool,
+                   PendingApproval.status.in_(_WAITING))
+            .order_by(PendingApproval.id)
+        )
+        return [r for r in rows if bool(r.tainted) == tainted]
+
+
 async def pending_rows(user_id: int | None = None) -> list[PendingApproval]:
     """PENDING approvals (waiting on a tap), oldest first, for one user or everyone."""
     stmt = select(PendingApproval).where(PendingApproval.status == ApprovalStatus.PENDING.value)

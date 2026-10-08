@@ -34,7 +34,7 @@ from mavis.domain.localtime import has_datetimes, localize_args
 from mavis.domain.policy import Capability, RiskClass
 from mavis.domain.results import ToolOutput
 from mavis.domain.tasks import ApprovalStatus
-from mavis.domain.terms import from_user_not_sources, grounded_in, terms
+from mavis.domain.terms import from_user_not_sources, grounded_in, same_request, terms
 from mavis.policy.risk import truncate, wrap_untrusted
 from mavis.store.db import utcnow
 from mavis.store.repo import approvals, audit, policy_rules, tasks
@@ -211,6 +211,23 @@ async def _queue_tainted(task_id: int | None) -> bool:
         return False
     task = await tasks.get(task_id)
     return bool(task is not None and task.tainted)
+
+
+async def _waiting_same_request(user_id: int, tool: MavisTool, arguments: dict, tainted: bool):
+    """A card already waiting for the same request in other words: tools that declare a provenance
+    argument (the text that says what the request is) compare it by content terms, so a re-asked request
+    ("yes go ahead" answered by a model that words the goal again) never makes a second card."""
+    if not tool.provenance:
+        return None
+    mine = " ".join(str(arguments.get(name) or "") for name in tool.provenance)
+    rest = approvals.equivalence_key({k: v for k, v in arguments.items() if k not in tool.provenance})
+    for row in await approvals.waiting_of_tool(user_id, tool.name, tainted=tainted):
+        theirs = " ".join(str((row.arguments or {}).get(name) or "") for name in tool.provenance)
+        other = {k: v for k, v in (row.arguments or {}).items() if k not in tool.provenance}
+        # the same words for another time or kind (a reminder at 5 and at 6) are another request
+        if approvals.equivalence_key(other) == rest and same_request(mine, theirs):
+            return row
+    return None
 
 
 ToolFn = Callable[[int, Any], Awaitable[str | dict | list | ToolOutput]]
@@ -612,6 +629,8 @@ class ToolRegistry:
                         await approvals.waiting_equivalents(user_id, tool.name, req.arguments,
                                                             identity=tool.identity, tainted=tainted)),
                         None)
+                    if twin is None and existing is None:
+                        twin = await _waiting_same_request(user_id, tool, req.arguments, tainted)
                     if twin is not None:
                         # The same action already waits on the user (another task, or an earlier
                         # turn): one card per action, never a second one to approve twice.

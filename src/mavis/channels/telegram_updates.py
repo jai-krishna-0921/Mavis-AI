@@ -103,6 +103,8 @@ async def ingest_update(data: dict[str, Any], bus: EventBus, answer: Answerer | 
         event_type = EventType.USER_MESSAGE
         text = msg.get("text") or msg.get("caption") or ""
         payload = {"text": text, "message_id": msg.get("message_id")}
+        if replied := (msg.get("reply_to_message") or {}).get("text"):
+            payload["reply_to_text"] = str(replied)[:4000]  # the message they answered (card edits need it)
         if m := _COMMAND.match(text):
             payload["command"] = m.group(1).lower()
         if file := _file(msg):
