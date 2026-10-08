@@ -285,3 +285,52 @@ def test_assistant_context_of_returns_the_fenced_reply_only():
     assert "Book the vet?" in ctx and "not a user line" in ctx
     assert "sure" not in ctx and "remind me later" not in ctx
     assert service_mod.assistant_context_of("plain user text") == ""
+
+
+# --- D7: the assistant's own text is never a memory source -----------------------------------------------
+
+
+async def _stored(memory, user_id, query):
+    return await memory.vector.search_with_kind(user_id, query, k=20, min_score=0.0)
+
+
+@pytest.mark.parametrize("trust", [Trust.USER, Trust.UNTRUSTED])
+async def test_assistant_reply_is_never_stored_as_a_memory_point(memory, user, fake_llm, trust):
+    """Live E2E: Qdrant held '<assistant_context> Your previous reply: context only...' as `signal` points,
+    because a turn that saw third-party content learns its WHOLE text as an unverified signal."""
+    from mavis.agents.turn_support import learn_text
+
+    fake_llm.push_structured(Extraction())
+    text = learn_text("my sister Priya lives in Pune and I am preparing for GATE", REPLY, None)
+    await memory.learn(user.id, text, "tg:update:30", trust)
+    stored = await _stored(memory, user.id, "Priya Pune GATE blocked dentist lease")
+    assert stored, "the user's own words should still be remembered"
+    for point, _kind in stored:
+        assert "assistant_context" not in point and "context only" not in point
+        assert "Dentist on Friday" not in point and "Call Ravi" not in point
+    kind = "episode" if trust is Trust.USER else "signal"
+    assert ("my sister Priya lives in Pune and I am preparing for GATE", kind) in stored
+
+
+async def test_legacy_mavis_prefixed_reply_is_not_stored_for_untrusted_turns(memory, user, fake_llm):
+    fake_llm.push_structured(Extraction())
+    text = "Mavis: " + "Long earlier reply words " * 40 + "\nUser: I am meeting Jawahar for lunch tomorrow"
+    await memory.learn(user.id, text, "tg:update:31", Trust.UNTRUSTED)
+    assert await _stored(memory, user.id, "earlier reply words meeting Jawahar") == [
+        ("I am meeting Jawahar for lunch tomorrow", "signal")]
+
+
+async def test_third_party_documents_are_still_stored_whole_as_signals(memory, user, fake_llm):
+    fake_llm.push_structured(Extraction())
+    mail = "Subject: Invoice 42 due Friday. Please pay the attached invoice before the end of the week."
+    await memory.learn(user.id, mail, "gmail:msg:9", Trust.UNTRUSTED, conversation=False)
+    assert await _stored(memory, user.id, "invoice due Friday") == [(mail, "signal")]
+
+
+async def test_vector_store_refuses_fenced_assistant_text_whatever_the_caller(memory, user):
+    from mavis.memory import vector as vector_mod
+
+    assert vector_mod.ASSISTANT_FENCE == (service_mod.CONTEXT_OPEN, service_mod.CONTEXT_CLOSE)
+    await memory.vector.add(user.id, [f"{service_mod.CONTEXT_OPEN} Your previous reply: hello Pune",
+                                      "a real fact about Pune"], kind="fact")
+    assert await _stored(memory, user.id, "Pune") == [("a real fact about Pune", "fact")]

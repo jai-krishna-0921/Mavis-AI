@@ -19,6 +19,8 @@ from mavis.memory.embeddings import Embedder
 
 log = structlog.get_logger()
 COLLECTION = "episodes"
+# the fence around the assistant's previous reply in LEARN text (mavis.memory.service.CONTEXT_OPEN/CLOSE)
+ASSISTANT_FENCE = ("<assistant_context>", "</assistant_context>")
 
 
 def _ts(raw: object) -> datetime | None:
@@ -96,6 +98,9 @@ class QdrantVectorStore:
         """`at`: when the text was written (a turn's time), default now. Recall stamps hits with it."""
         unique: dict[str, str] = {}
         for t in texts:
+            if any(marker in t for marker in ASSISTANT_FENCE):
+                log.error("memory.assistant_text_refused", user_id=user_id, kind=kind, source_ref=source_ref)
+                continue  # the assistant's words are never a memory source, whichever caller sent them
             if t and t.strip():
                 unique.setdefault(self.point_id(user_id, t), " ".join(t.split()))
         if not unique:
