@@ -88,7 +88,12 @@ PAYLOAD = {"id": "m1", "type": "composio.trigger.message",
            "data": {"messageId": "x1", "subject": "Hello", "sender": "a@b.com", "labelIds": ["INBOX"]}}
 
 
-async def test_webhook_publishes_events_once():
+async def test_webhook_publishes_events_once(db):
+    from mavis.store.repo import users
+
+    u, _ = await users.get_or_create_by_chat(4001, "Aiko")
+    await users.update(u.id, composio_user_id="mavis-1")  # stored identity: resolves in any environment
+    assert u.id == 1
     bus = FakeBus()
     provider = ComposioProvider(api_key="k", webhook_secret=SECRET)
     body, headers = signed_body(PAYLOAD)

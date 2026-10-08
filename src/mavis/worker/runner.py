@@ -16,7 +16,7 @@ import structlog
 from mavis.bus.base import SELF_RETRYING, EventBus, run_with_inline_retries
 from mavis.channels import presence
 from mavis.config import get_settings
-from mavis.domain.errors import LLMError
+from mavis.domain.errors import LLMError, StartupRefused
 from mavis.domain.events import Event, EventType, Job, JobKind, Trust
 from mavis.domain.messages import Outbound
 from mavis.store.repo import outbox, users
@@ -72,6 +72,9 @@ async def run_startup_hooks() -> None:
     for fn in list(_startup_hooks):
         try:
             await fn()
+        except StartupRefused:
+            log.error("worker.startup_refused", hook=getattr(fn, "__name__", "?"))
+            raise
         except Exception as exc:  # noqa: BLE001 - a failed heal must not keep the worker down
             log.warning("worker.startup_hook_failed", hook=getattr(fn, "__name__", "?"),
                         error=type(exc).__name__)

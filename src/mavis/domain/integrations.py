@@ -50,6 +50,7 @@ class PendingStatus(StrEnum):
 
 
 def user_from_provider_id(value: object) -> int | None:
-    """Inverse of UserRef.provider_id. Anything not shaped 'mavis-<int>' is not ours."""
+    """Inverse of the legacy UserRef.provider_id. Anything not shaped 'mavis-<int>' is not ours. Kept for the
+    default resolver of parse_composio_webhook; live callers use identity.user_for_provider_id."""
     m = _PROVIDER_ID.fullmatch(str(value or ""))
     return int(m.group(1)) if m else None

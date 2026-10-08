@@ -27,6 +27,7 @@ from mavis.domain.errors import FailureKind, IntegrationError, NoSuchConnection
 from mavis.domain.events import Event
 from mavis.domain.integrations import ConnectionState, Toolkit, ToolResult, UserRef
 from mavis.domain.policy import Capability
+from mavis.tools.integrations import identity
 from mavis.tools.integrations.actions import ACTIONS, GOOGLE_CAPABILITIES, WORKSPACE_CAPABILITIES
 from mavis.tools.integrations.composio_map import (
     COMPOSIO_ACTIONS,
@@ -200,16 +201,15 @@ class ComposioProvider:
     async def _accounts(self, user: UserRef) -> dict[str, dict[str, Any]]:
         """Newest account per toolkit for exactly this identity; a newer non-ACTIVE never hides an ACTIVE.
         Abandoned connect attempts (links never finished) are skipped: they were never accounts."""
-        answer = await self._request(
-            "GET", "/connected_accounts", params={"user_ids": user.provider_id, "limit": 100}
-        )
+        pid = await identity.provider_id_for(user.user_id)
+        answer = await self._request("GET", "/connected_accounts", params={"user_ids": pid, "limit": 100})
         items = sorted(
             answer.get("items") or [],
             key=lambda i: str(i.get("created_at") or i.get("createdAt") or ""),
         )
         best: dict[str, dict[str, Any]] = {}
         for item in items:
-            if str(item.get("user_id") or user.provider_id) != user.provider_id or _abandoned(item):
+            if str(item.get("user_id") or pid) != pid or _abandoned(item):
                 continue
             slug = str((item.get("toolkit") or {}).get("slug") or "").lower()
             if not slug:
@@ -219,17 +219,18 @@ class ComposioProvider:
                 best[slug] = item
         return best
 
-    def _remember(self, user: UserRef, accounts: dict[str, dict[str, Any]]) -> None:
+    def _remember(self, pid: str, accounts: dict[str, dict[str, Any]]) -> None:
         statuses = {slug: str(item.get("status")) for slug, item in accounts.items()}
-        self._routes[user.provider_id] = (time.monotonic() + ROUTE_TTL_S, statuses)
+        self._routes[pid] = (time.monotonic() + ROUTE_TTL_S, statuses)
 
     async def _route_statuses(self, user: UserRef) -> dict[str, str]:
-        hit = self._routes.get(user.provider_id)
+        pid = await identity.provider_id_for(user.user_id)
+        hit = self._routes.get(pid)
         if hit is not None and time.monotonic() < hit[0]:
             return hit[1]
         accounts = await self._accounts(user)
-        self._remember(user, accounts)
-        return self._routes[user.provider_id][1]
+        self._remember(pid, accounts)
+        return self._routes[pid][1]
 
     async def status(self, user: UserRef) -> dict[str, ConnectionState]:
         states = {t.slug: ConnectionState.NONE for t in CATALOG}
@@ -238,7 +239,7 @@ class ComposioProvider:
         if not self.configured:
             return states
         accounts = await self._accounts(user)
-        self._remember(user, accounts)
+        self._remember(await identity.provider_id_for(user.user_id), accounts)
         for slug, item in accounts.items():
             if slug in states:
                 states[slug] = _STATE_MAP.get(str(item.get("status")), ConnectionState.NONE)
@@ -311,7 +312,7 @@ class ComposioProvider:
             )
         answer = await self._request("POST", "/connected_accounts/link", body={
             "auth_config_id": await self._auth_config(toolkit),
-            "user_id": user.provider_id,
+            "user_id": await identity.provider_id_for(user.user_id),
             "callback_url": callback_url,
         })
         url = str(answer.get("redirect_url") or "")
@@ -332,7 +333,8 @@ class ComposioProvider:
         if not row:
             raise NoSuchConnection(f"there is no {toolkit} connection to remove.")
         await self._request("DELETE", f"/connected_accounts/{row.get('id')}")
-        self._routes.pop(user.provider_id, None)  # after the DELETE, so no concurrent execute re-caches it
+        pid = await identity.provider_id_for(user.user_id)
+        self._routes.pop(pid, None)  # after the DELETE, so no concurrent execute re-caches it
 
     # --- tools --------------------------------------------------------------------------------------
 
@@ -356,7 +358,7 @@ class ComposioProvider:
                 )
             answer = await self._request(
                 "POST", f"/tools/execute/{slug}",
-                body={"user_id": user.provider_id, "arguments": arguments},
+                body={"user_id": await identity.provider_id_for(user.user_id), "arguments": arguments},
             )
         except IntegrationError as exc:
             kind = adapter_kind(exc.status)
@@ -377,7 +379,7 @@ class ComposioProvider:
         if google_slug is None and legacy is None:
             raise IntegrationError(f"unknown trigger {trigger!r}")
         accounts = await self._accounts(user)
-        self._remember(user, accounts)
+        self._remember(await identity.provider_id_for(user.user_id), accounts)
         if legacy is None:
             if google_slug is None:
                 raise IntegrationError(f"unknown trigger {trigger!r}")
@@ -400,23 +402,34 @@ class ComposioProvider:
             raise IntegrationError(f"Composio accepted {trigger} but returned no trigger id.")
         return trigger_id
 
+    async def list_user_ids(self) -> list[str]:
+        """Provider-side user ids that have connected accounts on this key (the startup shared-key check)."""
+        answer = await self._request("GET", "/connected_accounts", params={"limit": 100})
+        return sorted({str(i.get("user_id")) for i in answer.get("items") or [] if i.get("user_id")})
+
     async def retire_legacy_triggers(self, user: UserRef) -> int:
         """After the Google upgrade: delete this user's Gmail/Calendar trigger instances on the legacy
         accounts, so every email arrives once (from googlesuper). Returns how many were deleted."""
+        pid = await identity.provider_id_for(user.user_id)
         answer = await self._request(
-            "GET", "/trigger_instances/active", params={"user_ids": user.provider_id, "limit": 100}
-        )
+            "GET", "/trigger_instances/active", params={"user_ids": pid, "limit": 100})
         deleted = 0
         for item in answer.get("items") or []:
             name = str(item.get("trigger_name") or item.get("triggerName") or "").upper()
-            if str(item.get("user_id") or user.provider_id) != user.provider_id:
+            if str(item.get("user_id") or pid) != pid:
                 continue
             if name.startswith(_LEGACY_TRIGGER_PREFIXES) and item.get("id"):
                 await self._request("DELETE", f"/trigger_instances/manage/{item['id']}")
                 deleted += 1
         return deleted
 
-    def parse_webhook(self, headers: dict[str, str], body: bytes) -> list[Event]:
-        from mavis.tools.integrations.composio_webhooks import parse_composio_webhook
+    async def parse_webhook(self, headers: dict[str, str], body: bytes) -> list[Event]:
+        from mavis.tools.integrations.composio_webhooks import (
+            parse_composio_webhook,
+            peek_provider_user,
+            verify_signature,
+        )
 
-        return parse_composio_webhook(headers, body, self._webhook_secret)
+        verify_signature(self._webhook_secret, headers, body)  # no identity lookup for a forged request
+        uid = await identity.user_for_provider_id(peek_provider_user(body))
+        return parse_composio_webhook(headers, body, self._webhook_secret, resolver=lambda _v: uid)

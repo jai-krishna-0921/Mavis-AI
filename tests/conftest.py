@@ -45,6 +45,16 @@ TEST_ENV = {
 
 
 @pytest.fixture(autouse=True)
+def _reset_provider_identity_cache():
+    """Composio id lookups are cached for minutes; tests reuse user ids with different rows."""
+    from mavis.tools.integrations import identity
+
+    identity.clear_cache()
+    yield
+    identity.clear_cache()
+
+
+@pytest.fixture(autouse=True)
 def _reset_ollama_state():
     """Global 429 backoff / timeout cooldown is process-wide; it must not leak between tests."""
     from mavis.llm import models

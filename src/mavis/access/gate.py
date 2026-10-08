@@ -18,6 +18,7 @@ from mavis.domain.messages import Outbound
 from mavis.store.db import utcnow
 from mavis.store.models import InviteCode, User
 from mavis.store.repo import audit, invites, outbox, users
+from mavis.tools.integrations.identity import new_provider_id
 from mavis.worker.gates import register_event_gate
 
 log = structlog.get_logger(__name__)
@@ -111,7 +112,7 @@ async def activate(user_id: int, invite: InviteCode, now: datetime) -> User:
     s = get_settings()
     await users.update(user_id, status=UserStatus.ACTIVE.value, tier=invite.tier, invite_id=invite.id,
                        activated_at=now, timezone=invite.default_timezone or s.default_timezone,
-                       currency=invite.default_currency)
+                       currency=invite.default_currency, composio_user_id=new_provider_id(user_id))
     await audit.record(user_id, actor="user", action="invite.redeemed", detail={"invite_id": invite.id})
     user = await users.get(user_id)
     for fn in list(on_activated):
