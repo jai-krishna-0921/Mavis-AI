@@ -92,7 +92,7 @@ async def test_calendar_invite_card_and_provider_get_the_time_the_user_said(user
                                            "attendees": ["jk@example.com"]})
     with pytest.raises(ApprovalRequired) as req:
         await fresh_registry.invoke(tool, user.id, args)
-    assert "11:00 to 11:30" in req.value.preview
+    assert "11:00 to 12:00" in req.value.preview  # only a start: the default length (60 min)
     approved = tool.args_model.model_validate(req.value.arguments)
     await tool.fn(user.id, approved)
     [(_, action, sent)] = [e for e in provider.executed if e[1] == "calendar.create_event"]

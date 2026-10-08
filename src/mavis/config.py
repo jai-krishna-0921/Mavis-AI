@@ -99,6 +99,8 @@ class Settings(BaseSettings):
     # the start ack already promised the result, so a quick line after half a minute is noise.
     task_progress_after_s: float = 120
     approval_ttl_hours: int = 48
+    # Length of an event or block created with only a start time (hotfix4 H6): used, mentioned, changeable.
+    default_event_minutes: int = 60
     react_max_steps: int = 8
     # Tool rounds for the research specialist. 6 cut task #14 off after 33 s with its searches thrown
     # away; the task models (glm-5.3 and fallbacks) tend to issue one search or extract per round, and a
