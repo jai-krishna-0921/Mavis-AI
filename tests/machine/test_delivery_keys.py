@@ -76,3 +76,25 @@ async def test_redeliver_skips_delivered_files(db, user, sent, tmp_path):
     before = len([m for m in sent if m.document_path])
     await task_delivery.redeliver(user.id, tid)
     assert len([m for m in sent if m.document_path]) == before
+
+
+@pytest.mark.parametrize("status", ["CANCELLED", "FAILED"])
+async def test_mid_task_delivery_sends_nothing_after_cancel_or_fail(db, user, sent, tmp_path, status):
+    from mavis.domain.tasks import TaskStatus
+
+    progress_card.set_cards(RecordingCards())
+    tid = await tasks.create(user.id, goal="make a deck")
+    art = await _art(user, tid, tmp_path, "deck.pptx")
+    await tasks.set_status(tid, TaskStatus[status])
+    assert await task_delivery.deliver_artifact_now(user.id, tid, art) is False
+    assert sent == []
+
+
+async def test_end_of_task_paths_still_hand_over_files_of_a_failed_task(db, user, sent, tmp_path):
+    from mavis.domain.tasks import TaskStatus
+
+    progress_card.set_cards(RecordingCards())
+    tid = await tasks.create(user.id, goal="make a deck")
+    await _art(user, tid, tmp_path, "deck.pptx")
+    await tasks.set_status(tid, TaskStatus.FAILED)
+    assert await task_delivery.deliver_pending_artifacts(user.id, tid) == 1
