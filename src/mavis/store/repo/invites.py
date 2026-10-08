@@ -46,8 +46,13 @@ async def list_active(now: datetime | None = None) -> list[InviteCode]:
 async def revoke(hint_or_id: str) -> InviteCode | None:
     key = hint_or_id.strip().upper()
     async with Session() as s:
-        cond = InviteCode.id == int(key) if key.isdigit() else InviteCode.code_hint == key
-        row = await s.scalar(select(InviteCode).where(cond, InviteCode.revoked_at.is_(None)))
+        # A hint can be all digits (it is the last 4 characters of a code), so match the hint first and
+        # fall back to the numeric id only when no code has that hint.
+        row = await s.scalar(select(InviteCode).where(InviteCode.code_hint == key,
+                                                      InviteCode.revoked_at.is_(None)))
+        if row is None and key.isdigit():
+            row = await s.scalar(select(InviteCode).where(InviteCode.id == int(key),
+                                                          InviteCode.revoked_at.is_(None)))
         if row is None:
             return None
         row.revoked_at = utcnow()
