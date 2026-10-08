@@ -2,22 +2,21 @@
 
 The model may end a turn saying it will act ("I'll block 2 to 3 pm, just tap Approve") without having
 called any tool: nothing was created and no card exists. This module decides, from the turn's own record
-(ReactResult: which tools ran, which cards were queued) and the vocabulary of the tools that were offered,
-when such a reply needs a second look, and builds the one re-prompt that gives the model its tools again.
-It never rewrites what the model meant: the model either calls the tool or answers again. The only code
-edit is the approval-UI rule: a reply cannot point at a card (tap, button, approve) when no card exists.
+(ReactResult: which tools ran, which cards were queued, which cards are waiting) and the vocabulary of the
+tools that were offered, when such a reply needs a second look, and builds the one re-prompt that gives
+the model its tools again. Code never edits the reply: the model either calls the tool or answers again.
 
 Signals (measured, not phrase lists):
-- UI claim: the reply uses the approval card's own vocabulary while the turn queued no card and none is
-  waiting on the user.
+- UI claim: the reply tells the user to work a control (tap, a button) while the turn queued no card
+  and none is waiting. Ordinary words such as "approved" ("HR approved your leave") are not card UI and
+  never count.
 - Missed action: no action tool ran this turn, and the reply shares content terms with an offered action
-  tool's own vocabulary (its name and description, minus terms most offered tools share): at least two
-  terms, or one when the user's message shares a term with that tool too (they asked for what it does).
+  tool's own vocabulary (its name and description, minus terms most action tools share, terms any read
+  tool uses, and the approval mechanics every outward description repeats).
 """
 
 from __future__ import annotations
 
-import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -28,11 +27,17 @@ from langchain_core.tools import BaseTool
 from mavis.domain.policy import RiskClass
 from mavis.domain.terms import terms
 
-# The approval card's own vocabulary (its buttons and what they do): only a card makes these true.
-UI_TERMS = frozenset(terms("tap tapping tapped button buttons approve approved approval approving"))
-_SENTENCE = re.compile(r"[^.!?\n]+[.!?]*\s*|\n")
+# Working an on-screen control: in a chat, only our approval card has controls.
+UI_TERMS = frozenset(terms("tap tapping tapped button buttons"))
 _SHARED_BY = 3  # a term in this many offered action tools' vocabularies says nothing about any one of them
-UI_FALLBACK = "I haven't set anything up for that yet. Want me to?"
+# How an outward tool's description says it waits for the user ("asked to approve first"): mechanics,
+# not what the tool does, so never evidence that a reply is about that tool.
+_MECHANICS = frozenset(terms("approve approved approves approval asked first user"))
+
+
+def ui_claim(reply: str) -> bool:
+    """The reply tells the user to work a control of the approval card."""
+    return bool(terms(reply) & UI_TERMS)
 
 REPROMPT = (
     "[System note, not from the user] Your reply talks about doing something, but this turn "
@@ -77,7 +82,7 @@ def _action_vocab(offered: Sequence[BaseTool], risk_of, exclude: frozenset[str]
     counts = Counter(t for words in vocab.values() for t in words)
     out = {}
     for name, words in vocab.items():
-        own = {t for t in words if counts[t] < _SHARED_BY}
+        own = {t for t in words if counts[t] < _SHARED_BY} - _MECHANICS
         out[name] = (own, own - reads)
     return out
 
@@ -93,7 +98,7 @@ def check(reply: str, user_text: str, offered: Sequence[BaseTool], *, tools_call
     all, the reply and the user's message both share one of its own terms (they asked for what it does,
     the reply talks about it, and nothing was even looked up)."""
     said = terms(reply)
-    out = ClaimCheck(ui_claim=bool(said & UI_TERMS) and not card_shown and not waiting_tools)
+    out = ClaimCheck(ui_claim=ui_claim(reply) and not card_shown and not waiting_tools)
     if card_shown or any(risk_of(name) not in (None, RiskClass.READ) for name in tools_called):
         return out  # the turn did act: its own receipt and card speak for it
     asked = terms(user_text)
@@ -103,10 +108,3 @@ def check(reply: str, user_text: str, offered: Sequence[BaseTool], *, tools_call
                 or (not tools_called and said & own and asked & own)):
             out.tools.append(name)
     return out
-
-
-def strip_ui_claims(reply: str) -> str:
-    """Drop the sentences that point at an approval card (only used when no card exists)."""
-    kept = [s for s in _SENTENCE.findall(reply) if not terms(s) & UI_TERMS]
-    text = re.sub(r"\n{3,}", "\n\n", "".join(kept)).strip()
-    return text or UI_FALLBACK

@@ -303,9 +303,8 @@ async def bind_claims(result: ReactResult, tools: list[BaseTool], text: str, use
     """Action claims are bound to what the turn did (track 1 T1.4, agents.claims).
 
     A reply that talks about acting while no action tool ran, or points at an approval card that does not
-    exist, is re-prompted once with the same tools ("call the tool or say you won't"). After that, a
-    reply that still points at a missing card loses those sentences. The model's own words are otherwise
-    sent as written."""
+    exist, is re-prompted once with the same tools ("call the tool or say you won't"). The answer to the
+    re-prompt is sent as the model wrote it: code never deletes sentences from a reply."""
     reply = strip_stamps(result.text or "").strip()
     if not tools or not reply:
         return result
@@ -342,9 +341,6 @@ async def bind_claims(result: ReactResult, tools: list[BaseTool], text: str, use
         tainted=result.tainted or again.tainted, read_untrusted=result.read_untrusted or again.read_untrusted,
         wrapped_up=again.wrapped_up,
     )
-    if not waiting and not _card_shown(merged) and claims.check(
-            merged.text, text, [], tools_called=[], card_shown=False, risk_of=risk_of).ui_claim:
-        merged.text = claims.strip_ui_claims(merged.text)
     return merged
 
 
