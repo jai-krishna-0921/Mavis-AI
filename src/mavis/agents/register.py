@@ -50,6 +50,8 @@ WEAK = frozenset({
 })
 _MASK_CHARS = "*!#@$"
 _WORD = re.compile(r"[A-Za-z](?:[A-Za-z'*!#@$]*[A-Za-z*])?")
+# "Mr. Bastard", "Dr. Dick": an honorific's full stop is not a sentence end
+_HONORIFIC = re.compile(r"\b(?:Mr|Mrs|Ms|Mx|Dr|Prof|St|Sr|Jr|Mt|Capt|Sgt|Rev|Hon|Gen|Col|Lt|Fr)\.\s*$")
 _SENTENCE_END = re.compile(r"(?:^|[.!?\n:;\"(\u201c]\s*)$")
 _TOKEN = re.compile(r"[a-z]+", re.IGNORECASE)
 
@@ -62,8 +64,9 @@ def _word_tokens(text: str) -> list[tuple[str, bool]]:
         if word.lower().endswith("'s"):
             word = word[:-2]
         before = text[: m.start()]
-        proper = (word[:1].isupper() and not word.isupper()
-                  and not _SENTENCE_END.search(before[-3:] if before else ""))
+        sentence_start = bool(_SENTENCE_END.search(before[-3:] if before else "")) and not _HONORIFIC.search(
+            before[-8:])
+        proper = word[:1].isupper() and not word.isupper() and not sentence_start
         out.append((word, proper and bool(before.strip())))
     return out
 
@@ -131,12 +134,15 @@ _LAUGHING = re.compile(r"\b(?:lol|lmao|lmfao|haha\w*|crying laughing|dying laugh
                        re.IGNORECASE)
 
 # Slurs: masked in outgoing text whatever the register (a guard, not a style signal). Only words with
-# no innocent meaning; whole words only, never a capitalised name ("a plate of Faggots", a dish), and
-# never inside links, email addresses, code or verbatim spans (third-party text shown as written).
-SLURS = frozenset({
-    "nigger", "niggers", "nigga", "niggas", "faggot", "faggots", "kike", "kikes", "tranny", "trannies",
-    "wetback", "wetbacks", "raghead", "ragheads", "towelhead", "towelheads",
-})
+# no innocent meaning as plain words; whole words only, never inside links, email addresses, code or
+# verbatim spans (third-party text shown as written). Each entry says whether it is also an ordinary
+# capitalised name or food ("Faggots" is a British dish): only those keep the proper-noun exception;
+# every other entry is masked however it is capitalised.
+SLURS: dict[str, bool] = {  # word -> ambiguous as a capitalised name or food
+    "nigger": False, "niggers": False, "nigga": False, "niggas": False, "faggot": True, "faggots": True,
+    "kike": False, "kikes": False, "tranny": False, "trannies": False, "wetback": False, "wetbacks": False,
+    "raghead": False, "ragheads": False, "towelhead": False, "towelheads": False,
+}
 # Spans that are never rewritten or masked: verbatim (\x0e...\x0f), code, links, email addresses.
 PROTECTED = re.compile(
     r"\x0e.*?(?:\x0f|$)|```.*?(?:```|$)|`[^`\n]+`|(?:https?://|www\.)\S+|\S+@\S+\.\S+|"
@@ -264,7 +270,8 @@ def _mask_word(word: str) -> str:
 def _mask_plain(text: str) -> str:
     out, last = [], 0
     for m, (word, proper) in zip(_WORD.finditer(text), _word_tokens(text), strict=True):
-        if not proper and word.lower() in SLURS:
+        ambiguous = SLURS.get(word.lower())
+        if ambiguous is not None and not (proper and ambiguous):
             out.append(text[last : m.start()])
             out.append(_mask_word(word) + m.group(0)[len(word):])
             last = m.end()
