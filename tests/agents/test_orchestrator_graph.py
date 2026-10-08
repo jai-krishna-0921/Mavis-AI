@@ -357,7 +357,7 @@ async def test_connect_gate_interrupts_then_reruns_step_when_connected(user, fak
     attempts: list[str] = []
     monkeypatch.setattr(og, "run_step_agent", _connect_step(attempts, connected_after=1))
     fake_llm.push_structured(_plan(PlanStep(id="s1", agent="research", instruction="check my inbox")))
-    tid = await tasks.create(user.id, goal="anything from Jawahar?")
+    tid = await tasks.create(user.id, goal="anything from Jawahar in my email?")
     task = await tasks.get(tid)
     graph = _graph()
     cfg = _cfg(tid)
@@ -375,7 +375,7 @@ async def test_connect_gate_declined_continues_without(user, fake_llm, rec_bus, 
     attempts: list[str] = []
     monkeypatch.setattr(og, "run_step_agent", _connect_step(attempts, connected_after=99))
     fake_llm.push_structured(_plan(PlanStep(id="s1", agent="research", instruction="check my inbox")))
-    tid = await tasks.create(user.id, goal="anything from Jawahar?")
+    tid = await tasks.create(user.id, goal="anything from Jawahar in my email?")
     task = await tasks.get(tid)
     graph = _graph()
     cfg = _cfg(tid)
@@ -403,7 +403,7 @@ async def test_dependents_wait_for_the_connect_answer(user, fake_llm, rec_bus, m
     monkeypatch.setattr(og, "run_step_agent", _fake_step)
     fake_llm.push_structured(_plan(PlanStep(id="s1", agent="inbox", instruction="mail"),
                                    PlanStep(id="s2", agent="research", instruction="b", depends_on=["s1"])))
-    tid = await tasks.create(user.id, goal="g")
+    tid = await tasks.create(user.id, goal="check my email")
     graph = _graph()
     first = await graph.ainvoke(og.initial_state(await tasks.get(tid)), _cfg(tid))
     assert attempts == ["s1"]
@@ -420,7 +420,7 @@ async def test_sqlite_checkpointer_survives_a_restart(settings, user, fake_llm, 
     attempts: list[str] = []
     monkeypatch.setattr(og, "run_step_agent", _connect_step(attempts, connected_after=1))
     fake_llm.push_structured(_plan(PlanStep(id="s1", agent="research", instruction="check my inbox")))
-    tid = await tasks.create(user.id, goal="g")
+    tid = await tasks.create(user.id, goal="check my email")
     async with checkpointing.open_checkpointer() as saver:
         graph = og.build_orchestrator().compile(checkpointer=saver)
         first = await graph.ainvoke(og.initial_state(await tasks.get(tid)), _cfg(tid))
@@ -705,3 +705,94 @@ async def test_responder_masks_slurs(user, fake_llm):
     fake_llm.push_structured(ComposedMessage(send=True, messages=["Those faggots at the bank fixed it."]))
     out = await og.responder({"user_id": user.id, "goal": "check the bank", "kind": TaskKind.TASK})
     assert "faggots" not in out["final_messages"][0] and "f*****s" in out["final_messages"][0]
+
+
+# --- live E2E 2026-10-08 (D3): an account nobody asked for never stalls a task ----------------------------
+
+
+def _reaching_for(capability: Capability, seen: list):
+    """A step agent that reaches for `capability` unless the registry no longer offers its tools."""
+    async def _fake_step(step, user_id, context):
+        from mavis.tools.registry import excluded_capabilities
+
+        seen.append((step.id, excluded_capabilities.get(), context))
+        if capability not in excluded_capabilities.get():
+            raise ConnectionRequired(capability, "look in your notes")
+        return StepOutcome(ok=True, text="GATE coaching fees gathered")
+    return _fake_step
+
+
+@pytest.mark.parametrize("capability,goal", [
+    (Capability.NOTION, "compare GATE coaching institutes in Chennai, fees and reviews"),
+    (Capability.GMAIL, "research standing desks under 15k with product links"),
+    (Capability.SLACK, "plan a three day Ladakh trip"),
+])
+async def test_an_unrequested_account_is_skipped_and_the_task_finishes_with_results(
+    user, fake_llm, rec_bus, monkeypatch, capability, goal
+):
+    seen: list = []
+    monkeypatch.setattr(og, "run_step_agent", _reaching_for(capability, seen))
+    fake_llm.push_structured(_plan(PlanStep(id="s1", agent="knowledge",
+                                         instruction="recall what Mavis knows")))
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["Here is what I found."]))
+    tid = await tasks.create(user.id, goal=goal)
+    final = await _run(tid)
+    assert "__interrupt__" not in final
+    assert final["results"]["s1"]["ok"] is True and final["results"]["s1"]["text"]
+    assert any("not asked for" in a for a in final["action_results"])
+    assert [excl for _, excl, _ in seen] == [frozenset(), frozenset({capability})]
+    assert "Work without it" in seen[1][2]
+
+
+async def test_a_requested_account_still_pauses_for_the_connect_prompt(user, fake_llm, rec_bus, monkeypatch):
+    seen: list = []
+    monkeypatch.setattr(og, "run_step_agent", _reaching_for(Capability.NOTION, seen))
+    fake_llm.push_structured(_plan(PlanStep(id="s1", agent="knowledge",
+                                         instruction="search my Notion notes")))
+    tid = await tasks.create(user.id, goal="find the GATE plan in my notion")
+    final = await _run(tid)
+    assert final["__interrupt__"][0].value["capability"] == "notion"
+    assert len(seen) == 1
+
+
+def test_the_registry_does_not_offer_an_excluded_accounts_tools(fresh_registry):
+    from pydantic import BaseModel
+
+    from mavis.domain.policy import RiskClass
+    from mavis.tools.registry import MavisTool, excluded_capabilities
+
+    async def fn(user_id, args):
+        return "x"
+
+    fresh_registry.register(MavisTool("notion_search", "notes", BaseModel, RiskClass.READ, fn,
+                                      frozenset({"knowledge"}), requires=Capability.NOTION))
+    fresh_registry.register(MavisTool("what_do_you_know", "memory", BaseModel, RiskClass.READ, fn,
+                                      frozenset({"knowledge"})))
+    assert {t.name for t in fresh_registry.for_agent("knowledge", 1)} == {"notion_search", "what_do_you_know"}
+    token = excluded_capabilities.set(frozenset({Capability.NOTION}))
+    try:
+        assert {t.name for t in fresh_registry.for_agent("knowledge", 1)} == {"what_do_you_know"}
+        assert {t.name for t in fresh_registry.select("knowledge", 1, "notes")} == {"what_do_you_know"}
+    finally:
+        excluded_capabilities.reset(token)
+
+
+async def test_an_account_named_only_by_the_planner_is_not_requested_and_reruns_once(
+    user, fake_llm, rec_bus, monkeypatch
+):
+    seen: list = []
+
+    async def _always(step, user_id, context):
+        from mavis.tools.registry import excluded_capabilities
+
+        seen.append(excluded_capabilities.get())
+        raise ConnectionRequired(Capability.NOTION, "look in your notes")
+
+    monkeypatch.setattr(og, "run_step_agent", _always)
+    fake_llm.push_structured(_plan(PlanStep(id="s1", agent="knowledge",
+                                         instruction="search my Notion notes")))
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["Done."]))
+    tid = await tasks.create(user.id, goal="compare GATE coaching institutes")
+    final = await _run(tid)
+    assert seen == [frozenset(), frozenset({Capability.NOTION})]  # one re-run, then it gives up
+    assert "__interrupt__" in final  # still failing after the skip: the old connect pause, not a loop
