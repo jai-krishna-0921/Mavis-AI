@@ -60,6 +60,7 @@ _BG = {"priority": "background", "fallback": True}
 PLANNER_PROMPT = """You are Mavis's planner. Break the user's goal into 1-6 steps for specialist agents.
 Run independent steps in parallel by leaving depends_on empty; add depends_on only when a step needs another
 step's output. Use short ids s1, s2, ...
+Give every step a short plain "title" (at most 8 words, no links), for example "Search for standing desks".
 
 Available agents:
 {specialists}
