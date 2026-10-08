@@ -57,6 +57,14 @@ async def open_for(user_id: int, capability: Capability) -> list[ConnectionPendi
         return list(rows)
 
 
+async def has_open(user_id: int) -> bool:
+    """The user started a connect flow (any capability) that is still waiting."""
+    async with Session() as s:
+        return await s.scalar(select(ConnectionPending.id).where(
+            ConnectionPending.user_id == user_id,
+            ConnectionPending.status == PendingStatus.PENDING.value).limit(1)) is not None
+
+
 async def latest_open(user_id: int, capability: Capability) -> ConnectionPending | None:
     rows = await open_for(user_id, capability)
     return rows[-1] if rows else None

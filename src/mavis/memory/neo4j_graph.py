@@ -82,7 +82,17 @@ def q_close_single_valued(rel: str) -> str:
     r = sanitize_rel(rel)
     return (
         f"MATCH (a:Entity {{user_id:$u, key:$src}})-[r:{r}]->(b:Entity) "
-        "WHERE r.valid_to IS NULL AND b.key <> $dst SET r.valid_to = datetime()"
+        "WHERE r.valid_to IS NULL AND b.key <> $dst SET r.valid_to = datetime($at)"
+    )
+
+
+def q_newer_single_valued(rel: str) -> str:
+    """Start of the oldest current edge that began after the fact being written (None when none did)."""
+    r = sanitize_rel(rel)
+    return (
+        f"MATCH (a:Entity {{user_id:$u, key:$src}})-[r:{r}]->(b:Entity) "
+        "WHERE r.valid_to IS NULL AND b.key <> $dst AND r.valid_from > datetime($at) "
+        "RETURN min(r.valid_from) AS vf"
     )
 
 
@@ -103,7 +113,7 @@ def q_create_edge(rel: str) -> str:
     return (
         "MATCH (a:Entity {user_id:$u, key:$src}), (b:Entity {user_id:$u, key:$dst}) "
         f"CREATE (a)-[r:{r} {{statement:$statement, confidence:$confidence, source_ref:$source_ref, "
-        "valid_from:datetime()}]->(b)"
+        "valid_from:datetime($at), valid_to:CASE WHEN $to IS NULL THEN null ELSE datetime($to) END}]->(b)"
     )
 
 
@@ -198,17 +208,26 @@ class Neo4jGraphStore:
         )
         return key
 
-    async def upsert_relation(self, user_id: int, rel: Relation, source_ref: str = "") -> None:
+    async def upsert_relation(self, user_id: int, rel: Relation, source_ref: str = "",
+                              at: datetime | None = None) -> None:
+        """`at`: when the fact was said. Older than the current single-valued edge: recorded as a closed
+        interval (history) instead of superseding it. See GraphStore."""
         r = sanitize_rel(rel.rel)
         src = await self._key_for(user_id, rel.subject)
         dst = await self._key_for(user_id, rel.object)
+        when = (timeutil.ensure_utc(at) if at else timeutil.now()).isoformat()
         params = dict(u=user_id, src=src, dst=dst, statement=rel.statement, confidence=rel.confidence,
-                      source_ref=source_ref)
+                      source_ref=source_ref, at=when)
         rows = await self._run(q_update_current_edge(r), **params)
         if not rows or rows[0]["c"] == 0:
+            to = None
             if r in SINGLE_VALUED_RELS:
-                await self._run(q_close_single_valued(r), u=user_id, src=src, dst=dst)
-            await self._run(q_create_edge(r), **params)
+                newer = await self._run(q_newer_single_valued(r), u=user_id, src=src, dst=dst, at=when)
+                if newer and newer[0]["vf"] is not None:
+                    to = newer[0]["vf"].isoformat()
+                else:
+                    await self._run(q_close_single_valued(r), u=user_id, src=src, dst=dst, at=when)
+            await self._run(q_create_edge(r), to=to, **params)
 
     async def neighborhood(self, user_id: int, names: list[str], hops: int = 2, limit: int = 25) -> list[str]:
         keys: list[str] = []

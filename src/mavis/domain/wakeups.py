@@ -49,6 +49,8 @@ class Wakeup(BaseModel):
     status: WakeupStatus = WakeupStatus.PENDING
 
 
+REMINDER_PREFIX = "Reminder the user asked for: "  # the reason prefix of a wake_me (user-requested) wakeup
+
 # payload keys the timer sets itself; callers may not supply them. "reminder" (a user-requested reminder,
 # which always fires and skips the daily budget) is set only through WakeupService.wake_me(reminder=True).
 RESERVED_PAYLOAD_KEYS = frozenset({"wakeup_id", "kind", "reason", "loop_id", "reminder"})

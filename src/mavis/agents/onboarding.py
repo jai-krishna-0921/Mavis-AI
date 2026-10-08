@@ -9,6 +9,7 @@ from pathlib import Path
 from mavis.access import gate, preferences
 from mavis.access.currency import for_zone
 from mavis.access.tz_resolve import from_city, from_location, from_text_llm
+from mavis.agents import settings_flow
 from mavis.agents.buttons import register_button_handler
 from mavis.config import get_settings
 from mavis.domain import timeutil
@@ -21,6 +22,7 @@ from mavis.store.repo import outbox, users
 from mavis.timers.service import WakeupService
 
 PREFIX = "ob:"
+MAX_PLACE_GUESSES = 3  # model-assisted place guesses per user while onboarding
 CITY_TABLE: Path | None = None
 WELCOME = ("Hi {name}, I'm Mavis, your personal assistant on Telegram. I remember things, remind you, and "
            "can watch your email and calendar if you want.")
@@ -72,6 +74,10 @@ async def _after_zone(user_id: int) -> None:
 
 async def on_button(event: Event, data: str) -> None:
     uid = event.user_id
+    if data.startswith("ob:tz:"):
+        step = ((await users.get_state(uid)).get("onboarding") or {}).get("step")
+        if step not in ("clock", "place"):
+            return  # a stale button from an earlier message: onboarding is over, nothing to redo
     if data == "ob:tz:yes":
         await _after_zone(uid)
     elif data == "ob:tz:no":
@@ -106,10 +112,13 @@ async def on_text(user: User, text: str) -> bool:
         rows = [[Button(label=f"{m.name}, {m.country} ({m.zone.split('/')[-1].replace('_', ' ')})",
                         data=f"ob:tz:{i}")] for i, m in enumerate(matches)]
         await _say(user.id, PICK, f"pick:{len(matches)}", rows)
-    elif zone := await from_text_llm(text):
+    elif (tries := int(st.get("place_tries", 0))) < MAX_PLACE_GUESSES and (zone := await from_text_llm(text)):
+        await _state(user.id, place_tries=tries + 1)
         await preferences.set_timezone(user.id, zone)
         await _after_zone(user.id)
     else:
+        # bounded: after a few misses the model is not asked again, only the city name or a location works
+        await _state(user.id, place_tries=int(st.get("place_tries", 0)) + 1)
         await _say(user.id, ASK_PLACE, f"ask_place_again:{utcnow():%H%M}")
     return True
 
@@ -153,16 +162,7 @@ async def onboarding_gate(event: Event) -> bool:
     return not await on_text(user, str(event.payload.get("text", "")))
 
 
-async def settings_command(event: Event, user: User, args: list[str]) -> str | None:
-    clock = timeutil.to_local(utcnow(), user.timezone).strftime("%I:%M %p").lstrip("0")
-    await _say(user.id, CLOCK.format(clock=clock), f"settings_clock:{event.id}",
-               [[Button(label="Yes", data="ob:tz:yes"), Button(label="No", data="ob:tz:no")]])
-    return (f"Time zone: {user.timezone}\nCurrency: {user.currency or '(default)'}\n"
-            f"Name: {user.name or '(none)'}\nSay 'my time zone is ...' or 'use EUR' to change them.")
-
-
 def register() -> None:
-    from mavis.access.commands import register_user_command
     from mavis.timers.system import register_system_wakeup
     from mavis.worker.gates import register_event_gate
 
@@ -171,4 +171,4 @@ def register() -> None:
     register_button_handler(PREFIX, on_button)
     register_event_gate("onboarding", onboarding_gate, order=30)
     register_system_wakeup(WakeupKind.SYSTEM_ONBOARD_CONNECT.value, after_first_value)
-    register_user_command("settings", settings_command)
+    settings_flow.register()

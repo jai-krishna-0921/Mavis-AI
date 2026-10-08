@@ -803,35 +803,95 @@ def test_reasoning_effort_only_for_gpt_oss_models(settings) -> None:
     assert models.chat_model(Tier.FAST).reasoning_effort is None
 
 
-# --- several slots: best_effort may use spare capacity, never the last free slot while chat is active ----
+# --- several slots: best_effort queues for a lull, never takes the last free slot, never delays a reply ----
+
+
+@pytest.fixture
+def quiet_zero(monkeypatch):
+    monkeypatch.setattr(models, "BEST_EFFORT_QUIET_S", 0.0)
 
 
 @pytest.mark.parametrize("size", [2, 3, 5])
-async def test_best_effort_uses_spare_slots_right_after_chat_but_never_the_last(monkeypatch, size) -> None:
-    monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", 20.0)
+async def test_best_effort_runs_at_once_when_idle_even_right_after_chat_ended(monkeypatch, size) -> None:
+    """The grace window is a one-slot rule. With several slots LEARN starts after a short lull instead of
+    being refused (live E2E: 13 extractions refused while 3 slots were mostly idle)."""
+    monkeypatch.setattr(models, "BEST_EFFORT_QUIET_S", 0.03)
+    monkeypatch.setattr(models, "BEST_EFFORT_TICK_S", 0.01)
     lim = models._Limiter(size)
-    await lim.acquire("interactive", 1)  # a chat turn is running (holds one slot)
-    for _ in range(size - 2):  # every slot but the chat's and one spare for its next call
-        await asyncio.wait_for(lim.acquire("best_effort", 1), 1)
-    with pytest.raises(LLMError, match="interactive"):
-        await lim.acquire("best_effort", 1)  # only one slot left: it stays free for the chat
-    await asyncio.wait_for(lim.acquire("interactive", 1), 1)  # and the chat gets it at once
+    await lim.acquire("interactive", 1)
+    lim.release()  # a chat call just ended
+    await asyncio.wait_for(lim.acquire("best_effort", 1), 1)  # queued for the lull, then runs; not refused
 
 
-@pytest.mark.parametrize("size", [2, 4])
-async def test_best_effort_waiter_gets_a_spare_slot_but_not_the_last_one(monkeypatch, size) -> None:
-    monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", 20.0)
+@pytest.mark.parametrize("size", [2, 3, 5])
+async def test_best_effort_waits_while_a_chat_call_is_in_flight(quiet_zero, size) -> None:
     lim = models._Limiter(size)
-    for _ in range(size):
-        await lim.acquire("background", 1)  # saturated by task work (counts as recent use)
+    await lim.acquire("interactive", 1)  # one call running, spare slots exist
     be = asyncio.create_task(lim.acquire("best_effort", 5))
-    await asyncio.sleep(0)
-    lim.release()  # one slot frees: it is the last free one while work is active
-    with pytest.raises(LLMError):
-        await asyncio.wait_for(be, 1)
-    if size > 2:
-        lim.release()  # now two are free: a best_effort caller may take one of them
-        await asyncio.wait_for(lim.acquire("best_effort", 1), 1)
+    await asyncio.sleep(0.05)
+    assert not be.done()  # a reply arriving meanwhile must not wait on it
+    lim.release()
+    await asyncio.wait_for(be, 1)  # the lull begins
+
+
+@pytest.mark.parametrize("size", [2, 3, 5])
+async def test_best_effort_never_takes_the_last_free_slot(quiet_zero, size) -> None:
+    lim = models._Limiter(size)
+    for _ in range(size - 1):
+        await lim.acquire("interactive", 1)  # exactly one slot left
+    be = asyncio.create_task(lim.acquire("best_effort", 5))
+    await asyncio.sleep(0.02)
+    assert not be.done()
+    await asyncio.wait_for(lim.acquire("interactive", 1), 1)  # the chat still gets the last slot at once
+    be.cancel()
+
+
+@pytest.mark.parametrize(("size", "second_runs"), [(2, False), (3, True), (6, True)])
+async def test_idle_best_effort_backlog_drains_on_every_slot_but_one(quiet_zero, size, second_runs) -> None:
+    lim = models._Limiter(size)
+    await lim.acquire("best_effort", 1)
+    second = asyncio.create_task(lim.acquire("best_effort", 5))
+    await asyncio.sleep(0.02)
+    assert second.done() is second_runs
+    second.cancel()
+
+
+async def test_waiting_best_effort_never_delays_a_chat_call(quiet_zero) -> None:
+    lim = models._Limiter(3)
+    for _ in range(3):
+        await lim.acquire("interactive", 1)
+    be = asyncio.create_task(lim.acquire("best_effort", 5))
+    chat = asyncio.create_task(lim.acquire("interactive", 5))
+    await asyncio.sleep(0.01)
+    lim.release()
+    await asyncio.wait_for(chat, 1)  # the freed slot goes to the chat
+    assert not be.done()
+    be.cancel()
+
+
+async def test_best_effort_starts_by_timer_when_the_lull_arrives_without_any_other_event(monkeypatch) -> None:
+    """No acquire/release happens after the quiet period elapses: the timer must notice it."""
+    monkeypatch.setattr(models, "BEST_EFFORT_QUIET_S", 0.08)
+    monkeypatch.setattr(models, "BEST_EFFORT_TICK_S", 0.02)
+    lim = models._Limiter(3)
+    await lim.acquire("interactive", 1)
+    lim.release()
+    lim.touch()
+    be = asyncio.create_task(lim.acquire("best_effort", 5))
+    await asyncio.sleep(0.02)
+    assert not be.done()
+    await asyncio.wait_for(be, 1)
+
+
+async def test_best_effort_timer_stops_when_nobody_waits(monkeypatch) -> None:
+    monkeypatch.setattr(models, "BEST_EFFORT_TICK_S", 0.01)
+    lim = models._Limiter(3)
+    await lim.acquire("interactive", 1)
+    be = asyncio.create_task(lim.acquire("best_effort", 5))
+    await asyncio.sleep(0.03)
+    be.cancel()
+    await asyncio.sleep(0.05)
+    assert lim._tick is None
 
 
 async def test_local_limiter_is_the_default_backend(settings):

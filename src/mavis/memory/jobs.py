@@ -2,12 +2,13 @@
 
 Both run off the reply path, serialised per user under a lock distinct from the turn lock.
 
-Both are best effort: an LLMError (deadline, slot wait, timeout, 429 backoff, invalid output) is
-never retried inline or by redelivery, which only holds the single LLM slot (timeout plus cooldown per
-attempt) while chat turns and approved actions wait behind it. A busy LEARN is re-tried later on a
-system_learn wakeup (LEARN_RETRY_DELAYS, at most twice), then dropped; CONSOLIDATE is dropped (it runs
-nightly). A LEARN job with a future `not_before` (chat turns: after the interactive grace window, so it
-does not just lose to the reply's follow-up calls) is parked on a wakeup instead of run.
+An LLMError (deadline, slot wait, timeout, 429 backoff, invalid output) is never retried inline or by
+bus redelivery, which only holds an LLM slot (timeout plus cooldown per attempt) while chat turns wait
+behind it. LEARN is the only way a user's facts, loops and profile get learned, so it is NOT best effort
+in the sense of "may be dropped": a failed LEARN is parked on a durable system_learn wakeup and retried
+(LEARN_RETRY_DELAYS, then every LEARN_RETRY_CAP) until it succeeds; only a job older than LEARN_MAX_AGE
+is dropped, with an error log. CONSOLIDATE is dropped (it runs nightly). A LEARN job with a future
+`not_before` is parked on a wakeup instead of run.
 Non-LLM failures (graph, vector store, database) still raise so the bus retries them.
 """
 
@@ -30,7 +31,9 @@ from mavis.worker.runner import register_job_handler
 
 log = structlog.get_logger(__name__)
 
-LEARN_RETRY_DELAYS = (timedelta(minutes=3), timedelta(minutes=10))
+LEARN_RETRY_DELAYS = (timedelta(minutes=1), timedelta(minutes=3), timedelta(minutes=10))
+LEARN_RETRY_CAP = timedelta(minutes=15)  # steady cadence once the short delays are used up
+LEARN_MAX_AGE = timedelta(hours=24)  # a LEARN older than this is stale (relative dates, context): dropped
 _LEARN_REASON = "learn"
 
 
@@ -96,22 +99,36 @@ async def handle_learn(job: Job) -> None:
                                      conversation=bool(p.get("conversation", True)),
                                      anchor_at=_anchor(p))
         except LLMError as exc:
-            retry = int(p.get("retry", 0))
-            if retry < len(LEARN_RETRY_DELAYS):
-                at = timeutil.now() + LEARN_RETRY_DELAYS[retry]
-                await park_learn(job.user_id, {**p, "retry": retry + 1, "not_before": None}, at,
-                                 f"r{retry + 1}")
-                log.warning("memory.learn_deferred_llm_busy", job_id=job.id, source_ref=source_ref,
-                            retry=retry + 1, error=str(exc))
-            else:
-                # Final: the facts AND any loops this text would have created are lost.
-                log.error("memory.learn_dropped_final", job_id=job.id, source_ref=source_ref,
-                          attempts=retry + 1, error=str(exc))
+            await _defer_learn(job, p, exc)
             return
         if p.get("conversation", True):
             await maybe_summarize(job.user_id)
         if source_ref:
             await events.record(marker)
+
+
+def _learn_retry_delay(retry: int) -> timedelta:
+    return LEARN_RETRY_DELAYS[retry] if retry < len(LEARN_RETRY_DELAYS) else LEARN_RETRY_CAP
+
+
+async def _defer_learn(job: Job, p: dict, exc: LLMError) -> None:
+    """Park the job for another try, or drop it when it has been failing for LEARN_MAX_AGE."""
+    now = timeutil.now()
+    retry = int(p.get("retry", 0))
+    source_ref = str(p.get("source_ref", ""))
+    try:
+        first = timeutil.ensure_utc(datetime.fromisoformat(str(p["first_at"])))
+    except (KeyError, ValueError):
+        first = now
+    if now - first > LEARN_MAX_AGE:
+        # Final: the facts AND any loops this text would have created are lost.
+        log.error("memory.learn_dropped_final", job_id=job.id, source_ref=source_ref, attempts=retry + 1,
+                  error=str(exc))
+        return
+    retried = {**p, "retry": retry + 1, "not_before": None, "first_at": first.isoformat()}
+    await park_learn(job.user_id, retried, now + _learn_retry_delay(retry), f"r{retry + 1}")
+    log.warning("memory.learn_deferred_llm_busy", job_id=job.id, source_ref=source_ref, retry=retry + 1,
+                error=str(exc))
 
 
 async def handle_consolidate(job: Job) -> None:

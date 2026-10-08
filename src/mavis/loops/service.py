@@ -21,6 +21,7 @@ from mavis.domain.messages import Role
 from mavis.domain.reldate import absolutize
 from mavis.store.repo import loops as repo
 from mavis.store.repo import messages, users
+from mavis.timers.coverage import FIRED_LOOKBACK, covering_reminder
 from mavis.worker.locks import lock
 
 log = structlog.get_logger()
@@ -231,6 +232,11 @@ async def loops_from_extraction(
         except ValueError:
             kind = LoopKind.COMMITMENT
         due = timeutil.to_utc(draft.due_at, user.timezone) if draft.due_at else None
+        if due is not None and await covering_reminder(
+                user_id, [draft.title], due, fired_within=FIRED_LOOKBACK):
+            # the user's own reminder (the wake_me this same sentence made) already speaks for it
+            log.info("loops.covered_by_reminder", user_id=user_id, source_ref=source_ref[:40])
+            continue
         await _upsert_unless_closed(
             service,
             user_id,
@@ -248,6 +254,10 @@ async def loops_from_extraction(
         )
     for ev in extraction.events:
         if ev.ambiguous or ev.starts_at is None or ev.importance < MIN_EVENT_IMPORTANCE:
+            continue
+        if await covering_reminder(user_id, [ev.title], timeutil.to_utc(ev.starts_at, user.timezone),
+                                  fired_within=FIRED_LOOKBACK):
+            log.info("loops.covered_by_reminder", user_id=user_id, source_ref=source_ref[:40])
             continue
         await _upsert_unless_closed(
             service,

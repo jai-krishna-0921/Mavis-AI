@@ -18,7 +18,7 @@ from mavis.domain.events import Trust
 from mavis.domain.loops import LoopKind, LoopOrigin, LoopUpsert
 from mavis.domain.messages import Role
 from mavis.domain.timefmt import due_label
-from mavis.domain.wakeups import WakeupKind
+from mavis.domain.wakeups import WakeupKind, WakeupStatus
 from mavis.initiative.executor import InitiativeExecutor
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.loops.service import LoopService
@@ -161,8 +161,13 @@ class Routines:
                    if lp.kind is LoopKind.ROUTINE and lp.title == MORNING_TITLE]
         if not morning:
             return
+        now = timeutil.now()
+        recent = await self._wakeups.history(user_id, WakeupKind.ROUTINE, now - timedelta(days=2))
+        fired_today = [w for w in recent
+                       if w.status is WakeupStatus.FIRED and now - timedelta(hours=20) < w.due_at <= now]
         await self._wakeups.cancel_where(user_id, [WakeupKind.ROUTINE], morning[0].id)
-        await self._schedule_morning(user, morning[0].id, next_day=False)
+        # a check-in that already went out in the old zone is not repeated in the new one the same day
+        await self._schedule_morning(user, morning[0].id, next_day=bool(fired_today))
 
     async def reschedule(self, user, loop_id: int | None) -> None:
         """A check-in that fired far too late is skipped; the next one is booked for tomorrow."""

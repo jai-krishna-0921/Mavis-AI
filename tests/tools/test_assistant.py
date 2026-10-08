@@ -162,3 +162,35 @@ def test_no_dashes_and_untrusted_agents_cannot_write():
     by = _by_name()
     for name in ("remember", "track_loop", "forget", "wake_me", "add_policy_rule"):
         assert by[name].agents == frozenset({"conversation"})
+
+
+async def test_remember_busy_model_queues_a_durable_learn_instead_of_failing(user, fake_memory, rec_bus,
+                                                                              monkeypatch):
+    """Live E2E: 'remember' was refused 'LLM slot reserved' and the fact was lost."""
+    from mavis.domain.errors import LLMError
+    from mavis.domain.events import JobKind
+
+    async def busy(*a, **k):
+        raise LLMError("timed out waiting for an LLM slot")
+
+    monkeypatch.setattr(fake_memory, "learn", busy)
+    out = await assistant.remember(user.id, assistant.RememberArgs(fact="call me Arjun"))
+    assert out == "Saved to memory."
+    [job] = [j for j in rec_bus.jobs if j.kind is JobKind.LEARN]
+    assert job.payload["text"].endswith("call me Arjun") and job.payload["trust"] == "user"
+    assert job.payload["source_ref"].startswith("tool:remember:")
+
+
+async def test_remember_never_holds_the_turn_for_a_slow_model(user, fake_memory, rec_bus, monkeypatch):
+    import asyncio
+
+    from mavis.domain.events import JobKind
+
+    async def slow(*a, **k):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(fake_memory, "learn", slow)
+    monkeypatch.setattr(assistant, "REMEMBER_INLINE_S", 0.05)
+    await asyncio.wait_for(assistant.remember_untrusted(user.id, assistant.RememberArgs(fact="x is y")), 1)
+    [job] = [j for j in rec_bus.jobs if j.kind is JobKind.LEARN]
+    assert job.payload["trust"] == "untrusted"

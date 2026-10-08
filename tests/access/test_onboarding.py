@@ -109,17 +109,104 @@ async def test_established_users_are_not_captured_by_the_onboarding_gate(db, cha
     assert (await users.get(user.id)).timezone == user.timezone
 
 
-async def test_settings_command_shows_values_and_offers_the_clock_check(db, channel):
+async def test_settings_for_an_onboarded_user_does_not_reenter_onboarding(db, channel):
     from mavis.access import commands
 
     u, _ = await _activate(6302, "Ines", "Europe/Lisbon", "EUR")
+    await onboarding.on_button(_btn(u.id, "ob:tz:yes"), "ob:tz:yes")
+    await _texts(channel)
+    before = (await users.get(u.id)).state["onboarding"]
+    channel.sent.clear()
     ev = Event(id="s:1", user_id=u.id, type=EventType.USER_MESSAGE, occurred_at=utcnow(), source="telegram",
                payload={"text": "/settings", "command": "settings"}, trust=Trust.USER)
     assert await commands.command_gate(ev) is False
     out = await _texts(channel)
     assert any("Time zone: Europe/Lisbon" in t and "Currency: EUR" in t for t in out)
-    assert any("Quick check" in t for t in out)
-    assert all("—" not in t for t in out)
+    assert not any("off your mind" in t or "Quick check" in t or "I'll show money" in t for t in out)
+    assert (await users.get(u.id)).state["onboarding"] == before
+    assert all("\u2014" not in t for t in out)
+
+
+async def test_stale_onboarding_buttons_do_nothing_after_onboarding(db, channel):
+    u, _ = await _activate(6303, "Ines", "Europe/Lisbon", "EUR")
+    await onboarding.on_button(_btn(u.id, "ob:tz:yes"), "ob:tz:yes")
+    await onboarding.onboarding_gate(Event(id="m:2", user_id=u.id, type=EventType.USER_MESSAGE,
+                                           occurred_at=utcnow(), source="telegram",
+                                           payload={"text": "hi"}, trust=Trust.USER))
+    await _texts(channel)
+    channel.sent.clear()
+    await users.update(u.id, currency="USD")
+    await onboarding.on_button(_btn(u.id, "ob:tz:yes"), "ob:tz:yes")
+    await onboarding.on_button(_btn(u.id, "ob:tz:no"), "ob:tz:no")
+    assert await _texts(channel) == [] and (await users.get(u.id)).currency == "USD"
+
+
+async def test_settings_can_change_the_timezone_without_touching_currency(db, channel):
+    from mavis.agents import settings_flow
+
+    u, _ = await _activate(6304, "Ines", "Europe/Lisbon", "EUR")
+    await users.update(u.id, currency="EUR")
+    await settings_flow.on_button(_btn(u.id, "st:tz"), "st:tz")
+    ev = Event(id="s:2", user_id=u.id, type=EventType.USER_MESSAGE, occurred_at=utcnow(), source="telegram",
+               payload={"text": "Osaka"}, trust=Trust.USER)
+    assert await settings_flow.settings_gate(ev) is False
+    fresh = await users.get(u.id)
+    assert fresh.timezone == "Asia/Tokyo" and fresh.currency == "EUR"
+    # not waiting any more: the next message is a normal turn
+    assert await settings_flow.settings_gate(ev) is True
+
+
+async def test_place_guesses_by_the_model_are_bounded(db, channel, fake_llm):
+    u, _ = await _activate(6305, "Mina", "Asia/Kolkata", None)
+    await onboarding.on_button(_btn(u.id, "ob:tz:no"), "ob:tz:no")
+    from mavis.access import tz_resolve
+
+    for i in range(4):
+        fake_llm.push_structured(tz_resolve._Zone(zone="Mars/Olympus"))
+        await onboarding.on_text(await users.get(u.id), f"somewhere odd {i}")
+    assert len(fake_llm.structured_queue) == 1  # the fourth miss never reached the model
+    assert (await users.get(u.id)).timezone == "Asia/Kolkata"
+
+
+async def test_a_failing_timezone_hook_does_not_skip_the_others(db, user):
+    seen = []
+
+    async def bad(uid, old, new):
+        raise RuntimeError("boom")
+
+    async def good(uid, old, new):
+        seen.append(new)
+
+    preferences._tz_hooks[:] = [bad, good]
+    try:
+        await preferences.set_timezone(user.id, "Asia/Tokyo")
+    finally:
+        preferences._tz_hooks.clear()
+    assert seen == ["Asia/Tokyo"] and (await users.get(user.id)).timezone == "Asia/Tokyo"
+
+
+async def test_no_second_morning_checkin_the_same_day_after_a_move(db, user, bus, clock):
+    from datetime import UTC, datetime, timedelta
+
+    from mavis.domain import timeutil
+    from mavis.domain.wakeups import WakeupKind
+    from mavis.initiative.wiring import wire_initiative
+    from mavis.timers.service import WakeupService
+
+    clock.set(datetime(2026, 10, 8, 3, 0, tzinfo=UTC))  # 08:30 in Kolkata, 04:00 in London
+    init = wire_initiative(register_handlers=False)
+    await init.routines.on_user_message(await users.get(user.id))
+    (w,) = await WakeupService().pending(user.id, WakeupKind.ROUTINE)
+    # today's check-in fires in the old zone, then the user lands somewhere it is still early morning
+    await WakeupService().reschedule(w.id, timeutil.now() - timedelta(minutes=1))
+    await WakeupService().fire_due(timeutil.now(), _noop_publish)
+    await preferences.set_timezone(user.id, "Europe/London")
+    (nxt,) = await WakeupService().pending(user.id, WakeupKind.ROUTINE)
+    assert nxt.due_at > timeutil.now() + timedelta(hours=12)  # tomorrow's, not a second one today
+
+
+async def _noop_publish(_w) -> None:
+    return None
 
 
 @pytest.mark.parametrize("args,needle,field,value", [
@@ -144,7 +231,7 @@ async def test_set_preferences_tool_rejects_a_bad_zone_without_changing_anything
     assert (await users.get(user.id)).timezone == user.timezone
 
 
-async def test_timezone_change_moves_the_morning_checkin_to_the_new_zone(db, user, fake_redis):
+async def test_timezone_change_moves_the_morning_checkin_to_the_new_zone(db, user, bus):
     from mavis.domain import timeutil
     from mavis.domain.wakeups import WakeupKind
     from mavis.initiative.wiring import wire_initiative

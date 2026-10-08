@@ -107,3 +107,34 @@ async def test_names_and_mild_words_cost_no_rewrite_call(
     assert channel.texts == [reply]
     assert len(fake_llm.calls) == 1
     assert "may swear" not in fake_llm.calls[0][0].content
+
+
+async def test_brevity_preference_reaches_the_model_from_the_profile_only(db, channel, fake_llm, memory, bus):
+    """Live E2E: 'I hate long messages' got 5 to 8 line replies. LEARN now writes a profile preference
+    and the persona turns it into a length rule; the words in the chat history are never scanned."""
+    from mavis.domain.memory import ProfileUpdate
+    from mavis.domain.messages import Role
+    from mavis.memory.profile import ProfileCard
+    from mavis.store.repo import messages
+    from mavis.store.repo import profile as profile_repo
+
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+
+    async def turn(n: int, text: str) -> str:
+        fake_llm.push_text("ok")
+        await run_turn(_event(user.id, text, n))
+        return fake_llm.calls[-1][0].content
+
+    await messages.log(user.id, Role.USER, "keep it short, I hate walls of text", event_id="tg:update:900")
+    assert "want short messages" not in await turn(1, "how do I split 47000 between rent and savings")
+    card = ProfileCard().apply([ProfileUpdate(field="brevity", value="short")])
+    await profile_repo.save(user.id, card)
+    assert "want short messages" in await turn(2, "and what about coaching fees")
+    await profile_repo.save(user.id, card.apply([ProfileUpdate(field="brevity", value="normal")]))
+    assert "want short messages" not in await turn(3, "ok explain in detail please")
+
+
+async def test_just_made_swear_is_mirrored_in_the_prompt(db, channel, fake_llm, memory, bus):
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    system = await _turns(user.id, fake_llm, ["fuck this week man, so much shit to do"])
+    assert "ONE casual swear" in system

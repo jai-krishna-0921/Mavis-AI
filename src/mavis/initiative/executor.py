@@ -14,8 +14,8 @@ from mavis.domain.decisions import InitiativeDecision, NotifyIntent, WakeupReque
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.messages import TAINT_SUFFIX, Button, Outbound, Role
-from mavis.domain.wakeups import WakeupKind, WakeupStatus
-from mavis.initiative import subjects
+from mavis.domain.wakeups import REMINDER_PREFIX, WakeupKind, WakeupStatus
+from mavis.initiative import guards, subjects
 from mavis.initiative.composer import Composer
 from mavis.initiative.quiet import QuietTracker
 from mavis.initiative.subjects import Subject, SubjectKind, SubjectState, event_subject
@@ -29,6 +29,7 @@ from mavis.policy.pings import (
 )
 from mavis.store.db import Session
 from mavis.store.repo import messages, outbox
+from mavis.timers import coverage
 from mavis.timers.service import WakeupService
 
 log = structlog.get_logger()
@@ -41,7 +42,6 @@ SECURITY_DEFER_GRACE = timedelta(hours=2)
 MERGE_WINDOW = timedelta(minutes=30)  # a model wakeup this close to one already set for the loop merges
 CHAIN_LOOKBACK = timedelta(days=30)
 LOOP_WAKEUP_KINDS = (WakeupKind.EVENT_STARTING, WakeupKind.EVENT_ENDED, WakeupKind.AGENT)
-REMINDER_PREFIX = "Reminder the user asked for: "  # wake_me's wakeup reason
 REMINDER_URGENCY = 4
 LATE_REMINDER_AFTER = timedelta(hours=2)  # later than this, the reminder says it is late
 UNTRUSTED_FIELDS = frozenset({"status", "entities", "watch"})  # all third-party content may change
@@ -109,7 +109,11 @@ class InitiativeExecutor:
             # always tainted: the reasoner's prompt carries untrusted history, memory and email
             await dispatch_task_requests(user.id, [task], TaskOrigin.INITIATIVE, bus=self._bus,
                                          tainted=True)
-        if decision.notify is not None:
+        if decision.notify is not None and not await guards.connection_proposal_allowed(
+                user.id, decision.notify.about_connection):
+            log.info("initiative.connection_nudge_dropped", event_id=event.id,
+                     intent=decision.notify.intent[:80])
+        elif decision.notify is not None:
             intent = decision.notify
             if intent.dedupe_key is None:  # retry-safe default: one notification per source event
                 intent = intent.model_copy(update={"dedupe_key": f"notify:{event.id}"})
@@ -182,7 +186,14 @@ class InitiativeExecutor:
         if event.source == "timer" and await self._rearm_without_change(user.id, state, event):
             log.info("initiative.wakeup_chain_stopped", event_id=event.id, subject=state.subject.key)
             return
+        if not await guards.connection_proposal_allowed(user.id, w.about_connection):
+            log.info("initiative.connection_nudge_dropped", event_id=event.id, reason=w.reason[:80])
+            return
         loop_id = state.loop_id
+        if await self._owned_by_reminder(user.id, loop_id, w):
+            log.info("initiative.wakeup_owned_by_reminder", event_id=event.id, loop_id=loop_id,
+                     reason=w.reason[:80])
+            return
         if loop_id is not None and await self._covered(user.id, loop_id, w.at):
             log.info("initiative.wakeup_merged", event_id=event.id, loop_id=loop_id, reason=w.reason[:80])
             return
@@ -210,6 +221,17 @@ class InitiativeExecutor:
         return any((w.payload.get("subject"), w.payload.get("subject_state")) == mark
                    for w in await self._wakeups.history(user_id, WakeupKind.AGENT, since)
                    if w.status is WakeupStatus.FIRED)
+
+    async def _owned_by_reminder(self, user_id: int, loop_id: int | None, w: WakeupRequest) -> bool:
+        """A reminder the user asked for, about now and about the same thing, already speaks for it."""
+        texts = [w.reason]
+        if loop_id is not None and (loop := await self._loops.get(loop_id)) is not None:
+            texts.append(loop.title)
+        at = timeutil.ensure_utc(w.at)
+        now = timeutil.now()
+        if at > now:
+            at = now + timeutil.scale_offset(at - now)  # compare like wake_me stores it
+        return await coverage.covering_reminder(user_id, texts, at) is not None
 
     async def _covered(self, user_id: int, loop_id: int, at: datetime) -> bool:
         """A pending wakeup for the same loop within MERGE_WINDOW already covers this one."""

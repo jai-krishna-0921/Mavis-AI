@@ -12,7 +12,7 @@ from mavis.llm.limiter import SharedLimiter
 
 
 def _lim(client, **kw) -> SharedLimiter:
-    args = {"provider": "primary", "slots": 3, "bg_max": 1, "best_effort_max": 0, "user_max": 2,
+    args = {"provider": "primary", "slots": 3, "bg_max": 1, "user_max": 2,
             "hold_ttl_s": 5.0}
     return SharedLimiter(client, **{**args, **kw})
 
@@ -43,10 +43,50 @@ async def test_background_lane_cap_keeps_chat_slots(fake_redis, settings):
     lim.release(bg)
 
 
-async def test_best_effort_never_runs_on_pro_defaults(fake_redis, settings):
+async def test_best_effort_runs_at_default_settings_in_a_lull(fake_redis, settings):
+    lim = _lim(fake_redis)  # the Pro defaults: 3 slots
+    with bind_user(9, "memory"):
+        lease = await lim.acquire("best_effort", 1.0)
+    assert lease is not None and lease.priority == "best_effort"
+    lim.release(lease)
+
+
+async def test_best_effort_queues_behind_chat_and_never_takes_the_last_slot(fake_redis, settings):
     lim = _lim(fake_redis)
+    with bind_user(1, "chat"):
+        chat = await lim.acquire("interactive", 1.0)
+    lim.touch()
+    await asyncio.sleep(0.02)
+    waiter = asyncio.create_task(_be(lim))
+    await asyncio.sleep(0.4)
+    assert not waiter.done()  # queued, not failed: chat ran a moment ago
+    lim.release(chat)
+    await asyncio.sleep(0.02)
+    assert await asyncio.wait_for(waiter, 8) is not None  # runs once the lull comes (quiet period)
+
+
+async def _be(lim):
+    with bind_user(9, "memory"):
+        return await lim.acquire("best_effort", 8.0)
+
+
+async def test_single_slot_best_effort_fails_fast_while_chat_is_active(fake_redis, settings):
+    lim = _lim(fake_redis, slots=1)
+    with bind_user(1, "chat"):
+        chat = await lim.acquire("interactive", 1.0)
     with bind_user(9, "memory"), pytest.raises(LLMError):
-        await lim.acquire("best_effort", 0.5)
+        await lim.acquire("best_effort", 5.0)
+    lim.release(chat)
+
+
+async def test_best_effort_lanes_are_capped_and_released_with_the_priority_flag(fake_redis, settings):
+    from mavis.llm.limiter import LocalLimiterAdapter
+    local = LocalLimiterAdapter()
+    with bind_user(9, "memory"):
+        lease = await local.acquire("best_effort", 1.0)
+    assert lease.priority == "best_effort"
+    local.release(lease)
+    assert local._inner._be_inflight == 0 and local._inner._free == 3  # the flag is not dropped
 
 
 @pytest.mark.parametrize("busy_user,other_user", [(5, 6), (41, 42), (900, 7)])
