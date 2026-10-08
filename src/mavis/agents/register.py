@@ -11,6 +11,7 @@ Two guards on outgoing text: `mask_slurs` (a slur never reaches the user, whatev
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -26,20 +27,78 @@ WINDOW = timedelta(hours=12)  # the "recent" register; older talk does not set t
 SAMPLE = 8  # user messages measured
 SWEAR_RECENT = 3  # swearing is mirrored only when they swore in one of their last few messages
 
-# Profanity (English, Hinglish). A token matches when it is one of these words or forms, or the text
-# has a masked spelling ("f*ck", "sh!t"). Substrings never count ("shitake", "Scunthorpe", "class").
-_SWEAR_WORDS = frozenset({
-    "ass", "arse", "asshole", "arsehole", "bastard", "bitch", "bitching", "bloody", "bollocks",
-    "bullshit", "crap", "crappy", "hell", "damn", "damned", "dammit", "dick", "dickhead", "goddamn", "piss",
-    "pissed", "prick", "screwed", "sod", "wtf", "ffs", "stfu", "omfg", "fml", "af", "jfc",
-    "bc", "mc", "bkl", "bsdk", "chutiya", "chutiye", "saala", "saale", "kamina", "harami",
+# Profanity (English, Hinglish), matched on whole word tokens only: never a substring or a prefix, so
+# "shitake", "Scunthorpe", "classes" and "Fukushima" are words, not swears. STRONG words are unambiguous;
+# WEAK ones (mild, or with an innocent meaning: "bc" = because, "MC", "hell", "dick") never count alone.
+# A capitalised word mid-sentence is a proper noun ("Moby Dick", "Hell's Kitchen") and never counts;
+# an all-caps word does ("FUCK"). A masked spelling counts when it hides a strong word ("f*ck", "sh!t").
+STRONG = frozenset({
+    "fuck", "fucks", "fucked", "fucker", "fuckers", "fucking", "fuckin", "fuckery", "fuckhead", "fuckface",
+    "fuckup", "fuckwit", "motherfucker", "motherfuckers", "motherfucking", "fck", "fcking", "fcked", "fking",
+    "fkn", "fuk", "fukk", "fukking", "fuking", "fukin", "fukked", "shit", "shits", "shitty", "shittier",
+    "shitting", "shitted", "shite", "shithead", "shitshow", "shitload", "shithole", "shitstorm", "bullshit",
+    "horseshit", "dipshit", "apeshit", "asshole", "assholes", "arsehole", "arseholes", "dumbass", "jackass",
+    "bitch", "bitches", "bitching", "bitchy", "bastard", "bastards", "dickhead", "dickheads", "goddamn",
+    "goddamned", "goddammit", "dammit", "damnit", "cunt", "cunts", "twat", "wanker", "wtf", "stfu", "ffs",
+    "omfg", "fml", "jfc", "gtfo", "bsdk", "bhenchod", "behenchod", "madarchod", "chutiya", "chutiye",
+    "bhosdike",
 })
-_SWEAR_FORMS = re.compile(
-    r"(?:mother)?f+u+c*k+\w*|fuk\w*|fck\w*|(?:bull|horse|dip|dog)?sh+i+t+(?:s|ty|tier|tiest|ting|ted|head|"
-    r"show|load|hole|e|ey)?|(?:dumb|jack|bad|smart|lame|kick)ass(?:es)?|ass(?:holes?|hats?)|(?:god)?damn\w*",
-)
-_MASKED = re.compile(r"\b(?:f[\W_]{1,3}(?:c?k|ck)\w*|sh[\W_]{1,2}t\w*|b[\W_]tch\w*)", re.IGNORECASE)
+WEAK = frozenset({
+    "damn", "damned", "hell", "bloody", "crap", "crappy", "piss", "pissed", "pissy", "ass", "arse", "dick",
+    "dicks", "prick", "pricks", "sod", "screwed", "bollocks", "badass", "bc", "mc", "af", "saala", "saale",
+    "kamina", "harami", "gaand",
+})
+_MASK_CHARS = "*!#@$"
+_WORD = re.compile(r"[A-Za-z](?:[A-Za-z'*!#@$]*[A-Za-z*])?")
+_SENTENCE_END = re.compile(r"(?:^|[.!?\n:;\"(\u201c]\s*)$")
 _TOKEN = re.compile(r"[a-z]+", re.IGNORECASE)
+
+
+def _word_tokens(text: str) -> list[tuple[str, bool]]:
+    """(word, proper_noun) per word. Proper noun: capitalised, not all caps, not at a sentence start."""
+    out = []
+    for m in _WORD.finditer(text):
+        word = m.group(0).rstrip("'")
+        if word.lower().endswith("'s"):
+            word = word[:-2]
+        before = text[: m.start()]
+        proper = (word[:1].isupper() and not word.isupper()
+                  and not _SENTENCE_END.search(before[-3:] if before else ""))
+        out.append((word, proper and bool(before.strip())))
+    return out
+
+
+def _masked_strong(word: str) -> bool:
+    if not any(c in _MASK_CHARS for c in word) or sum(c.isalpha() for c in word) < 2:
+        return False
+    pattern = re.sub(rf"[{re.escape(_MASK_CHARS)}]+", ".{1,3}", re.escape(word.lower()).replace("\\", ""))
+    return any(re.fullmatch(pattern, w) for w in ("fuck", "fucking", "shit", "bitch", "cunt", "fucked"))
+
+
+def profanity_score(text: str) -> tuple[int, int]:
+    """(strong, weak) swear counts in `text`, proper nouns excluded."""
+    strong = weak = 0
+    for word, proper in _word_tokens(text):
+        if proper:
+            continue
+        low = word.lower()
+        if low in STRONG or _masked_strong(word):
+            strong += 1
+        elif low in WEAK:
+            weak += 1
+    return strong, weak
+
+
+def has_profanity(text: str) -> bool:
+    """They swore: one unambiguous swear, or two mild ones together."""
+    strong, weak = profanity_score(text)
+    return strong >= 1 or weak >= 2
+
+
+def strong_profanity(text: str) -> bool:
+    """An unambiguous swear (the bar for acting on a reply)."""
+    return profanity_score(text)[0] >= 1
+
 
 # Formality and casualness markers (measured, never echoed).
 _POLITE = re.compile(
@@ -60,29 +119,33 @@ _EMOJI = re.compile("[\U0001f300-\U0001faff☀-➿]")
 # A measured signal only: it turns swearing and jokes off for this reply; the model reads the rest.
 _DISTRESS = re.compile(
     r"\b(?:died|dying|death|passed away|funeral|hospital|icu|stroke|cancer|tumou?r|biopsy|"
-    r"heart attack|accident|surgery|emergency|diagnos\w*|miscarriage|suicid\w*|self[- ]harm|"
-    r"scared|terrified|afraid|panic\w*|anxious|anxiety|depress\w*|crying|cried|in tears|grief|grieving|"
+    r"heart attack|accident|surgery|diagnosed with|miscarriage|suicidal|suicide|self[- ]harm|"
+    r"scared|terrified|panic attack|panicking|anxiety|depressed|depression|crying|cried|in tears|grief|"
+    r"grieving|"
     r"heartbroken|broke up|break ?up|divorce|laid off|got fired|lost my (?:job|mom|mum|dad|father|mother)|"
     r"can'?t (?:cope|breathe|think straight)|falling apart)\b",
     re.IGNORECASE,
 )
 
-# Slurs: masked in outgoing text whatever the register (a guard, not a style signal).
-_SLURS = re.compile(
-    r"\b(?:nigg(?:er|a|as|ers|ah)|fag(?:got)?s?|faggots?|retard(?:s|ed)?|tranny|trannies|chinks?|"
-    r"spics?|kikes?|pakis?|wetbacks?|coons?|gooks?|dykes?|raghead|towelhead|shemale)\b",
-    re.IGNORECASE,
-)
+_LAUGHING = re.compile(r"\b(?:lol|lmao|lmfao|haha\w*|crying laughing|dying laughing)\b|\U0001f602|\U0001f923",
+                       re.IGNORECASE)
 
+# Slurs: masked in outgoing text whatever the register (a guard, not a style signal). Only words with
+# no innocent meaning; whole words only, never a capitalised name ("a plate of Faggots", a dish), and
+# never inside links, email addresses, code or verbatim spans (third-party text shown as written).
+SLURS = frozenset({
+    "nigger", "niggers", "nigga", "niggas", "faggot", "faggots", "kike", "kikes", "tranny", "trannies",
+    "wetback", "wetbacks", "raghead", "ragheads", "towelhead", "towelheads",
+})
+# Spans that are never rewritten or masked: verbatim (\x0e...\x0f), code, links, email addresses.
+PROTECTED = re.compile(
+    r"\x0e.*?(?:\x0f|$)|```.*?(?:```|$)|`[^`\n]+`|(?:https?://|www\.)\S+|\S+@\S+\.\S+|"
+    r"\b[\w-]+(?:\.[\w-]+)+/\S*",
+    re.DOTALL,
+)
 
 def _tokens(text: str) -> list[str]:
     return [t.lower() for t in _TOKEN.findall(text)]
-
-
-def has_profanity(text: str) -> bool:
-    if _MASKED.search(text):
-        return True
-    return any(t in _SWEAR_WORDS or _SWEAR_FORMS.fullmatch(t) for t in _tokens(text))
 
 
 def _formal(text: str) -> bool:
@@ -134,7 +197,7 @@ def measure(texts: list[str]) -> Register:
         return Register()
     latest = texts[-1]
     formal = _formal(latest)
-    distressed = bool(_DISTRESS.search(latest))
+    distressed = bool(_DISTRESS.search(latest)) and not _LAUGHING.search(latest)
     sweary = [has_profanity(t) for t in texts]
     return Register(
         sample=len(texts),
@@ -194,41 +257,89 @@ def prompt_line(reg: Register, *, proactive: bool = False) -> str:
     return f"Their register right now: plain and neutral. Don't swear.{energy}"
 
 
-def _mask(m: re.Match[str]) -> str:
-    word = m.group(0)
+def _mask_word(word: str) -> str:
     return word[0] + "*" * (len(word) - 2) + word[-1] if len(word) > 2 else "*" * len(word)
 
 
+def _mask_plain(text: str) -> str:
+    out, last = [], 0
+    for m, (word, proper) in zip(_WORD.finditer(text), _word_tokens(text), strict=True):
+        if not proper and word.lower() in SLURS:
+            out.append(text[last : m.start()])
+            out.append(_mask_word(word) + m.group(0)[len(word):])
+            last = m.end()
+    out.append(text[last:])
+    return "".join(out)
+
+
+def _outside_protected(text: str, fn) -> str:
+    out, last = [], 0
+    for m in PROTECTED.finditer(text):
+        out.append(fn(text[last : m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(fn(text[last:]))
+    return "".join(out)
+
+
 def mask_slurs(text: str) -> str:
-    return _SLURS.sub(_mask, text)
+    return _outside_protected(text, _mask_plain)
 
 
 def unmirrored(reg: Register, text: str, *, proactive: bool = False) -> bool:
-    """The reply swears although their register does not allow it (formal, upset, or they never swore).
-    Chat turns with nothing measured are left to the prompt; proactive messages need a sweary chat."""
+    """The reply clearly swears (an unambiguous word outside names, links and code) although their register
+    does not allow it: formal, upset, or they never swore. Chat turns with nothing measured are left to
+    the prompt; proactive messages need a recent sweary chat."""
     if reg.swears or (reg.sample == 0 and not proactive):
         return False
-    return has_profanity(text)
+    return strong_profanity(PROTECTED.sub(" ", text))
 
 
 TONE_DOWN = (
-    "Rewrite the chat message you are given so it has no swearing and no crude words. Keep everything "
-    "else the same: meaning, facts, warmth, length, emoji, line breaks and any line that is just ---. "
-    "Reply with the rewritten message only."
+    "Rewrite the chat message you are given so it has no swearing and no crude words. Change only those "
+    "words. Keep everything else the same: meaning, facts, names, warmth, length, emoji, line breaks, any "
+    "line that is just ---, and every placeholder like [[1]] exactly as it is. Reply with the rewritten "
+    "message only."
 )
+TONE_DOWN_TIMEOUT_S = 4.0  # the whole rewrite, slot wait included; after this the original goes out
+_PLACEHOLDER = "[[{}]]"
+
+
+def _names(text: str) -> set[str]:
+    """Capitalised words that are not swears: names and places the rewrite must keep."""
+    return {w for w, _ in _word_tokens(text)
+            if w[:1].isupper() and w.lower() not in STRONG | WEAK and not _masked_strong(w)}
 
 
 async def tone_down(text: str, *, priority: llm.Priority = "interactive") -> str:
-    """One rewrite without the swearing; the original when the rewrite fails or still swears."""
+    """One rewrite without the swearing, within TONE_DOWN_TIMEOUT_S. Links, email addresses, code and
+    verbatim spans are held back as placeholders and put back unchanged. The original goes out when the
+    rewrite times out, fails, drops a name or a placeholder, or still swears."""
+    held: list[str] = []
+
+    def hold(m: re.Match[str]) -> str:
+        held.append(m.group(0))
+        return _PLACEHOLDER.format(len(held))
+
+    sent = PROTECTED.sub(hold, text)
     try:
-        out = await llm.complete([SystemMessage(TONE_DOWN), HumanMessage(text)], tier=llm.Tier.FAST,
-                                 temperature=0.2, name="tone_down", priority=priority)
-    except Exception as exc:  # noqa: BLE001 - the reply still goes out
-        log.warning("register.tone_down_failed", error=type(exc).__name__)
+        out = await asyncio.wait_for(
+            llm.complete([SystemMessage(TONE_DOWN), HumanMessage(sent)], tier=llm.Tier.FAST,
+                         temperature=0.2, name="tone_down", priority=priority, fallback=False),
+            TONE_DOWN_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001 - timeout or model failure: the reply still goes out
+        log.warning("register.tone_down", outcome="failed", error=type(exc).__name__)
         return text
-    out = mask_slurs(out).strip()
-    if not out or has_profanity(out):
-        log.info("register.tone_down_kept_original")
+    out = (out or "").strip()
+    marks = [_PLACEHOLDER.format(i + 1) for i in range(len(held))]
+    if not out or any(out.count(mark) != 1 for mark in marks):
+        log.info("register.tone_down", outcome="kept_original", reason="placeholders")
         return text
-    log.info("register.toned_down")
-    return out
+    for mark, original in zip(marks, held, strict=True):
+        out = out.replace(mark, original)
+    if strong_profanity(PROTECTED.sub(" ", out)) or _names(text) - _names(out):
+        log.info("register.tone_down", outcome="kept_original", reason="swears_or_names")
+        return text
+    log.info("register.tone_down", outcome="rewritten")
+    return mask_slurs(out)

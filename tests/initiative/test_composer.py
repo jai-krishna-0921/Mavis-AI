@@ -177,13 +177,13 @@ async def test_proactive_swears_only_after_a_recent_sweary_chat(user, clock, fak
 
 
 async def test_composer_masks_slurs_in_bubbles(user, clock, fake_memory, fake_llm):
-    fake_llm.push_structured(ComposedMessage(send=True, messages=["what a retard move by the bank"]))
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["what a nigger move by the bank"]))
     msg = await Composer(fake_memory).compose(user, "bank news", 2)
-    assert "retard" not in msg.messages[0] and "r****d" in msg.messages[0]
+    assert "nigger" not in msg.messages[0] and "n****r" in msg.messages[0]
 
 
 async def test_proactive_swearing_without_a_sweary_chat_is_rewritten(user, clock, fake_memory, fake_llm):
-    bubbles = ["Dentist at 5, hell of a day.", "Good luck!"]
+    bubbles = ["Dentist at 5, shit of a day.", "Good luck!"]
     fake_llm.push_structured(ComposedMessage(send=True, messages=bubbles))
     fake_llm.push_text("Dentist at 5, big day.")
     msg = await Composer(fake_memory).compose(user, "dentist reminder", 2)

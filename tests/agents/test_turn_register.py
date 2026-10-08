@@ -46,10 +46,10 @@ async def test_profanity_only_message_gets_a_normal_model_turn(db, channel, fake
 
 async def test_chat_reply_slurs_are_masked(db, channel, fake_llm, memory, bus):
     user, _ = await users.get_or_create_by_chat(77, "Jai")
-    fake_llm.push_text("That guy sounds like a total retard, honestly.")
+    fake_llm.push_text("That guy sounds like a total faggot, honestly.")
     await run_turn(_event(user.id, "my landlord ignored me again", 1))
     await OutboxSender(channel).run_once()
-    assert "retard" not in channel.texts[0]
+    assert "faggot" not in channel.texts[0]
 
 
 @pytest.mark.parametrize("texts", [
@@ -89,3 +89,21 @@ async def test_failed_rewrite_keeps_the_reply(db, channel, fake_llm, memory, bus
     await run_turn(_event(user.id, "my dad is in the hospital", 1))
     await OutboxSender(channel).run_once()
     assert channel.texts == ["Damn, sorry. Is he stable?"]
+
+
+@pytest.mark.parametrize("user_text,reply", [
+    ("Good morning. Could you please tell me who wrote Do Androids Dream of Electric Sheep?",
+     "Philip K. Dick wrote it in 1968."),
+    ("bc I was busy, can u move my 3pm", "Done, moved to 4. Hell of a day, huh?"),
+    ("Kindly book a table at Hell's Kitchen for Friday.", "Booked Hell's Kitchen for Friday at 8."),
+])
+async def test_names_and_mild_words_cost_no_rewrite_call(
+    db, channel, fake_llm, memory, bus, user_text, reply
+):
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    fake_llm.push_text(reply)  # an extra rewrite call would find an empty queue and fail loudly
+    await run_turn(_event(user.id, user_text, 1))
+    await OutboxSender(channel).run_once()
+    assert channel.texts == [reply]
+    assert len(fake_llm.calls) == 1
+    assert "may swear" not in fake_llm.calls[0][0].content

@@ -18,12 +18,18 @@ def _m(role, content, minutes_ago=0):
 @pytest.mark.parametrize("text", [
     "fuck it, let's just do it",
     "this shit is wild",
-    "ugh my boss is being a total dick today",
+    "ugh my boss is being a total dick today, what a prick",  # two mild words together
     "wtf happened to my calendar",
-    "bc this traffic yaar",
+    "bc this traffic is shit yaar",
     "that's fucking brilliant",
     "f*ck, forgot the meeting",
+    "sh!t the train left",
     "Bloody hell, the train's late again",
+    "FUCK. Missed it.",  # shouting is not a proper noun
+    "Fucking finally",  # capitalised at the start of a sentence
+    "ok. Shit, the oven",
+    "fuckin' hell mate",
+    "what a dumbass move by me",
 ])
 def test_profanity_is_detected_in_varied_forms(text):
     assert register.has_profanity(text)
@@ -32,15 +38,46 @@ def test_profanity_is_detected_in_varied_forms(text):
 @pytest.mark.parametrize("text", [
     "Could you please send the report to Asha?",
     "remind me to call mom at 6",
-    "the shitake mushrooms were great",  # substring of a swear is not a swear
+    "the shitake mushrooms were great",  # part of a word is not a swear
     "I passed the class, assessment done",
     "Scunthorpe United won",
     "hello there",
     "two classes, my glasses and the bus passes",
     "Dickens and Cockburn wrote that",
+    # ambiguous abbreviations and mild words never count alone
+    "bc I was busy",
+    "can't come bc of work",
+    "the MC was great last night",
+    "hell yeah",
+    "damn right",
+    "the bloody mary was strong",
+    # proper nouns: names and places
+    "meeting with Dick tomorrow at 10",
+    "reading Moby Dick on the train",
+    "booking the Fukushima trip",
+    "fukuoka ramen is the best",
+    "Philip K. Dick wrote it",
+    "dinner at Hell's Kitchen?",
+    "a print by MC Escher",
+    "flying to Fucking, Austria lol",  # a real village, capitalised mid-sentence
+    # letters in brackets and masked-looking text without a mask character
+    "see section (f) and kindly review",
+    "email me at f.k@example.com",
+    "the f-k pair in the matrix",
 ])
 def test_clean_text_is_not_profanity(text):
     assert not register.has_profanity(text)
+
+
+@pytest.mark.parametrize("texts", [
+    ["bc I was busy", "meeting with Dick tomorrow", "hell yeah"],
+    ["booking the Fukushima trip", "MC Escher print?", "see section (f)"],
+    ["damn right", "ok cool"],
+])
+def test_false_positives_never_switch_the_sweary_register_on(texts):
+    reg = measure(texts)
+    assert not reg.swears and reg.swear_share == 0
+    assert "may swear" not in prompt_line(reg)
 
 
 def test_sweary_casual_user_permits_swearing():
@@ -76,10 +113,16 @@ def test_old_swearing_ages_out_of_the_recent_window():
 
 
 def test_proportion_is_measured():
-    heavy = measure(["fuck", "shit man", "fucking finally", "damn right"])
+    heavy = measure(["fuck", "shit man", "fucking finally", "damn right, bloody hell"])
     light = measure(["what's on today", "cool", "ugh shit, missed it"])
     assert heavy.swear_share > light.swear_share > 0
     assert heavy.swears and light.swears
+
+
+def test_mild_words_need_company():
+    assert not measure(["damn, missed it"]).swears
+    assert measure(["damn, missed the bloody bus"]).swears
+    assert measure(["damn, missed the fucking bus"]).swears
 
 
 def test_no_messages_means_no_register_line():
@@ -119,11 +162,29 @@ def test_hype_energy_is_noticed():
 
 
 @pytest.mark.parametrize("text,masked", [
-    ("you absolute retard", "you absolute r****d"),
     ("no faggots here", "no f*****s here"),
+    ("he called him a nigger", "he called him a n****r"),
+    ("Faggot, he said.", "F****t, he said."),  # sentence start: not a proper noun
 ])
 def test_slurs_are_masked_in_outgoing_text(text, masked):
     assert register.mask_slurs(text) == masked
+
+
+@pytest.mark.parametrize("text", [
+    "Our Maine Coon is asleep",
+    "a chink in the armour",
+    "spic and span kitchen",
+    "Van Dyke Parks played",
+    "the retardant worked and fire retardation slowed it",
+    "read https://example.com/faggot-history-guide first",
+    "see www.example.org/nigger-etymology for the history",
+    "the slug is `faggots_recipe` in the code",
+    "mail old.faggots@example.co.uk",
+    "a plate of Faggots and peas at the pub",  # a dish, capitalised mid-sentence
+    "\x0eSubject: faggots recipe\x0f arrived",  # verbatim span: shown as written
+])
+def test_slur_mask_spares_ordinary_words_links_code_and_verbatim(text):
+    assert register.mask_slurs(text) == text
 
 
 def test_mask_slurs_leaves_ordinary_swearing_alone():
@@ -155,6 +216,78 @@ def test_distress_mutes_proactive_swearing_too():
     assert "don't swear" in prompt_line(reg, proactive=True).lower()
 
 
-def test_hell_counts_as_mild_swearing_but_hello_does_not():
-    assert register.has_profanity("hell yes")
-    assert not register.has_profanity("hello, shell company")
+def test_hell_is_mild_and_hello_is_nothing():
+    assert register.profanity_score("hell yes") == (0, 1)
+    assert register.profanity_score("hello, shell company") == (0, 0)
+    assert register.profanity_score("fucking hell") == (1, 1)
+
+
+@pytest.mark.parametrize("latest", [
+    "I'm afraid the meeting moved, could you please check Thursday?",
+    "Could you diagnose why my calendar sync fails?",
+    "emergency meeting at 4, can you move my 4:30?",
+    "lol I was crying laughing at that video",
+    "anxious to hear back from them, any reply yet?",
+])
+def test_ordinary_phrases_are_not_distress(latest):
+    assert not measure([latest]).distressed
+
+
+@pytest.mark.parametrize("reply", [
+    "Philip K. Dick wrote it in 1968.",
+    "Hell's Kitchen has a table at 8.",
+    "Your Fukushima trip is booked.",
+    "Damn, that's a lot of email.",  # one mild word: not worth a rewrite
+    "See https://example.com/shit-list for the list.",
+])
+def test_unmirrored_needs_an_unambiguous_swear_outside_names_and_links(reply):
+    formal = measure(["Good morning. Could you please summarise my inbox for me?"])
+    assert not register.unmirrored(formal, reply)
+
+
+def test_unmirrored_fires_on_a_clear_swear_for_formal_or_upset_users():
+    formal = measure(["Could you please check Thursday for me?"])
+    assert register.unmirrored(formal, "Shit, Thursday is full.")
+    assert register.unmirrored(measure(["my dog died"]), "That's a shit week.")
+    assert not register.unmirrored(measure(["fuck yeah"]), "Fuck yes!")
+
+
+async def test_tone_down_times_out_to_the_original(monkeypatch):
+    import asyncio
+
+    async def slow(*a, **k):
+        await asyncio.sleep(5)
+        return "clean"
+
+    monkeypatch.setattr(register.llm, "complete", slow)
+    monkeypatch.setattr(register, "TONE_DOWN_TIMEOUT_S", 0.05)
+    assert await register.tone_down("Shit, sorry.") == "Shit, sorry."
+
+
+async def test_tone_down_keeps_links_code_and_names(monkeypatch):
+    seen = {}
+
+    async def rewrite(messages, **k):
+        seen["text"] = messages[-1].content
+        return messages[-1].content.replace("shit", "rough")
+
+    monkeypatch.setattr(register.llm, "complete", rewrite)
+    text = "Asha says the shit report is at https://ex.com/a?b=1 and `run.sh`."
+    out = await register.tone_down(text)
+    assert out == "Asha says the rough report is at https://ex.com/a?b=1 and `run.sh`."
+    assert "https://" not in seen["text"] and "run.sh" not in seen["text"]  # held back from the model
+
+
+@pytest.mark.parametrize("rewritten", [
+    "Someone says the rough report is at [[1]] and [[2]].",  # dropped the name
+    "Asha says the rough report is somewhere.",  # dropped the link placeholders
+    "Asha says the fucking report is at [[1]] and [[2]].",  # still swears
+    "",
+])
+async def test_tone_down_rejects_a_rewrite_that_loses_names_links_or_still_swears(monkeypatch, rewritten):
+    async def rewrite(messages, **k):
+        return rewritten
+
+    monkeypatch.setattr(register.llm, "complete", rewrite)
+    text = "Asha says the shit report is at https://ex.com/a and `run.sh`."
+    assert await register.tone_down(text) == text
