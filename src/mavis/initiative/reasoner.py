@@ -7,7 +7,7 @@ import structlog
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import InitiativeDecision
-from mavis.domain.events import Event, Trust
+from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import Loop
 from mavis.domain.messages import Role, tainted_event_id
 from mavis.domain.timefmt import due_label, message_stamp, stamped
@@ -21,6 +21,7 @@ from mavis.store.repo import messages
 
 log = structlog.get_logger()
 SMART_RELEVANCE = 0.6
+LOOP_WRITE_EVENTS = frozenset({EventType.LOOP_CREATED, EventType.LOOP_UPDATED})
 
 REASONER_SYSTEM = """You are the initiative engine of {agent}, a proactive personal assistant for {name}.
 You receive one incoming signal plus context and decide what a sharp human PA would do about it.
@@ -80,7 +81,10 @@ class Reasoner:
         now = timeutil.now()
         local = timeutil.to_local(now, user.timezone)
         important = any(lp.importance >= 4 for lp in result.matched_loops)
-        tier = llm.Tier.SMART if result.relevance >= SMART_RELEVANCE or important else llm.Tier.FAST
+        # A loop written from a chat turn never notifies at creation (only wakeups are planned from it): a
+        # SMART call (60 s timeout, then a 45 s slot cooldown) buys nothing there and ties up capacity.
+        smart = (result.relevance >= SMART_RELEVANCE or important) and event.type not in LOOP_WRITE_EVENTS
+        tier = llm.Tier.SMART if smart else llm.Tier.FAST
         system = REASONER_SYSTEM.format(
             agent=s.agent_name,
             name=user.name or "the user",

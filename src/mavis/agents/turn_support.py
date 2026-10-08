@@ -20,15 +20,13 @@ from mavis.domain.events import Event, Job, JobKind, Trust
 from mavis.domain.messages import TAINT_SUFFIX, Role, tainted_event_id
 from mavis.domain.timefmt import message_stamp, stamped
 from mavis.initiative import wiring
-from mavis.llm.models import INTERACTIVE_GRACE_S
 from mavis.memory.service import CONTEXT_CLOSE, CONTEXT_NOTE, CONTEXT_OPEN, USER_PREFIX, get_memory
 from mavis.store.models import Message
 from mavis.store.repo import profile as profile_repo
 from mavis.store.repo import summaries as summaries_repo
 
 log = structlog.get_logger(__name__)
-# just past the LLM interactive grace window: a chat turn's LEARN must not lose the slot by design
-LEARN_DELAY = timedelta(seconds=INTERACTIVE_GRACE_S + 8)
+LEARN_DELAY = timedelta(seconds=5)  # lets the reply's own first calls go first; the limiter queues the rest
 
 
 async def initiative_hook(name: str, call) -> None:
@@ -226,8 +224,8 @@ async def enqueue_learn(
     """`tainted`: the turn or the included previous reply saw untrusted tool output: learn as untrusted."""
     trust = Trust.UNTRUSTED.value if tainted else event.trust.value
     convo = learn_text(text, previous_reply, original)
-    # Not before the interactive grace window has passed: until then best_effort LLM work fails fast
-    # (the reply's own follow-up calls own the slot), so an immediate LEARN would just be dropped.
+    # A short head start for the reply's own follow-up calls. Nothing depends on it: the limiter queues
+    # LEARN behind chat work and the job layer retries until it succeeds.
     not_before = timeutil.now() + LEARN_DELAY
     await get_bus().enqueue(Job(
         id=f"learn:{event.id}", user_id=user_id, kind=JobKind.LEARN,
