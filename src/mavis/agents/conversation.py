@@ -9,11 +9,13 @@ calls tools from a bounded per-turn set (`registry.select`, at most CHAT_TOOL_LI
   These are queued, never run here: after the reply goes out, queued approvals are attached to an
   APPROVAL task whose approval gate sends the Approve / Edit / Cancel prompt (Phase 4 Task 9).
 
-Taint: once the model has read untrusted tool output, or when the previous reply it sees was written
-from such output, trusted writes downgrade (remember is kept as unverified, wake_me / track_loop /
-cancel_task queue for approval), standing rules stop auto-approving, a started task is tainted, and
-the turn learns at untrusted trust. web_extract is never offered in chat: a planted email must not be
-able to send data out through a URL.
+Taint: once the model has read untrusted tool output, or when a replayed reply was written from such
+output, standing rules stop auto-approving outward actions, a started task is tainted, and the turn
+learns at untrusted trust. Self-only writes (remember, wake_me, track_loop, start_task, cancel_task...)
+are judged by what can steer THIS turn only: its own untrusted reads, hook context and the reply just
+before the user's message (track 1 T1.1). Then remember is kept as unverified and the others queue for
+approval, unless their wording comes from the user's own message this turn (domain.terms). web_extract
+is never offered in chat: a planted email must not be able to send data out through a URL.
 
 A text reply to an approval prompt ("ok", "send it", "cancel", "make it shorter") is a pre-check before
 the agent: it only applies when the prompt is among the last 2 assistant messages (recency gate).
@@ -384,6 +386,9 @@ async def run_turn(event: Event) -> None:
         # was written from it, or hook context (the inbox digest) was added. The react loop then applies
         # the taint rules (outward tools and start_task need approval, a started task is tainted).
         carried_taint = window_tainted(history) or hooked
+        # Self-only actions (start_task, wake_me, track_loop, ...) are judged by what can steer THIS turn:
+        # the reply just before the user's message and the hook context, plus this turn's own reads.
+        self_taint = previous_tainted(history) or hooked
         # LEARN sees only the user's text and the previous reply, so its trust keeps the per-turn rule.
         learn_taint = previous_tainted(history) or hooked
         now = utcnow()
@@ -407,8 +412,8 @@ async def run_turn(event: Event) -> None:
         try:
             result = await react_loop(
                 tools, prompt, CHAT_MAX_STEPS, tier=llm.Tier.FAST, temperature=0.6, name="simple_turn",
-                tainted=carried_taint, wrap_up=True, deadline_s=CHAT_DEADLINE_S,
-                tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
+                tainted=carried_taint, self_tainted=self_taint, user_words=text, wrap_up=True,
+                deadline_s=CHAT_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
             )
         except ConnectionRequired as exc:
             result = None

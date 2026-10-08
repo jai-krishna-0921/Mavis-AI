@@ -18,7 +18,7 @@ from mavis.domain.policy import RiskClass
 from mavis.domain.results import ToolOutput
 from mavis.domain.tasks import TaskOrigin
 from mavis.store.repo import messages, tasks
-from mavis.tools.registry import MavisTool, TaintPolicy, current_run, current_task_id
+from mavis.tools.registry import MavisTool, TaintPolicy, current_run, current_task_id, self_only_tainted
 
 
 @dataclass
@@ -86,10 +86,13 @@ async def start_task(user_id: int, args: StartTaskArgs) -> ToolOutput:
         turn.starts += 1
     if (dup := await find_duplicate(user_id, args.goal, ref)) is not None:
         return ToolOutput(TASK_EXISTS_USER.format(id=dup), TASK_EXISTS_NOTE)
-    tainted = _tainted() or await _approved_from_tainted_task()
-    # The approval preview shows only the goal, so after third-party content the unseen `context`
-    # (free text the model chose) is dropped rather than smuggled into the task.
-    context = "" if tainted else args.context
+    approved_tainted = await _approved_from_tainted_task()
+    # The task is tainted whenever third-party text was anywhere in the prompt (the replayed window too),
+    # even when it started without a card because the turn itself was clean (registry._gate_tainted).
+    tainted = _tainted() or approved_tainted
+    # The approval preview shows only the goal, so after third-party content in this turn the unseen
+    # `context` (free text the model chose) is dropped rather than smuggled into the task.
+    context = "" if (self_only_tainted() or approved_tainted) else args.context
     [task_id] = await dispatch_task_requests(
         user_id, [TaskRequest(goal=args.goal, context=context)], TaskOrigin.USER, tainted=tainted,
         source_ref=ref,
@@ -120,7 +123,8 @@ TOOLS = [
     MavisTool("start_task", "Start a background task for multi-step work that takes more than a few "
               "seconds: research, comparisons, plans, drafting documents. You report back when it is done.",
               StartTaskArgs, RiskClass.WRITE_SELF, start_task, _CONV, priority=80,
-              preview=lambda a: f"Start a background task: {a.goal}", on_taint=TaintPolicy.APPROVE),
+              preview=lambda a: f"Start a background task: {a.goal}", on_taint=TaintPolicy.APPROVE,
+              provenance=("goal",)),
     MavisTool("connect_account", "Send the user a link to connect an account (Gmail, Google Calendar, "
               "Slack, Notion) when they ask to connect one.",
               ConnectArgs, RiskClass.WRITE_SELF, connect_account, _CONV, priority=60),
