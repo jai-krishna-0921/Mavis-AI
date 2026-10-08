@@ -284,11 +284,21 @@ def _is_card(message: ToolMessage) -> bool:
     return _text_of(message.content).startswith(CARD_RESULT_PREFIXES)
 
 
-def card_only(result: ReactResult) -> bool:
-    """Every tool result of the turn is an approval card (queued, or an updated card shown again): the
-    card says all there is to say, so the model's prose would only repeat it."""
+SUBSTANTIVE_CHARS = 140
+
+
+def substantive(prose: str) -> bool:
+    """Prose that answers the user rather than pointing at a card: longer than a nudge, or carrying figures.
+    A card is additive to such a reply, never a replacement for it."""
+    return len(prose) > SUBSTANTIVE_CHARS or any(ch.isdigit() for ch in prose)
+
+
+def card_only(result: ReactResult, prose: str = "") -> bool:
+    """Every tool result of the turn is an approval card (queued, or an updated card shown again) and the
+    model's prose only points at it ("tap Approve"): the card says all there is to say. Substantive prose
+    (an analysis, an answer) is kept: the card follows it."""
     outputs = [m for m in result.messages if isinstance(m, ToolMessage)]
-    return bool(outputs) and all(_is_card(m) for m in outputs)
+    return bool(outputs) and all(_is_card(m) for m in outputs) and not substantive(prose)
 
 
 def _card_shown(result: ReactResult) -> bool:
@@ -403,12 +413,36 @@ def prompt_is_latest(approval: PendingApproval, history: list[Message]) -> bool:
         approval_flow.EDIT_QUESTION in t for t in latest)
 
 
+def _replies_to_card(approval: PendingApproval, event: Event) -> bool:
+    """The user used Telegram's reply on the card's own message."""
+    replied = str(event.payload.get("reply_to_text") or "")
+    preview = strip_verbatim(approval.preview or "").strip()
+    return bool(replied and preview and preview in replied)
+
+
+def _edit_question_is_latest(history: list[Message]) -> bool:
+    return any(approval_flow.EDIT_QUESTION in t for t in _recent_assistant(history, 1))
+
+
 async def _approval_reply(event: Event, user_id: int, text: str, history: list[Message]) -> bool:
+    """A text message that decides the card waiting on the user, or False (an ordinary turn).
+
+    Who may decide: a plain yes / no (approval_flow.quick_decision; yes only while the card is the newest
+    message). A free-text CHANGE is an edit of the card only when it is plausibly one: the message after
+    tapping Edit (the edit question is the newest message), or sent as a reply to the card itself. Anything
+    else a pending card sees is a normal message, whatever the model would make of it."""
     approval = await approval_awaiting_reply(user_id, history)
     if approval is None:
         return False
-    interp = await approval_flow.interpret_reply(approval, text)
-    if interp.decision == "approve" and not prompt_is_latest(approval, history):
+    quick = approval_flow.quick_decision(text)
+    on_card = _replies_to_card(approval, event)
+    if quick is None:
+        editing = approval.status == ApprovalStatus.AWAITING_EDIT and _edit_question_is_latest(history)
+        if not (editing or on_card):
+            log.info("conversation.card_reply_not_an_edit", approval_id=approval.id)
+            return False
+    interp = quick or await approval_flow.interpret_reply(approval, text)
+    if interp.decision == "approve" and not (prompt_is_latest(approval, history) or on_card):
         log.info("conversation.approve_not_latest", approval_id=approval.id)
         return False  # something was said after the prompt: this "yes" may answer that instead
     ack = await approval_flow.apply_reply(approval, interp)
@@ -596,7 +630,7 @@ async def run_turn(event: Event) -> None:
         if register.unmirrored(their_register, reply):  # formal, upset or never swore: no swearing (T1.2)
             reply = await register.tone_down(reply)
         bubbles = persona.split_bubbles(reply) or [reply]
-        if card_only(result):
+        if card_only(result, reply):
             # The card (preview + buttons, rendered by code) is the only prompt: no prose bubble repeats it.
             log.info("simple_turn.card_only", queued=result.queued_approvals)
             bubbles = []
