@@ -92,7 +92,7 @@ class SinkChannel:
         if chat_id != self._test:
             await self._inner.send_typing(chat_id)
 
-    async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
+    async def react(self, chat_id: int, message_id: int, emoji: str | None) -> None:
         if chat_id != self._test:
             await self._inner.react(chat_id, message_id, emoji)
 

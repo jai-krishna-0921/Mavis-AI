@@ -29,7 +29,7 @@ import structlog
 from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.tools import BaseTool
 
-from mavis.agents import clarify, commands, persona, register
+from mavis.agents import clarify, commands, persona, reactions, register
 from mavis.agents.react import react_loop
 from mavis.agents.task_dispatch import enqueue_run
 from mavis.agents.turn_support import (
@@ -314,6 +314,21 @@ async def _approval_reply(event: Event, user_id: int, text: str, history: list[M
 # --- the turn --------------------------------------------------------------------------------------
 
 
+def _reaction_target(event: Event, chat_id: int | None) -> tuple[int, int] | None:
+    """(chat_id, message_id) when this turn answers a Telegram message that can carry a reaction."""
+    message_id = event.payload.get("message_id")
+    if event.source != "telegram" or message_id is None or chat_id is None:
+        return None
+    return chat_id, int(message_id)
+
+
+async def _settle_reaction(event: Event, user_id: int, chat_id: int | None, mood: str | None) -> None:
+    """Replace the "seen" cue with the mood reaction, or clear it (T1.3). Best effort."""
+    target = _reaction_target(event, chat_id)
+    if target is not None:
+        await reactions.apply(user_id, *target, mood, ack_key=event.id)
+
+
 async def run_turn(event: Event) -> None:
     text = user_text(event)
     current_route.set(None)
@@ -364,6 +379,7 @@ async def run_turn(event: Event) -> None:
         # The request still carries information (people, titles); the hooks skip its ambiguous time.
         await enqueue_learn(user.id, event, text, previous, clarified_request(history),
                             tainted=previous_tainted(history))
+        await _settle_reaction(event, user.id, user.telegram_chat_id, None)
         return
 
     if await _approval_reply(event, user.id, text, history):
@@ -400,6 +416,8 @@ async def run_turn(event: Event) -> None:
             system = f"{system}\n\n{TOOL_RULES}"
             if any(t.name == "web_search" for t in tools):
                 system = f"{system}\n{WEB_RULE}"
+        if _reaction_target(event, user.telegram_chat_id) is not None:
+            system = f"{system}\n\n{reactions.REACTION_RULE}"
         prompt: list[BaseMessage] = [SystemMessage(system)]
         prompt += to_langchain(history, now, user.timezone)
 
@@ -427,13 +445,16 @@ async def run_turn(event: Event) -> None:
             await initiative_hook("quiet.after_assistant_message",
                                   lambda i: i.quiet.after_assistant_message(user.id, connect_texts[-1]))
             current_route.set("CONNECT")
+            await _settle_reaction(event, user.id, user.telegram_chat_id, None)
             return
         if result.tools_called:
             log.info("simple_turn.tools", tools=result.tools_called, steps=result.steps,
                      tainted=result.tainted, wrapped_up=result.wrapped_up,
                      queued=result.queued_approvals)
         # replayed messages carry stamps (T1); one echoed at the start of a line is not content
-        reply = register.mask_slurs(strip_stamps(result.text or "")).strip() or WRAP_UP_FALLBACK
+        # the optional mood reaction rides on the reply as a marker line (T1.3); it never reaches the text
+        reply, mood = reactions.split_reaction(register.mask_slurs(strip_stamps(result.text or "")))
+        reply = reply.strip() or WRAP_UP_FALLBACK
         bubbles = persona.split_bubbles(reply) or [reply]
 
         async with Session() as s:
@@ -451,3 +472,4 @@ async def run_turn(event: Event) -> None:
     await initiative_hook("quiet.after_assistant_message",
                           lambda i: i.quiet.after_assistant_message(user.id, bubbles[-1]))
     current_route.set(_route_for(result.tools_called))
+    await _settle_reaction(event, user.id, user.telegram_chat_id, mood)
