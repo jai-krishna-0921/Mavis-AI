@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     task_step_parallelism: int = 1
     spawn_max_per_step: int = 3  # spawned workers one model step may start
     initiative_act_enabled: bool = True
+    task_await_ttl_s: float = 86400  # a task waiting on a connection or approval ends after this long
     task_timeout_max_s: float = 1200  # no task clock is ever extended past this
     machine_task_timeout_s: float = 900  # clock for a plan with a machine specialist (Phase 12)
     machine_file_max_mb: int = 50  # Telegram's bot upload limit; bigger files are named, not attached
