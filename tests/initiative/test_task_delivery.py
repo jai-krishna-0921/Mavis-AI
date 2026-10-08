@@ -125,18 +125,46 @@ async def test_tainted_result_is_delivered_scrubbed(user, sent, policy):
     assert sent and all("evil.example" not in m.text for m in sent)
 
 
-async def test_progress_message_is_fixed_text(user, sent, policy):
-    def ev(origin: str) -> Event:
-        return Event(id="task:7:progress", user_id=user.id, type=EventType.TASK_PROGRESS,
-                     occurred_at=utcnow(), source="agent", trust=Trust.SYSTEM,
-                     payload={"task_id": 7, "goal": "deck", "origin": origin})
+def _progress(user_id: int, task_id: int, origin: str) -> Event:
+    return Event(id=f"task:{task_id}:progress", user_id=user_id, type=EventType.TASK_PROGRESS,
+                 occurred_at=utcnow(), source="agent", trust=Trust.SYSTEM,
+                 payload={"task_id": task_id, "goal": "deck", "origin": origin})
 
-    await task_delivery.on_progress(ev(TaskOrigin.INITIATIVE))
+
+async def test_progress_message_is_fixed_text_for_a_user_chatting_meanwhile(user, sent, policy):
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    tid = await tasks.create(user.id, goal="deck", origin=TaskOrigin.USER)
+    await messages.log(user.id, Role.USER, "also, what's on tomorrow?")  # they kept chatting
+    await task_delivery.on_progress(_progress(user.id, tid, TaskOrigin.INITIATIVE))
     assert sent == []
-    await task_delivery.on_progress(ev(TaskOrigin.USER))
+    await task_delivery.on_progress(_progress(user.id, tid, TaskOrigin.USER))
     [m] = sent
-    assert m.text == task_delivery.PROGRESS_TEXT and m.dedupe_key == "task:7:progress"
+    assert m.text == task_delivery.PROGRESS_TEXT and m.dedupe_key == f"task:{tid}:progress"
     assert "—" not in m.text and "–" not in m.text
+
+
+@pytest.mark.parametrize("goal", ["research standing desks", "compare Goa hotels", "summarise the RFC"])
+async def test_no_progress_line_when_the_user_has_not_written_since_the_ack(user, sent, policy, goal):
+    """Track 1 T1.1: the start ack already promised the result; a user who is away gets no 'still on it'."""
+    from mavis.domain.messages import Role
+    from mavis.store.repo import messages
+
+    await messages.log(user.id, Role.USER, f"please {goal}")  # the request itself, before the task
+    tid = await tasks.create(user.id, goal=goal, origin=TaskOrigin.USER)
+    await messages.log(user.id, Role.ASSISTANT, "On it.")
+    await task_delivery.on_progress(_progress(user.id, tid, TaskOrigin.USER))
+    assert sent == []
+
+
+async def test_no_progress_line_for_an_unknown_task(user, sent, policy):
+    await task_delivery.on_progress(_progress(user.id, 999, TaskOrigin.USER))
+    assert sent == []
+
+
+def test_progress_waits_long_enough_not_to_follow_the_ack(settings):
+    assert settings.task_progress_after_s >= 90
 
 
 async def test_dispatch_task_requests_creates_rows_and_jobs(user, rec_bus):

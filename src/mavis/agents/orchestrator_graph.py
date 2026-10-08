@@ -597,7 +597,9 @@ def _approval_messages(outcomes: list[dict]) -> list[str]:
     for o in outcomes:
         status, detail = o.get("status"), str(o.get("detail") or "")
         if status == "executed":
-            texts.append(f"{APPROVAL_TEXT['executed']}\n{detail}" if detail else APPROVAL_TEXT["executed"])
+            # a tool's user_text is its own receipt ("On it: ...", "Reminder set for ..."): it replaces the
+            # generic tick, which would read wrong for work that has only started
+            texts.append(detail or APPROVAL_TEXT["executed"])
         elif status == "failed":
             texts.append(APPROVAL_TEXT["failed"].format(reason=verbatim(detail) or "unknown error"))
         elif status == "past":

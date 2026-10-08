@@ -28,11 +28,11 @@ from contextvars import ContextVar
 from datetime import timedelta
 
 import structlog
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from mavis.agents import clarify, commands, persona
-from mavis.agents.react import react_loop
+from mavis.agents.react import ReactResult, _text_of, react_loop
 from mavis.agents.task_dispatch import enqueue_run
 from mavis.agents.turn_support import (
     HISTORY_LIMIT,
@@ -65,6 +65,7 @@ from mavis.store.db import Session, utcnow
 from mavis.store.models import Message, PendingApproval
 from mavis.store.repo import approvals, messages, outbox, tasks, users
 from mavis.tools.chat_tools import TurnInfo, current_turn
+from mavis.tools.registry import CARD_RESULT_PREFIXES
 
 log = structlog.get_logger(__name__)
 
@@ -102,8 +103,9 @@ TOOL_RULES = (
     "broader query (the sender's name or domain, one or two key nouns) before saying you couldn't find "
     "it, and then say you couldn't find it, not that it doesn't exist.\n"
     "- Sending or replying to email, inviting guests, forgetting things and standing rules always wait "
-    "for their OK. When a tool answers QUEUED_FOR_APPROVAL, tell them it's ready and waiting for their "
-    "OK (they get buttons to approve, edit or cancel). Never say it was sent or done.\n"
+    "for their OK. When a tool answers QUEUED_FOR_APPROVAL, a card with the action and its buttons goes "
+    "to them by itself: don't repeat it or ask them to approve or tap anything, and never say it was sent "
+    "or done. Only a tool call makes a card; never promise one you didn't queue.\n"
     "- Reminders: wake_me at the exact time they asked for.\n"
     "- When they agree to something you suggested (\"yes\", \"do that\", \"the second one\") or ask you "
     "to remember or remind them of something, call track_loop or wake_me in this same turn with the "
@@ -231,6 +233,14 @@ def _read_untrusted(tools_called: list[str]) -> bool:
         return any(registry.get(name).untrusted_output for name in tools_called)
     except KeyError:
         return True  # unknown tool: assume the worst
+
+
+def card_only(result: ReactResult) -> bool:
+    """Every tool result of the turn is an approval card (queued, or an updated card shown again): the
+    card says all there is to say, so the model's prose would only repeat it."""
+    outputs = [m for m in result.messages if isinstance(m, ToolMessage)]
+    return bool(outputs) and all(
+        _text_of(m.content).startswith(CARD_RESULT_PREFIXES) for m in outputs)
 
 
 def _route_for(tools_called: list[str]) -> str:
@@ -439,6 +449,10 @@ async def run_turn(event: Event) -> None:
         # replayed messages carry stamps (T1); one echoed at the start of a line is not content
         reply = strip_stamps(result.text or "").strip() or WRAP_UP_FALLBACK
         bubbles = persona.split_bubbles(reply) or [reply]
+        if card_only(result):
+            # The card (preview + buttons, rendered by code) is the only prompt: no prose bubble repeats it.
+            log.info("simple_turn.card_only", queued=result.queued_approvals)
+            bubbles = []
 
         async with Session() as s:
             for i, bubble in enumerate(bubbles):
@@ -447,11 +461,13 @@ async def run_turn(event: Event) -> None:
             await s.commit()
     # This turn's own untrusted input marks the reply: a tool read, or the digest it was shown.
     read_untrusted = _read_untrusted(result.tools_called) or result.read_untrusted or hooked
-    await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles),
-                       event_id=reply_event_id(event.id, read_untrusted))
+    if bubbles:
+        await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles),
+                           event_id=reply_event_id(event.id, read_untrusted))
     await enqueue_learn(user.id, event, text, previous, clarified_request(history),
                         tainted=read_untrusted or learn_taint)
     await attach_queued_approvals(user.id, text, tainted=result.tainted, turn_ref=event.id)
-    await initiative_hook("quiet.after_assistant_message",
-                          lambda i: i.quiet.after_assistant_message(user.id, bubbles[-1]))
+    if bubbles:
+        await initiative_hook("quiet.after_assistant_message",
+                              lambda i: i.quiet.after_assistant_message(user.id, bubbles[-1]))
     current_route.set(_route_for(result.tools_called))

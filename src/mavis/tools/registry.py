@@ -53,10 +53,18 @@ ALREADY_WAITING_RESULT = (
     "that card; do not queue it again."
 )
 
+# The card (preview + buttons, rendered by code) is the only prompt for an approval: the model's reply
+# must not repeat it or ask for a tap (track 1 T1.1). A turn whose every tool result is one of these
+# sends no prose bubble at all (agents.conversation).
+CARD_NOTE = ("It has NOT been done yet. The user gets a card with this action and buttons to approve, edit "
+             "or cancel right after your reply: that card is the prompt. Do not describe it, ask them to "
+             "approve or tap anything, or say it was done.")
+QUEUED_PREFIX = "QUEUED_FOR_APPROVAL"
+UPDATED_PREFIX = "UPDATED_WAITING_APPROVAL"
+CARD_RESULT_PREFIXES = (QUEUED_PREFIX, UPDATED_PREFIX)
 UPDATED_WAITING_RESULT = (
-    "UPDATED_WAITING_APPROVAL #{id}: {shown}\nThe card already waiting for this was updated to this "
-    "version and shown to the user again. It has NOT been done yet. Tell the user the corrected version "
-    "is waiting for their OK; do not queue it again."
+    UPDATED_PREFIX + " #{id}: {shown}\nThe card already waiting for this was updated to this version and "
+    "is shown again. " + CARD_NOTE + " Do not queue it again."
 )
 
 # Serialises "find open approval, else create" so identical parallel tool calls queue one approval.
@@ -571,10 +579,7 @@ class ToolRegistry:
                 if run is not None and approval_id not in run.queued_approvals:
                     run.queued_approvals.append(approval_id)
                 shown = wrap_untrusted(truncate(req.preview, _PREVIEW_IN_RESULT_CHARS), "approval_preview")
-                return (
-                    f"QUEUED_FOR_APPROVAL #{approval_id}: {shown}\n"
-                    "This has NOT been done yet. Tell the user it is ready and waiting for their OK."
-                )
+                return f"{QUEUED_PREFIX} #{approval_id}: {shown}\n{CARD_NOTE}"
 
         return StructuredTool.from_function(
             coroutine=_call, name=tool.name, description=tool.description, args_schema=tool.args_model,
