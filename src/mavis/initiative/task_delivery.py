@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mavis.config import get_settings
 from mavis.domain.events import Event
 from mavis.domain.messages import TAINT_SUFFIX, Outbound, Role
-from mavis.domain.tasks import REPORTED_STATUSES, TaskOrigin
+from mavis.domain.tasks import REPORTED_STATUSES, TaskOrigin, TaskStatus
 from mavis.initiative.composer import scrub_untrusted_origin
 from mavis.policy import pings
 from mavis.store.db import Session, utcnow
@@ -60,8 +60,14 @@ async def _enqueue_artifact(s: AsyncSession, user_id: int, task_id: int, art: An
 
 
 async def deliver_artifact_now(user_id: int, task_id: int, artifact_id: int, *,
-                               proactive: bool = False) -> bool:
-    """Send one file of a task right away. True when this call sent it; never twice (key + delivered_at)."""
+                               proactive: bool = False, end_of_task: bool = False) -> bool:
+    """Send one file of a task right away. True when this call sent it; never twice (key + delivered_at).
+    Mid-task (the default) a cancelled or failed task sends nothing; the end-of-task paths pass
+    end_of_task=True because a failing task still hands over what it made."""
+    if not end_of_task:
+        task = await tasks.get(task_id)
+        if task is not None and task.status in (TaskStatus.CANCELLED.value, TaskStatus.FAILED.value):
+            return False
     art = next((a for a in await tasks.artifacts_for(task_id) if a.id == artifact_id), None)
     if art is None or art.user_id != user_id or art.delivered_at is not None:
         return False
@@ -80,7 +86,8 @@ async def deliver_pending_artifacts(user_id: int, task_id: int, *, proactive: bo
     """Every file of the task not sent yet, in the order they were made. Returns how many went out."""
     sent = 0
     for art in await tasks.undelivered_artifacts(task_id):
-        sent += int(await deliver_artifact_now(user_id, task_id, art.id, proactive=proactive))
+        sent += int(await deliver_artifact_now(user_id, task_id, art.id, proactive=proactive,
+                                                    end_of_task=True))
     return sent
 
 
