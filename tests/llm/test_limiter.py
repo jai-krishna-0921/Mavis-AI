@@ -51,18 +51,29 @@ async def test_best_effort_runs_at_default_settings_in_a_lull(fake_redis, settin
     lim.release(lease)
 
 
-async def test_best_effort_queues_behind_chat_and_never_takes_the_last_slot(fake_redis, settings):
+async def test_best_effort_starts_beside_chat_with_its_own_short_timeout(fake_redis, settings):
     lim = _lim(fake_redis)
     with bind_user(1, "chat"):
         chat = await lim.acquire("interactive", 1.0)
     lim.touch()
-    await asyncio.sleep(0.02)
-    waiter = asyncio.create_task(_be(lim))
-    await asyncio.sleep(0.4)
-    assert not waiter.done()  # queued, not failed: chat ran a moment ago
+    lease = await asyncio.wait_for(_be(lim), 3)  # two slots free: a guaranteed share
+    assert lease.timeout_s == 20.0 and chat.timeout_s is None
+    lim.release(lease)
     lim.release(chat)
-    await asyncio.sleep(0.02)
-    assert await asyncio.wait_for(waiter, 8) is not None  # runs once the lull comes (quiet period)
+
+
+async def test_best_effort_queues_instead_of_taking_the_last_slot(fake_redis, settings):
+    lim = _lim(fake_redis)
+    held = []
+    for uid in (1, 2):
+        with bind_user(uid, "chat"):
+            held.append(await lim.acquire("interactive", 1.0))
+    waiter = asyncio.create_task(_be(lim))
+    await asyncio.sleep(0.5)
+    assert not waiter.done()  # queued (not failed): only the last slot is free
+    lim.release(held[0])
+    assert await asyncio.wait_for(waiter, 8) is not None  # two free now: it runs
+    lim.release(held[1])
 
 
 async def _be(lim):

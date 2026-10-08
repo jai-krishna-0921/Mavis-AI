@@ -16,7 +16,7 @@ import structlog
 from mavis import bus
 from mavis.config import get_settings
 from mavis.domain.errors import LLMError
-from mavis.llm import limiter_lua, policy
+from mavis.llm import limiter_lua, share
 from mavis.llm.context import llm_user_id
 
 log = structlog.get_logger(__name__)
@@ -32,6 +32,7 @@ class Lease(NamedTuple):
     id: str
     provider: str
     priority: str = "interactive"  # the release needs it: best_effort holders are counted separately
+    timeout_s: float | None = None  # a best_effort call's own timeout (mavis.llm.share), else no clamp
 
 
 class LimiterBackend(Protocol):
@@ -54,13 +55,30 @@ def spawn(coro) -> None:
     t.add_done_callback(_tasks.discard)
 
 
+# order of the policy constants in the Lua ARGV (after WAITER_TTL_MS)
+_CONSTANT_ORDER = ("grace_s", "background_aging_s", "best_effort_aging_s", "min_gap_s", "lull_quiet_s",
+                   "escape_after_s", "escape_chat_gap_s", "timeout_s", "escape_timeout_s")
+
+
+def policy_constants() -> dict[str, float]:
+    """The slot policy's numbers as they are now (mavis.llm.share and the limiter's own ageing; tests move
+    the module globals)."""
+    from mavis.llm import models
+
+    return {"grace_s": models.INTERACTIVE_GRACE_S, "background_aging_s": models.BACKGROUND_AGING_S,
+            "best_effort_aging_s": models.BEST_EFFORT_AGING_S, "min_gap_s": share.MIN_START_GAP_S,
+            "lull_quiet_s": share.LULL_QUIET_S, "escape_after_s": share.ESCAPE_AFTER_S,
+            "escape_chat_gap_s": share.ESCAPE_CHAT_GAP_S, "timeout_s": share.TIMEOUT_S,
+            "escape_timeout_s": share.ESCAPE_TIMEOUT_S}
+
+
 class SharedLimiter:
     def __init__(self, client, provider: str, slots: int, bg_max: int, user_max: int, hold_ttl_s: float,
-                 timings: Callable[[], policy.Timings] | None = None) -> None:
+                 constants: Callable[[], dict[str, float]] | None = None) -> None:
         self._r, self._prov = client, provider
         self._p = f"mavis:llm:{provider}:"
         self._slots, self._bg, self._um = slots, bg_max, user_max
-        self._timings = timings or policy.Timings
+        self._constants = constants or policy_constants
         self._ttl_ms = int(hold_ttl_s * 1000)
         self._try = client.register_script(limiter_lua.TRY_ACQUIRE)
         self._rel = client.register_script(limiter_lua.RELEASE)
@@ -68,7 +86,8 @@ class SharedLimiter:
         self._queue_seen = (0, float("-inf"))  # (length, monotonic time) from the latest acquire attempt
 
     def _keys(self) -> list[str]:
-        return [self._p + "holders", self._p + "queue", self._p + "last_used"]
+        return [self._p + "holders", self._p + "queue", self._p + "last_used", self._p + "last_chat_start",
+                self._p + "last_be_start"]
 
     async def acquire(self, priority: str, wait_s: float) -> Lease | None:
         rank = _RANK[priority]
@@ -78,15 +97,13 @@ class SharedLimiter:
         deadline = time.monotonic() + max(wait_s, 0.0)
         try:
             while True:
-                t = self._timings()
-                ms = (int(t.grace_s * 1000), int(t.quiet_s * 1000), int(t.background_aging_s * 1000),
-                      int(t.best_effort_aging_s * 1000))
-                code, qlen = await self._try(keys=self._keys(), args=[
+                c = self._constants()
+                code, qlen, clamp_ms = await self._try(keys=self._keys(), args=[
                     int(time.time() * 1000), me, uid, rank, since, self._slots, self._bg, self._um,
-                    self._ttl_ms, self._p, WAITER_TTL_MS, t.share, *ms])
+                    self._ttl_ms, self._p, WAITER_TTL_MS, *[int(c[k] * 1000) for k in _CONSTANT_ORDER]])
                 self._queue_seen = (int(qlen), time.monotonic())
                 if int(code) == 1:
-                    return Lease(me, self._prov, priority)
+                    return Lease(me, self._prov, priority, int(clamp_ms) / 1000 if int(clamp_ms) else None)
                 if int(code) == 2:  # one slot and other work is active: best_effort yields, the job retries
                     raise LLMError("LLM slot reserved for interactive work")
                 left = deadline - time.monotonic()
@@ -133,8 +150,8 @@ class LocalLimiterAdapter:
         return models._limiter(self._secondary)
 
     async def acquire(self, priority: str, wait_s: float) -> Lease | None:
-        await self._inner.acquire(priority, wait_s)
-        return Lease("local", "local", priority)
+        clamp = await self._inner.acquire(priority, wait_s)
+        return Lease("local", "local", priority, clamp)
 
     def release(self, lease: Lease | None) -> None:
         self._inner.release(best_effort=lease is not None and lease.priority == "best_effort")
@@ -193,7 +210,6 @@ def reset_limiters() -> None:
 
 
 def get_limiter(secondary: bool = False) -> LimiterBackend:
-    from mavis.llm import models
 
     s = get_settings()
     client = bus.get_redis() if s.llm_limiter == "redis" else None
@@ -208,7 +224,7 @@ def get_limiter(secondary: bool = False) -> LimiterBackend:
             ttl = max(s.llm_timeout_smart_s, s.llm_timeout_fast_s) + s.llm_timeout_cooldown_s + HOLD_MARGIN_S
             shared = SharedLimiter(client, "secondary" if secondary else "primary",
                                    s.llm_secondary_max_concurrency if secondary else s.llm_global_slots,
-                                   s.llm_bg_max_slots, s.llm_user_max_slots, ttl, models.timings)
+                                   s.llm_bg_max_slots, s.llm_user_max_slots, ttl)
         except Exception as exc:  # noqa: BLE001
             log.warning("llm.limiter_setup_failed", error=type(exc).__name__)
             shared = None

@@ -134,7 +134,8 @@ async def test_owner_commands_ban_and_unban(db, settings, monkeypatch, channel):
 
     def cmd(text, n):
         return Event(id=f"b:{n}", user_id=owner.id, type=EventType.USER_MESSAGE, occurred_at=utcnow(),
-                     source="telegram", payload={"text": text, "command": text[1:].split()[0]}, trust=Trust.USER)
+                     source="telegram", payload={"text": text, "command": text[1:].split()[0]},
+                     trust=Trust.USER)
 
     assert await commands.command_gate(cmd(f"/ban {guest} spamming links", 1)) is False
     assert (await users.get(guest)).status == "banned"
