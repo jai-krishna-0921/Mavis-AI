@@ -112,3 +112,21 @@ def test_recent_messages_and_name_ask_ignore_old_history() -> None:
     assert recent_messages([old, fresh], NOW) == [fresh]
     # asked 13h ago but still "today" locally: outside the 12h window, so asking is allowed again
     assert should_ask_name(None, [old], NOW, "Asia/Kolkata")
+
+
+async def test_persona_carries_register_rules(db) -> None:
+    user, _ = await users.get_or_create_by_chat(8, "Jai")
+    prompt = system_prompt(user, NOW)
+    low = prompt.lower()
+    for rule in ("slur", "never insult", "sexual", "lecture", "canned refusal", "unbothered"):
+        assert rule in low, rule
+    assert "only when the register note" in low  # no note: no swearing
+    assert "Their register right now" not in prompt
+
+
+async def test_register_line_lands_in_right_now_section(db) -> None:
+    user, _ = await users.get_or_create_by_chat(9, "Jai")
+    line = "Their register right now: casual and sweary. You may swear casually back."
+    prompt = system_prompt(user, NOW, register_line=line, context="## Known facts\n- x")
+    assert line in prompt
+    assert prompt.index("Right now") < prompt.index(line) < prompt.index("## Known facts")

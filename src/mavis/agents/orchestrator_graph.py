@@ -31,7 +31,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send, interrupt
 
 from mavis import bus
-from mavis.agents import persona
+from mavis.agents import persona, register
 from mavis.agents.spawn import spawn_agent
 from mavis.agents.specialists import SPECIALISTS, get_specialist
 from mavis.agents.specialists.base import current_deliverable, run_specialist
@@ -625,7 +625,7 @@ async def responder(state: OrchestratorState) -> dict:
         f"\n\nActions:\n{actions}",
         tier=llm.Tier.SMART, **_BG,
     )
-    texts = [m.strip() for m in msg.messages if m.strip()][:3] or ["Done."]
+    texts = [register.mask_slurs(m).strip() for m in msg.messages if m.strip()][:3] or ["Done."]
     return {"final_messages": texts}
 
 

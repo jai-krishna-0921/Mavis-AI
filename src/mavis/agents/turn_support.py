@@ -59,15 +59,27 @@ def user_text(event: Event) -> str:
     return text
 
 
-def to_langchain(history: list[Message], now: datetime, tz: str) -> list[BaseMessage]:
+def to_langchain(history: list[Message], now: datetime, tz: str,
+                 reactions: dict[str, str] | None = None) -> list[BaseMessage]:
     """Replay stored messages to the model, each stamped relative to `now` in the user's zone (T1), so
     "tomorrow" in a two-day-old message is not read as tomorrow. The last message is the one being
-    answered when it is the user's: it is not stamped."""
+    answered when it is the user's: it is not stamped.
+
+    `reactions` (user message event id -> emoji that landed on it, T1.3): the reply to that message
+    replays with its "[react: X]" marker line, the way the model wrote it."""
     out: list[BaseMessage] = []
+    reacted: str | None = None
     for i, m in enumerate(history):
         current = i == len(history) - 1 and m.role == Role.USER.value
         text = m.content if current else stamped(m.content, m.created_at, now, tz)
-        out.append(HumanMessage(text) if m.role == Role.USER.value else AIMessage(text))
+        if m.role == Role.USER.value:
+            reacted = (reactions or {}).get(m.event_id or "")
+            out.append(HumanMessage(text))
+        else:
+            if reacted:
+                text = f"{text}\n[react: {reacted}]"
+                reacted = None
+            out.append(AIMessage(text))
     return out
 
 
