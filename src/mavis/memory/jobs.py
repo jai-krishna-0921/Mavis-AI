@@ -102,7 +102,7 @@ async def handle_learn(job: Job) -> None:
             await get_memory().learn(job.user_id, str(p.get("text", "")), source_ref,
                                      Trust(p.get("trust", Trust.USER.value)),
                                      conversation=bool(p.get("conversation", True)),
-                                     anchor_at=_anchor(p))
+                                     anchor_at=_anchor(p), strict=bool(p.get("tainted", False)))
         except LLMError as exc:
             await _defer_learn(job, p, exc)
             await wakeups_repo.cancel_ids(consumed)  # the batch is parked again as one
@@ -122,7 +122,7 @@ async def _coalesce(user_id: int, p: dict) -> tuple[dict, list[int]]:
     from mavis.store.repo import users as users_repo  # lazy: the job layer starts before the store is used
 
     def group(x: dict) -> tuple:
-        return (x.get("trust", Trust.USER.value), bool(x.get("conversation", True)))
+        return (x.get("trust", Trust.USER.value), bool(x.get("conversation", True)), bool(x.get("tainted")))
 
     waiting = await wakeups_repo.list_pending(user_id, WakeupKind.SYSTEM_LEARN)
     parked = [(w.id, w.payload["learn"]) for w in waiting

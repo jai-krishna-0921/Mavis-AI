@@ -33,7 +33,7 @@ async def test_turn_injects_recall_and_enqueues_learn(db, channel, fake_llm, mem
     assert not_before
     assert job.payload.pop("anchor_at")  # when the user said it (phase A3), not when LEARN runs
     assert job.payload == {"text": "is Jawahar free?", "source_ref": "tg:update:42", "trust": "user",
-                           "conversation": True}
+                           "conversation": True, "tainted": False}
 
 
 async def test_learn_text_includes_previous_reply(db, channel, fake_llm, memory, bus, monkeypatch):

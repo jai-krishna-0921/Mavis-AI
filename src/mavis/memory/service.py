@@ -83,7 +83,7 @@ def assistant_context_of(text: str) -> str:
     return _split_learn_text(text)[1]
 
 
-_WORD = re.compile(r"[a-z0-9]+")
+_WORD = re.compile(r"[^\W_]+")  # any letters or digits: names are not only ASCII
 _GROUNDING_STEM = 4  # "claims" grounds "claim", "renewal" grounds "renew"
 
 
@@ -233,11 +233,13 @@ class MemoryService:
 
     async def learn(
         self, user_id: int, text: str, source_ref: str = "", trust: Trust = Trust.USER,
-        conversation: bool = True, anchor_at: datetime | None = None,
+        conversation: bool = True, anchor_at: datetime | None = None, strict: bool = False,
     ) -> Extraction:
         """Extract and persist. LLMError from extraction propagates; the LEARN job drops it (best effort).
 
         `trust` and `conversation` are the origin's provenance; hooks receive them unchanged.
+        `strict`: the turn saw third-party output, so every item must be named in the user's own words (the
+        same grounding as when an assistant reply is included), even when no reply is.
         `anchor_at` is when the text was written (the turn, the email): relative times in it ("7 PM",
         "tomorrow") resolve against that, not against when this job happens to run.
 
@@ -259,7 +261,8 @@ class MemoryService:
         # The assistant's own words are never a memory source (only fenced context for the extractor):
         # what is stored is the user's side of a chat turn, whatever its trust.
         own_words = said if conversation else text
-        if conversation and said != text.strip():  # an assistant reply was included as context (T3)
+        # a reply was included as context (T3), or the turn read third-party output (strict)
+        if conversation and (strict or said != text.strip()):
             extraction = grounded_in_user(extraction, said, context)
 
         resolution = await resolve(extraction, await self.graph.entities(user_id), self.embedder)
