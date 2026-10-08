@@ -12,12 +12,16 @@ from mavis.store.db import Session
 from mavis.store.models import User
 
 
-async def get_or_create_by_chat(chat_id: int, name: str | None) -> tuple[User, bool]:
+async def get_or_create_by_chat(chat_id: int, name: str | None, *,
+                                telegram_user_id: int | None = None) -> tuple[User, bool]:
     async with Session() as s:
         user = await s.scalar(select(User).where(User.telegram_chat_id == chat_id))
         if user is not None:
             return user, False
-        user = User(telegram_chat_id=chat_id, name=name, timezone=get_settings().default_timezone, state={})
+        # New rows start pending (Phase 11): the access gate activates them on redemption. In
+        # ACCESS_MODE=allowlist the gate is not enforced, so this changes nothing for the owner.
+        user = User(telegram_chat_id=chat_id, telegram_user_id=telegram_user_id, name=name,
+                    timezone=get_settings().default_timezone, state={}, status="pending")
         s.add(user)
         try:
             await s.commit()

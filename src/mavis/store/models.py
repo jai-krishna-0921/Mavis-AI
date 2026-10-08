@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Date,
     Float,
     ForeignKey,
     Index,
@@ -37,6 +38,22 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_user_msg_at: Mapped[datetime | None] = mapped_column(default=None)
     last_agent_msg_at: Mapped[datetime | None] = mapped_column(default=None)
+    # --- Phase 11 multi-user -------------------------------------------------
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    tier: Mapped[str] = mapped_column(String(16), default="standard")
+    telegram_user_id: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    locale: Mapped[str | None] = mapped_column(String(16), default=None)
+    currency: Mapped[str | None] = mapped_column(String(3), default=None)
+    country: Mapped[str | None] = mapped_column(String(2), default=None)
+    composio_user_id: Mapped[str | None] = mapped_column(String(64), unique=True, default=None)
+    invite_id: Mapped[int | None] = mapped_column(ForeignKey("invite_codes.id"), default=None)
+    activated_at: Mapped[datetime | None] = mapped_column(default=None)
+    banned_at: Mapped[datetime | None] = mapped_column(default=None)
+    ban_reason: Mapped[str | None] = mapped_column(String(200), default=None)
+    budget_override_usd_day: Mapped[float | None] = mapped_column(Float, default=None)
+    inactive_since: Mapped[datetime | None] = mapped_column(default=None)
+    deleted_at: Mapped[datetime | None] = mapped_column(default=None)
+    is_test: Mapped[bool] = mapped_column(default=False)
 
 
 class Message(Base):
@@ -60,6 +77,7 @@ class OutboxMessage(Base):
     buttons: Mapped[list[Any]] = mapped_column(JSON, default=list)
     document_path: Mapped[str | None] = mapped_column(String(1024))
     proactive: Mapped[bool] = mapped_column(default=False)
+    priority: Mapped[int] = mapped_column(Integer, default=0, index=True)  # 0 chat, 1 proactive, 2 broadcast
     dedupe_key: Mapped[str | None] = mapped_column(String(200), unique=True)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     attempts: Mapped[int] = mapped_column(default=0)
@@ -409,3 +427,48 @@ class InitiativeDecisionRow(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     decision: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(index=True)
+
+
+
+class InviteCode(Base):
+    __tablename__ = "invite_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    code_hint: Mapped[str] = mapped_column(String(8))
+    label: Mapped[str] = mapped_column(String(120), default="")
+    tier: Mapped[str] = mapped_column(String(16), default="standard")
+    max_uses: Mapped[int] = mapped_column(Integer, default=1)
+    uses: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime] = mapped_column()
+    revoked_at: Mapped[datetime | None] = mapped_column(default=None)
+    created_by_user_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    default_timezone: Mapped[str | None] = mapped_column(String(64), default=None)
+    default_currency: Mapped[str | None] = mapped_column(String(3), default=None)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class InviteRedemption(Base):
+    __tablename__ = "invite_redemptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    invite_id: Mapped[int] = mapped_column(ForeignKey("invite_codes.id"), index=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    redeemed_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class LlmUsage(Base):
+    __tablename__ = "llm_usage"
+    __table_args__ = (UniqueConstraint("user_id", "day", "provider", "model", "purpose",
+                                       name="uq_llm_usage_user_day_model_purpose"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)  # 0 = system
+    day: Mapped[date] = mapped_column(Date, index=True)  # the user's local date
+    provider: Mapped[str] = mapped_column(String(32))
+    model: Mapped[str] = mapped_column(String(80))
+    purpose: Mapped[str] = mapped_column(String(24))
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    completion_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    cost_micros: Mapped[int] = mapped_column(BigInteger, default=0)
