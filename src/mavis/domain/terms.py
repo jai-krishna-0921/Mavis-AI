@@ -57,6 +57,11 @@ def foreign_terms(text: str, user_words: str) -> set[str]:
     return {t for t in terms(text) if not _same(t, theirs)}
 
 
+# Who is speaking, not what is said: "The user's name is Arjun" and "my name is Arjun" say the same thing.
+# Dropped from the MODEL's text in strict grounding only (the user's words are never filtered).
+PERSPECTIVE = frozenset("user users me my mine myself i m you your yours mavis".split())
+
+
 def grounded_in(text: str, user_words: str) -> bool:
     """`text` (written by the model) says nothing the user did not say in `user_words`.
 
@@ -64,12 +69,13 @@ def grounded_in(text: str, user_words: str) -> bool:
     identifier in it (URL, host, email address, handle) appears in their words verbatim. Reordering, dropping
     words and inflection are fine ("compare laptops" ~ "laptop comparison"); a single added content word
     ("budget", "forward", "invoices", a number) is not: the text is then not purely theirs."""
-    if not text.strip() or not user_words.strip() or not terms(text):
+    content = {t for t in terms(text) if t not in PERSPECTIVE}
+    if not text.strip() or not user_words.strip() or not content:
         return False
     said = user_words.lower()
     if any(ident not in said for ident in identifiers(text)):
         return False
-    return not foreign_terms(text, user_words)
+    return not {t for t in foreign_terms(text, user_words) if t not in PERSPECTIVE}
 
 
 def _stem(word: str) -> str:
