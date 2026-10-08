@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     live_test_enabled: bool = False
     test_telegram_chat_id: int | None = None
 
-    @field_validator("test_telegram_chat_id", mode="before")
+    @field_validator("test_telegram_chat_id", "test_mirror_chat_id", mode="before")
     @classmethod
     def _blank_is_unset(cls, v: object) -> object:
         # compose passes unset optional vars as "" (${VAR:-}); for an optional id that means "not set"
@@ -109,6 +109,16 @@ class Settings(BaseSettings):
     task_step_parallelism: int = 1
     spawn_max_per_step: int = 3  # spawned workers one model step may start
     initiative_act_enabled: bool = True
+
+    # --- progress cards (Phase 12 slice A, spec 2026-10-08 section 8) ----------
+    progress_card_enabled: bool = True  # false: the single fixed "Still on it" line, as before
+    progress_card_after_s: float = 4.0  # tasks that finish sooner get no card (0 for machine plans)
+    progress_edit_min_interval_s: float = 3.0  # at most one card edit per chat per interval
+    progress_max_screenshots: int = 4  # milestone photos per task (approval photos not counted)
+    telegram_global_send_rate: float = 25.0  # messages per second across all chats (shared with the outbox)
+    # Demo suite mirror: the owner's real chat (must be in ALLOWED_TELEGRAM_CHAT_IDS). Sends to the test
+    # chat are copied there with a "[test]" header and no buttons. Unset: no mirror.
+    test_mirror_chat_id: int | None = None
 
     # --- sandbox --------------------------------------------------------------
     sandbox_backend: Literal["auto", "docker", "agentcore", "local"] = "auto"
