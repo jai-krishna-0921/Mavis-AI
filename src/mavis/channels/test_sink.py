@@ -27,7 +27,7 @@ from mavis.domain import timeutil
 from mavis.domain.messages import Button
 
 log = structlog.get_logger()
-SINK_FILE = "test_sink.jsonl"
+SINK_FILE = "e2e/test_sink.jsonl"  # inside e2e/ so one shared volume carries the sink and the demo reports
 SYNTHETIC_BELOW = -(10**15)
 _warned: set[tuple] = set()
 FIXTURE_DIR = Path(__file__).resolve().parents[3] / "scripts" / "fixtures" / "machine" / "files"

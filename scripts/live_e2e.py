@@ -4,7 +4,7 @@
         uv run python -m scripts.live_e2e "remind me to call Ravi at 6"
 
 It only ever speaks as TEST_TELEGRAM_CHAT_ID (the running stack must have the same settings, so the chat
-is admitted and every send to it goes to data_dir/test_sink.jsonl instead of Telegram). The id
+is admitted and every send to it goes to data_dir/e2e/test_sink.jsonl instead of Telegram). The id
 must be synthetic (below -10**15, which no Telegram chat can have) and not in ALLOWED_TELEGRAM_CHAT_IDS.
 Replies are read from that user's rows only. Never clean up by editing rows: use the product's own
 tools as the test user.

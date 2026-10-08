@@ -138,6 +138,6 @@ log "health: https://$MAVIS_HOST/healthz (certificate is issued on first request
 
 if [[ "$VERIFY_MACHINE" == 1 ]]; then
   log "running the machine demo suite on the box (mirrored to the owner's chat when TEST_MIRROR_CHAT_ID is set)"
-  compose_remote exec -T api python -m scripts.machine_demo --all --report-to-owner \
-    || log "demo suite reported failures (see data/e2e on the box)"
+  compose_remote exec -T worker python -m scripts.machine_demo --all --report-to-owner \
+    || log "demo suite reported failures (reports are in the e2edata volume, /app/data/e2e in the worker)"
 fi

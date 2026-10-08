@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     telegram_mode: Literal["polling", "webhook"] = "polling"
     allowed_telegram_chat_ids: list[int] = Field(default_factory=list)
     # The live E2E harness's own chat: admitted beside the allowlist, and every send to it goes to a log
-    # sink (data_dir/test_sink.jsonl), never to Telegram, so tests never write into a real user's chat.
+    # sink (data_dir/e2e/test_sink.jsonl), never to Telegram, so tests never write into a real user's chat.
     # Off unless enabled, and the id must be synthetic (below -10**15) and not allowlisted
     # (channels.test_sink.active_test_chat).
     live_test_enabled: bool = False

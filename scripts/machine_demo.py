@@ -329,11 +329,13 @@ async def report_to_owner(s: Settings, out: Path, summary: str, results) -> None
     from mavis.domain.messages import Outbound
     from mavis.store.repo import outbox, users
 
-    if not s.allowed_telegram_chat_ids:
-        print("no owner chat configured")
+    # Only the explicit mirror chat, never an allowlisted real user picked by position.
+    if s.test_mirror_chat_id is None:
+        print("TEST_MIRROR_CHAT_ID is not set: the report stays in the saved run folder")
         return
-    owner = await users.get_by_chat(s.allowed_telegram_chat_ids[0])
+    owner = await users.get_by_chat(s.test_mirror_chat_id)
     if owner is None:
+        print("the mirror chat has no user row: the report stays in the saved run folder")
         return
     shots = [str(p) for p in sorted(out.glob("*/screenshots/*"))[:4]]  # noqa: ASYNC240
     run = out.name

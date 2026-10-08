@@ -6,7 +6,7 @@ data
 deploy
 docs
 tests
-scripts
+scripts/__pycache__
 **/__pycache__
 **/*.pyc
 .pytest_cache
