@@ -18,7 +18,6 @@ from mavis.initiative.composer import scrub_untrusted_origin
 from mavis.initiative.executor import (
     DEFERRED_TTL,
     REMINDER_PREFIX,
-    REMINDER_URGENCY,
     InitiativeExecutor,
 )
 from mavis.initiative.filters import EXTERNAL_TYPES, EventFilter
@@ -77,13 +76,10 @@ class InitiativeHandler:
             reason = str(event.payload.get("reason", "")).removeprefix(REMINDER_PREFIX).strip()
             key = str(event.payload.get("reminder_key") or f"reminder:{event.payload.get('wakeup_id')}")
             if event.trust is Trust.UNTRUSTED:
-                # a reason worded from third-party text (wake_me after an email, without a card): the
-                # composer words it on the untrusted path, links and addresses scrubbed first
-                await self._executor.notify(
-                    user, NotifyIntent(urgency=REMINDER_URGENCY,
-                                       intent=f"Remind them: {scrub_untrusted_origin(reason)}",
-                                       dedupe_key=key), untrusted=True)
-                return
+                # worded from third-party text (wake_me after an email): still the user's own reminder, so
+                # it takes the same fixed path (never budget-gated, never dropped), with the text scrubbed
+                # of links, addresses, phone numbers and codes first
+                reason = scrub_untrusted_origin(reason)
             original_due = event.payload.get("original_due")
             due = datetime.fromisoformat(original_due) if original_due else event.occurred_at
             await self._executor.remind(user, reason, key, due)
