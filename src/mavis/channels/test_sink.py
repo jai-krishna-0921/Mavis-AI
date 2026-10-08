@@ -50,6 +50,11 @@ def active_test_chat(s: Settings | None = None) -> int | None:
     return None
 
 
+def is_test_chat(chat_id: int | None, s: Settings | None = None) -> bool:
+    """True when `chat_id` is an enabled, safe synthetic test chat (contract E)."""
+    return chat_id is not None and chat_id == active_test_chat(s)
+
+
 def sink_path(data_dir: Path) -> Path:
     return Path(data_dir) / SINK_FILE
 
@@ -66,6 +71,9 @@ class SinkChannel:
         self._inner, self._test = inner, test_chat_id
         self._next_id = 1
 
+    def _is_test(self, chat_id: int) -> bool:
+        return chat_id == self._test
+
     def _record(self, kind: str, chat_id: int, text: str, **extra: Any) -> int:
         row = {"at": timeutil.now().isoformat(), "kind": kind, "chat_id": chat_id, "text": text, **extra}
         log.info("channel.test_sink", kind=kind, chat_id=chat_id, text=text[:200])
@@ -78,22 +86,22 @@ class SinkChannel:
 
     async def send_text(self, chat_id: int, text: str,
                         buttons: list[list[Button]] | None = None) -> list[int]:
-        if chat_id != self._test:
+        if not self._is_test(chat_id):
             return await self._inner.send_text(chat_id, text, buttons)
         labels = [[b.label for b in row] for row in (buttons or [])]
         return [self._record("text", chat_id, text, buttons=labels)]
 
     async def send_document(self, chat_id: int, path: str, caption: str = "") -> int:
-        if chat_id != self._test:
+        if not self._is_test(chat_id):
             return await self._inner.send_document(chat_id, path, caption)
         return self._record("document", chat_id, caption, path=path)
 
     async def send_typing(self, chat_id: int) -> None:
-        if chat_id != self._test:
+        if not self._is_test(chat_id):
             await self._inner.send_typing(chat_id)
 
     async def react(self, chat_id: int, message_id: int, emoji: str | None) -> None:
-        if chat_id != self._test:
+        if not self._is_test(chat_id):
             await self._inner.react(chat_id, message_id, emoji)
 
     async def download_file(self, file_id: str, dest_path: str) -> str:

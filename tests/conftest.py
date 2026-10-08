@@ -91,6 +91,15 @@ def workspace_on(settings, monkeypatch):
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_inbound_limiter():
+    from mavis.access.inbound import set_inbound_limiter
+
+    set_inbound_limiter(None)
+    yield
+    set_inbound_limiter(None)
+
+
 @pytest.fixture
 def invite_mode(settings, monkeypatch):
     """ACCESS_MODE=invite for one test: strangers are gated by invite codes."""
