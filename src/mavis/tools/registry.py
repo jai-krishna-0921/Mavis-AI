@@ -34,6 +34,7 @@ from mavis.domain.localtime import has_datetimes, localize_args
 from mavis.domain.policy import Capability, RiskClass
 from mavis.domain.results import ToolOutput
 from mavis.domain.tasks import ApprovalStatus
+from mavis.domain.terms import grounded_in, terms
 from mavis.policy.risk import truncate, wrap_untrusted
 from mavis.store.db import utcnow
 from mavis.store.repo import approvals, audit, policy_rules, tasks
@@ -41,27 +42,7 @@ from mavis.store.repo import approvals, audit, policy_rules, tasks
 log = structlog.get_logger()
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
-_WORD_RE = re.compile(r"[a-z0-9]+")
-# Words that say nothing about which tool fits ("the", "user", "a"): ignored by select()'s overlap score.
-_STOPWORDS = frozenset(
-    "a an and are as at be by can do for from i in is it me my of on or s so the their them they this "
-    "to up us user we what when with you your".split()
-)
-_SUFFIXES = ("ings", "ing", "ers", "er", "ed", "es", "s")
-
-
-def _terms(text: str) -> set[str]:
-    """Crude stems for select()'s overlap score: "reminder" ~ "remind", "emails" ~ "email"."""
-    out = set()
-    for word in _WORD_RE.findall(text.lower()):
-        if word in _STOPWORDS:
-            continue
-        for suffix in _SUFFIXES:
-            if word.endswith(suffix) and len(word) - len(suffix) >= 3:
-                word = word[: -len(suffix)]
-                break
-        out.add(word[:-1] if word.endswith("e") and len(word) > 3 else word)
-    return out
+_terms = terms  # select()'s overlap vocabulary (domain.terms)
 
 
 NEVER_AUTO_APPROVE = frozenset({"add_policy_rule", "forget"})
@@ -72,10 +53,18 @@ ALREADY_WAITING_RESULT = (
     "that card; do not queue it again."
 )
 
+# The card (preview + buttons, rendered by code) is the only prompt for an approval: the model's reply
+# must not repeat it or ask for a tap (track 1 T1.1). A turn whose every tool result is one of these
+# sends no prose bubble at all (agents.conversation).
+CARD_NOTE = ("It has NOT been done yet. The user gets a card with this action and buttons to approve, edit "
+             "or cancel right after your reply: that card is the prompt. Do not describe it, ask them to "
+             "approve or tap anything, or say it was done.")
+QUEUED_PREFIX = "QUEUED_FOR_APPROVAL"
+UPDATED_PREFIX = "UPDATED_WAITING_APPROVAL"
+CARD_RESULT_PREFIXES = (QUEUED_PREFIX, UPDATED_PREFIX)
 UPDATED_WAITING_RESULT = (
-    "UPDATED_WAITING_APPROVAL #{id}: {shown}\nThe card already waiting for this was updated to this "
-    "version and shown to the user again. It has NOT been done yet. Tell the user the corrected version "
-    "is waiting for their OK; do not queue it again."
+    UPDATED_PREFIX + " #{id}: {shown}\nThe card already waiting for this was updated to this version and "
+    "is shown again. " + CARD_NOTE + " Do not queue it again."
 )
 
 # Serialises "find open approval, else create" so identical parallel tool calls queue one approval.
@@ -111,6 +100,11 @@ class ToolRun:
     """
 
     tainted: bool = False
+    # Taint for self-only actions (track 1, T1.1): their effects stay with the user, so they are judged by
+    # what can steer THIS turn (its own untrusted reads and the reply just before the user's message),
+    # not by the whole replayed window that `tainted` covers. None: same as `tainted` (task loops).
+    self_tainted: bool | None = None
+    user_words: str = ""  # the user's own message this turn: the provenance of a self-only request
     untrusted_seen: bool = False  # an untrusted_output tool returned during the current step
     untrusted_reads: int = 0  # every time third-party text reached the model in this run (never reset)
     queued_approvals: list[int] = field(default_factory=list)
@@ -123,7 +117,12 @@ class ToolRun:
 
     def end_step(self) -> None:
         self.tainted = self.tainted or self.untrusted_seen
+        if self.self_tainted is not None:
+            self.self_tainted = self.self_tainted or self.untrusted_seen
         self.untrusted_seen = False
+
+    def self_taint(self) -> bool:
+        return self.tainted if self.self_tainted is None else self.self_tainted
 
 
 current_run: ContextVar[ToolRun | None] = ContextVar("current_run", default=None)
@@ -132,6 +131,61 @@ current_run: ContextVar[ToolRun | None] = ContextVar("current_run", default=None
 def _run_tainted() -> bool:
     run = current_run.get()
     return run is not None and run.tainted
+
+
+SELF_ONLY = frozenset({RiskClass.READ, RiskClass.WRITE_SELF})
+
+
+def self_only_tainted() -> bool:
+    """The taint a self-only action of this run is judged by (ToolRun.self_tainted)."""
+    run = current_run.get()
+    return run is not None and run.self_taint()
+
+
+def _user_worded(tool: MavisTool, args: BaseModel, run: ToolRun) -> bool:
+    """Every provenance argument the tool declares is the user's own words this turn (domain.terms)."""
+    values = [getattr(args, name, "") for name in tool.provenance]
+    texts = [v for v in values if isinstance(v, str) and v.strip()]
+    return bool(texts) and len(texts) == len(values) and all(grounded_in(t, run.user_words) for t in texts)
+
+
+def _gate_tainted(tool: MavisTool, args: BaseModel, risk: RiskClass) -> bool:
+    """Does this call need its taint policy's CARD (TaintPolicy.APPROVE)?
+
+    Outward, spending and destructive calls: the whole run's taint (the replayed window included).
+    Self-only calls (READ / WRITE_SELF, their effects stay with the user): only what can steer this turn
+    (ToolRun.self_tainted), and not even that when the call is worded entirely in the user's own words
+    this turn. Skipping the card never changes the trust of what the call stores: see _persist_untrusted."""
+    if risk not in SELF_ONLY:
+        return _run_tainted()
+    run = current_run.get()
+    if run is None or not run.self_taint():
+        return False
+    if _user_worded(tool, args, run):
+        log.info("tool.taint_waived_user_words", tool=tool.name)
+        return False
+    return True
+
+
+def _persist_untrusted(tool: MavisTool, args: BaseModel) -> bool:
+    """Is what this call stores (a fact, a loop, a reminder, a task) third-party shaped?
+
+    Yes whenever third-party text was anywhere in the run's prompt (the whole window, ToolRun.tainted),
+    unless the call is worded entirely in the user's own words this turn: then its content is theirs."""
+    run = current_run.get()
+    if run is None or not run.tainted:
+        return False
+    return not _user_worded(tool, args, run)
+
+
+# Set by the registry around one tool call (track 1 T1.1 fix round 1): the call persists content derived
+# from third-party text, so the tool stores it untrusted (a loop, a reminder that fires on the untrusted
+# path). Approved calls never set it: the user saw the card and said yes.
+current_call_untrusted: ContextVar[bool] = ContextVar("current_call_untrusted", default=False)
+
+
+def call_untrusted() -> bool:
+    return current_call_untrusted.get()
 
 
 async def _queue_tainted(task_id: int | None) -> bool:
@@ -217,6 +271,10 @@ class MavisTool:
     # The argument holding when the action takes effect (an event start). An approval whose action
     # time has passed expires and can no longer be approved.
     action_time: str | None = None
+    # Free-text arguments that state what a self-only call is for (a task's goal, a reminder's reason).
+    # When all of them come from the user's own words this turn, the call is the user's request and its
+    # taint policy does not apply (see _gate_tainted). Empty: provenance never waives the policy.
+    provenance: tuple[str, ...] = ()
 
     def effective_risk(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn is not None else self.risk
@@ -362,8 +420,8 @@ class ToolRegistry:
             return prepared.refusal  # refused before approval: nothing runs and nothing is queued
         risk = prepared.risk or tool.effective_risk(args)
         note = f"\n{prepared.note}" if prepared.note else ""
-        tainted = _run_tainted()
-        if tainted and tool.on_taint is TaintPolicy.APPROVE:
+        tainted = _run_tainted()  # outward: standing rules never auto-approve after third-party text
+        if _gate_tainted(tool, args, risk) and tool.on_taint is TaintPolicy.APPROVE:
             log.info("tool.taint_needs_approval", tool=tool.name)
             preview = tool.render_preview(args, await tool_context(user_id)) + note
             raise ApprovalRequired(tool.name, preview, payload)
@@ -379,10 +437,16 @@ class ToolRegistry:
             if not auto:
                 preview = tool.render_preview(args, await tool_context(user_id)) + note
                 raise ApprovalRequired(tool.name, preview, payload)
-        if tainted and tool.on_taint is TaintPolicy.DOWNGRADE and tool.tainted_fn is not None:
+        untrusted = risk in SELF_ONLY and _persist_untrusted(tool, args)
+        if tool.on_taint is TaintPolicy.DOWNGRADE and tool.tainted_fn is not None and (
+                untrusted or _gate_tainted(tool, args, risk)):
             log.info("tool.taint_downgraded", tool=tool.name)
             return await self._run(tool, user_id, args, actor="agent", fn=tool.tainted_fn)
-        return await self._run(tool, user_id, args, actor="agent")
+        token = current_call_untrusted.set(untrusted)
+        try:
+            return await self._run(tool, user_id, args, actor="agent")
+        finally:
+            current_call_untrusted.reset(token)
 
     async def execute_approved(self, approval_id: int) -> Executed:
         """Run a tool the user explicitly approved. Bypasses the approval check only."""
@@ -546,10 +610,7 @@ class ToolRegistry:
                 if run is not None and approval_id not in run.queued_approvals:
                     run.queued_approvals.append(approval_id)
                 shown = wrap_untrusted(truncate(req.preview, _PREVIEW_IN_RESULT_CHARS), "approval_preview")
-                return (
-                    f"QUEUED_FOR_APPROVAL #{approval_id}: {shown}\n"
-                    "This has NOT been done yet. Tell the user it is ready and waiting for their OK."
-                )
+                return f"{QUEUED_PREFIX} #{approval_id}: {shown}\n{CARD_NOTE}"
 
         return StructuredTool.from_function(
             coroutine=_call, name=tool.name, description=tool.description, args_schema=tool.args_model,

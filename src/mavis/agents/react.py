@@ -86,6 +86,8 @@ async def react_loop(
     priority: llm.Priority = "interactive",
     fallback: bool | None = None,
     tainted: bool = False,
+    self_tainted: bool | None = None,
+    user_words: str = "",
     wrap_up: bool = False,
     deadline_s: float | None = None,
     tool_timeout_s: float | None = None,
@@ -96,7 +98,9 @@ async def react_loop(
 
     Raises BudgetExceeded after more than `max_steps` tool rounds, ConnectionRequired (after the
     step's other calls settle) when a tool needs an account linked, and LLMError if the model fails.
-    Pass `tainted=True` when `messages` already carry third-party content.
+    Pass `tainted=True` when `messages` already carry third-party content. A chat turn also passes
+    `self_tainted` (what can steer this turn: the previous reply, hook context) and `user_words` (the
+    user's message), by which self-only actions are judged instead (ToolRun.self_tainted).
 
     `wrap_up=True` (interactive turns): instead of raising BudgetExceeded, once `max_steps` tool
     rounds ran or `deadline_s` (seconds from now) has passed, the model is asked once more to answer
@@ -117,6 +121,9 @@ async def react_loop(
     parent = current_run.get()
     run = parent or ToolRun()
     run.tainted = run.tainted or tainted
+    if parent is None:
+        run.self_tainted = self_tainted
+        run.user_words = user_words
     first_approval = len(run.queued_approvals)
     first_read = run.untrusted_reads
     token = current_run.set(run)

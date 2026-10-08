@@ -95,9 +95,8 @@ async def test_mail_send_waits_for_approve_then_sends_once_and_says_done(user, w
     prompt = prompts[0]
     ok = next(b.data for b in prompt.buttons[0] if b.data.endswith(":ok"))
     approval_id = int(ok.split(":")[1])
-    # the explanation bubble comes before the buttons (F38)
-    assert channel.texts.index("Ready to send it to Jawahar, waiting for your OK.") < channel.texts.index(
-        prompt.text)
+    # track 1 T1.1: the card is the only prompt; the model's "waiting for your OK" prose is not sent
+    assert "Ready to send it to Jawahar, waiting for your OK." not in channel.texts
     ap = await approvals.get(approval_id)
     assert ap.status == ApprovalStatus.PENDING and ap.tool == "mail_send"
     task = await tasks.get(ap.task_id)

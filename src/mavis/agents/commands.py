@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import difflib
 import re
 
 from mavis.domain.events import Event
 from mavis.domain.messages import Role
 from mavis.domain.policy import Capability
+from mavis.domain.terms import terms
 from mavis.tools.integrations.actions import (
     DISPLAY_NAMES,
     GOOGLE_ANCHOR,
@@ -26,6 +28,75 @@ _KEYWORDS: tuple[tuple[re.Pattern[str], Capability], ...] = (
     (re.compile(r"\bslack\b", re.I), Capability.SLACK),
     (re.compile(r"\bnotion\b", re.I), Capability.NOTION),
 )
+
+
+KNOWN_COMMANDS = ("start", *COMMANDS)  # what the bot answers to; /start is Telegram's own
+# Words a model uses for "connect" that are not commands of ours.
+_CONNECT_SYNONYMS = frozenset({"link", "relink", "reconnect", "auth", "authorize", "authorise", "login",
+                               "signin", "integrate", "integrations"})
+_SLASH = re.compile(r"(?<![\w/:.@\\])/([A-Za-z][A-Za-z_-]*)(?:([^\S\n]+)([A-Za-z][\w-]*))?")
+
+
+def connect_word(capability: Capability) -> str:
+    """The word /connect takes for a capability: what capability_from_text reads back as it."""
+    if is_google(capability) and workspace_enabled():
+        return "google"
+    return "calendar" if capability is Capability.CALENDAR else capability.value
+
+
+def _service(word: str) -> Capability | None:
+    return capability_from_text(word) if word and word.lower() not in LEGACY_ALIASES else None
+
+
+def _command_of(name: str) -> tuple[str, str] | None:
+    """(real command, service word glued to it) for a slash word that is NOT one of ours but plainly
+    means one, or None. A known command is never passed here: it is left exactly as written."""
+    low = name.lower()
+    head, sep, tail = re.split(r"([_-])", low, maxsplit=1) if re.search(r"[_-]", low) else (low, "", "")
+    # Telegram-style /connect_google: the part after "_" is the argument, kept even when it is not a
+    # service here (/connect google then opens the menu); after "-" only a service splits (/connect-four
+    # is not ours)
+    if head in KNOWN_COMMANDS and tail and (sep == "_" or _service(tail) is not None):
+        return head, tail
+    for cmd in ("disconnect", "connect"):  # glued service: /connectgmail
+        if low.startswith(cmd) and _service(low[len(cmd):]) is not None:
+            return cmd, low[len(cmd):]
+    close = difflib.get_close_matches(low, KNOWN_COMMANDS, n=1, cutoff=0.8)  # /connection, /conect
+    if close:
+        return close[0], ""
+    return ("connect", "") if low in _CONNECT_SYNONYMS else None
+
+
+# Code spans, fenced blocks and verbatim spans are shown as written: commands inside them are never touched.
+_KEEP_AS_IS = re.compile("```.*?(?:```|$)|`[^`\n]+`|\x0e.*?(?:\x0f|$)", re.DOTALL)
+
+
+def canonical_commands(text: str) -> str:
+    """Slash commands in a reply are real ones (track 1 T1.4, hotfix4 H6). Only a slash token that is not
+    a command of ours but plainly means one is rewritten, and only that token: /connect_google ->
+    /connect google, /connectgmail -> /connect gmail, /connection -> /connections, /link -> /connect.
+    Known commands, their arguments, everything after the token, code and verbatim spans stay as
+    written; slash words not near any command ("and/or", a path) are left alone."""
+
+    def fix(m: re.Match[str]) -> str:
+        if m.group(1).lower() in KNOWN_COMMANDS:
+            return m.group(0)
+        found = _command_of(m.group(1))
+        if found is None:
+            return m.group(0)
+        cmd, glued = found
+        if (cap := _service(glued)) is not None:
+            glued = connect_word(cap)
+        arg = f" {glued}" if glued else ""
+        return f"/{cmd}{arg}{m.group(2) or ''}{m.group(3) or ''}"
+
+    out, last = [], 0
+    for held in _KEEP_AS_IS.finditer(text or ""):
+        out.append(_SLASH.sub(fix, text[last:held.start()]))
+        out.append(held.group(0))
+        last = held.end()
+    out.append(_SLASH.sub(fix, (text or "")[last:]))
+    return "".join(out)
 
 
 def parse_command(text: str) -> tuple[str, list[str]] | None:
@@ -56,6 +127,23 @@ def capability_from_text(text: str) -> Capability | None:
         if pattern.search(text or ""):
             return capability
     return None
+
+
+# The connect tool's own vocabulary (registry-style term overlap, domain.terms): asking to link something.
+_CONNECT_VERBS = terms("connect reconnect link relink unlink authorize authorise integrate")
+_CONNECT_OBJECTS = terms("account connection integration")
+
+
+def wants_connect(text: str) -> bool:
+    """The message asks to link an account: a connect verb AND a service it names (or "account").
+
+    connect_account sends the user a link by itself, so it is offered to a chat turn only then (track 1
+    T1.4); a missing link found while acting goes through ConnectionRequired instead. "Amazon links"
+    has the verb's word but names no service, so it is not a connect request."""
+    words = terms(text or "")
+    if not words & _CONNECT_VERBS:
+        return False
+    return capability_from_text(text) is not None or bool(words & _CONNECT_OBJECTS)
 
 
 def _flow(flow: ConnectFlow | None) -> ConnectFlow:

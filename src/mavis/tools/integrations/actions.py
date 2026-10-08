@@ -132,7 +132,10 @@ class CalendarSlotsArgs(LocalTimes):
 class CalendarCreateArgs(LocalTimes):
     summary: str
     start: datetime = Field(description=wall_clock("Start time"))
-    duration_minutes: int = Field(default=30, ge=5, le=1440)
+    # Only a start given: the configured default length (hotfix4 H6), never a question about the length.
+    duration_minutes: int = Field(
+        default_factory=lambda: get_settings().default_event_minutes, ge=5, le=1440,
+        description="Length in minutes; leave it out when they gave only a start (the default is used)")
     attendees: list[Email] = Field(
         default_factory=list, description="Guest emails; adding guests sends invites"
     )

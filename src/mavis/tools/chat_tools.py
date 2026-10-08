@@ -18,7 +18,7 @@ from mavis.domain.policy import RiskClass
 from mavis.domain.results import ToolOutput
 from mavis.domain.tasks import TaskOrigin
 from mavis.store.repo import messages, tasks
-from mavis.tools.registry import MavisTool, TaintPolicy, current_run, current_task_id
+from mavis.tools.registry import MavisTool, TaintPolicy, current_run, current_task_id, self_only_tainted
 
 
 @dataclass
@@ -29,10 +29,21 @@ class TurnInfo:
 
 current_turn: ContextVar[TurnInfo | None] = ContextVar("current_turn", default=None)
 
-# (user_text, model_note): an approved start_task shows the user only the first part (hotfix4 H3).
-START_TASK_USER = "Started background task #{id}."
+# (user_text, model_note): an approved start_task shows the user only the first part (hotfix4 H3). The
+# user part is a short natural ack rendered from the task itself (track 1 T1.1), never an internal id.
+START_TASK_USER = "On it: {goal}. I'll send it over when it's ready."
 START_TASK_NOTE = "Tell the user you're on it and will report back."
-TASK_EXISTS_USER = "Task #{id} is already working on this, so I didn't start another."
+TASK_EXISTS_USER = "I'm already working on that one, so I didn't start another."
+ACK_GOAL_CHARS = 140
+
+
+def task_ack(goal: str) -> str:
+    """The receipt for a started task, from its goal: one line, clipped at a word, no trailing stop."""
+    text = " ".join((goal or "").split()).rstrip(" .!?;:,")
+    if len(text) > ACK_GOAL_CHARS:
+        text = text[:ACK_GOAL_CHARS].rsplit(" ", 1)[0].rstrip(" .!?;:,")
+    text = text[:1].lower() + text[1:] if text[:2].istitle() or text[:2].islower() else text
+    return START_TASK_USER.format(goal=text or "that")
 TASK_EXISTS_NOTE = "Tell the user it's already in progress and you'll report back."
 CONNECT_RESULT = "Sent them the connect link and buttons. Don't repeat the link."
 
@@ -85,16 +96,19 @@ async def start_task(user_id: int, args: StartTaskArgs) -> ToolOutput:
         ref = f"turn:{turn.event_id}:start:{turn.starts}"
         turn.starts += 1
     if (dup := await find_duplicate(user_id, args.goal, ref)) is not None:
-        return ToolOutput(TASK_EXISTS_USER.format(id=dup), TASK_EXISTS_NOTE)
-    tainted = _tainted() or await _approved_from_tainted_task()
-    # The approval preview shows only the goal, so after third-party content the unseen `context`
-    # (free text the model chose) is dropped rather than smuggled into the task.
-    context = "" if tainted else args.context
+        return ToolOutput(TASK_EXISTS_USER, f"Task #{dup} already runs it. {TASK_EXISTS_NOTE}")
+    approved_tainted = await _approved_from_tainted_task()
+    # The task is tainted whenever third-party text was anywhere in the prompt (the replayed window too),
+    # even when it started without a card because the turn itself was clean (registry._gate_tainted).
+    tainted = _tainted() or approved_tainted
+    # The approval preview shows only the goal, so after third-party content in this turn the unseen
+    # `context` (free text the model chose) is dropped rather than smuggled into the task.
+    context = "" if (self_only_tainted() or approved_tainted) else args.context
     [task_id] = await dispatch_task_requests(
         user_id, [TaskRequest(goal=args.goal, context=context)], TaskOrigin.USER, tainted=tainted,
         source_ref=ref,
     )
-    return ToolOutput(START_TASK_USER.format(id=task_id), START_TASK_NOTE)
+    return ToolOutput(task_ack(args.goal), f"Task #{task_id} started. {START_TASK_NOTE}")
 
 
 async def connect_account(user_id: int, args: ConnectArgs) -> str:
@@ -120,7 +134,8 @@ TOOLS = [
     MavisTool("start_task", "Start a background task for multi-step work that takes more than a few "
               "seconds: research, comparisons, plans, drafting documents. You report back when it is done.",
               StartTaskArgs, RiskClass.WRITE_SELF, start_task, _CONV, priority=80,
-              preview=lambda a: f"Start a background task: {a.goal}", on_taint=TaintPolicy.APPROVE),
+              preview=lambda a: f"Start a background task: {a.goal}", on_taint=TaintPolicy.APPROVE,
+              provenance=("goal",)),
     MavisTool("connect_account", "Send the user a link to connect an account (Gmail, Google Calendar, "
               "Slack, Notion) when they ask to connect one.",
               ConnectArgs, RiskClass.WRITE_SELF, connect_account, _CONV, priority=60),

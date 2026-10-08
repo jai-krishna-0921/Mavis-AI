@@ -9,11 +9,13 @@ calls tools from a bounded per-turn set (`registry.select`, at most CHAT_TOOL_LI
   These are queued, never run here: after the reply goes out, queued approvals are attached to an
   APPROVAL task whose approval gate sends the Approve / Edit / Cancel prompt (Phase 4 Task 9).
 
-Taint: once the model has read untrusted tool output, or when the previous reply it sees was written
-from such output, trusted writes downgrade (remember is kept as unverified, wake_me / track_loop /
-cancel_task queue for approval), standing rules stop auto-approving, a started task is tainted, and
-the turn learns at untrusted trust. web_extract is never offered in chat: a planted email must not be
-able to send data out through a URL.
+Taint: once the model has read untrusted tool output, or when a replayed reply was written from such
+output, standing rules stop auto-approving outward actions, a started task is tainted, and the turn
+learns at untrusted trust. Self-only writes (remember, wake_me, track_loop, start_task, cancel_task...)
+are judged by what can steer THIS turn only: its own untrusted reads, hook context and the reply just
+before the user's message (track 1 T1.1). Then remember is kept as unverified and the others queue for
+approval, unless their wording comes from the user's own message this turn (domain.terms). web_extract
+is never offered in chat: a planted email must not be able to send data out through a URL.
 
 A text reply to an approval prompt ("ok", "send it", "cancel", "make it shorter") is a pre-check before
 the agent: it only applies when the prompt is among the last 2 assistant messages (recency gate).
@@ -22,15 +24,16 @@ the agent: it only applies when the prompt is among the last 2 assistant message
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from contextvars import ContextVar
 from datetime import timedelta
 
 import structlog
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
-from mavis.agents import clarify, commands, persona
-from mavis.agents.react import react_loop
+from mavis.agents import claims, clarify, commands, persona
+from mavis.agents.react import ReactResult, _text_of, react_loop
 from mavis.agents.task_dispatch import enqueue_run
 from mavis.agents.turn_support import (
     HISTORY_LIMIT,
@@ -51,7 +54,8 @@ from mavis.agents.turn_support import (
 )
 from mavis.channels import presence
 from mavis.channels.formatting import strip_verbatim
-from mavis.domain.errors import ConnectionRequired
+from mavis.config import get_settings
+from mavis.domain.errors import ConnectionRequired, LLMError
 from mavis.domain.events import Event
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.tasks import ApprovalStatus, TaskKind, TaskOrigin
@@ -63,6 +67,7 @@ from mavis.store.db import Session, utcnow
 from mavis.store.models import Message, PendingApproval
 from mavis.store.repo import approvals, messages, outbox, tasks, users
 from mavis.tools.chat_tools import TurnInfo, current_turn
+from mavis.tools.registry import CARD_RESULT_PREFIXES
 
 log = structlog.get_logger(__name__)
 
@@ -71,8 +76,17 @@ current_route: ContextVar[str | None] = ContextVar("current_route", default=None
 
 CHAT_TOOL_LIMIT = 10
 # each only when available; track_loop and wake_me carry agreements and reminders (LEARN does not)
-CHAT_ALWAYS = ("start_task", "connect_account", "pending", "web_search", "track_loop", "wake_me")
+CHAT_ALWAYS = ("start_task", "pending", "web_search", "track_loop", "wake_me")
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
+# Sends the user a link by itself: offered only when they ask to connect something (commands.wants_connect).
+CONNECT_TOOL = "connect_account"
+# Tool focus (track 1 T1.4): the tools of approvals queued, executed or failed within the last FOCUS_TURNS
+# user turns stay offered whatever the new message's words ("hi", then "do it without the guest"), and
+# a running background task keeps the tools that manage it.
+FOCUS_TURNS = 3
+FOCUS_APPROVAL_STATUSES = (ApprovalStatus.PENDING, ApprovalStatus.AWAITING_EDIT, ApprovalStatus.RESOLVING,
+                           ApprovalStatus.EXECUTED, ApprovalStatus.FAILED)
+TASK_FOCUS_TOOLS = ("list_tasks", "cancel_task")
 # Offered together: mail_search returns short previews only, so without mail_read a question about an
 # email (one a brief mentioned, say) cannot be answered from its text; mail_read needs search's ids.
 CHAT_COMPANIONS = {"mail_search": "mail_read", "mail_read": "mail_search"}
@@ -100,8 +114,11 @@ TOOL_RULES = (
     "broader query (the sender's name or domain, one or two key nouns) before saying you couldn't find "
     "it, and then say you couldn't find it, not that it doesn't exist.\n"
     "- Sending or replying to email, inviting guests, forgetting things and standing rules always wait "
-    "for their OK. When a tool answers QUEUED_FOR_APPROVAL, tell them it's ready and waiting for their "
-    "OK (they get buttons to approve, edit or cancel). Never say it was sent or done.\n"
+    "for their OK. When a tool answers QUEUED_FOR_APPROVAL, a card with the action and its buttons goes "
+    "to them by itself: don't repeat it or ask them to approve or tap anything, and never say it was sent "
+    "or done. Only a tool call makes a card; never promise one you didn't queue.\n"
+    "- Saying you'll do something is not doing it: call its tool in this same turn, or offer and ask "
+    "instead of announcing it. Never say something is done, set or waiting unless a tool said so.\n"
     "- Reminders: wake_me at the exact time they asked for.\n"
     "- When they agree to something you suggested (\"yes\", \"do that\", \"the second one\") or ask you "
     "to remember or remind them of something, call track_loop or wake_me in this same turn with the "
@@ -119,25 +136,59 @@ TOOLS_GUIDE = TOOL_RULES  # name kept for callers of the chat-tools slice
 # Added only when web_search is offered. Web results are untrusted (they taint the turn), so search only
 # when the question needs the outside world, not for everything.
 WEB_RULE = (
-    "- Use web_search only when they ask about a specific named real-world person, organisation, product, "
-    "price, event or news, or ask you to look something up; then answer from what it finds. Anything the "
-    "user told you needs no search. Otherwise answer normally. If the search finds nothing clear, say "
-    "you're not sure. Never invent a biography."
+    "- Use web_search when they ask about a specific named real-world person, organisation, product, place, "
+    "price, event or news, about anything live or current (prices, scores, weather, opening hours, "
+    "what's new), when they want links, product options or where to buy something, or when they ask you "
+    "to look something up; then answer from what it finds, with the links it found when they want links. "
+    "Anything the user told you needs no search. Otherwise answer normally. If the search finds nothing "
+    "clear, say you're not sure. Never invent a biography, and never say you can't browse or look things "
+    "up: you can, with web_search."
 )
 
 
-def chat_tools(user_id: int, query: str = "") -> list[BaseTool]:
-    """The tools a chat turn may use (at most CHAT_TOOL_LIMIT). Never raises: no tools = plain reply."""
+# Added only when a tool that creates events is offered (hotfix4 H6).
+EVENT_TOOLS = frozenset({"calendar_create_event"})
+DURATION_RULE = (
+    "- Creating an event or a block when they gave only a start time: don't ask how long. Leave the length "
+    "out, so it gets the default of {minutes} minutes, and mention that length in a few words; they can "
+    "change it."
+)
+
+
+def chat_tools(user_id: int, query: str = "", *, focus: tuple[str, ...] = (),
+               connect: bool = False) -> list[BaseTool]:
+    """The tools a chat turn may use (at most CHAT_TOOL_LIMIT, plus any `focus` tools, which are always
+    offered). connect_account only when `connect` (the user asked to link an account). Never raises: no
+    tools = plain reply."""
     try:
         from mavis.tools.registry import get_registry
 
         registry = get_registry()
+        always = tuple(dict.fromkeys((*CHAT_ALWAYS, *((CONNECT_TOOL,) if connect else ()), *focus)))
+        exclude = CHAT_EXCLUDED if connect else CHAT_EXCLUDED | {CONNECT_TOOL}
         tools = registry.select("conversation", user_id, query=query, limit=CHAT_TOOL_LIMIT,
-                                always=CHAT_ALWAYS, exclude=CHAT_EXCLUDED)
+                                always=always, exclude=exclude)
         return _with_companions(registry, user_id, tools)
     except Exception:  # noqa: BLE001 - tools are an extra; the turn must still answer
         log.warning("simple_turn.tools_unavailable", exc_info=True)
         return []
+
+
+async def focus_tools(user_id: int, history: list[Message]) -> tuple[str, ...]:
+    """Tools the conversation is about, whatever the new message says: those of approvals queued,
+    executed or failed since the FOCUS_TURNS-th user message before this one, and the task-management
+    tools while a background task runs. Never raises (focus is an extra)."""
+    try:
+        sent = [m.created_at for m in history if m.role == Role.USER.value]
+        prior = sent[:-1][-FOCUS_TURNS:]  # the newest user message is the one being answered
+        since = prior[0] if prior else (sent[-1] if sent else utcnow())
+        names = [a.tool for a in await approvals.touched_since(user_id, since, FOCUS_APPROVAL_STATUSES)]
+        if any(t.kind == TaskKind.TASK for t in await tasks.active_for_user(user_id)):
+            names += TASK_FOCUS_TOOLS
+        return tuple(dict.fromkeys(names))
+    except Exception:  # noqa: BLE001
+        log.warning("simple_turn.focus_failed", exc_info=True)
+        return ()
 
 
 def _with_companions(registry, user_id: int, tools: list[BaseTool]) -> list[BaseTool]:
@@ -167,14 +218,11 @@ async def handle_connect(user_id: int, text: str) -> str | None:
 
 
 def _connect_hint(exc: ConnectionRequired) -> str:
-    from mavis.tools.integrations.actions import display_name, is_google
+    from mavis.tools.integrations.actions import display_name
 
-    name = display_name(exc.capability)
-    if is_google(exc.capability):
-        word = "google"
-    else:
-        word = "calendar" if exc.capability.value == "googlecalendar" else exc.capability.value
-    return f"I need your {name} linked for that. Send /connect {word} and I'll take it from there."
+    word = commands.connect_word(exc.capability)
+    return (f"I need your {display_name(exc.capability)} linked for that. Send /connect {word} and I'll "
+            "take it from there.")
 
 
 async def _connect_prompt(event: Event, user_id: int, exc: ConnectionRequired) -> list[str]:
@@ -229,6 +277,71 @@ def _read_untrusted(tools_called: list[str]) -> bool:
         return any(registry.get(name).untrusted_output for name in tools_called)
     except KeyError:
         return True  # unknown tool: assume the worst
+
+
+def _is_card(message: ToolMessage) -> bool:
+    return _text_of(message.content).startswith(CARD_RESULT_PREFIXES)
+
+
+def card_only(result: ReactResult) -> bool:
+    """Every tool result of the turn is an approval card (queued, or an updated card shown again): the
+    card says all there is to say, so the model's prose would only repeat it."""
+    outputs = [m for m in result.messages if isinstance(m, ToolMessage)]
+    return bool(outputs) and all(_is_card(m) for m in outputs)
+
+
+def _card_shown(result: ReactResult) -> bool:
+    return bool(result.queued_approvals) or any(
+        isinstance(m, ToolMessage) and _is_card(m) for m in result.messages)
+
+
+CLAIM_DEADLINE_S = CHAT_DEADLINE_S / 2  # the re-prompt's own budget: it follows a whole turn
+
+
+async def bind_claims(result: ReactResult, tools: list[BaseTool], text: str, user_id: int, *,
+                      self_tainted: bool) -> ReactResult:
+    """Action claims are bound to what the turn did (track 1 T1.4, agents.claims).
+
+    A reply that talks about acting while no action tool ran, or points at an approval card that does not
+    exist, is re-prompted once with the same tools ("call the tool or say you won't"). The answer to the
+    re-prompt is sent as the model wrote it: code never deletes sentences from a reply."""
+    reply = strip_stamps(result.text or "").strip()
+    if not tools or not reply:
+        return result
+    from mavis.tools.registry import get_registry
+
+    registry = get_registry()
+
+    def risk_of(name: str):
+        tool = registry.find(name)
+        return tool.risk if tool is not None else None
+
+    waiting = tuple(dict.fromkeys(a.tool for a in await approvals.open_for_user(user_id)))
+    found = claims.check(reply, text, tools, tools_called=result.tools_called,
+                         card_shown=_card_shown(result), waiting_tools=waiting, risk_of=risk_of)
+    if not found.reprompt:
+        return result
+    log.info("simple_turn.claim_reprompt", ui_claim=found.ui_claim, tools=found.tools)
+    try:
+        again = await react_loop(
+            tools, [*result.messages, found.note()], CHAT_MAX_STEPS, tier=llm.Tier.FAST, temperature=0.6,
+            name="simple_turn_claims", tainted=result.tainted,
+            self_tainted=self_tainted or result.read_untrusted, user_words=text, wrap_up=True,
+            deadline_s=CLAIM_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
+        )
+    except LLMError:
+        log.warning("simple_turn.claim_reprompt_failed", exc_info=True)
+        again = None
+    # replace(): fields this merge does not know about come from the final answer
+    merged = result if again is None else dataclasses.replace(
+        again, text=again.text or result.text, steps=result.steps + again.steps,
+        tools_called=[*result.tools_called, *again.tools_called],
+        queued_approvals=[*result.queued_approvals, *again.queued_approvals],
+        unqueued_approvals=[*result.unqueued_approvals, *again.unqueued_approvals],
+        tainted=result.tainted or again.tainted, read_untrusted=result.read_untrusted or again.read_untrusted,
+        wrapped_up=again.wrapped_up,
+    )
+    return merged
 
 
 def _route_for(tools_called: list[str]) -> str:
@@ -384,6 +497,9 @@ async def run_turn(event: Event) -> None:
         # was written from it, or hook context (the inbox digest) was added. The react loop then applies
         # the taint rules (outward tools and start_task need approval, a started task is tainted).
         carried_taint = window_tainted(history) or hooked
+        # Self-only actions (start_task, wake_me, track_loop, ...) are judged by what can steer THIS turn:
+        # the reply just before the user's message and the hook context, plus this turn's own reads.
+        self_taint = previous_tainted(history) or hooked
         # LEARN sees only the user's text and the previous reply, so its trust keeps the per-turn rule.
         learn_taint = previous_tainted(history) or hooked
         now = utcnow()
@@ -394,11 +510,15 @@ async def run_turn(event: Event) -> None:
             ask_name=persona.should_ask_name(name, history, now, user.timezone),
             prior_turns=max(len(recent) - 1, 0),  # the current message is already in history
         )
-        tools = chat_tools(user.id, query=f"{text}\n{previous or ''}")
+        tools = chat_tools(user.id, query=f"{text}\n{previous or ''}",
+                           focus=await focus_tools(user.id, history), connect=commands.wants_connect(text))
         if tools:
             system = f"{system}\n\n{TOOL_RULES}"
             if any(t.name == "web_search" for t in tools):
                 system = f"{system}\n{WEB_RULE}"
+            if any(t.name in EVENT_TOOLS for t in tools):
+                minutes = get_settings().default_event_minutes
+                system = f"{system}\n{DURATION_RULE.format(minutes=minutes)}"
         prompt: list[BaseMessage] = [SystemMessage(system)]
         prompt += to_langchain(history, now, user.timezone)
 
@@ -407,9 +527,10 @@ async def run_turn(event: Event) -> None:
         try:
             result = await react_loop(
                 tools, prompt, CHAT_MAX_STEPS, tier=llm.Tier.FAST, temperature=0.6, name="simple_turn",
-                tainted=carried_taint, wrap_up=True, deadline_s=CHAT_DEADLINE_S,
-                tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
+                tainted=carried_taint, self_tainted=self_taint, user_words=text, wrap_up=True,
+                deadline_s=CHAT_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
             )
+            result = await bind_claims(result, tools, text, user.id, self_tainted=self_taint)
         except ConnectionRequired as exc:
             result = None
             connect_texts = await _connect_prompt(event, user.id, exc)
@@ -433,7 +554,12 @@ async def run_turn(event: Event) -> None:
                      queued=result.queued_approvals)
         # replayed messages carry stamps (T1); one echoed at the start of a line is not content
         reply = strip_stamps(result.text or "").strip() or WRAP_UP_FALLBACK
+        reply = commands.canonical_commands(reply)  # /connect_google -> the command that exists
         bubbles = persona.split_bubbles(reply) or [reply]
+        if card_only(result):
+            # The card (preview + buttons, rendered by code) is the only prompt: no prose bubble repeats it.
+            log.info("simple_turn.card_only", queued=result.queued_approvals)
+            bubbles = []
 
         async with Session() as s:
             for i, bubble in enumerate(bubbles):
@@ -442,11 +568,13 @@ async def run_turn(event: Event) -> None:
             await s.commit()
     # This turn's own untrusted input marks the reply: a tool read, or the digest it was shown.
     read_untrusted = _read_untrusted(result.tools_called) or result.read_untrusted or hooked
-    await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles),
-                       event_id=reply_event_id(event.id, read_untrusted))
+    if bubbles:
+        await messages.log(user.id, Role.ASSISTANT, "\n\n".join(bubbles),
+                           event_id=reply_event_id(event.id, read_untrusted))
     await enqueue_learn(user.id, event, text, previous, clarified_request(history),
                         tainted=read_untrusted or learn_taint)
     await attach_queued_approvals(user.id, text, tainted=result.tainted, turn_ref=event.id)
-    await initiative_hook("quiet.after_assistant_message",
-                          lambda i: i.quiet.after_assistant_message(user.id, bubbles[-1]))
+    if bubbles:
+        await initiative_hook("quiet.after_assistant_message",
+                              lambda i: i.quiet.after_assistant_message(user.id, bubbles[-1]))
     current_route.set(_route_for(result.tools_called))
