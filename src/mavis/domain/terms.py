@@ -70,3 +70,56 @@ def grounded_in(text: str, user_words: str) -> bool:
     if any(ident not in said for ident in identifiers(text)):
         return False
     return not foreign_terms(text, user_words)
+
+
+def _stem(word: str) -> str:
+    for suffix in _SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            word = word[: -len(suffix)]
+            break
+    return word[:-1] if word.endswith("e") and len(word) > 3 else word
+
+
+def _sequence(text: str) -> list[str]:
+    """Content stems in reading order (stopwords dropped), the unit of copy detection."""
+    return [_stem(w) for w in _WORD_RE.findall(text.lower()) if w not in STOPWORDS]
+
+
+def copied_from(text: str, user_words: str, sources: list[str]) -> bool:
+    """Does `text` repeat a phrase of an untrusted source that the user did not write?
+
+    A phrase is two neighbouring content words (reading order, stopwords dropped) at least one of which
+    the user did not write. A single shared word is not copying (every web page says "compare"); a copied
+    pair ("wire money", "forward invoices") is the shape of planted text carried into an argument."""
+    theirs = terms(user_words)
+    mine = _sequence(text)
+    pairs = {(a, b) for a, b in zip(mine, mine[1:], strict=False)
+             if not (_same(a, theirs) and _same(b, theirs))}
+    if not pairs:
+        return False
+    for source in sources:
+        seq = _sequence(source)
+        if pairs & set(zip(seq, seq[1:], strict=False)):
+            return True
+    return False
+
+
+def from_user_not_sources(text: str, user_words: str, sources: list[str]) -> bool:
+    """`text` is the user's request even though it is not a subset of their words (provenance of the
+    arguments, not of the whole prompt).
+
+    The model words a request naturally ("research and compare X options, fees, reviews"), so extra words
+    are fine when they were not copied from untrusted text (`sources`: the tainted replies and tool reads
+    that reached the prompt). It is the user's when at least half of its content terms are theirs, every
+    identifier and number in it is one they wrote, and it repeats no phrase of a source that they did not
+    write. Content copied from an untrusted source stays untrusted."""
+    mine = terms(text)
+    if not mine or not user_words.strip():
+        return False
+    said = user_words.lower()
+    if any(ident not in said for ident in identifiers(text)):
+        return False
+    foreign = foreign_terms(text, user_words)
+    if 2 * len(foreign) > len(mine) or any(t.isdigit() for t in foreign):
+        return False  # mostly the model's own words, not a request of theirs
+    return not copied_from(text, user_words, sources)

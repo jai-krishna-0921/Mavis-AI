@@ -48,6 +48,7 @@ from mavis.agents.turn_support import (
     previous_reply,
     previous_tainted,
     reply_event_id,
+    tainted_texts,
     to_langchain,
     user_text,
     window_tainted,
@@ -299,7 +300,7 @@ CLAIM_DEADLINE_S = CHAT_DEADLINE_S / 2  # the re-prompt's own budget: it follows
 
 
 async def bind_claims(result: ReactResult, tools: list[BaseTool], text: str, user_id: int, *,
-                      self_tainted: bool) -> ReactResult:
+                      self_tainted: bool, sources: list[str] | None = None) -> ReactResult:
     """Action claims are bound to what the turn did (track 1 T1.4, agents.claims).
 
     A reply that talks about acting while no action tool ran, or points at an approval card that does not
@@ -327,6 +328,7 @@ async def bind_claims(result: ReactResult, tools: list[BaseTool], text: str, use
             tools, [*result.messages, found.note()], CHAT_MAX_STEPS, tier=llm.Tier.FAST, temperature=0.6,
             name="simple_turn_claims", tainted=result.tainted,
             self_tainted=self_tainted or result.read_untrusted, user_words=text, wrap_up=True,
+            untrusted_sources=None if result.read_untrusted else sources,
             deadline_s=CLAIM_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
         )
     except LLMError:
@@ -521,6 +523,9 @@ async def run_turn(event: Event) -> None:
         self_taint = previous_tainted(history) or hooked
         # LEARN sees only the user's text and the previous reply, so its trust keeps the per-turn rule.
         learn_taint = previous_tainted(history) or hooked
+        # What an argument must not copy: the tainted replies in the window. Hook context (the inbox digest)
+        # has no text here, so then only an argument made of the user's own words is theirs.
+        sources = None if hooked else tainted_texts(history)
         now = utcnow()
         name = user.name or card_name
         recent = persona.recent_messages(history, now)
@@ -556,9 +561,11 @@ async def run_turn(event: Event) -> None:
             result = await react_loop(
                 tools, prompt, CHAT_MAX_STEPS, tier=llm.Tier.FAST, temperature=0.6, name="simple_turn",
                 tainted=carried_taint, self_tainted=self_taint, user_words=text, wrap_up=True,
+                untrusted_sources=sources,
                 deadline_s=CHAT_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
             )
-            result = await bind_claims(result, tools, text, user.id, self_tainted=self_taint)
+            result = await bind_claims(result, tools, text, user.id, self_tainted=self_taint,
+                                        sources=sources)
         except ConnectionRequired as exc:
             result = None
             connect_texts = await _connect_prompt(event, user.id, exc)
