@@ -153,7 +153,8 @@ async def test_in_order_facts_supersede_at_the_source_time(graph):
 
 
 async def test_retrying_the_same_older_fact_twice_is_idempotent(graph):
-    await graph.upsert_relation(1, rel("User", "LOCATED_IN", "Delhi", "Moved to Delhi."), at=T0 + timedelta(days=2))
+    await graph.upsert_relation(1, rel("User", "LOCATED_IN", "Delhi", "Moved to Delhi."),
+                                at=T0 + timedelta(days=2))
     for _ in range(2):
         await graph.upsert_relation(1, rel("User", "LOCATED_IN", "Pune", "Lives in Pune."), at=T0)
     assert len(await _rows("LOCATED_IN")) == 2 + 1 - 1  # Delhi current, Pune history, no repeat rows

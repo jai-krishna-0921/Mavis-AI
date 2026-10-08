@@ -159,8 +159,11 @@ MAX_ATTEMPTS = 6  # same-model attempts per call (timeouts / 429s), always bound
 #   * with several slots, best_effort never takes the LAST free slot (it keeps one for the chat's next
 #     call) and uses at most size // BEST_EFFORT_SHARE slots at once (min 1); otherwise it runs at once;
 #   * when it cannot start it QUEUES (lowest rank, bounded by the call deadline) instead of failing;
-#   * a best_effort waiter older than BEST_EFFORT_AGING_S may take the last free slot and ranks with
-#     background work, so sustained chat load delays it by a bounded time but never starves it;
+#   * a best_effort waiter older than BEST_EFFORT_AGING_S ranks with background work among the waiters; a
+#     timer re-checks queued waiters every BEST_EFFORT_TICK_S because "quiet" is about elapsed time, which
+#     no acquire/release announces. Under sustained load it waits (deadline-bounded) and the caller's
+#     durable job retries: LEARN is delayed, a reply never is (beyond a call already running when the
+#     reply arrives, which only happens when it arrives within a lull-started call);
 #   * with ONE slot (dev, small plans) there is nothing to share: it fails fast while any other work is
 #     queued or ran within INTERACTIVE_GRACE_S, and the caller's job layer retries it later.
 # A chat turn or a task makes several calls in a row with gaps between them (tool waits): the slot is held
@@ -168,6 +171,8 @@ MAX_ATTEMPTS = 6  # same-model attempts per call (timeouts / 429s), always bound
 INTERACTIVE_GRACE_S = 20.0  # single-slot only: how long after other work best_effort keeps off the slot
 BEST_EFFORT_SHARE = 3  # best_effort may use at most size // BEST_EFFORT_SHARE slots (min 1)
 BEST_EFFORT_AGING_S = 45.0
+BEST_EFFORT_QUIET_S = 5.0
+BEST_EFFORT_TICK_S = 1.0
 BACKGROUND_AGING_S = 30.0  # a background waiter this old ranks with interactive (no starvation)
 BACKGROUND_ACQUIRE_TIMEOUT_S = 600.0  # below BUS_CLAIM_IDLE_MS (15 min): never outlive a bus claim
 INTERACTIVE_DEADLINE_S = 45.0  # chain-wide budget (queue + attempts + 429 backoffs) for a FAST reply
@@ -200,6 +205,7 @@ class _Limiter:
         self._last_used = float("-inf")  # loop time a non-best_effort call last held a slot
         self._be_inflight = 0
         self._be_cap = max(1, self._size // BEST_EFFORT_SHARE)
+        self._tick: asyncio.TimerHandle | None = None
 
     def touch(self) -> None:
         """A non-best_effort call used a slot just now (with one slot, best_effort keeps off a while)."""
@@ -221,8 +227,12 @@ class _Limiter:
             return False
         if self._size == 1:
             return not self._work_active(now)
-        aged = since is not None and now - since >= BEST_EFFORT_AGING_S
-        return self._free >= 2 or aged
+        quiet = now - self._last_used >= BEST_EFFORT_QUIET_S and not self._higher_waiting()
+        # Only in a true lull: nothing else in flight, none started or ended lately, a spare slot besides.
+        # A running call is never preempted (the server keeps working on an abandoned request), so a
+        # best_effort call that starts just before a reply is needed would make it wait for the rest of
+        # its run. `since` (how long this caller has waited) only ranks it (see _effective_rank).
+        return self._free >= 2 and others == 0 and quiet
 
     def _take(self, rank: int, now: float) -> None:
         self._free -= 1
@@ -251,6 +261,8 @@ class _Limiter:
         waiter = _Waiter(loop.create_future(), rank, now)
         self._waiters.append(waiter)
         self._dispatch()
+        if rank == 2:
+            self._arm_tick()
         try:
             await asyncio.wait_for(waiter.fut, max(wait_s, 0.0))
         except BaseException as exc:
@@ -261,6 +273,18 @@ class _Limiter:
             if isinstance(exc, TimeoutError):
                 raise LLMError("timed out waiting for an LLM slot") from exc
             raise
+
+    def _arm_tick(self) -> None:
+        """Re-dispatch on a timer while best_effort callers wait: ageing and the quiet period are about
+        elapsed time, which no acquire/release event announces."""
+        if self._tick is not None or not any(w.rank == 2 and not w.fut.done() for w in self._waiters):
+            return
+        self._tick = asyncio.get_running_loop().call_later(BEST_EFFORT_TICK_S, self._on_tick)
+
+    def _on_tick(self) -> None:
+        self._tick = None
+        self._dispatch()
+        self._arm_tick()
 
     def release(self, best_effort: bool = False) -> None:
         self._free += 1

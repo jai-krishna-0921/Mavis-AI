@@ -803,75 +803,60 @@ def test_reasoning_effort_only_for_gpt_oss_models(settings) -> None:
     assert models.chat_model(Tier.FAST).reasoning_effort is None
 
 
-# --- several slots: best_effort queues for spare capacity, never takes the last free slot, never starves ----
+# --- several slots: best_effort queues for a lull, never takes the last free slot, never delays a reply ----
+
+
+@pytest.fixture
+def quiet_zero(monkeypatch):
+    monkeypatch.setattr(models, "BEST_EFFORT_QUIET_S", 0.0)
 
 
 @pytest.mark.parametrize("size", [2, 3, 5])
-async def test_best_effort_runs_at_once_right_after_chat_when_a_spare_slot_exists(monkeypatch, size) -> None:
-    """The grace window is a one-slot rule: with several slots a chat that just finished must not keep
-    LEARN out (live E2E: 13 extractions refused while 3 slots were mostly idle)."""
-    monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", 20.0)
+async def test_best_effort_runs_at_once_when_idle_even_right_after_chat_ended(monkeypatch, size) -> None:
+    """The grace window is a one-slot rule. With several slots LEARN starts after a short lull instead of
+    being refused (live E2E: 13 extractions refused while 3 slots were mostly idle)."""
+    monkeypatch.setattr(models, "BEST_EFFORT_QUIET_S", 0.03)
+    monkeypatch.setattr(models, "BEST_EFFORT_TICK_S", 0.01)
     lim = models._Limiter(size)
     await lim.acquire("interactive", 1)
-    lim.release()  # a chat call just ended: the grace window is open
-    await asyncio.wait_for(lim.acquire("best_effort", 1), 1)
+    lim.release()  # a chat call just ended
+    await asyncio.wait_for(lim.acquire("best_effort", 1), 1)  # queued for the lull, then runs; not refused
 
 
 @pytest.mark.parametrize("size", [2, 3, 5])
-async def test_best_effort_queues_instead_of_taking_the_last_free_slot(monkeypatch, size) -> None:
+async def test_best_effort_waits_while_a_chat_call_is_in_flight(quiet_zero, size) -> None:
     lim = models._Limiter(size)
-    for _ in range(size - 2):
-        await lim.acquire("interactive", 1)
-    await lim.acquire("interactive", 1)  # exactly one slot left
+    await lim.acquire("interactive", 1)  # one call running, spare slots exist
     be = asyncio.create_task(lim.acquire("best_effort", 5))
-    await asyncio.sleep(0.01)
-    assert not be.done()  # queued, not failed and not running
-    await asyncio.wait_for(lim.acquire("interactive", 1), 1)  # the chat still gets the last slot at once
+    await asyncio.sleep(0.05)
+    assert not be.done()  # a reply arriving meanwhile must not wait on it
     lim.release()
-    lim.release()  # two free now: the queued best_effort call starts
-    await asyncio.wait_for(be, 1)
+    await asyncio.wait_for(be, 1)  # the lull begins
 
 
-@pytest.mark.parametrize(("size", "second_runs"), [(3, False), (6, True)])
-async def test_best_effort_is_capped_to_a_share_of_the_slots(size, second_runs) -> None:
+@pytest.mark.parametrize("size", [2, 3, 5])
+async def test_best_effort_never_takes_the_last_free_slot(quiet_zero, size) -> None:
     lim = models._Limiter(size)
-    await lim.acquire("interactive", 1)  # someone else is running: the share applies
+    for _ in range(size - 1):
+        await lim.acquire("interactive", 1)  # exactly one slot left
+    be = asyncio.create_task(lim.acquire("best_effort", 5))
+    await asyncio.sleep(0.02)
+    assert not be.done()
+    await asyncio.wait_for(lim.acquire("interactive", 1), 1)  # the chat still gets the last slot at once
+    be.cancel()
+
+
+@pytest.mark.parametrize(("size", "second_runs"), [(2, False), (3, True), (6, True)])
+async def test_idle_best_effort_backlog_drains_on_every_slot_but_one(quiet_zero, size, second_runs) -> None:
+    lim = models._Limiter(size)
     await lim.acquire("best_effort", 1)
     second = asyncio.create_task(lim.acquire("best_effort", 5))
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0.02)
     assert second.done() is second_runs
     second.cancel()
 
 
-async def test_aged_best_effort_waiter_takes_the_last_free_slot(monkeypatch) -> None:
-    """Under constant chat load the last slot is the only one that ever frees: a waiter that has waited
-    BEST_EFFORT_AGING_S gets it, so LEARN is delayed by a bounded time, never starved."""
-    monkeypatch.setattr(models, "BEST_EFFORT_AGING_S", 0.05)
-    lim = models._Limiter(3)
-    for _ in range(3):
-        await lim.acquire("interactive", 1)
-    be = asyncio.create_task(lim.acquire("best_effort", 5))
-    await asyncio.sleep(0.01)
-    lim.release()  # one slot frees: the last one, and the waiter is still young
-    await asyncio.sleep(0.01)
-    assert not be.done()
-    await asyncio.sleep(0.06)
-    lim.release()  # free == 2 but also aged: either way it starts now
-    await asyncio.wait_for(be, 1)
-
-
-async def test_aged_best_effort_waiter_starts_on_the_last_slot_when_a_call_ends(monkeypatch) -> None:
-    monkeypatch.setattr(models, "BEST_EFFORT_AGING_S", 0.03)
-    lim = models._Limiter(3)
-    for _ in range(3):
-        await lim.acquire("interactive", 1)
-    be = asyncio.create_task(lim.acquire("best_effort", 5))
-    await asyncio.sleep(0.06)  # aged while everything was busy
-    lim.release()  # exactly one slot frees
-    await asyncio.wait_for(be, 1)
-
-
-async def test_best_effort_never_delays_a_waiting_interactive_call() -> None:
+async def test_waiting_best_effort_never_delays_a_chat_call(quiet_zero) -> None:
     lim = models._Limiter(3)
     for _ in range(3):
         await lim.acquire("interactive", 1)
@@ -882,3 +867,28 @@ async def test_best_effort_never_delays_a_waiting_interactive_call() -> None:
     await asyncio.wait_for(chat, 1)  # the freed slot goes to the chat
     assert not be.done()
     be.cancel()
+
+
+async def test_best_effort_starts_by_timer_when_the_lull_arrives_without_any_other_event(monkeypatch) -> None:
+    """No acquire/release happens after the quiet period elapses: the timer must notice it."""
+    monkeypatch.setattr(models, "BEST_EFFORT_QUIET_S", 0.08)
+    monkeypatch.setattr(models, "BEST_EFFORT_TICK_S", 0.02)
+    lim = models._Limiter(3)
+    await lim.acquire("interactive", 1)
+    lim.release()
+    lim.touch()
+    be = asyncio.create_task(lim.acquire("best_effort", 5))
+    await asyncio.sleep(0.02)
+    assert not be.done()
+    await asyncio.wait_for(be, 1)
+
+
+async def test_best_effort_timer_stops_when_nobody_waits(monkeypatch) -> None:
+    monkeypatch.setattr(models, "BEST_EFFORT_TICK_S", 0.01)
+    lim = models._Limiter(3)
+    await lim.acquire("interactive", 1)
+    be = asyncio.create_task(lim.acquire("best_effort", 5))
+    await asyncio.sleep(0.03)
+    be.cancel()
+    await asyncio.sleep(0.05)
+    assert lim._tick is None

@@ -73,7 +73,8 @@ def test_older_statement_does_not_overwrite_a_newer_scalar():
 
     t0 = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
     card = ProfileCard().apply([ProfileUpdate(field="name", value="Arjun")], at=t0 + timedelta(days=1))
-    late = card.apply([ProfileUpdate(field="name", value="Jai"), ProfileUpdate(field="tone", value="dry")], at=t0)
+    late = card.apply([ProfileUpdate(field="name", value="Jai"), ProfileUpdate(field="tone", value="dry")],
+                      at=t0)
     assert late.name == "Arjun" and late.tone == "dry"  # name stale, an unset field still takes the old value
     newer = late.apply([ProfileUpdate(field="name", value="Arjun K")], at=t0 + timedelta(days=2))
     assert newer.name == "Arjun K"

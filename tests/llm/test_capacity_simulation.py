@@ -28,8 +28,9 @@ def _sim(settings, monkeypatch) -> None:
     settings.llm_timeout_cooldown_s = s(45)
     monkeypatch.setattr(models, "INTERACTIVE_GRACE_S", s(20))
     monkeypatch.setattr(models, "BACKGROUND_AGING_S", s(30))
-    if hasattr(models, "BEST_EFFORT_AGING_S"):
-        monkeypatch.setattr(models, "BEST_EFFORT_AGING_S", s(60))
+    monkeypatch.setattr(models, "BEST_EFFORT_AGING_S", s(45))
+    monkeypatch.setattr(models, "BEST_EFFORT_QUIET_S", s(5))
+    monkeypatch.setattr(models, "BEST_EFFORT_TICK_S", s(1))
     models._limiters.clear()
     models._ollama.reset()
 
@@ -119,9 +120,10 @@ async def test_learn_completes_while_chat_is_busy_and_chat_latency_stays_bounded
     # LEARN does not wait for the chat to go quiet, and is never refused in a loop
     assert max(finished) < chat_done + s(90), "LEARN starved until the conversation ended"
     assert max(attempts) <= 2, f"LEARN refused repeatedly: {attempts}"
-    # chat latency protected: LEARN adds at most about one best_effort call of queueing at p95
-    assert p95(waits) <= p95(base_waits) + s(8)
-    assert max(waits) <= s(20)
+    # chat latency protected: background load adds (almost) nothing to a reply's wait for a slot
+    assert p95(waits) <= p95(base_waits) + s(1.5)
+    assert sum(waits) / len(waits) <= sum(base_waits) / len(base_waits) + s(0.5)
+    assert max(waits) <= max(base_waits) + s(3)
 
 
 async def test_heavier_load_learn_still_completes_in_bounded_time() -> None:
