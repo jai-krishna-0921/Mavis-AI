@@ -121,8 +121,8 @@ async def test_creating_records_ids_for_the_task(provider, cache):
         ToolContext(user_id=1, task_id=42), a.DocCreateArgs(title="Notes")
     )
     assert out == 'Done. {"document_id": "doc-new"}'
-    assert workspace_guard.created_by(42) == {"doc-new"}
-    assert workspace_guard.created_by(43) == set()
+    assert await workspace_guard.created_by(42) == {"doc-new"}
+    assert await workspace_guard.created_by(43) == set()
 
 
 def test_render_meet_returns_only_a_google_meet_link():

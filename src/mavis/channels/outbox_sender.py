@@ -9,6 +9,7 @@ import structlog
 
 from mavis.channels import get_channel
 from mavis.channels.base import Channel, ChannelRateLimited
+from mavis.store import artifacts
 from mavis.store.db import utcnow
 from mavis.store.models import OutboxMessage
 from mavis.store.repo import outbox, users
@@ -48,6 +49,9 @@ class OutboxSender:
         except ChannelRateLimited as exc:
             await outbox.mark_retry(row.id, "rate limited", now + timedelta(seconds=exc.retry_after),
                                     count_attempt=False)
+        except PermissionError as exc:  # a file outside the user's artifacts: retrying cannot fix it
+            log.warning("outbox.document_refused", outbox_id=row.id, user_id=row.user_id)
+            await outbox.mark_failed(row.id, repr(exc)[:500])
         except Exception as exc:  # noqa: BLE001
             attempts = row.attempts + 1
             log.warning("outbox.delivery_failed", outbox_id=row.id, attempt=attempts, error=repr(exc))
@@ -67,6 +71,7 @@ class OutboxSender:
         msg = outbox.to_outbound(row)
         ids: list[int] = []
         if msg.document_path:
+            artifacts.guard(row.user_id, msg.document_path)  # another user's file is never sent
             ids.append(await self.channel.send_document(user.telegram_chat_id, msg.document_path, msg.text))
         elif msg.text:
             ids += await self.channel.send_text(user.telegram_chat_id, msg.text, msg.buttons or None)
