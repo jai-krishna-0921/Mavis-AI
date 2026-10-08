@@ -281,17 +281,18 @@ _CONV = frozenset({"conversation"})
 TOOLS = [
     MavisTool("remember", "Store a durable fact the user wants remembered.", RememberArgs,
               RiskClass.WRITE_SELF, remember, _CONV, priority=60,
-              on_taint=TaintPolicy.DOWNGRADE, tainted_fn=remember_untrusted),
+              on_taint=TaintPolicy.DOWNGRADE, tainted_fn=remember_untrusted, provenance=("fact",)),
     MavisTool("forget", "Delete memories matching a word or phrase (asks the user first).", ForgetArgs,
               RiskClass.DESTRUCTIVE, forget, _CONV,
               preview=lambda a: f"Forget everything I know matching “{a.needle}”", priority=30),
     MavisTool("wake_me", "Schedule a reminder at a specific FUTURE time, given as the user said it "
               "(local wall-clock ISO 8601, no offset).",
               WakeMeArgs, RiskClass.WRITE_SELF, wake_me, _CONV, priority=65,
-              preview=_preview_wake, preview_needs_ctx=True, on_taint=TaintPolicy.APPROVE),
+              preview=_preview_wake, preview_needs_ctx=True, on_taint=TaintPolicy.APPROVE,
+              provenance=("reason",)),
     MavisTool("track_loop", "Track an open loop: commitment, waiting-on, goal, concern, routine or watch.",
               TrackLoopArgs, RiskClass.WRITE_SELF, track_loop, _CONV, priority=55,
-              preview=_preview_loop, on_taint=TaintPolicy.APPROVE),
+              preview=_preview_loop, on_taint=TaintPolicy.APPROVE, provenance=("title",)),
     MavisTool("pending", "What is pending: actions and tasks that recently failed, open items with how "
               "due they are, approvals waiting for the user's OK and background work. Call it for any "
               "question about what is open, due, left or whether something went through.",
