@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import structlog
 
-from mavis.agents import buttons, conversation, orchestrator
+from mavis.agents import buttons, conversation, orchestrator, task_buttons
 from mavis.domain.events import EventType, Job, JobKind
 from mavis.initiative import task_delivery
 from mavis.policy import approvals as approval_flow
@@ -50,6 +50,7 @@ def register() -> None:
     register_event_handler(EventType.USER_MESSAGE, conversation.run_turn, replace=True)
     register_event_handler(EventType.BUTTON_PRESSED, buttons.dispatch_button)
     buttons.register_approval_buttons()
+    task_buttons.register_task_buttons()  # tk: Cancel on a progress card
     # Fixed text, no LLM call; replace=True takes TASK_PROGRESS away from the initiative reasoner.
     register_event_handler(EventType.TASK_PROGRESS, task_delivery.on_progress, replace=True)
     register_job_handler(JobKind.RUN_TASK, _run_task_job)

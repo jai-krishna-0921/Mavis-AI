@@ -524,3 +524,30 @@ def _reset_attention():
 
     rhythm.clear_evening_sources()
     first_sync.EXTRA_HANDLERS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_send_pacer():
+    from mavis.channels import pacing
+
+    pacing.set_pacer(None)
+    yield
+    pacing.set_pacer(None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_progress_cards():
+    from mavis.channels import progress_card
+
+    progress_card.set_cards(None)
+    yield
+    progress_card.set_cards(None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_cancellation():
+    from mavis.agents import cancellation
+
+    cancellation.reset_for_tests()
+    yield
+    cancellation.reset_for_tests()

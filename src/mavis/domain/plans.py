@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class PlanStep(BaseModel):
@@ -9,6 +9,12 @@ class PlanStep(BaseModel):
     instruction: str
     depends_on: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list, description="Only for agent='spawn': tool names allowed")
+    title: str = Field(default="", description="Short plain title for the progress card, at most 60 chars")
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _short_title(cls, v: object) -> str:
+        return " ".join(str(v or "").split())[:60]
 
 
 class Plan(BaseModel):
