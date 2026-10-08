@@ -34,7 +34,7 @@ from mavis.domain.localtime import has_datetimes, localize_args
 from mavis.domain.policy import Capability, RiskClass
 from mavis.domain.results import ToolOutput
 from mavis.domain.tasks import ApprovalStatus
-from mavis.domain.terms import grounded_in, terms
+from mavis.domain.terms import from_user_not_sources, grounded_in, terms
 from mavis.policy.risk import truncate, wrap_untrusted
 from mavis.store.db import utcnow
 from mavis.store.repo import approvals, audit, policy_rules, tasks
@@ -105,13 +105,22 @@ class ToolRun:
     # not by the whole replayed window that `tainted` covers. None: same as `tainted` (task loops).
     self_tainted: bool | None = None
     user_words: str = ""  # the user's own message this turn: the provenance of a self-only request
+    # Third-party text that reached the prompt (tainted replies in the window, this run's untrusted reads):
+    # an argument is the user's when it repeats nothing from it. None: unknown (hook context), then only an
+    # argument made of the user's own words counts.
+    untrusted_sources: list[str] | None = None
     untrusted_seen: bool = False  # an untrusted_output tool returned during the current step
     untrusted_reads: int = 0  # every time third-party text reached the model in this run (never reset)
     queued_approvals: list[int] = field(default_factory=list)
     spawned: int = 0  # workers started in the current outermost model step (reset by react_loop)
     memo: dict[str, Any] = field(default_factory=dict)  # per-run cache for `prepare` lookups (file metadata)
 
-    def saw_untrusted(self) -> None:
+    def saw_untrusted(self, text: str = "") -> None:
+        if self.untrusted_sources is not None:
+            if text:
+                self.untrusted_sources.append(text)
+            else:
+                self.untrusted_sources = None  # third-party text of unknown wording: back to strict
         self.untrusted_seen = True
         self.untrusted_reads += 1
 
@@ -146,7 +155,11 @@ def _user_worded(tool: MavisTool, args: BaseModel, run: ToolRun) -> bool:
     """Every provenance argument the tool declares is the user's own words this turn (domain.terms)."""
     values = [getattr(args, name, "") for name in tool.provenance]
     texts = [v for v in values if isinstance(v, str) and v.strip()]
-    return bool(texts) and len(texts) == len(values) and all(grounded_in(t, run.user_words) for t in texts)
+    if not texts or len(texts) != len(values):
+        return False
+    sources = run.untrusted_sources
+    return all(grounded_in(t, run.user_words) or (
+        sources is not None and from_user_not_sources(t, run.user_words, sources)) for t in texts)
 
 
 def _gate_tainted(tool: MavisTool, args: BaseModel, risk: RiskClass) -> bool:
@@ -567,7 +580,7 @@ class ToolRegistry:
             if tool.untrusted_output and not raise_errors:
                 # Third-party error text must never reach the model unwrapped.
                 if run is not None:
-                    run.saw_untrusted()
+                    run.saw_untrusted(str(exc))
                 return wrap_untrusted(truncate(f"Tool error: {exc}"), tool.name), ""
             raise
         finally:
@@ -582,7 +595,7 @@ class ToolRegistry:
         if not tool.untrusted_output:
             return text, user_text
         if run is not None:
-            run.saw_untrusted()
+            run.saw_untrusted(text)
         return wrap_untrusted(text, tool.name), user_text
 
     def _as_langchain(self, tool: MavisTool, user_id: int) -> BaseTool:
