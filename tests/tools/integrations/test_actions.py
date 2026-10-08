@@ -52,7 +52,7 @@ def test_calendar_preview_in_user_timezone():
     spec = ACTIONS["calendar.create_event"]
     args = CalendarCreateArgs(summary="Interview prep", start=START, attendees=["jawahar@example.com"])
     text = spec.preview(args, "Asia/Kolkata")
-    assert "Mon 05 Oct, 10:00 to 10:30 (Asia/Kolkata)" in text
+    assert "Mon 05 Oct, 10:00 to 11:00 (Asia/Kolkata)" in text  # default length: 60 min
     assert "jawahar@example.com" in text
     assert "—" not in text and "–" not in text
 

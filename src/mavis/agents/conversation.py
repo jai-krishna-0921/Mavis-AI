@@ -53,6 +53,7 @@ from mavis.agents.turn_support import (
 )
 from mavis.channels import presence
 from mavis.channels.formatting import strip_verbatim
+from mavis.config import get_settings
 from mavis.domain.errors import ConnectionRequired, LLMError
 from mavis.domain.events import Event
 from mavis.domain.messages import Outbound, Role
@@ -144,6 +145,15 @@ WEB_RULE = (
 )
 
 
+# Added only when a tool that creates events is offered (hotfix4 H6).
+EVENT_TOOLS = frozenset({"calendar_create_event"})
+DURATION_RULE = (
+    "- Creating an event or a block when they gave only a start time: don't ask how long. Leave the length "
+    "out, so it gets the default of {minutes} minutes, and mention that length in a few words; they can "
+    "change it."
+)
+
+
 def chat_tools(user_id: int, query: str = "", *, focus: tuple[str, ...] = (),
                connect: bool = False) -> list[BaseTool]:
     """The tools a chat turn may use (at most CHAT_TOOL_LIMIT, plus any `focus` tools, which are always
@@ -207,14 +217,11 @@ async def handle_connect(user_id: int, text: str) -> str | None:
 
 
 def _connect_hint(exc: ConnectionRequired) -> str:
-    from mavis.tools.integrations.actions import display_name, is_google
+    from mavis.tools.integrations.actions import display_name
 
-    name = display_name(exc.capability)
-    if is_google(exc.capability):
-        word = "google"
-    else:
-        word = "calendar" if exc.capability.value == "googlecalendar" else exc.capability.value
-    return f"I need your {name} linked for that. Send /connect {word} and I'll take it from there."
+    word = commands.connect_word(exc.capability)
+    return (f"I need your {display_name(exc.capability)} linked for that. Send /connect {word} and I'll "
+            "take it from there.")
 
 
 async def _connect_prompt(event: Event, user_id: int, exc: ConnectionRequired) -> list[str]:
@@ -511,6 +518,9 @@ async def run_turn(event: Event) -> None:
             system = f"{system}\n\n{TOOL_RULES}"
             if any(t.name == "web_search" for t in tools):
                 system = f"{system}\n{WEB_RULE}"
+            if any(t.name in EVENT_TOOLS for t in tools):
+                minutes = get_settings().default_event_minutes
+                system = f"{system}\n{DURATION_RULE.format(minutes=minutes)}"
         prompt: list[BaseMessage] = [SystemMessage(system)]
         prompt += to_langchain(history, now, user.timezone)
 
@@ -546,6 +556,7 @@ async def run_turn(event: Event) -> None:
                      queued=result.queued_approvals)
         # replayed messages carry stamps (T1); one echoed at the start of a line is not content
         reply = strip_stamps(result.text or "").strip() or WRAP_UP_FALLBACK
+        reply = commands.canonical_commands(reply)  # /connect_google -> the command that exists
         bubbles = persona.split_bubbles(reply) or [reply]
         if card_only(result):
             # The card (preview + buttons, rendered by code) is the only prompt: no prose bubble repeats it.

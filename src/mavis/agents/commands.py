@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import re
 
 from mavis.domain.events import Event
@@ -27,6 +28,65 @@ _KEYWORDS: tuple[tuple[re.Pattern[str], Capability], ...] = (
     (re.compile(r"\bslack\b", re.I), Capability.SLACK),
     (re.compile(r"\bnotion\b", re.I), Capability.NOTION),
 )
+
+
+KNOWN_COMMANDS = ("start", *COMMANDS)  # what the bot answers to; /start is Telegram's own
+# Words a model uses for "connect" that are not commands of ours.
+_CONNECT_SYNONYMS = frozenset({"link", "relink", "reconnect", "auth", "authorize", "authorise", "login",
+                               "signin", "integrate", "integrations"})
+_SLASH = re.compile(r"(?<![\w/:.@\\])/([A-Za-z][A-Za-z_-]*)(?:([^\S\n]+)([A-Za-z][\w-]*))?")
+
+
+def connect_word(capability: Capability) -> str:
+    """The word /connect takes for a capability: what capability_from_text reads back as it."""
+    if is_google(capability) and workspace_enabled():
+        return "google"
+    return "calendar" if capability is Capability.CALENDAR else capability.value
+
+
+def _service(word: str) -> Capability | None:
+    return capability_from_text(word) if word and word.lower() not in LEGACY_ALIASES else None
+
+
+def _command_of(name: str) -> tuple[str, str] | None:
+    """(real command, service word glued to it) for a slash word the model wrote, or None if not ours."""
+    low = name.lower()
+    if low in KNOWN_COMMANDS:
+        return low, ""
+    parts = re.split(r"[_-]", low, maxsplit=1)
+    head, tail = parts[0], parts[1] if len(parts) > 1 else ""
+    if head in KNOWN_COMMANDS:
+        return head, tail
+    for cmd in ("disconnect", "connect"):  # glued service: /connectgmail
+        if low.startswith(cmd) and _service(low[len(cmd):]) is not None:
+            return cmd, low[len(cmd):]
+    close = difflib.get_close_matches(low, KNOWN_COMMANDS, n=1, cutoff=0.75)  # /connection, /conect
+    if close:
+        return close[0], ""
+    return ("connect", "") if low in _CONNECT_SYNONYMS else None
+
+
+def canonical_commands(text: str) -> str:
+    """Slash commands in a reply match the real ones (track 1 T1.4, hotfix4 H6): /connect_google,
+    /connectgmail, /link or /connection become /connect google, /connect gmail, /connect, /connections;
+    the service word is the one /connect reads (google when Google Workspace is on). Words that are not
+    near any command of ours (a path, "and/or") are left alone."""
+
+    def fix(m: re.Match[str]) -> str:
+        found = _command_of(m.group(1))
+        if found is None:
+            return m.group(0)
+        cmd, glued = found
+        gap, arg = m.group(2) or "", m.group(3) or ""
+        tail = f"{gap}{arg}"
+        if cmd in ("connect", "disconnect"):
+            if (cap := _service(glued)) is not None:
+                return f"/{cmd} {connect_word(cap)}{tail}"
+            if (cap := _service(arg)) is not None:
+                return f"/{cmd} {connect_word(cap)}"
+        return f"/{cmd}{tail}"
+
+    return _SLASH.sub(fix, text or "")
 
 
 def parse_command(text: str) -> tuple[str, list[str]] | None:
