@@ -29,14 +29,17 @@ def _event(user_id: int, text: str, n: int = 1) -> Event:
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("Send /connect_google to link it.", "Send /connect to link it."),  # no Google consent when off
+    ("Send /connect_google to link it.", "Send /connect google to link it."),  # no word is dropped
     ("Try /connectgmail.", "Try /connect gmail."),
     ("Use /link calendar.", "Use /connect calendar."),
     ("/connection shows what's linked", "/connections shows what's linked"),
     ("Just send /conect gmail", "Just send /connect gmail"),
     ("Send /connect again in a minute.", "Send /connect again in a minute."),
-    ("/disconnect Gmail removes it", "/disconnect gmail removes it"),
+    ("/disconnect Gmail removes it", "/disconnect Gmail removes it"),  # a known command stays as written
     ("/start over", "/start over"),
+    ("we played /connect-four game", "we played /connect-four game"),  # not ours: untouched
+    ("run `/connection` in a shell", "run `/connection` in a shell"),  # code spans are shown as written
+    ("```\n/connection\n```", "```\n/connection\n```"),
 ])
 def test_commands_in_replies_match_the_real_ones(settings, raw, expected):
     assert commands.canonical_commands(raw) == expected
@@ -44,11 +47,11 @@ def test_commands_in_replies_match_the_real_ones(settings, raw, expected):
 
 @pytest.mark.parametrize("raw,expected", [
     ("Send /connect_google to link it.", "Send /connect google to link it."),
-    ("Try /connectgmail or /connect calendar.", "Try /connect google or /connect google."),
-    ("/link drive", "/connect google"),
+    ("Try /connectgmail or /connect calendar.", "Try /connect google or /connect calendar."),
+    ("/link drive", "/connect drive"),
     ("/disconnect gmail-legacy", "/disconnect gmail-legacy"),  # a real alias of /disconnect
 ])
-def test_with_workspace_every_google_service_is_one_google_command(workspace_on, raw, expected):
+def test_with_workspace_rewrites_only_the_unknown_token(workspace_on, raw, expected):
     assert commands.canonical_commands(raw) == expected
 
 
