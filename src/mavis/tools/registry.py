@@ -240,6 +240,36 @@ def contextual(fn: Callable[[ToolContext, Any], Awaitable[str | dict | list | To
     return wrapped
 
 
+def default_label(name: str) -> str:
+    """The humanised tool name: the card's "Last:" line when a tool has no progress_label."""
+    return name.replace("_", " ").strip()
+
+
+def host_of(url: str) -> str:
+    """Lower-cased host without "www.", or "" when the text is not a URL with a host."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit(str(url)).hostname or "").lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+async def _note_progress(tool: MavisTool, args: BaseModel, raw: Any) -> None:
+    """Tell the task's card what just ran, with a code-made label. Never fails the tool call."""
+    task_id = current_task_id.get()
+    if task_id is None or not get_settings().progress_card_enabled:
+        return
+    try:
+        label = tool.progress_label(args, raw) if tool.progress_label else default_label(tool.name)
+        from mavis.channels.progress_card import get_cards  # lazy: channels import the bus
+
+        await get_cards().tool_called(task_id, label)
+    except Exception as exc:  # noqa: BLE001 - cosmetic
+        log.debug("tool.progress_label_failed", tool=tool.name, error=type(exc).__name__)
+
+
 @dataclass(frozen=True)
 class MavisTool:
     name: str
@@ -275,6 +305,9 @@ class MavisTool:
     # When all of them come from the user's own words this turn, the call is the user's request and its
     # taint policy does not apply (see _gate_tainted). Empty: provenance never waives the policy.
     provenance: tuple[str, ...] = ()
+    # Code-made "Last:" line for the progress card (Phase 12). Gets the arguments and the raw return
+    # value; must never include page text, file contents or model prose (hosts, counts and exit codes only).
+    progress_label: Callable[[BaseModel, Any], str] | None = None
 
     def effective_risk(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn is not None else self.risk
@@ -512,6 +545,7 @@ class ToolRegistry:
         failed = False
         try:
             out = await (fn or tool.fn)(user_id, args)
+            await _note_progress(tool, args, out)
         except (ApprovalRequired, ConnectionRequired):
             raise
         except ActionFailed as exc:

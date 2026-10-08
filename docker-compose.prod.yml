@@ -40,6 +40,15 @@ x-app-env: &app-env
   # live E2E sink: a synthetic chat id whose sends go to a log, never Telegram (scripts/live_e2e.py)
   LIVE_TEST_ENABLED: ${LIVE_TEST_ENABLED:-false}
   TEST_TELEGRAM_CHAT_ID: ${TEST_TELEGRAM_CHAT_ID:-}
+  TEST_MIRROR_CHAT_ID: ${TEST_MIRROR_CHAT_ID:-}
+  PROGRESS_CARD_ENABLED: ${PROGRESS_CARD_ENABLED:-true}
+  PROGRESS_CARD_AFTER_S: ${PROGRESS_CARD_AFTER_S:-4}
+  PROGRESS_EDIT_MIN_INTERVAL_S: ${PROGRESS_EDIT_MIN_INTERVAL_S:-3}
+  PROGRESS_MAX_SCREENSHOTS: ${PROGRESS_MAX_SCREENSHOTS:-4}
+  TELEGRAM_GLOBAL_SEND_RATE: ${TELEGRAM_GLOBAL_SEND_RATE:-25}
+  TASK_TIMEOUT_MAX_S: ${TASK_TIMEOUT_MAX_S:-1200}
+  MACHINE_TASK_TIMEOUT_S: ${MACHINE_TASK_TIMEOUT_S:-900}
+  MACHINE_FILE_MAX_MB: ${MACHINE_FILE_MAX_MB:-50}
   ATTENTION_UNDERSTAND_PER_WINDOW: ${ATTENTION_UNDERSTAND_PER_WINDOW:-4}
   ATTENTION_WINDOW_S: ${ATTENTION_WINDOW_S:-120}
   ATTENTION_MAX_ATTEMPTS: ${ATTENTION_MAX_ATTEMPTS:-2}
@@ -63,6 +72,9 @@ x-app: &app
   environment: *app-env
   volumes:
     - artifacts:/app/data/artifacts
+    # the test sink (written by the worker) and the demo reports: shared so `--verify-machine` sees the
+    # worker's sink and the reports survive a restart
+    - e2edata:/app/data/e2e
   restart: unless-stopped
   logging: *logging
   security_opt: ["no-new-privileges:true"]
@@ -214,5 +226,6 @@ volumes:
   qdrantdata:
   neo4jdata:
   artifacts:
+  e2edata:
   caddydata:
   caddyconfig:

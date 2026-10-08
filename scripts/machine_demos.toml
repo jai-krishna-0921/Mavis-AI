@@ -1,0 +1,10 @@
+# Demo cases for scripts/machine_demo.py. Checks are names from machine_demo.CHECKS; values are their
+# arguments. Structure, not exact text: live sites and models vary.
+
+[[case]]
+id = "A0"
+prompt = "find three facts about the Konkan Railway with sources"
+timeout_s = 300
+[case.expect]
+card_final_in = ["Done", "Partly done"]
+min_card_frames = 2
