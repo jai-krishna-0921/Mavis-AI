@@ -619,7 +619,8 @@ async def run_turn(event: Event) -> None:
         now = utcnow()
         name = user.name or card_name
         recent = persona.recent_messages(history, now)
-        their_register = register.measure(register.user_texts(history, now))
+        their_register = register.measure(register.user_texts(history, now),
+                                          brief=await register.standing_brief(user.id))
         system = persona.system_prompt(
             user, now, context=context, connections=connections, known_name=name,
             ask_name=persona.should_ask_name(name, history, now, user.timezone),

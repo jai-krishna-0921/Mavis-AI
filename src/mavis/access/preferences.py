@@ -6,9 +6,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+import structlog
+
 from mavis.access.currency import country_for_zone
 from mavis.access.tz_resolve import valid_zone
 from mavis.store.repo import users
+
+log = structlog.get_logger(__name__)
 
 TimezoneHook = Callable[[int, str, str], Awaitable[None]]
 _tz_hooks: list[TimezoneHook] = []
@@ -31,7 +35,11 @@ async def set_timezone(user_id: int, tz: str) -> TimezoneChange:
     old = (await users.get(user_id)).timezone
     await users.update(user_id, timezone=tz, country=country_for_zone(tz))
     for fn in list(_tz_hooks):
-        await fn(user_id, old, tz)
+        try:  # the zone is saved: one failing re-anchor must not skip the others
+            await fn(user_id, old, tz)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("preferences.timezone_hook_failed", hook=getattr(fn, "__name__", "?"),
+                        error=type(exc).__name__)
     return TimezoneChange(old, tz)
 
 
