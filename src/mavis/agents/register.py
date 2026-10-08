@@ -184,9 +184,22 @@ def _hype(text: str) -> bool:
     return shouting or "!!" in text or bool(_ELONGATED.search(text))
 
 
+async def standing_brief(user_id: int) -> bool:
+    """They asked for short messages: the profile preference LEARN wrote (profile card `brevity`). It holds
+    until they take it back, so it is not limited to the recent conversation. No text matching here."""
+    from mavis.store.repo import profile as profile_repo  # lazy: keep this module free of the store
+
+    try:
+        return (await profile_repo.get(user_id)).brevity == "short"
+    except Exception:  # noqa: BLE001 - a style hint must never break a turn
+        return False
+
+
 @dataclass(frozen=True)
 class Register:
     sample: int = 0  # user messages measured
+    brief: bool = False  # a standing wish for short messages (profile card brevity)
+    latest_swore: bool = False  # the latest message itself swears: mirror it now, not just "may"
     swears: bool = False  # swore recently and the latest message is not formal: swearing may be mirrored
     swear_share: float = 0.0  # share of measured messages with profanity ("in proportion")
     formal: bool = False  # the latest message reads formal
@@ -195,19 +208,23 @@ class Register:
     distressed: bool = False  # the latest message sounds like a hard moment: no swearing, no jokes
 
 
-def measure(texts: list[str]) -> Register:
+def measure(texts: list[str], *, brief: bool = False) -> Register:
     """Measure the register of a user's messages, oldest first. The latest message weighs most:
-    a formal latest message turns swearing off even if they swore a minute ago."""
+    a formal latest message turns swearing off even if they swore a minute ago. `brief`: the profile card's
+    standing wish for short messages."""
     texts = [t for t in texts if t and t.strip()][-SAMPLE:]
     if not texts:
-        return Register()
+        return Register(brief=brief)
     latest = texts[-1]
     formal = _formal(latest)
     distressed = bool(_DISTRESS.search(latest)) and not _LAUGHING.search(latest)
     sweary = [has_profanity(t) for t in texts]
+    swears = not formal and not distressed and any(sweary[-SWEAR_RECENT:])
     return Register(
         sample=len(texts),
-        swears=not formal and not distressed and any(sweary[-SWEAR_RECENT:]),
+        brief=brief,
+        latest_swore=swears and sweary[-1],
+        swears=swears,
         swear_share=sum(sweary) / len(texts),
         formal=formal,
         casual=not formal and sum(_casual(t) for t in texts) * 2 >= len(texts),
@@ -233,9 +250,20 @@ def user_texts(history: list, now: datetime, window: timedelta | None = WINDOW) 
 _LIMITS = "never at them, never an insult, never a slur, nothing sexual"
 
 
+BRIEF_LINE = ("They told you they want short messages: keep every reply to one to three short lines "
+              "(under about 250 characters), no lists, no preamble, answer first. Go longer only when they "
+              "explicitly ask for detail, and then say the short version first.")
+
+
 def prompt_line(reg: Register, *, proactive: bool = False) -> str:
-    """One prompt line describing their register right now, or "" when there is nothing to go on
-    (chat turns; the persona default then applies: no swearing)."""
+    """The prompt line(s) describing their register right now, or "" when there is nothing to go on
+    (chat turns; the persona default then applies: no swearing). A standing wish for short messages is
+    appended whatever else is known."""
+    line = _register_line(reg, proactive=proactive)
+    return f"{line} {BRIEF_LINE}".strip() if reg.brief else line
+
+
+def _register_line(reg: Register, *, proactive: bool = False) -> str:
     if proactive:
         if reg.swears and not reg.formal:
             return ("Their register lately: casual and sweary. You may swear lightly, at most once and one "
@@ -255,6 +283,15 @@ def prompt_line(reg: Register, *, proactive: bool = False) -> str:
         amount = "they swear now and then, so at most one, only where it fits"
         if reg.swear_share >= 0.5:
             amount = "they swear a lot, so a swear here and there sounds natural"
+        if reg.latest_swore:
+            # "may" was read as "better not": the model stayed clean in every live run. They just swore, so
+            # a clean reply reads as stiff: ask for one, aimed at the situation.
+            return ("Their register right now: casual and sweary, and they just swore, so a spotless reply "
+                    "sounds stiff. You may swear casually back, so do: include exactly ONE casual swear word "
+                    "(damn, shit, hell, bloody, fuck: whichever fits, no stronger than theirs), aimed at the "
+                    "situation (the "
+                    f"week, the deadline, the mess), {_LIMITS}. In proportion: {amount}. Skip it only if "
+                    f"they are upset or the news is bad.{energy}")
         return ("Their register right now: casual and sweary. You may swear casually back, in proportion: "
                 f"{amount}. Use it for emphasis or fun, not filler ({_LIMITS}). Drop it the moment they "
                 f"are upset or the news is bad.{energy}")

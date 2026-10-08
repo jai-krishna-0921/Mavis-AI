@@ -30,6 +30,9 @@ class NotifyIntent(BaseModel):
     urgency: int = Field(ge=1, le=5)
     intent: str = Field(description="What the message should accomplish, not the wording")
     dedupe_key: str | None = None
+    about_connection: bool = Field(
+        default=False, description="True when this is about linking, connecting or authorising a service "
+        "(Gmail, Calendar, Notion...). Code drops it unless the user has a connect flow open.")
     # Set only by deterministic code (the email security floor); hidden from the model's schema and
     # reset on model output. A security notice is never dropped by the daily budget.
     security: SkipJsonSchema[bool] = False
@@ -50,6 +53,9 @@ class WakeupRequest(BaseModel):
     subject_kind: Literal["loop", "approval", "task", "observation"] | None = Field(
         default=None, description="With subject_id: the signal's subject when it is not a listed loop")
     subject_id: int | None = None
+    about_connection: bool = Field(
+        default=False, description="True when this wakeup is about linking, connecting or authorising a "
+        "service. Code drops it unless the user has a connect flow open.")
 
 
 class InitiativeDecision(BaseModel):

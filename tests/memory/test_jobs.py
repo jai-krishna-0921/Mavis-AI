@@ -175,7 +175,6 @@ from datetime import datetime, timedelta  # noqa: E402
 from mavis.domain import timeutil  # noqa: E402
 from mavis.domain.events import Event, EventType, Trust  # noqa: E402
 from mavis.domain.wakeups import WakeupKind  # noqa: E402
-from mavis.llm import models as llm_models  # noqa: E402
 from mavis.timers.service import WakeupService  # noqa: E402
 
 
@@ -183,7 +182,9 @@ async def _learn_wakeups(user_id):
     return await WakeupService().pending(user_id, WakeupKind.SYSTEM_LEARN)
 
 
-async def test_chat_learn_is_not_before_the_interactive_grace_window(user, rec_bus, clock):
+async def test_chat_learn_is_queued_shortly_after_the_turn_not_after_a_grace_window(user, rec_bus, clock):
+    """The limiter queues best_effort work now, so LEARN needs no long delay (it used to wait out the
+    20 s grace window and was then refused anyway)."""
     from mavis.agents.turn_support import enqueue_learn
 
     ev = Event(id="tg:update:1", user_id=user.id, type=EventType.USER_MESSAGE, occurred_at=clock.t,
@@ -191,7 +192,7 @@ async def test_chat_learn_is_not_before_the_interactive_grace_window(user, rec_b
     await enqueue_learn(user.id, ev, "Jawahar is my friend", None)
     [job] = [j for j in rec_bus.jobs if j.kind is JobKind.LEARN]
     not_before = datetime.fromisoformat(job.payload["not_before"])
-    assert timedelta(seconds=llm_models.INTERACTIVE_GRACE_S) < not_before - clock.t <= timedelta(seconds=30)
+    assert timedelta(0) <= not_before - clock.t <= timedelta(seconds=10)
 
 
 async def test_early_learn_job_is_parked_on_a_wakeup_not_run(memory, user, monkeypatch, clock):
@@ -213,26 +214,215 @@ async def test_learn_wakeup_enqueues_the_job_again(user, rec_bus, clock):
     assert job.payload["source_ref"] == "tg:3"
 
 
-async def test_busy_learn_is_retried_twice_on_wakeups_then_dropped(memory, user, monkeypatch, clock):
+def _job(job_id, user_id, payload):
+    return Job(id=job_id, user_id=user_id, kind=JobKind.LEARN, payload=payload)
+
+
+async def _fail_learn(memory, monkeypatch):
     async def busy(*a, **k):
         raise LLMError("LLM slot reserved for interactive work")
 
     monkeypatch.setattr(memory, "learn", busy)
+
+
+async def test_busy_learn_is_retried_with_growing_then_capped_delay(memory, user, monkeypatch, clock):
+    await _fail_learn(memory, monkeypatch)
     payload = {"text": "x", "source_ref": "tg:4", "trust": "user"}
-    await jobs.handle_learn(Job(id="learn:tg:4", user_id=user.id, kind=JobKind.LEARN, payload=payload))
-    [w1] = await _learn_wakeups(user.id)
-    assert timeutil.ensure_utc(w1.due_at) - clock.t == timedelta(minutes=3)
-    assert w1.payload["learn"]["retry"] == 1
+    delays = []
+    seen = set()
+    for n in range(8):
+        await jobs.handle_learn(_job(f"learn:tg:4:w{n}", user.id, payload))
+        [w] = [w for w in await _learn_wakeups(user.id) if w.id not in seen]
+        seen.add(w.id)
+        delays.append(timeutil.ensure_utc(w.due_at) - clock.t)
+        assert w.payload["learn"]["retry"] == n + 1
+        payload = w.payload["learn"]
+    assert delays[:3] == [timedelta(minutes=1), timedelta(minutes=3), timedelta(minutes=10)]
+    assert max(delays) == jobs.LEARN_RETRY_CAP  # then a steady cadence: bounded delay, never dropped
+    assert delays[-1] == jobs.LEARN_RETRY_CAP
 
-    await jobs.handle_learn(Job(id="learn:tg:4:r1", user_id=user.id, kind=JobKind.LEARN,
-                                payload=w1.payload["learn"]))
-    w2 = [w for w in await _learn_wakeups(user.id) if w.id != w1.id]
-    assert [timeutil.ensure_utc(w.due_at) - clock.t for w in w2] == [timedelta(minutes=10)]
-    assert w2[0].payload["learn"]["retry"] == 2
 
+async def test_learn_survives_many_failures_but_is_dropped_after_a_day(memory, user, monkeypatch, clock):
+    await _fail_learn(memory, monkeypatch)
+    first = clock.t - timedelta(hours=3)
+    payload = {"text": "x", "source_ref": "tg:5", "trust": "user", "retry": 40, "first_at": first.isoformat()}
+    await jobs.handle_learn(_job("learn:tg:5", user.id, payload))
+    assert len(await _learn_wakeups(user.id)) == 1  # 40 failures in, still queued
+
+    stale = clock.t - jobs.LEARN_MAX_AGE - timedelta(minutes=1)
+    old = {**payload, "source_ref": "tg:6", "first_at": stale.isoformat()}
     with capture_logs() as logs:
-        await jobs.handle_learn(Job(id="learn:tg:4:r2", user_id=user.id, kind=JobKind.LEARN,
-                                    payload=w2[0].payload["learn"]))
-    assert len(await _learn_wakeups(user.id)) == 2  # no third retry
+        await jobs.handle_learn(_job("learn:tg:6", user.id, old))
+    assert len(await _learn_wakeups(user.id)) == 1  # nothing new parked
     [final] = [e for e in logs if e["event"] == "memory.learn_dropped_final"]
-    assert final["job_id"] == "learn:tg:4:r2" and final["log_level"] == "error"  # loops lost too
+    assert final["log_level"] == "error"
+
+
+async def test_retried_learn_eventually_succeeds_once(memory, user, fake_llm, monkeypatch, clock):
+    """Fail twice, then the model answers: the facts are stored once, the job is marked seen."""
+    from mavis.store.repo import events
+
+    calls = {"n": 0}
+    real = memory.learn
+
+    async def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise LLMError("timed out waiting for an LLM slot")
+        return await real(*a, **k)
+
+    async def no_summary(uid):
+        return False
+
+    monkeypatch.setattr(memory, "learn", flaky)
+    monkeypatch.setattr(jobs, "maybe_summarize", no_summary)
+    fake_llm.push_structured(Extraction(
+        entities=[Entity(name="Priya", label="Person")],
+        relations=[Relation(subject="User", rel="SIBLING_OF", object="Priya",
+                            statement="Priya is the user's sister.")],
+    ))
+    payload = {"text": "Priya is my sister", "source_ref": "tg:7", "trust": "user"}
+    for n in range(3):
+        await jobs.handle_learn(_job(f"learn:tg:7:w{n}", user.id, payload))
+        parked = await _learn_wakeups(user.id)
+        if n < 2:
+            payload = max(parked, key=lambda w: w.id).payload["learn"]
+    assert calls["n"] == 3 and await events.seen("learn:tg:7")
+    assert len(await memory.graph.dump(user.id)) == 1
+
+
+async def test_deferred_learn_keeps_source_time_end_to_end(memory, user, fake_llm, monkeypatch, clock):
+    """Pune said first (LEARN fails and is retried later), Delhi said second (applied at once): after the
+    retry Delhi is still where the user lives, and the name they gave later is kept too."""
+    from mavis.domain.memory import ProfileUpdate
+    from mavis.store.repo import profile as profile_repo
+
+    async def no_summary(uid):
+        return False
+
+    monkeypatch.setattr(jobs, "maybe_summarize", no_summary)
+    t1, t2 = clock.t - timedelta(hours=2), clock.t - timedelta(hours=1)
+
+    def extraction(city, name):
+        return Extraction(
+            entities=[Entity(name=city, label="Place")],
+            relations=[Relation(subject="User", rel="LOCATED_IN", object=city,
+                                statement=f"Lives in {city}.")],
+            profile_updates=[ProfileUpdate(field="name", value=name)])
+
+    fake_llm.push_structured(extraction("Delhi", "Arjun"))  # turn 2, applied first
+    await jobs.handle_learn(_job("learn:tg:b", user.id, {
+        "text": "moved to Delhi, I'm Arjun", "source_ref": "tg:b", "trust": "user",
+        "anchor_at": t2.isoformat()}))
+    fake_llm.push_structured(extraction("Pune", "Jai"))  # turn 1's retry, 10 minutes later
+    await jobs.handle_learn(_job("learn:tg:a:w1", user.id, {"text": "I live in Pune, call me Jai",
+                                                          "source_ref": "tg:a", "trust": "user",
+                                                          "anchor_at": t1.isoformat(), "retry": 1}))
+    homes = {d["object"] for d in await memory.graph.dump(user.id) if d["relation"] == "LOCATED_IN"}
+    assert homes == {"Delhi"}
+    assert (await profile_repo.get(user.id)).name == "Arjun"
+
+
+# --- a backlog of LEARN texts for one user is coalesced into one extraction ------------------------------
+
+
+async def _park(user, n, text=None, trust="user", at=None, retry=1):
+    payload = {"text": text or f"User: message number {n}", "source_ref": f"tg:q{n}", "trust": trust,
+               "conversation": True, "retry": retry, "anchor_at": (at or timeutil.now()).isoformat()}
+    await jobs.park_learn(user.id, payload, timeutil.now() + timedelta(minutes=3), f"r{retry}")
+
+
+async def test_backlog_over_the_threshold_is_one_extraction_with_every_source_time(
+        memory, user, fake_llm, monkeypatch, clock):
+    from mavis.store.repo import events
+
+    seen_texts = []
+    real = memory.learn
+
+    async def spy(uid, text, source_ref="", trust=None, **kw):
+        seen_texts.append((text, source_ref, kw.get("anchor_at")))
+        return await real(uid, text, source_ref, trust, **kw)
+
+    async def no_summary(uid):
+        return False
+
+    monkeypatch.setattr(memory, "learn", spy)
+    monkeypatch.setattr(jobs, "maybe_summarize", no_summary)
+    base = clock.t - timedelta(hours=3)
+    for n in range(jobs.LEARN_COALESCE_ABOVE + 2):
+        await _park(user, n, at=base + timedelta(minutes=10 * n))
+    fake_llm.push_structured(Extraction())
+    current = {"text": "User: the newest message", "source_ref": "tg:new", "trust": "user",
+               "conversation": True, "anchor_at": clock.t.isoformat()}
+    await jobs.handle_learn(_job("learn:tg:new", user.id, current))
+    assert len(seen_texts) == 1  # one extraction over everything
+    text, ref, anchor = seen_texts[0]
+    for n in range(jobs.LEARN_COALESCE_ABOVE + 2):
+        assert f"message number {n}" in text
+    assert "the newest message" in text
+    assert text.index("message number 0") < text.index("message number 3") < text.index("the newest message")
+    for n in range(jobs.LEARN_COALESCE_ABOVE + 2):  # each text's own time is in the batch, in order
+        stamp = timeutil.to_local(base + timedelta(minutes=10 * n), user.timezone)
+        assert f"[{stamp:%a %d %b %H:%M}]" in text
+    assert anchor == clock.t  # the newest source time: facts are applied no earlier than the last statement
+    assert await events.seen("learn:tg:new") and await events.seen("learn:tg:q0")
+    assert await _learn_wakeups(user.id) == []  # the parked ones were consumed
+
+
+async def test_a_short_queue_is_left_alone(memory, user, fake_llm, monkeypatch, clock):
+    calls = []
+    real = memory.learn
+
+    async def spy(uid, text, *a, **kw):
+        calls.append(text)
+        return await real(uid, text, *a, **kw)
+
+    async def no_summary(uid):
+        return False
+
+    monkeypatch.setattr(memory, "learn", spy)
+    monkeypatch.setattr(jobs, "maybe_summarize", no_summary)
+    for n in range(jobs.LEARN_COALESCE_ABOVE - 2):
+        await _park(user, n)
+    fake_llm.push_structured(Extraction())
+    hi = {"text": "User: hi", "source_ref": "tg:x", "trust": "user"}
+    await jobs.handle_learn(_job("learn:tg:x", user.id, hi))
+    assert calls == ["User: hi"] and len(await _learn_wakeups(user.id)) == jobs.LEARN_COALESCE_ABOVE - 2
+
+
+async def test_only_the_same_users_same_trust_texts_are_merged(memory, user, fake_llm, monkeypatch, clock):
+    from mavis.store.repo import users as users_repo
+
+    other, _ = await users_repo.get_or_create_by_chat(4242, "Other")
+    calls = []
+
+    async def spy(uid, text, *a, **kw):
+        calls.append((uid, text))
+        return Extraction()
+
+    async def no_summary(uid):
+        return False
+
+    monkeypatch.setattr(memory, "learn", spy)
+    monkeypatch.setattr(jobs, "maybe_summarize", no_summary)
+    for n in range(jobs.LEARN_COALESCE_ABOVE + 1):
+        await _park(user, n, trust="untrusted")  # another trust: never mixed into a trusted batch
+        await _park(other, 100 + n)  # another user: never mixed
+    await jobs.handle_learn(_job("learn:tg:y", user.id, {"text": "User: mine", "source_ref": "tg:y",
+                                                       "trust": "user", "conversation": True}))
+    assert calls == [(user.id, "User: mine")]
+
+
+async def test_a_failed_batch_is_parked_again_whole(memory, user, monkeypatch, clock):
+    async def busy(*a, **k):
+        raise LLMError("timed out waiting for an LLM slot")
+
+    monkeypatch.setattr(memory, "learn", busy)
+    for n in range(jobs.LEARN_COALESCE_ABOVE + 1):
+        await _park(user, n)
+    await jobs.handle_learn(_job("learn:tg:z", user.id, {"text": "User: last", "source_ref": "tg:z",
+                                                       "trust": "user", "conversation": True}))
+    [w] = await _learn_wakeups(user.id)  # one wakeup carries the whole batch
+    batch = w.payload["learn"]
+    assert "message number 0" in batch["text"] and "last" in batch["text"]
+    assert "tg:q0" in batch["merged_refs"] and "tg:z" in batch["merged_refs"]

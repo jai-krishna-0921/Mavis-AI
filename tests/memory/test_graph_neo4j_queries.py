@@ -26,12 +26,12 @@ def test_close_single_valued_only_touches_current_other_targets():
     query = q.q_close_single_valued("WORKS_AT")
     assert "[r:WORKS_AT]" in query
     assert "r.valid_to IS NULL" in query and "b.key <> $dst" in query
-    assert "SET r.valid_to = datetime()" in query
+    assert "SET r.valid_to = datetime($at)" in query
 
 
 def test_create_edge_sets_valid_from_and_params_only():
     query = q.q_create_edge("WORKS_AT")
-    assert "valid_from:datetime()" in query
+    assert "valid_from:datetime($at)" in query and "valid_to:CASE" in query
     for p in ("$statement", "$confidence", "$source_ref", "$src", "$dst", "$u"):
         assert p in query
 
@@ -205,3 +205,9 @@ async def test_merge_copies_drop_aliases_to_keep():
     call = next(c for c in drv.calls if c[0] == q.Q_ADD_ALIASES)
     assert call[1]["aliases"] == ["Jawa R", "JR"]
     assert call[1]["norm_aliases"] == ["jawa r", "jr"]
+
+
+def test_newer_single_valued_query_finds_the_start_of_a_later_current_edge():
+    query = q.q_newer_single_valued("LOCATED_IN")
+    assert "[r:LOCATED_IN]" in query and "r.valid_to IS NULL" in query
+    assert "r.valid_from > datetime($at)" in query and "b.key <> $dst" in query

@@ -9,8 +9,10 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 
 from mavis.domain import timeutil
-from mavis.domain.wakeups import RESERVED_PAYLOAD_KEYS, Wakeup, WakeupKind
+from mavis.domain.wakeups import REMINDER_PREFIX, RESERVED_PAYLOAD_KEYS, Wakeup, WakeupKind
 from mavis.store.repo import wakeups as repo
+from mavis.store.repo.loops import same_matter
+from mavis.timers import coverage
 
 
 class WakeupService:
@@ -40,14 +42,40 @@ class WakeupService:
             at = now + timeutil.scale_offset(at - now)
         if dedupe_key and (existing := await repo.pending_by_key(user_id, dedupe_key)) is not None:
             return existing.id
+        if reminder and (twin := await coverage.covering_reminder(
+                user_id, [reason.removeprefix(REMINDER_PREFIX)], at, coverage.SAME_REMINDER_WINDOW)):
+            return twin.id  # the same reminder asked again in other words: one wakeup, one message
         try:
-            return await repo.insert(user_id=user_id, due_at=at, kind=kind, reason=reason, loop_id=loop_id,
-                                     payload=payload or {}, dedupe_key=dedupe_key)
+            wakeup_id = await repo.insert(user_id=user_id, due_at=at, kind=kind, reason=reason,
+                                          loop_id=loop_id, payload=payload or {}, dedupe_key=dedupe_key)
         except IntegrityError:
             # lost a race with a concurrent wake_me on the same dedupe_key (partial unique index)
             if dedupe_key and (existing := await repo.pending_by_key(user_id, dedupe_key)) is not None:
                 return existing.id
             raise
+        if reminder:
+            await self._supersede_nudges(user_id, wakeup_id, reason.removeprefix(REMINDER_PREFIX), at)
+        return wakeup_id
+
+    async def _supersede_nudges(self, user_id: int, reminder_id: int, matter: str, at: datetime) -> None:
+        """The user's own reminder owns its moment: pending wakeups of Mavis's about the same matter at
+        about the same time (the reasoner's nudge for the loop LEARN made from the same sentence) are
+        redundant and would be a second message."""
+        from mavis.store.repo import loops as loops_repo  # lazy: keep the timers import graph flat
+
+        stale: list[int] = []
+        for w in await repo.list_pending(user_id, WakeupKind.AGENT):
+            if w.id == reminder_id or coverage.is_user_reminder(w):
+                continue
+            if abs(w.due_at - at) > coverage.COVER_WINDOW:
+                continue
+            texts = [w.reason]
+            if w.loop_id is not None and (loop := await loops_repo.get(w.loop_id)) is not None:
+                texts.append(loop.title)
+            if any(same_matter(matter, text) for text in texts):
+                stale.append(w.id)
+        if stale:
+            await repo.cancel_ids(stale)
 
     async def cancel(self, wakeup_id: int) -> bool:
         return await repo.cancel_ids([wakeup_id]) == 1
