@@ -156,15 +156,21 @@ def self_only_tainted() -> bool:
     return run is not None and run.self_taint()
 
 
-def _user_worded(tool: MavisTool, args: BaseModel, run: ToolRun) -> bool:
-    """Every provenance argument the tool declares is the user's own words this turn (domain.terms)."""
+def _user_worded(tool: MavisTool, args: BaseModel, run: ToolRun, *, relaxed: bool = False) -> bool:
+    """Every provenance argument the tool declares is the user's own words this turn (domain.terms).
+
+    Strict (default): every content term and identifier is one the user wrote. `relaxed` also accepts the
+    model's own natural wording that copies nothing from untrusted text (domain.terms.from_user_not_sources).
+    Only the CARD for a self-only action may use the relaxed rule; what a call stores is judged strictly, so
+    a paraphrase of planted text can skip a card but is never saved as the user's own."""
     values = [getattr(args, name, "") for name in tool.provenance]
     texts = [v for v in values if isinstance(v, str) and v.strip()]
     if not texts or len(texts) != len(values):
         return False
     sources = run.untrusted_sources
     return all(grounded_in(t, run.user_words) or (
-        sources is not None and from_user_not_sources(t, run.user_words, sources)) for t in texts)
+        relaxed and sources is not None and from_user_not_sources(t, run.user_words, sources))
+        for t in texts)
 
 
 def _gate_tainted(tool: MavisTool, args: BaseModel, risk: RiskClass) -> bool:
@@ -179,7 +185,8 @@ def _gate_tainted(tool: MavisTool, args: BaseModel, risk: RiskClass) -> bool:
     run = current_run.get()
     if run is None or not run.self_taint():
         return False
-    if _user_worded(tool, args, run):
+    # A durable trusted store (DOWNGRADE tools: remember) never gets the relaxed waiver.
+    if _user_worded(tool, args, run, relaxed=tool.on_taint is not TaintPolicy.DOWNGRADE):
         log.info("tool.taint_waived_user_words", tool=tool.name)
         return False
     return True
