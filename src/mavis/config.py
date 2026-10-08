@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     model_smart_fallbacks: list[str] = ["kimi-k3", "deepseek-v4.1-flash"]
     # process-wide cap on in-flight LLM calls (Ollama Cloud free tier 429s on concurrent requests)
     llm_max_concurrency: int = 3
+    # USD per million tokens (in, out). Unknown models use the default (the smart price: an upper bound).
+    llm_prices: dict[str, tuple[float, float]] = {
+        "deepseek-v4.1-flash": (0.30, 1.20), "glm-5.3": (1.40, 4.40)}
+    llm_price_default: tuple[float, float] = (1.40, 4.40)
     llm_timeout_fast_s: float = 30.0
     llm_timeout_smart_s: float = 60.0
     # after a client-side timeout the request still runs server-side and holds the account's slot
