@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field
 
 from mavis import bus
+from mavis.agents import cancellation
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.args import ToolArgs
@@ -168,11 +169,11 @@ async def list_tasks(user_id: int, args: NoArgs) -> str:
 
 
 async def cancel_task(user_id: int, args: CancelTaskArgs) -> ToolOutput:
-    if not await tasks.cancel(user_id, args.task_id):
+    # The one cancel path (status claim, approvals, cancel flag and hooks, card) shared with the button.
+    if not await cancellation.cancel_by_user(user_id, args.task_id):
         raise ActionFailed(f"Task #{args.task_id} is not active (or not yours).",
                            reason=f"task #{args.task_id} was not running, so there was nothing to cancel",
                            kind=FailureKind.NOT_FOUND)
-    await approvals.reject_open_for_task(args.task_id)
     return ToolOutput(f"Task #{args.task_id} cancelled.")
 
 

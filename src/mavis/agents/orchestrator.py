@@ -16,8 +16,9 @@ import structlog
 from langgraph.types import Command
 
 from mavis import bus
-from mavis.agents import checkpointing, interrupts
+from mavis.agents import cancellation, checkpointing, interrupts
 from mavis.agents.orchestrator_graph import build_orchestrator, card_wanted, initial_state
+from mavis.agents.task_clock import TaskClock, current_clock
 from mavis.agents.task_dispatch import enqueue_run
 from mavis.channels.formatting import verbatim
 from mavis.config import get_settings
@@ -39,11 +40,29 @@ _STALE_MARGIN_S = 60
 _user_locks: dict[int, asyncio.Lock] = {}
 
 
+def clock_s(task: Any) -> float:
+    """The task's own wall clock: `plan["clock_s"]` when the planner extended it, else task_timeout_s."""
+    try:
+        return float((task.plan or {}).get("clock_s") or get_settings().task_timeout_s)
+    except (TypeError, ValueError, AttributeError):
+        return get_settings().task_timeout_s
+
+
+def _still_within_clock(task: Any, now: datetime) -> bool:
+    """A RUNNING task past the default cutoff whose extended clock has not run out yet."""
+    started = task.started_at
+    return started is not None and started > now - timedelta(seconds=clock_s(task) + _STALE_MARGIN_S)
+
+
 async def _reap_stale(user_id: int) -> None:
-    """A task RUNNING past the wall-clock limit plus a margin lost its worker: fail it so it stops
-    counting toward the concurrency limit."""
-    cutoff = utcnow() - timedelta(seconds=get_settings().task_timeout_s + _STALE_MARGIN_S)
+    """A task RUNNING past its wall-clock limit plus a margin lost its worker: fail it so it stops
+    counting toward the concurrency limit. The query uses the shortest clock; each candidate is then
+    checked against its own (an extended machine clock is not stale)."""
+    now = utcnow()
+    cutoff = now - timedelta(seconds=get_settings().task_timeout_s + _STALE_MARGIN_S)
     for stale in await tasks.stale_running(user_id, cutoff):
+        if _still_within_clock(stale, now):
+            continue
         log.warning("task.stale_running", task_id=stale.id)
         await _fail(stale.id, user_id, "that task stalled and was stopped")
 
@@ -58,11 +77,14 @@ async def recover_tasks(user_id: int | None = None, *, restarted_at: datetime | 
     2. Every user with QUEUED tasks gets its next one re-enqueued when a slot is free (a deferred task
        has no job of its own; a duplicate RUN_TASK is harmless, run_task claims QUEUED once).
     Returns the number of tasks failed."""
-    cutoff = utcnow() - timedelta(seconds=get_settings().task_timeout_s + _STALE_MARGIN_S)
+    now = utcnow()
+    cutoff = now - timedelta(seconds=get_settings().task_timeout_s + _STALE_MARGIN_S)
     if restarted_at is not None:
         cutoff = max(cutoff, restarted_at)
     failed = 0
     for stale in await tasks.running_started_before(cutoff, user_id):
+        if restarted_at is None and _still_within_clock(stale, now):
+            continue  # its clock was extended and is still running
         log.warning("task.recovered_stuck_running", task_id=stale.id, restart=restarted_at is not None)
         reason = ("I was restarted partway through it" if restarted_at is not None
                   else "that task stalled and was stopped")
@@ -114,12 +136,20 @@ async def _drive(task_id: int, user_id: int, graph_input: Any) -> None:
     limit = asyncio.timeout(s.task_timeout_s)
     try:
         async with limit, checkpointing.open_checkpointer() as saver:
-            graph = build_orchestrator().compile(checkpointer=saver)
-            config = {
-                "configurable": {"thread_id": f"task:{task_id}"},
-                "callbacks": callbacks(), "recursion_limit": 80, "run_name": f"task:{task_id}",
-            }
-            result = await graph.ainvoke(graph_input, config=config)
+            clock = TaskClock(limit, s.task_timeout_s, s.task_timeout_max_s,
+                              asyncio.get_running_loop().time())
+            if task_row is not None and clock_s(task_row) > s.task_timeout_s:
+                clock.extend_to(clock_s(task_row))  # a resumed machine task keeps the clock its plan got
+            clock_token = current_clock.set(clock)
+            try:
+                graph = build_orchestrator().compile(checkpointer=saver)
+                config = {
+                    "configurable": {"thread_id": f"task:{task_id}"},
+                    "callbacks": callbacks(), "recursion_limit": 80, "run_name": f"task:{task_id}",
+                }
+                result = await graph.ainvoke(graph_input, config=config)
+            finally:
+                current_clock.reset(clock_token)
     except TimeoutError:
         if limit.expired():
             await _fail(task_id, user_id, "that took longer than I allow for one task")
@@ -147,6 +177,7 @@ async def _drive(task_id: int, user_id: int, graph_input: Any) -> None:
         await _report_executed_after_stop(task_id, user_id)
     except Exception:  # noqa: BLE001 - delivery trouble must not block the queue
         log.exception("task.post_run_failed", task_id=task_id)
+    cancellation.forget(task_id)  # this run is over: the in-process flag has done its job
     await _kick_next_queued(user_id)
 
 
