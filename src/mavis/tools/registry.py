@@ -134,6 +134,11 @@ class ToolRun:
         return self.tainted if self.self_tainted is None else self.self_tainted
 
 
+# Capabilities a step must do without (the user never asked for them and they are not connected): their
+# tools are not offered to the step's loop. Set by the orchestrator around a re-run of one step.
+excluded_capabilities: ContextVar[frozenset[Capability]] = ContextVar("excluded_capabilities",
+                                                                      default=frozenset())
+
 current_run: ContextVar[ToolRun | None] = ContextVar("current_run", default=None)
 
 
@@ -417,12 +422,17 @@ class ToolRegistry:
     def names_for(self, agent: str) -> list[str]:
         return [t.name for t in self._tools.values() if agent in t.agents]
 
+    @staticmethod
+    def _excluded(tool: MavisTool) -> bool:
+        return tool.requires is not None and tool.requires in excluded_capabilities.get()
+
     def for_agent(self, agent: str, user_id: int, names: Iterable[str] | None = None) -> list[BaseTool]:
         wanted = set(names) if names is not None else None
         return [
             self._as_langchain(t, user_id)
             for t in self._tools.values()
             if agent in t.agents and self.available(t) and (wanted is None or t.name in wanted)
+            and not self._excluded(t)
         ]
 
     def select(
@@ -434,7 +444,8 @@ class ToolRegistry:
         words = _terms(query)
         banned = set(exclude)
         candidates = [t for t in self._tools.values()
-                      if agent in t.agents and self.available(t) and t.name not in banned]
+                      if agent in t.agents and self.available(t) and t.name not in banned
+                      and not self._excluded(t)]
         pinned: list[MavisTool] = []
         for name in always:
             t = self._tools.get(name)

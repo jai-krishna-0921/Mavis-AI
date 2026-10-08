@@ -33,6 +33,7 @@ from langgraph.types import Command, Send, interrupt
 from mavis import bus
 from mavis.agents import persona, register
 from mavis.agents.cancellation import TaskCancelled
+from mavis.agents.commands import capability_requested
 from mavis.agents.spawn import spawn_agent
 from mavis.agents.specialists import SPECIALISTS, get_specialist
 from mavis.agents.specialists.base import current_deliverable, run_specialist
@@ -45,13 +46,15 @@ from mavis.domain.errors import ActionFailed, BudgetExceeded, ConnectionRequired
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.localtime import localize_args
 from mavis.domain.plans import CriticVerdict, Plan, PlanStep
+from mavis.domain.policy import Capability
 from mavis.domain.progress import StepState, final_of
 from mavis.domain.tasks import ApprovalStatus, StepOutcome, TaskKind, TaskOrigin, TaskStatus
 from mavis.llm import models as llm
 from mavis.policy.risk import UNTRUSTED_NOTE, wrap_untrusted
 from mavis.store.db import utcnow
 from mavis.store.repo import approvals, tasks, users
-from mavis.tools.registry import current_task_id, get_registry, tool_context
+from mavis.tools.integrations.actions import display_name
+from mavis.tools.registry import current_task_id, excluded_capabilities, get_registry, tool_context
 
 log = structlog.get_logger()
 
@@ -298,6 +301,38 @@ async def run_step_agent(
     return await run_specialist(get_specialist(step.agent), user_id, step.instruction, context, tainted=taint)
 
 
+UNREQUESTED_SKIP_NOTE = ("Part of the work could have used {names}, which is not connected and was not asked "
+                         "for, so I did it without. Everything else is delivered as gathered.")
+MAX_UNREQUESTED_SKIPS = 3
+
+
+async def _run_step_without_unrequested(step: PlanStep, inp: StepInput, skipped: list[Capability]):
+    """Run a step; an account it reaches for that the user never named is not a reason to stop.
+
+    The task's goal and the step's instruction say which accounts the user asked for. A step that needs
+    another one (a planner or specialist adding Notion to a research task) is re-run without the tools of
+    that account, so nothing waits on a connection nobody wanted and what was gathered is delivered. A
+    requested account still pauses the task for the connect prompt."""
+    asked = f"{inp['goal']}\n{step.instruction}"
+    token = excluded_capabilities.set(excluded_capabilities.get())
+    try:
+        while True:
+            try:
+                note = ("\n\nNot available and not needed: "
+                        f"{', '.join(sorted(display_name(c) for c in skipped))}. Work without it."
+                        if skipped else "")
+                return await run_step_agent(step, inp["user_id"], _step_context(inp) + note)
+            except ConnectionRequired as exc:
+                if capability_requested(exc.capability, asked) or len(skipped) >= MAX_UNREQUESTED_SKIPS:
+                    raise
+                log.info("orchestrator.unrequested_connection_skipped", task_id=inp["task_id"],
+                         step=step.id, capability=exc.capability.value)
+                skipped.append(exc.capability)
+                excluded_capabilities.set(excluded_capabilities.get() | {exc.capability})
+    finally:
+        excluded_capabilities.reset(token)
+
+
 def _result_body(step_id: str, res: dict) -> str:
     if res.get("ok"):
         body = str(res.get("text") or "")[:_STEP_DIGEST_CHARS]
@@ -357,8 +392,9 @@ async def run_step(inp: StepInput) -> dict:
     deliverable_token = current_deliverable.set(inp.get("deliverable", "message"))
     taint_token = step_tainted.set(tainted)
     await _cards().step_started(inp["task_id"], step.id)
+    skipped: list[Capability] = []
     try:
-        outcome = await run_step_agent(step, inp["user_id"], _step_context(inp))
+        outcome = await _run_step_without_unrequested(step, inp, skipped)
     except BudgetExceeded as exc:
         outcome = StepOutcome(ok=False, error=f"step ran out of budget: {exc}")
     except ConnectionRequired as exc:
@@ -386,11 +422,15 @@ async def run_step(inp: StepInput) -> dict:
         step_tainted.reset(taint_token)
     log.info("orchestrator.step_done", task_id=inp["task_id"], step=step.id, ok=outcome.ok)
     await _cards().step_finished(inp["task_id"], step.id, step_state_of(outcome))
-    return {
+    update: dict[str, Any] = {
         "results": {step.id: {**outcome.model_dump(), "tainted": outcome.tainted or tainted,
                               "round": inp["revision"], "agent": step.agent}},
         "artifacts": outcome.artifacts,
     }
+    if skipped:
+        names = ", ".join(sorted({display_name(c) for c in skipped}))
+        update["action_results"] = [UNREQUESTED_SKIP_NOTE.format(names=names)]
+    return update
 
 
 # --- review ------------------------------------------------------------------------
