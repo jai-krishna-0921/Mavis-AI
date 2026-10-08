@@ -1,58 +1,73 @@
-"""The Redis Lua script and mavis.llm.policy must decide the same way (e2efix-capacity rules)."""
+"""The Redis Lua script and mavis.llm.share must decide the same way (the capacity rules win)."""
 
 from __future__ import annotations
 
 import itertools
 import time
 
-import pytest
+from mavis.llm import limiter, limiter_lua, share
 
-from mavis.llm import limiter_lua, policy
-
-T = policy.Timings()
 P = "mavis:llm:par:"
+KEYS = [P + "holders", P + "queue", P + "last_used", P + "last_chat_start", P + "last_be_start"]
+BIG = 10_000.0
 
 
-async def _decide(client, *, size, others, be, higher, since_last_s, rank) -> int:
+async def _decide(client, *, size, chat, be, higher, activity, chat_start, be_start, waited, rank,
+                  grace=20.0):
     await client.flushall()
     now = int(time.time() * 1000)
-    holders = [("o", 0)] * others + [("b", 2)] * be
-    for i, (kind, r) in enumerate(holders):
-        lease = f"{kind}{i}"
-        await client.zadd(P + "holders", {lease: now + 60_000})
-        await client.hset(P + "holder:" + lease, mapping={"uid": 1, "rank": r})
+    for i, (kind, r) in enumerate([("c", 0)] * chat + [("b", 2)] * be):
+        await client.zadd(P + "holders", {f"{kind}{i}": now + 60_000})
+        await client.hset(P + f"holder:{kind}{i}", mapping={"uid": 1, "rank": r})
     if higher:
         await client.zadd(P + "queue", {"hw": now - 1000})
         await client.hset(P + "waiter:hw", mapping={"uid": 2, "rank": 0, "since": now - 1000})
-    if since_last_s is not None:
-        await client.set(P + "last_used", now - int(since_last_s * 1000))
+    for key, age in ((KEYS[2], activity), (KEYS[3], chat_start), (KEYS[4], be_start)):
+        if age < BIG:
+            await client.set(key, now - int(age * 1000))
+    c = limiter.policy_constants()
+    c["grace_s"] = grace
     script = client.register_script(limiter_lua.TRY_ACQUIRE)
-    code, _ = await script(keys=[P + "holders", P + "queue", P + "last_used"], args=[
-        now, "me", 7, rank, now, size, 9, 9, 60_000, P, 5000, T.share, int(T.grace_s * 1000),
-        int(T.quiet_s * 1000), int(T.background_aging_s * 1000), int(T.best_effort_aging_s * 1000)])
-    return int(code)
+    return [int(x) for x in await script(keys=KEYS, args=[
+        now, "me", 7, rank, now - int(waited * 1000), size, 9, 9, 60_000, P, 5000,
+        *[int(c[k] * 1000) for k in limiter._CONSTANT_ORDER]])]
 
 
-async def test_best_effort_decisions_match_the_policy(fake_redis, settings):
+def _expected(size, chat, be, higher, activity, chat_start, be_start, waited):
+    """(code, clamp_s) the in-process limiter's rules give a best_effort caller."""
+    work_active = higher or activity < 20.0
+    if size == 1:
+        if work_active:
+            return 2, None
+        return (1, share.TIMEOUT_S) if size - chat - be > 0 else (0, None)
+    v = share.best_effort_verdict(share.SlotState(
+        size=size, free=size - chat - be, best_effort_inflight=be, interactive_waiting=higher,
+        chat_in_flight=chat, since_chat_activity_s=activity, since_chat_start_s=chat_start,
+        since_best_effort_start_s=be_start, waited_s=waited))
+    return (1, v.timeout_s) if v.start else (0, None)
+
+
+async def test_best_effort_decisions_match_the_shared_policy(fake_redis, settings):
     checked = 0
-    for size, others, be, higher, since in itertools.product(
-            (1, 2, 3, 6), (0, 1, 2), (0, 1, 2, 3), (False, True), (None, 1.0, 10.0, 100.0)):
-        if others + be > size:
+    for size, chat, be, higher, activity, chat_start, be_start, waited in itertools.product(
+            (1, 2, 3, 6), (0, 1, 2), (0, 1, 2), (False, True), (BIG, 1.0, 10.0), (BIG, 1.0, 10.0),
+            (BIG, 1.0, 5.0), (0.0, 30.0, 70.0)):
+        if chat + be > size or (chat_start < activity - 100):
             continue
-        snap = policy.Snapshot(size, size - others - be, be, higher,
-                               1e18 if since is None else since)
-        want = 1 if policy.best_effort_may_start(snap, T) else 0
-        if policy.single_slot_blocked(snap, T):
-            want = 2
-        got = await _decide(fake_redis, size=size, others=others, be=be, higher=higher,
-                            since_last_s=since, rank=2)
-        assert got == want, f"{size=} {others=} {be=} {higher=} {since=}: {got} != {want}"
+        want = _expected(size, chat, be, higher, activity, chat_start, be_start, waited)
+        code, _qlen, clamp_ms = await _decide(
+            fake_redis, size=size, chat=chat, be=be, higher=higher, activity=activity, chat_start=chat_start,
+            be_start=be_start, waited=waited, rank=2)
+        got = (code, clamp_ms / 1000 if clamp_ms else None)
+        state = f"{size=} {chat=} {be=} {higher=} {activity=} {chat_start=} {be_start=} {waited=}"
+        assert got == want, f"{state}: {got} != {want}"
         checked += 1
-    assert checked > 100
+    assert checked > 300
 
 
-@pytest.mark.parametrize("size,others,be,expect", [(3, 0, 0, 1), (3, 2, 0, 1), (3, 3, 0, 0), (3, 1, 1, 1),
-                                                   (1, 0, 0, 1), (1, 1, 0, 0)])
-async def test_interactive_takes_any_free_slot_even_the_last(fake_redis, settings, size, others, be, expect):
-    got = await _decide(fake_redis, size=size, others=others, be=be, higher=False, since_last_s=1.0, rank=0)
-    assert got == expect
+async def test_interactive_takes_any_free_slot_even_the_last(fake_redis, settings):
+    for size, chat, be, expect in ((3, 0, 0, 1), (3, 2, 0, 1), (3, 3, 0, 0), (3, 1, 1, 1), (1, 0, 0, 1),
+                                   (1, 1, 0, 0)):
+        code, *_ = await _decide(fake_redis, size=size, chat=chat, be=be, higher=False, activity=1.0,
+                                 chat_start=1.0, be_start=BIG, waited=0.0, rank=0)
+        assert code == expect, (size, chat, be)
