@@ -17,7 +17,7 @@ def upd(chat_id: int, update_id: int = 1) -> dict:
 @pytest.fixture
 async def client(db, bus, monkeypatch):
     monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "shh")
-    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", "[111]")
+    monkeypatch.setenv("OWNER_TELEGRAM_CHAT_IDS", "[111]")
     monkeypatch.setenv("ENV", "prod")
     get_settings.cache_clear()
     monkeypatch.setattr(ratelimit, "_limiter", None)
@@ -60,7 +60,7 @@ async def test_webhook_returns_429_when_limited(client, monkeypatch) -> None:
 
 async def test_prod_requires_allowlist(monkeypatch) -> None:
     monkeypatch.setenv("ENV", "prod")
-    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", "[]")
+    monkeypatch.setenv("OWNER_TELEGRAM_CHAT_IDS", "[]")
     get_settings.cache_clear()
     from mavis.api.app import lifespan
 
