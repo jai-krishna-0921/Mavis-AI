@@ -25,6 +25,7 @@ from mavis.loops.service import LoopService
 from mavis.policy import outcomes
 from mavis.store.db import Session
 from mavis.store.models import Message
+from mavis.store.repo import users
 from mavis.timers.service import WakeupService
 
 log = structlog.get_logger()
@@ -151,6 +152,17 @@ class Routines:
                 if not failed:
                     raise
                 log.exception("routines.reschedule_failed", user=user.id)
+
+    async def on_timezone_change(self, user_id: int, old: str, new: str) -> None:
+        """The user moved: the morning check-in is re-anchored to their new local time. One-off reminders keep
+        their absolute instant (they are stored in UTC and untouched here)."""
+        user = await users.get(user_id)
+        morning = [lp for lp in await self._loops.active(user_id)
+                   if lp.kind is LoopKind.ROUTINE and lp.title == MORNING_TITLE]
+        if not morning:
+            return
+        await self._wakeups.cancel_where(user_id, [WakeupKind.ROUTINE], morning[0].id)
+        await self._schedule_morning(user, morning[0].id, next_day=False)
 
     async def reschedule(self, user, loop_id: int | None) -> None:
         """A check-in that fired far too late is skipped; the next one is booked for tomorrow."""

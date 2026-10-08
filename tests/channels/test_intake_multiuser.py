@@ -118,3 +118,14 @@ async def test_a_flood_from_an_active_user_is_slowed_with_a_notice_not_silently(
     await _albumed(recording_bus, 6503, 80, 3000)
     types = [e.type for e in _take(recording_bus)]
     assert types.count(EventType.USER_MESSAGE) == 60 and EventType.RATE_LIMITED in types
+
+
+async def test_shared_location_travels_in_the_payload(db, invite_mode, recording_bus):
+    u, _ = await users.get_or_create_by_chat(6601, "Rui")
+    await users.update(u.id, status="active")
+    upd = _msg(55, 6601, "private", "")
+    del upd["message"]["text"]
+    upd["message"]["location"] = {"latitude": 41.15, "longitude": -8.61, "horizontal_accuracy": 50}
+    assert await ingest_update(upd, recording_bus, _noop)
+    (event,) = _take(recording_bus)
+    assert event.payload["location"] == {"latitude": 41.15, "longitude": -8.61}

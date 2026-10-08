@@ -168,7 +168,8 @@ class Settings(BaseSettings):
     attention_max_attempts: int = 2  # LLM attempts per email before the heuristic fallback
     attention_currency: str = "INR"  # the user's currency, used when an email states none
     # cold start: with no history, a debit at or above this amount (per currency) is notable
-    attention_large_amounts: dict[str, float] = {"INR": 10000.0, "USD": 150.0, "EUR": 150.0, "GBP": 120.0}
+    attention_large_amounts: dict[str, float] = {
+        "INR": 10000.0, "USD": 150.0, "EUR": 150.0, "GBP": 120.0, "JPY": 20000.0, "SGD": 200.0, "AED": 550.0}
     attention_ask_threshold: float = 0.6
     attention_notify_threshold: float = 0.7
     attention_brief_threshold: float = 0.35

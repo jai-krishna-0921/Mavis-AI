@@ -126,6 +126,8 @@ async def ingest_update(data: dict[str, Any], bus: EventBus, answer: Answerer | 
             payload["command"] = m.group(1).lower()
         if file := _file(msg):
             payload["file"] = file.model_dump()
+        if isinstance(loc := msg.get("location"), dict) and "latitude" in loc and "longitude" in loc:
+            payload["location"] = {"latitude": loc["latitude"], "longitude": loc["longitude"]}
         occurred = datetime.fromtimestamp(msg["date"], UTC) if msg.get("date") else utcnow()
     else:
         return False
