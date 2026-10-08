@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field
 
+from mavis.domain import timeutil
 from mavis.domain.memory import ProfileUpdate
 from mavis.memory.tokens import estimate_tokens
 
@@ -37,26 +39,37 @@ class ProfileCard(BaseModel):
     dislikes: list[str] = Field(default_factory=list)
     other: list[str] = Field(default_factory=list)
     flags: dict[str, bool] = Field(default_factory=dict)
+    # when each scalar field was last set, as said (ISO UTC): a LEARN deferred by a busy model must not
+    # overwrite a newer value with an older statement
+    stamps: dict[str, str] = Field(default_factory=dict)
 
     @property
     def tracks_mood(self) -> bool:
         return self.flags.get("track_mood", True)
 
-    def apply(self, updates: list[ProfileUpdate]) -> ProfileCard:
+    def apply(self, updates: list[ProfileUpdate], at: datetime | None = None) -> ProfileCard:
+        """`at`: when the updates were said (default now). A scalar field already set from a later
+        statement keeps its value."""
         data = self.model_dump()
+        when = (at or timeutil.now())
+        when_s = timeutil.ensure_utc(when).isoformat()
         for u in updates:
             value = " ".join(u.value.split())
             if not value:
                 continue
             field = u.field.strip().casefold()
+            if field in SCALAR_FIELDS and data["stamps"].get(field, "") > when_s:
+                continue  # said before the value we hold: history, not an update
             if field == "timezone":
                 try:
                     ZoneInfo(value)
                 except (ZoneInfoNotFoundError, ValueError):
                     continue
                 data["timezone"] = value
+                data["stamps"][field] = when_s
             elif field in SCALAR_FIELDS:
                 data[field] = value
+                data["stamps"][field] = when_s
             else:
                 target = field if field in LIST_FIELDS else "other"
                 existing = next((x for x in data[target] if _norm(x) == _norm(value)), None)

@@ -112,3 +112,50 @@ async def test_forget_escapes_like_wildcards(graph):
     await graph.upsert_relation(1, rel("User", "DISLIKES", "Rain", "User dislikes 100% rain."))
     assert await graph.forget(1, "%") == 1
     assert [d["relation"] for d in await graph.dump(1)] == ["PREFERS"]
+
+
+# --- a LEARN deferred by a busy model applies its facts with their SOURCE time ---------------------------
+from datetime import UTC, datetime, timedelta  # noqa: E402
+
+import pytest  # noqa: E402
+
+T0 = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
+
+
+async def _rows(rel_name):
+    async with dbm.Session() as s:
+        rows = list(await s.scalars(select(GraphEdge).where(GraphEdge.rel == rel_name)
+                                    .order_by(GraphEdge.valid_from)))
+    return rows
+
+
+@pytest.mark.parametrize("gap_days", [1, 30])
+@pytest.mark.parametrize("rel_name", ["LOCATED_IN", "WORKS_AT", "STUDIES_AT"])
+async def test_late_older_fact_is_history_not_current(graph, rel_name, gap_days):
+    """turn 1 'I live in Pune' deferred, turn 2 'moved to Delhi' applied, turn 1 retried later."""
+    older, newer = T0, T0 + timedelta(days=gap_days)
+    await graph.upsert_relation(1, rel("User", rel_name, "Delhi", "Moved to Delhi."), at=newer)
+    await graph.upsert_relation(1, rel("User", rel_name, "Pune", "Lives in Pune."), at=older)
+    assert {d["object"] for d in await graph.dump(1) if d["relation"] == rel_name} == {"Delhi"}
+    pune, delhi = await _rows(rel_name)
+    assert pune.dst_key.endswith("pune") or "Pune" in pune.statement
+    assert pune.valid_to is not None and pune.valid_to.replace(tzinfo=UTC) == newer  # closed interval
+    assert delhi.valid_to is None
+
+
+async def test_in_order_facts_supersede_at_the_source_time(graph):
+    await graph.upsert_relation(1, rel("User", "LOCATED_IN", "Pune", "Lives in Pune."), at=T0)
+    await graph.upsert_relation(1, rel("User", "LOCATED_IN", "Delhi", "Moved to Delhi."),
+                                at=T0 + timedelta(days=3))
+    pune, delhi = await _rows("LOCATED_IN")
+    assert pune.valid_to.replace(tzinfo=UTC) == T0 + timedelta(days=3)
+    assert delhi.valid_from.replace(tzinfo=UTC) == T0 + timedelta(days=3) and delhi.valid_to is None
+
+
+async def test_retrying_the_same_older_fact_twice_is_idempotent(graph):
+    await graph.upsert_relation(1, rel("User", "LOCATED_IN", "Delhi", "Moved to Delhi."), at=T0 + timedelta(days=2))
+    for _ in range(2):
+        await graph.upsert_relation(1, rel("User", "LOCATED_IN", "Pune", "Lives in Pune."), at=T0)
+    assert len(await _rows("LOCATED_IN")) == 2 + 1 - 1  # Delhi current, Pune history, no repeat rows
+    assert {d["object"] for d in await graph.dump(1)} >= {"Delhi"}
+    assert [r.valid_to is None for r in await _rows("LOCATED_IN")].count(True) == 1

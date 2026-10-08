@@ -289,3 +289,32 @@ async def test_retried_learn_eventually_succeeds_once(memory, user, fake_llm, mo
             payload = max(parked, key=lambda w: w.id).payload["learn"]
     assert calls["n"] == 3 and await events.seen("learn:tg:7")
     assert len(await memory.graph.dump(user.id)) == 1
+
+
+async def test_deferred_learn_applies_with_its_source_time_end_to_end(memory, user, fake_llm, monkeypatch, clock):
+    """Pune said first (LEARN fails and is retried later), Delhi said second (applied at once): after the
+    retry Delhi is still where the user lives, and the name they gave later is kept too."""
+    from mavis.domain.memory import ProfileUpdate
+    from mavis.store.repo import profile as profile_repo
+
+    async def no_summary(uid):
+        return False
+
+    monkeypatch.setattr(jobs, "maybe_summarize", no_summary)
+    t1, t2 = clock.t - timedelta(hours=2), clock.t - timedelta(hours=1)
+
+    def extraction(city, name):
+        return Extraction(
+            entities=[Entity(name=city, label="Place")],
+            relations=[Relation(subject="User", rel="LOCATED_IN", object=city, statement=f"Lives in {city}.")],
+            profile_updates=[ProfileUpdate(field="name", value=name)])
+
+    fake_llm.push_structured(extraction("Delhi", "Arjun"))  # turn 2, applied first
+    await jobs.handle_learn(_job("learn:tg:b", user.id, {"text": "moved to Delhi, I'm Arjun", "source_ref": "tg:b",
+                                                       "trust": "user", "anchor_at": t2.isoformat()}))
+    fake_llm.push_structured(extraction("Pune", "Jai"))  # turn 1's retry, 10 minutes later
+    await jobs.handle_learn(_job("learn:tg:a:w1", user.id, {"text": "I live in Pune, call me Jai",
+                                                          "source_ref": "tg:a", "trust": "user",
+                                                          "anchor_at": t1.isoformat(), "retry": 1}))
+    assert {d["object"] for d in await memory.graph.dump(user.id) if d["relation"] == "LOCATED_IN"} == {"Delhi"}
+    assert (await profile_repo.get(user.id)).name == "Arjun"
