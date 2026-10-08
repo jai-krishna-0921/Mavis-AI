@@ -25,8 +25,10 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ValidationError
 
+from mavis import bus
 from mavis.config import get_settings
 from mavis.domain.errors import LLMError
+from mavis.llm.limiter import SharedProviderState, get_limiter, spawn
 from mavis.llm.tracing import callbacks
 
 log = structlog.get_logger(__name__)
@@ -369,6 +371,52 @@ def _deadline_for(tier: Tier, priority: Priority) -> _Deadline:
     return _Deadline(INTERACTIVE_DEADLINE_S if fast_reply else BACKGROUND_DEADLINE_S)
 
 
+def _shared_state():
+    """The Redis-backed provider state when LLM_LIMITER=redis and Redis is configured, else None."""
+    if get_settings().llm_limiter != "redis" or (client := bus.get_redis()) is None:
+        return None
+    cached = _shared_cache.get("primary")
+    if cached is None or cached[0] is not client:
+        cached = _shared_cache["primary"] = (client, SharedProviderState(client, "primary"))
+    return cached[1]
+
+
+_shared_cache: dict[str, tuple[Any, SharedProviderState]] = {}
+
+
+async def _refresh_shared_state() -> None:
+    """Copy the account-wide backoff / cooldown other processes recorded into this process's view."""
+    state = _shared_state()
+    if state is None:
+        return
+    try:
+        await state.refresh()
+    except Exception as exc:  # noqa: BLE001 - Redis trouble: the local view still works
+        log.debug("llm.shared_state_refresh_failed", error=type(exc).__name__)
+        return
+    now = time.monotonic()
+    if (back := state.backoff_s()) > 0:
+        _ollama.backoff_until = max(_ollama.backoff_until, now + back)
+    if (cool := state.cooldown_until_ms / 1000 - time.time()) > 0:
+        _ollama.cooldown_until = max(_ollama.cooldown_until, now + cool)
+
+
+def _shared_note(kind: str, value: float | None = None) -> None:
+    """Record a provider event in Redis without delaying the call (fire and forget)."""
+    state = _shared_state()
+    if state is None:
+        return
+    if kind == "rate":
+        coro = state.note_rate_limit_async(value)
+    elif kind == "timeout":
+        coro = state.note_timeout_async(value or 0.0)
+    elif state.backoff_until_ms:
+        coro = state.note_success_async()
+    else:
+        return
+    spawn(coro)
+
+
 async def _await_backoff(priority: Priority, deadline: _Deadline) -> None:
     """Global 429 backoff: everyone waits. Interactive callers only if the wait fits the deadline;
     best_effort callers never wait (their work is dropped, the account is saturated)."""
@@ -398,11 +446,12 @@ async def _call[R](
     for _ in range(MAX_ATTEMPTS):
         deadline.check()
         if not secondary:
+            await _refresh_shared_state()
             await _await_backoff(priority, deadline)
         left = deadline.check()
-        lim = _limiter(secondary)
-        await lim.acquire(priority, left if priority == "interactive"
-                          else min(left, BACKGROUND_ACQUIRE_TIMEOUT_S))
+        lim = get_limiter(secondary)
+        lease = await lim.acquire(priority, left if priority == "interactive"
+                                  else min(left, BACKGROUND_ACQUIRE_TIMEOUT_S))
         hold = 0.0
         try:
             try:
@@ -411,20 +460,25 @@ async def _call[R](
             except TimeoutError as exc:
                 if not secondary:
                     hold = _ollama.note_timeout()
+                    _shared_note("timeout", hold)
                 if deadline.remaining() <= 0:
                     raise LLMError("LLM deadline exceeded") from exc
                 raise
             if not secondary:
                 _ollama.note_success()
+                _shared_note("ok")
             return result
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, LLMError) or secondary:
                 raise
             if _is_timeout(exc):
                 hold = hold or _ollama.note_timeout()
+                _shared_note("timeout", hold)
                 log.warning("llm.timeout_cooldown", hold_s=hold)
             elif _is_rate_limited(exc):
-                dur = _ollama.note_rate_limit(_retry_after_s(exc))
+                retry_after = _retry_after_s(exc)
+                dur = _ollama.note_rate_limit(retry_after)
+                _shared_note("rate", retry_after)
                 log.warning("llm.rate_limited", backoff_s=dur)
             else:
                 raise
@@ -435,9 +489,9 @@ async def _call[R](
             if priority != "best_effort":
                 lim.touch()  # the grace window runs from the END of a chat or task call
             if hold > 0:
-                asyncio.get_running_loop().call_later(hold, lim.release)  # server still busy
+                asyncio.get_running_loop().call_later(hold, lim.release, lease)  # server still busy
             else:
-                lim.release()
+                lim.release(lease)
     assert last is not None
     raise last
 
@@ -460,8 +514,14 @@ def _text_of(content: Any) -> str:
 
 
 def _prefer_secondary(tier: Tier, priority: Priority) -> bool:
-    """Interactive calls skip a saturated Ollama (cooldown / backoff) when a secondary exists."""
-    return priority == "interactive" and _secondary_ready(tier) and _ollama.unavailable_s() > 0
+    """Overflow routing (spec 8.4). Interactive: skip a saturated or backed-up primary when a secondary
+    exists. Background: only after a long primary backoff. best_effort never overflows."""
+    if not _secondary_ready(tier) or priority == "best_effort":
+        return False
+    s = get_settings()
+    if priority == "interactive":
+        return _ollama.unavailable_s() > 0 or get_limiter(False).estimate_wait_s() > s.llm_overflow_wait_s
+    return _ollama.unavailable_s() > s.llm_bg_overflow_after_s
 
 
 async def _invoke_chain(
