@@ -15,6 +15,7 @@ from mavis.domain import timeutil
 from mavis.domain.events import Provenance, Trust
 from mavis.domain.memory import Extraction, RecallContext
 from mavis.memory import recall as recall_mod
+from mavis.memory import suppress as suppress_mod
 from mavis.memory.dates import apply_relative_day
 from mavis.memory.embeddings import Embedder, get_embedder
 from mavis.memory.extractor import extract
@@ -23,6 +24,7 @@ from mavis.memory.names import is_user
 from mavis.memory.recall import LoopsReader
 from mavis.memory.resolver import resolve
 from mavis.memory.spotter import SpotterCache
+from mavis.memory.suppress import filter_learned
 from mavis.memory.vector import QdrantVectorStore, VectorStore
 from mavis.store.repo import events as events_repo
 from mavis.store.repo import loops as loops_repo
@@ -311,6 +313,9 @@ class MemoryService:
 
         resolution = await resolve(extraction, await self.graph.entities(user_id), self.embedder)
         trusted = trust is Trust.USER
+        if not trusted:  # what the user asked Mavis to stop learning stays out (their own words never are)
+            resolution.entities, resolution.relations = filter_learned(
+                resolution.entities, resolution.relations, await suppress_mod.load(user_id))
         if trusted:
             # Third-party text must not seed graph entities: an email sender listed as an alias would
             # otherwise count as a "known sender" in the trusted triage signals.

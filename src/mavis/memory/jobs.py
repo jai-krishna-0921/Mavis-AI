@@ -215,3 +215,6 @@ def register() -> None:
     from mavis.timers.system import register_system_wakeup  # lazy: keep import order unchanged
 
     register_system_wakeup(WakeupKind.SYSTEM_LEARN.value, on_learn_wakeup, with_payload=True)
+    from mavis.memory import personal_layer  # lazy: it imports the LLM and timer layers
+
+    personal_layer.register()

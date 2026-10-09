@@ -97,11 +97,15 @@ async def _default_embed(texts: list[str]) -> list[list[float]]:
     return await embeddings.get_embedder().embed(texts)
 
 
+Centrality = Callable[[int, str], Awaitable[float]]
+
+
 class EventFilter:
-    def __init__(self, embed: Embed | None = None) -> None:
+    def __init__(self, embed: Embed | None = None, centrality: Centrality | None = None) -> None:
         if embed is None:
             embed = _default_embed
         self._embed = embed
+        self._centrality = centrality  # personal layer: how central an event's people and projects are
 
     async def apply(self, event: Event, open_loops: list[Loop], tz: str = "UTC") -> FilterResult:
         summary = summarize_event(event, tz)
@@ -128,6 +132,8 @@ class EventFilter:
             return FilterResult(drop=False, matched_loops=matched, relevance=1.0, summary=summary)
         similarity = await self._similarity(summary, [lp for lp in open_loops if not lp.watch])
         relevance = max(URGENT_RELEVANCE if urgent else 0.0, similarity)
+        if self._centrality is not None:  # people and projects that matter to this user rank higher
+            relevance = min(1.0, relevance + await self._centrality(event.user_id, summary))
         return FilterResult(drop=False, relevance=relevance, summary=summary)
 
     async def _similarity(self, summary: str, loops: list[Loop]) -> float:

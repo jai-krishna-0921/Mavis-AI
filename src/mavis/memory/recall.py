@@ -120,8 +120,9 @@ async def recall(
         found = await graph.neighborhood(user_id, names) if names else []
         out = []
         for f in found:
-            if isinstance(f, Fact) and f.third_party:
-                # learned from a record (mail, Slack): labelled with where it came from, data not instruction
+            if isinstance(f, Fact) and (f.third_party or f.self_authored):
+                # learned from a record (mail, Slack; the user's own sent mail is medium trust, not USER):
+                # labelled with where it came from, data not instruction
                 f = Fact(wrap_untrusted(str(f), source=f.origin or "record"), f.source_ref)
                 tainted.add(f)
             out.append(f)

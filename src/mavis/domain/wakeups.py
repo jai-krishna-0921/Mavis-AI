@@ -30,6 +30,7 @@ class WakeupKind(StrEnum):
     SYSTEM_LEARN = "system_learn"  # a LEARN job parked until after the chat grace window, or retried
     SYSTEM_WORKSPACE_POLL = "system_workspace_poll"  # Phase 9: Tasks/Drive polls and deferred Workspace pings
     SYSTEM_ONBOARD_CONNECT = "system_onboard_connect"  # Phase 11: the connector offer after the first turn
+    SYSTEM_PERSONAL_LAYER = "system_personal_layer"  # rebuild a user's personal layer (kind column: 24 chars)
 
 
 class WakeupStatus(StrEnum):
@@ -75,4 +76,5 @@ EVENT_TYPE_FOR_KIND: dict[WakeupKind, EventType] = {
     WakeupKind.SYSTEM_LEARN: EventType.WAKEUP,
     WakeupKind.SYSTEM_WORKSPACE_POLL: EventType.WAKEUP,
     WakeupKind.SYSTEM_ONBOARD_CONNECT: EventType.WAKEUP,
+    WakeupKind.SYSTEM_PERSONAL_LAYER: EventType.WAKEUP,
 }
