@@ -47,6 +47,15 @@ _DRIVE_META = _any("drive.readonly", "drive.metadata.readonly", "drive.metadata"
 _DOCS_READ = _any("documents.readonly", "documents", "drive.readonly", "drive")
 _SHEETS_READ = _any("spreadsheets.readonly", "spreadsheets", "drive.readonly", "drive")
 _CONTACTS_READ = _any("contacts.readonly", "contacts")
+# Writes. drive.file is deliberately absent: it only reaches files this app created, and these actions work
+# on the user's existing files (comment, share, move, append, update cells), so the full drive scope counts.
+_DRIVE_WRITE = _any("drive")
+_DOCS_WRITE = _any("documents", "drive")
+_SHEETS_WRITE = _any("spreadsheets", "drive")
+_TASKS_READ = _any("tasks", "tasks.readonly")
+_TASKS_WRITE = _any("tasks")
+_MEET_CREATE = _any("meetings.space.created")
+_MEET_READ = _any("meetings.space.readonly", "meetings.space.created")
 
 # What each natively handled Google action needs: a tuple of any-of groups, and every group must be met
 # (a reply reads the thread and then sends). An action with no entry is never run natively. Google lets a
@@ -61,6 +70,14 @@ ACTION_SCOPES: dict[str, tuple[frozenset[str], ...]] = {
     "drive.permissions": (_DRIVE_META,), "drive.read": (_DRIVE_READ,), "drive.download": (_DRIVE_READ,),
     "docs.read": (_DOCS_READ,), "sheets.find": (_DRIVE_META,), "sheets.read": (_SHEETS_READ,),
     "contacts.search": (_CONTACTS_READ,), "contacts.list": (_CONTACTS_READ,),
+    "drive.create_folder": (_DRIVE_WRITE,), "drive.move": (_DRIVE_WRITE,), "drive.share": (_DRIVE_WRITE,),
+    "drive.upload_file": (_DRIVE_WRITE,), "docs.comment": (_DRIVE_WRITE,),
+    "docs.create": (_DOCS_WRITE,), "docs.insert_text": (_DOCS_WRITE,),
+    "sheets.create": (_SHEETS_WRITE,), "sheets.append_row": (_SHEETS_WRITE,),
+    "sheets.update_range": (_SHEETS_WRITE,),
+    "tasks.list": (_TASKS_READ,), "tasks.get": (_TASKS_READ,), "tasks.add": (_TASKS_WRITE,),
+    "tasks.patch": (_TASKS_WRITE,), "tasks.delete": (_TASKS_WRITE,),
+    "meet.create": (_MEET_CREATE,), "meet.transcript": (_MEET_READ,),
 }
 _GOOGLE_CAPABILITIES = frozenset(ACTIONS[a].capability for a in ACTION_SCOPES)
 _GOOGLE_TOOLKITS = frozenset({"google", "googlesuper", *(c.value for c in GOOGLE_CAPABILITIES)})
@@ -176,7 +193,7 @@ class NativeRouter:
 
     def _native_target(self, toolkit: str) -> NativeProvider | None:
         name = (toolkit or "").strip().lower()
-        if name in _GOOGLE_TOOLKITS and name not in (Capability.TASKS.value, Capability.MEET.value):
+        if name in _GOOGLE_TOOLKITS:
             provider = NativeProvider.GOOGLE
         elif name in _SLACK_TOOLKITS:
             provider = NativeProvider.SLACK
