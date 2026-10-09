@@ -67,6 +67,9 @@ def iban_number(country: str = "DE", body_len: int = 18) -> str:
     "验证码：{c}，请勿泄露",
     "PIN {c} for your card",
     "{c} es tu código de seguridad",
+    "Your OTP for the transaction of Rs. 4,500.00 on 08-10-2026 is {c}. Do not share it.",
+    "Para confirmar el pago de 40 EUR introduce el código {c}",
+    "Verification code (valid for 10 minutes): {c}",
 ])
 def test_one_time_codes_are_masked_in_common_forms(template):
     for _ in range(4):
