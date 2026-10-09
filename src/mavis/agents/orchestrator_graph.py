@@ -783,8 +783,12 @@ def derive_outcome(state: OrchestratorState) -> tuple[TaskStatus, str | None]:
     return TaskStatus.PARTIAL, "only part of it got done"
 
 
-def _bubbles(text: str) -> list[str]:
-    """`text` cut into chat bubbles at paragraph or line breaks, at most 3."""
+CUT_NOTE = "(That was too long to send in full, so the rest is left out. Ask me and I will send it.)"
+
+
+def _bubbles(text: str, limit: int = 3) -> list[str]:
+    """`text` cut into chat bubbles at paragraph or line breaks, at most `limit`. Content past the cap is
+    never dropped silently: the last bubble says plainly that the rest was left out."""
     out: list[str] = []
     cur = ""
     for para in text.strip().split("\n\n"):
@@ -802,15 +806,17 @@ def _bubbles(text: str) -> list[str]:
         cur = f"{cur}\n\n{para}".strip() if cur else para
     if cur:
         out.append(cur)
-    return out[:3]
+    if len(out) > limit:
+        out = [*out[:limit - 1], f"{out[limit - 1]}\n\n{CUT_NOTE}"]
+    return out
 
 
 def partial_messages(state: dict, lead: str = PARTIAL_LEAD) -> list[str]:
     """What the task finished, as chat bubbles, with no model call (the model may be what failed).
 
-    The last finished step in plan order leads: a finished summary step IS the answer. When the plan's
-    last step did not finish, the other finished outputs follow in plan order. Empty when no step
-    produced text."""
+    The plan's last step alone is the answer only when it finished and (transitively) depends on every
+    other finished step, so it can have folded their output in. Otherwise (parallel steps, a closing step
+    that did not finish) every finished step is delivered in plan order. Empty when no step produced text."""
     plan = Plan.model_validate(state["plan"]) if state.get("plan") else None
     results = state.get("results", {})
     order = [s.id for s in plan.steps] if plan else list(results)
@@ -819,14 +825,29 @@ def partial_messages(state: dict, lead: str = PARTIAL_LEAD) -> list[str]:
     if not done:
         return []
     last_id = order[-1]
-    if done[-1][0] == last_id:
+    if done[-1][0] == last_id and _folds_in_all(plan, last_id, {sid for sid, _ in done}):
         body = str(done[-1][1]["text"]).strip()  # the closing step already folds in the earlier ones
     else:
         body = "\n\n".join(str(r["text"]).strip() for _, r in done)
-    bubbles = _bubbles(register.mask_slurs(body))
-    if lead:
-        bubbles = [lead, *bubbles[:2]] if len(bubbles) > 2 else [lead, *bubbles]
-    return bubbles
+    room = 2 if lead else 3
+    bubbles = _bubbles(register.mask_slurs(body), room)
+    return [lead, *bubbles] if lead else bubbles
+
+
+def _folds_in_all(plan: Plan | None, last_id: str, finished: set[str]) -> bool:
+    """True when `last_id` (transitively) depends on every other finished step. Without a plan there is no
+    dependency to rely on."""
+    if plan is None:
+        return len(finished) <= 1
+    deps = {s.id: s.depends_on for s in plan.steps}
+    seen: set[str] = set()
+    todo = list(deps.get(last_id, []))
+    while todo:
+        sid = todo.pop()
+        if sid not in seen:
+            seen.add(sid)
+            todo.extend(deps.get(sid, []))
+    return (finished - {last_id}) <= seen
 
 
 async def finish(state: OrchestratorState) -> dict:
