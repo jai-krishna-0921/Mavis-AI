@@ -130,7 +130,13 @@ RC=1
 # keep the running image so a failed migration can roll back to it
 docker image tag mavis:prod mavis:prev >/dev/null 2>&1 || true
 \$C build || exit 1
-\$C up -d --wait --wait-timeout 300 postgres redis qdrant neo4j || exit 1
+# A changed network (subnet, fixed addresses) cannot be applied while containers use the old one: stop the
+# stack (volumes are kept: never -v) and start again. Only done when the first attempt fails.
+if ! \$C up -d --wait --wait-timeout 300 postgres redis qdrant neo4j; then
+  echo "compose up failed; recreating the stack without touching volumes"
+  \$C down --remove-orphans || exit 1
+  \$C up -d --wait --wait-timeout 300 postgres redis qdrant neo4j || exit 1
+fi
 if ! \$C run --rm migrate; then
   echo "migration failed; rolling back to the previous image"
   docker image tag mavis:prev mavis:prod >/dev/null 2>&1 || true
