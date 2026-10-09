@@ -176,8 +176,10 @@ class SinkChannel:
             await self._inner.send_typing(chat_id)
 
     async def react(self, chat_id: int, message_id: int, emoji: str | None) -> None:
-        if not self._is_test(chat_id):
-            await self._inner.react(chat_id, message_id, emoji)
+        if self._is_test(chat_id):  # recorded so live checks can see the mood reactions too
+            self._record("reaction", chat_id, emoji or "", message_id=message_id)
+            return
+        await self._inner.react(chat_id, message_id, emoji)
 
     async def download_file(self, file_id: str, dest_path: str) -> str:
         if not file_id.startswith(FIXTURE_PREFIX):
