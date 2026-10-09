@@ -54,6 +54,7 @@ class VectorStore(Protocol):
     ) -> list[tuple[str, str, datetime | None]]: ...
     async def forget(self, user_id: int, needle: str) -> int: ...
     async def count(self, user_id: int) -> int: ...
+    async def delete_user(self, user_id: int) -> int: ...
 
 
 def _norm(text: str) -> str:
@@ -204,6 +205,14 @@ class QdrantVectorStore:
         if ids:
             await self._client.delete(COLLECTION, points_selector=models.PointIdsList(points=ids))
         return len(ids)
+
+    async def delete_user(self, user_id: int) -> int:
+        """Remove every point of one user (account deletion). Returns how many there were."""
+        n = await self.count(user_id)
+        if n:
+            await self._client.delete(COLLECTION, points_selector=models.FilterSelector(
+                filter=_user_filter(user_id)))
+        return n
 
     async def count(self, user_id: int) -> int:
         res = await self._client.count(COLLECTION, count_filter=_user_filter(user_id), exact=True)

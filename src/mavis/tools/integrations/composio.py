@@ -402,6 +402,18 @@ class ComposioProvider:
             raise IntegrationError(f"Composio accepted {trigger} but returned no trigger id.")
         return trigger_id
 
+    async def disconnect_all(self, user: UserRef) -> int:
+        """Delete every connected account of this user (account deletion); returns how many."""
+        pid = await identity.provider_id_for(user.user_id)
+        answer = await self._request("GET", "/connected_accounts", params={"user_ids": pid, "limit": 100})
+        removed = 0
+        for item in answer.get("items") or []:
+            if str(item.get("user_id") or pid) == pid and item.get("id"):
+                await self._request("DELETE", f"/connected_accounts/{item['id']}")
+                removed += 1
+        self._routes.pop(pid, None)
+        return removed
+
     async def list_user_ids(self) -> list[str]:
         """Provider-side user ids that have connected accounts on this key (the startup shared-key check)."""
         answer = await self._request("GET", "/connected_accounts", params={"limit": 100})

@@ -103,6 +103,8 @@ class Settings(BaseSettings):
     inbound_pending_rate_per_min: float = 5.0
     inbound_pending_burst: int = 3
 
+    privacy_url: str = ""  # linked by /privacy and the bot description (Telegram requires it)
+
     # --- scheduler (spec 7) ----------------------------------------------------
     chat_executors: int = 6
     bg_executors: int = 3
