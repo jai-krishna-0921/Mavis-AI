@@ -59,6 +59,12 @@ CAPABILITY_PURPOSE: dict[Capability, str] = {
 }
 
 
+# Capabilities Mavis can serve itself (its own loops and reminders) when the external account is not
+# linked: a chat turn then never offers those tools, so a missing link cannot hijack the turn with a
+# connect prompt. Accounts with no internal equivalent (mail, calendar...) are not listed here.
+INTERNAL_EQUIVALENT: frozenset[Capability] = frozenset({Capability.TASKS})
+
+
 def workspace_enabled() -> bool:
     return get_settings().google_workspace_enabled
 
