@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -78,3 +79,29 @@ EVENT_TYPE_FOR_KIND: dict[WakeupKind, EventType] = {
     WakeupKind.SYSTEM_ONBOARD_CONNECT: EventType.WAKEUP,
     WakeupKind.SYSTEM_PERSONAL_LAYER: EventType.WAKEUP,
 }
+
+
+def clean_what(text: str, name: str | None = None, *, capitalise: bool = False) -> str:
+    """A reminder or loop title as the thing to do, in the user's own voice ("Stretch", "Call mom").
+
+    The tool schema asks the model for exactly that; this is the safety net for what still slips through
+    (and for titles stored before the schema said so): a leading "remind me to" / "remind <name> to" and
+    a leading third-person subject ("<name> should", "<name> to") are dropped, whitespace is collapsed.
+    Text with none of those is returned unchanged (`capitalise` only uppercases its first letter)."""
+    what = " ".join(text.split())
+    names = [re.escape(t) for t in (name or "").split() if len(t) > 1]
+    me = "|".join(["me", "us", "myself", "you", *names])
+    person = rf"(?:{me})(?:\s+(?:{me}))*"  # "me", "Jai", "Jai Krishna"
+    link = r"(?:to|about|that|of|:)"
+    wrapper = re.compile(rf"^(?:please\s+)?remind(?:er)?s?\b\s*(?:{person}\b\s*{link}?|{link})\s+",
+                         re.IGNORECASE)
+    own = "|".join(names)
+    subject = (re.compile(rf"^(?:{own})(?:\s+(?:{own}))*\b\s*,?\s+"
+                          r"(?:should\s+|needs?\s+to\s+|has\s+to\s+|to\s+)", re.IGNORECASE)
+               if names else None)
+    for pattern in (wrapper, subject):
+        if pattern is not None and (m := pattern.match(what)) and what[m.end():].strip():
+            what = what[m.end():].strip()
+    if capitalise and what:
+        what = what[0].upper() + what[1:]
+    return what
