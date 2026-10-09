@@ -28,7 +28,10 @@ async def _start_reaper() -> None:
 
 def register_machine() -> None:
     """Flags off: nothing is registered and get_runtime() stays whatever it was (None by default)."""
+    from mavis.agents.specialists import register_machine_specialists, unregister_machine_specialists
+
     if not get_settings().machine_enabled:
+        unregister_machine_specialists()  # a test or a restart that flipped the flag sees the off state
         return
     if machine.get_runtime() is None:
         from mavis.machine.selection import build_runtime
@@ -38,6 +41,7 @@ def register_machine() -> None:
     from mavis.tools.registry import get_registry
 
     register_machine_tools(get_registry())
+    register_machine_specialists()
     register_context_provider(intake.inbox_context)
     cancellation.register_cancel_hook(_cancel_hook)
     register_startup_hook(_start_reaper)

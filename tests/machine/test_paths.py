@@ -7,8 +7,10 @@ from mavis.machine.paths import SAFE_ENV_KEYS, clip, guard, is_hidden, safe_env,
 from mavis.machine.ports import FileClass, Provenance, class_of
 
 
-@pytest.mark.parametrize("raw,clean", [("out/a.png", "out/a.png"), ("./work//x.csv", "work/x.csv"),
-                                       ("inbox/My File.pdf", "inbox/My File.pdf")])
+@pytest.mark.parametrize(
+    "raw,clean",
+    [("out/a.png", "out/a.png"), ("./work//x.csv", "work/x.csv"), ("inbox/My File.pdf", "inbox/My File.pdf")],
+)
 def test_guard_normalises(raw, clean):
     assert guard(raw) == clean
 
@@ -22,12 +24,20 @@ def test_guard_refuses(bad):
 def test_hidden_and_classes():
     assert is_hidden(".mavis/builders/x.py") and not is_hidden("out/x.py")
     assert [class_of(p) for p in ("inbox/a", "out/b", "work/c", ".mavis/d", "e.txt")] == [
-        FileClass.INBOX, FileClass.OUT, FileClass.WORK, FileClass.META, FileClass.WORK]
+        FileClass.INBOX,
+        FileClass.OUT,
+        FileClass.WORK,
+        FileClass.META,
+        FileClass.WORK,
+    ]
 
 
 def test_provenance_trust():
-    assert {p for p in Provenance if p.untrusted} == {Provenance.USER_UPLOAD, Provenance.FETCHED,
-                                                       Provenance.GENERATED_TAINTED}
+    assert {p for p in Provenance if p.untrusted} == {
+        Provenance.USER_UPLOAD,
+        Provenance.FETCHED,
+        Provenance.GENERATED_TAINTED,
+    }
 
 
 def test_safe_env_has_only_whitelisted_keys(monkeypatch):
@@ -44,8 +54,10 @@ def test_clip_keeps_the_tail(n):
     assert len(out) <= 50 + 40 and out.endswith(text[-20:])
 
 
-@pytest.mark.parametrize("raw,clean", [("../../evil name!.csv", "evil_name.csv"), ("...", "file"),
-                                       ("Résumé 2026.docx", "R_sum_2026.docx")])
+@pytest.mark.parametrize(
+    "raw,clean",
+    [("../../evil name!.csv", "evil_name.csv"), ("...", "file"), ("Résumé 2026.docx", "R_sum_2026.docx")],
+)
 def test_safe_name(raw, clean):
     assert safe_name(raw) == clean
 
@@ -64,3 +76,9 @@ async def test_local_symlink_escape_is_refused(tmp_path):
             await s.write("out/etc/planted", b"x")
     finally:
         await s.close()
+
+
+def test_interpreter_state_is_not_a_user_file():
+    for path in (".ipython/profile_default/history.sqlite", ".cache/matplotlib/x", ".mavis/tmp/run.py"):
+        assert is_hidden(path)
+    assert not is_hidden("out/.ipython/x") and not is_hidden("work/data.csv")

@@ -24,8 +24,12 @@ def guard(path: str) -> str:
     return norm
 
 
+# Tool state a code interpreter leaves in its working directory (IPython history, caches): never user files.
+TOOL_STATE_DIRS = (".ipython/", ".cache/", ".local/", ".config/", ".jupyter/", ".matplotlib/")
+
+
 def is_hidden(path: str) -> bool:
-    return guard(path).startswith(HIDDEN_PREFIX)
+    return guard(path).startswith((HIDDEN_PREFIX, *TOOL_STATE_DIRS))
 
 
 def safe_env(home: str) -> dict[str, str]:

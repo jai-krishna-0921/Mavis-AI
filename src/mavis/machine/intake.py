@@ -29,13 +29,15 @@ TOO_BIG_TEXT = (
 DOWNLOAD_FAILED_TEXT = "I couldn't download that file. Could you send it again?"
 
 
+def user_allowed(user_id: int) -> bool:
+    """MACHINE_USERS is an allowlist of user ids; empty means every user."""
+    users = get_settings().machine_users
+    return not users or user_id in users
+
+
 def machine_allowed(user_id: int) -> bool:
     s = get_settings()
-    return (
-        s.machine_enabled
-        and machine.get_runtime() is not None
-        and (not s.machine_users or user_id in s.machine_users)
-    )
+    return s.machine_enabled and machine.get_runtime() is not None and user_allowed(user_id)
 
 
 async def on_user_message(event: Event) -> None:
