@@ -37,7 +37,7 @@ export type VaultItem = {
   detail?: string | null
   source: VaultSource
   trust: 'user' | 'high' | 'medium' | 'low'
-  updated_at: string
+  updated_at: string | null
 }
 
 export type VaultPage = { items: VaultItem[]; next_cursor: string | null }
@@ -58,7 +58,8 @@ export type Preferences = {
   language_register_opt_out: boolean
 }
 
-export type Invite = { code: string; link: string; name?: string | null; uses: number; max_uses: number | null }
+// `link` is only returned when the invite is created: the server keeps a hash of the code, so the list gives `hint`.
+export type Invite = { code: string; link: string | null; hint?: string; name?: string | null; uses: number; max_uses: number | null }
 
 export type TelegramStart = { nonce: string; deep_link: string; expires_at: string }
 export type PollStatus = { status: 'pending' | 'ok' | 'expired' }

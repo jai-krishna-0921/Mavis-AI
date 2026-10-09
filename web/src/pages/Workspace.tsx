@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useConnectors, useDisconnect, useMe } from '../api/hooks'
 import { api } from '../api/client'
 import type { Connector } from '../api/types'
@@ -112,6 +113,13 @@ function ConnectorRow({ c }: { c: Connector }) {
   )
 }
 
+function ConnectNote() {
+  const [params] = useSearchParams()
+  if (params.get('connected')) return <p className={ui.status} role="status">Connected. Mavis is reading it now.</p>
+  if (params.get('error')) return <p className={ui.error} role="alert">That account was not connected. You can try again.</p>
+  return null
+}
+
 export function Workspace() {
   const conns = useConnectors()
   return (
@@ -120,6 +128,7 @@ export function Workspace() {
       <Contact />
       <section className={ui.section} aria-labelledby="connectors">
         <header><h2 id="connectors">Connectors</h2><p>Accounts Mavis can read and act on, only with your permission.</p></header>
+        <ConnectNote />
         {conns.isPending && <p className={ui.status} role="status">Loading</p>}
         {conns.error && <p className={ui.error} role="alert">{conns.error.message}</p>}
         <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>

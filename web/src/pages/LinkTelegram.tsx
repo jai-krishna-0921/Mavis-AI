@@ -18,7 +18,7 @@ export function LinkTelegram({ pollIntervalMs }: { pollIntervalMs?: number }) {
         your Google address is confirmed on your account and you can use either way to sign in next time.
       </p>
       <section className={styles.block} aria-label="Telegram sign in">
-        <TelegramSignIn invite={params.get('invite') ?? undefined} pollIntervalMs={pollIntervalMs} />
+        <TelegramSignIn invite={params.get('invite') ?? undefined} linkToken={params.get('t') ?? undefined} pollIntervalMs={pollIntervalMs} />
       </section>
     </main>
   )

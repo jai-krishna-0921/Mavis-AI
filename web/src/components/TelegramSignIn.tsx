@@ -9,7 +9,7 @@ import styles from './TelegramSignIn.module.css'
 
 type Phase = 'starting' | 'waiting' | 'expired' | 'error'
 
-export function TelegramSignIn({ invite, pollIntervalMs = 2000, to = '/workspace' }: { invite?: string; pollIntervalMs?: number; to?: string }) {
+export function TelegramSignIn({ invite, linkToken, pollIntervalMs = 2000, to = '/workspace' }: { invite?: string; linkToken?: string; pollIntervalMs?: number; to?: string }) {
   const [start, setStart] = useState<TelegramStart | null>(null)
   const [phase, setPhase] = useState<Phase>('starting')
   const [error, setError] = useState('')
@@ -21,12 +21,12 @@ export function TelegramSignIn({ invite, pollIntervalMs = 2000, to = '/workspace
 
   useEffect(() => {
     let alive = true
-    api.telegramStart(invite).then(
+    api.telegramStart(invite, linkToken).then(
       (s) => { if (alive) { setStart(s); setPhase('waiting') } },
       (e: unknown) => { if (alive) { setError(e instanceof ApiError ? e.message : 'Could not start sign in.'); setPhase('error') } },
     )
     return () => { alive = false }
-  }, [invite, attempt])
+  }, [invite, linkToken, attempt])
 
   useEffect(() => {
     if (!start || phase !== 'waiting') return
