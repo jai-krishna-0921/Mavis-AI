@@ -335,7 +335,7 @@ class SlackExecutor:
         names = await self._names(user_id, team, [_s(m.get("user")) for m in raw])
         return {
             "channel": channel,
-            "messages": [message_view(m, channel, me, names) for m in raw],
+            "messages": [message_view(m, channel, me, names, team) for m in raw],
             "has_more": bool(body.get("has_more")),
             "next_cursor": _s((body.get("response_metadata") or {}).get("next_cursor")),
         }
@@ -375,13 +375,14 @@ def _num(value: Any) -> float:
         return 0.0
 
 
-def message_view(m: dict, channel: str, me: str, names: dict[str, dict]) -> dict:
+def message_view(m: dict, channel: str, me: str, names: dict[str, dict], team: str = "") -> dict:
     """A Slack message in the shape normalize.normalize_slack reads (channel, ts, user, text, thread_ts),
     plus resolved names and structural flags."""
     uid = _s(m.get("user"))
     person = names.get(uid) or {}
     return {
         "channel": channel,
+        "team": team,  # the workspace of the grant it was read with (provenance, never a single global one)
         "ts": _s(m.get("ts")),
         "user": uid,
         "from": person.get("name") or uid or _s(m.get("username")),

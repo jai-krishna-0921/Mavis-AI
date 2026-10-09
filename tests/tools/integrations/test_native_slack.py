@@ -141,6 +141,17 @@ async def test_history_by_name_resolves_users_and_parses_through_normalize():
     assert event.payload["text"].startswith("see") and event.payload["thread_ts"] == "1760000000.000050"
 
 
+async def test_history_messages_carry_the_workspace_they_were_read_in():
+    """Defect: a backfilled or polled message had no team, so its record id was `slack::C..:ts` while the same
+    message by webhook was `slack:T..:C..:ts` (two records, and no workspace in the provenance)."""
+    api = Api(**{"conversations.history": {"ok": True, "messages": [msg("1760000100.000100", "hello")]},
+                 "users.info": user_info("U0ALICE01", "Alice")})
+    res = await api.executor().execute(USER, "slack.history", {"channel": "C0000GEN01"})
+    [m] = res.data["messages"]
+    assert m["team"] == TEAM
+    assert slack_event(7, m, "test").payload["team"] == TEAM
+
+
 async def test_history_with_thread_uses_replies_and_forwards_window():
     api = Api(**{"conversations.replies": {"ok": True, "messages": [msg("1760000000.000050", "parent"),
                                                                     msg("1760000010.000060", "reply")]},
