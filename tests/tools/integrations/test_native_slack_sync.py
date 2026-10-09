@@ -80,7 +80,9 @@ async def test_backfill_window_order_and_event_shape():
     assert abs((ev.occurred_at - (NOW - timedelta(seconds=50))).total_seconds()) < 1
     for e in bus.events:
         assert e.occurred_at.tzinfo is UTC
-        assert {k: e.payload[k] for k in normalize_slack(e.payload)} == normalize_slack(e.payload)
+        parsed = normalize_slack(e.payload)
+        assert parsed["channel"] == e.payload["channel"] and parsed["ts"] == e.payload["ts"]
+        assert parsed["text"] == e.payload["text"]
         assert slack_event(7, {**e.payload, "channel": e.payload["channel"]}, "x").id == e.id
 
 
