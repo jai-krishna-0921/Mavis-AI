@@ -859,6 +859,12 @@ async def finish(state: OrchestratorState) -> dict:
 async def complete_task(state: dict, messages: list[str], status: TaskStatus, reason: str | None) -> bool:
     """Record the terminal outcome by claim (a concurrent cancel wins) and publish the delivery event."""
     task_id, user_id = state["task_id"], state["user_id"]
+    from mavis import machine
+
+    # "What I ran": exit codes per attempt and the last output, code-made (spec 8.4). Added on every
+    # terminal path, so a failed or timed-out task still shows what was tried.
+    if (rt := machine.get_runtime()) is not None and (block := rt.what_i_ran(task_id)):
+        messages = [*messages, block]
     artifacts = list(dict.fromkeys(state.get("artifacts", [])))
     recorded = {a.path for a in await tasks.artifacts_for(task_id)}  # specialists may record their own
     for path in (p for p in artifacts if p not in recorded):

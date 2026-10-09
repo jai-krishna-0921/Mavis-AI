@@ -190,3 +190,19 @@ async def test_install_refusal_is_a_sentence_for_the_model(env, monkeypatch):
     reg, rt, user, tid, _ = env
     out = await _call(reg, user, "machine_install", packages=["evil"])
     assert "Could not install" in out and "allowlist" in out
+
+
+async def test_machine_users_allowlist_blocks_other_users(env, settings, monkeypatch):
+    reg, rt, user, tid, _ = env
+    monkeypatch.setattr(settings, "machine_users", [user.id + 1000])
+    out = await _call(reg, user, "machine_run_shell", cmd="ls", purpose="look")
+    assert mt.NOT_ALLOWED_TEXT in out
+    assert rt.exec_log(tid) == []
+
+
+def test_package_probe_needs_the_distribution_not_just_the_import(capsys):
+    from mavis.machine.runtime import missing_probe
+
+    # `json` imports, but no distribution of that name exists; `pytest` has both
+    exec(missing_probe({"json": "no-such-distribution-xyz", "pytest": "pytest"}), {})  # noqa: S102 - our own probe
+    assert capsys.readouterr().out.split() == ["json"]

@@ -23,7 +23,7 @@ from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed
 from mavis.domain.tasks import TaskOrigin, TaskStatus
 from mavis.machine.errors import MachineBusy, QuotaExceeded, SessionUserMismatch
-from mavis.machine.paths import artifact_file, is_hidden, safe_name
+from mavis.machine.paths import artifact_file, guard, is_hidden, safe_name
 from mavis.machine.ports import (
     ExecRequest,
     ExecResult,
@@ -41,6 +41,22 @@ from mavis.store.repo import tasks
 log = structlog.get_logger(__name__)
 DeliverFn = Callable[..., Awaitable[bool]]
 SYNC_OUT_BOUND_S = 20.0
+
+
+def missing_probe(imports: dict[str, str]) -> str:
+    """Python that prints the import names whose package is not installed. A module that imports is not
+    enough: an old distribution can own the same import name (`fpdf` from pyfpdf is not fpdf2)."""
+    return (
+        "import importlib.metadata as md\n"
+        "import importlib.util as u\n"
+        "def ok(mod, dist):\n"
+        "    try:\n"
+        "        md.distribution(dist)\n"
+        "    except md.PackageNotFoundError:\n"
+        "        return False\n"
+        "    return u.find_spec(mod) is not None\n"
+        f"print(' '.join(m for m, d in {dict(imports)!r}.items() if not ok(m, d)))\n"
+    )
 
 
 class _Open:
@@ -162,11 +178,7 @@ class MachineRuntime:
 
     async def ensure_packages(self, user_id: int, task_id: int, imports: dict[str, str]) -> None:
         """Install the packages whose import names are missing in the session (import name -> package)."""
-        probe = (
-            "import importlib.util as u\n"
-            f"print(' '.join(m for m in {list(imports)!r} if u.find_spec(m) is None))"
-        )
-        req = ExecRequest(language="python", code=probe, timeout_s=30)
+        req = ExecRequest(language="python", code=missing_probe(imports), timeout_s=30)
         res = await self.exec(user_id, task_id, req, record=False)
         missing = sorted({imports[m] for m in res.stdout.split() if m in imports})
         if missing:
@@ -174,14 +186,6 @@ class MachineRuntime:
             if not res.ok:
                 why = (res.stderr or res.error or "")[-300:]
                 raise ActionFailed(f"Could not install {', '.join(missing)}: {why}")
-
-    async def extract_text(self, user_id: int, task_id: int, path: str, max_chars: int) -> str:
-        """Text of a workspace file. Plain text only until the document builders (Task 18) replace this."""
-        data = await self.store.get(user_id, path)
-        try:
-            return data.decode("utf-8")[:max_chars]
-        except UnicodeDecodeError:
-            return "(binary file; text extraction comes with the document builders)"
 
     async def write_in(self, user_id: int, task_id: int, path: str, data: bytes, *,
                        provenance: Provenance) -> None:
@@ -263,6 +267,68 @@ class MachineRuntime:
         from mavis.channels.progress_card import get_cards
 
         await get_cards().tool_called(task_id, f"made {name}")
+
+    # --- document builders and what ran -----------------------------------------------
+    async def _run_script(self, user_id: int, task_id: int, script: str, *args: str,
+                          timeout_s: int) -> ExecResult:
+        """Run a builder in the session. The arguments are code-made paths, quoted as Python literals."""
+        code = (
+            "import runpy, sys\n"
+            f"sys.argv = {[script, *args]!r}\n"
+            f"runpy.run_path({script!r}, run_name='__main__')\n"
+        )
+        req = ExecRequest(language="python", code=code, timeout_s=timeout_s)
+        return await self.exec(user_id, task_id, req, record=False)
+
+    async def build(
+        self, user_id: int, task_id: int, builder: str, data: dict, out_name: str
+    ) -> ExecResult:
+        """Run a builder script in the session on `data` (a JSON file, never formatted into code)."""
+        import json
+        import uuid
+
+        from mavis.machine.builders import BUILDER_IMPORTS, load
+
+        await self.ensure_packages(user_id, task_id, BUILDER_IMPORTS[builder])
+        script, data_path = f".mavis/builders/{builder}.py", f".mavis/data/{uuid.uuid4().hex}.json"
+        await self.write_in(user_id, task_id, script, load(builder).encode(), provenance=Provenance.MAVIS)
+        prov = Provenance.GENERATED_TAINTED if self.untrusted(task_id) else Provenance.GENERATED_CLEAN
+        await self.write_in(
+            user_id, task_id, data_path, json.dumps(data, ensure_ascii=False).encode(), provenance=prov
+        )
+        target = f"out/{safe_name(out_name)}"
+        return await self._run_script(user_id, task_id, script, data_path, target, timeout_s=180)
+
+    async def extract_text(self, user_id: int, task_id: int, path: str, max_chars: int) -> str:
+        """Text of a workspace file (PDF, DOCX, XLSX, CSV or text), extracted inside the session."""
+        import json
+
+        from mavis.machine.builders import BUILDER_IMPORTS, load
+
+        path = guard(path)
+        await self.attach(user_id, task_id, path)
+        await self.ensure_packages(user_id, task_id, BUILDER_IMPORTS["extract"])
+        script, data = ".mavis/builders/extract.py", ".mavis/data/extract.json"
+        await self.write_in(user_id, task_id, script, load("extract").encode(), provenance=Provenance.MAVIS)
+        await self.write_in(
+            user_id, task_id, data, json.dumps({"max_chars": int(max_chars)}).encode(),
+            provenance=Provenance.MAVIS,
+        )
+        res = await self._run_script(user_id, task_id, script, data, path, timeout_s=60)
+        return res.stdout if res.ok else f"Could not read {path}: {res.stderr[-300:] or res.error}"
+
+    def what_i_ran(self, task_id: int) -> str:
+        """The "What I ran" block: exit code per attempt and the last 15 lines of the last output."""
+        runs = self._log.get(task_id, [])
+        if not runs:
+            return ""
+        lines = ["What I ran:"]
+        for i, r in enumerate(runs, start=1):
+            lines.append(f"- attempt {i}: " + ("timed out" if r.timed_out else f"exit {r.exit_code}"))
+        tail = "\n".join(runs[-1].stdout.strip().splitlines()[-15:])
+        if tail:
+            lines += ["Last output:", "```", tail, "```"]
+        return "\n".join(lines)
 
     # --- lifecycle --------------------------------------------------------------------
     async def release(self, task_id: int) -> None:

@@ -5,12 +5,14 @@ inside a task; labels for the card are code-made."""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from mavis import machine
 from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed
+from mavis.domain.plans import DeckOutline, DocOutline
 from mavis.domain.policy import Capability, RiskClass
 from mavis.domain.results import ToolOutput
 from mavis.machine.errors import MachineBusy, QuotaExceeded, SandboxPathError
@@ -29,6 +31,7 @@ from mavis.tools.registry import (
 
 AGENTS = frozenset({"analyst", "docs", "operator", "spawn"})
 NO_TASK_TEXT = "The machine only runs inside a task."
+NOT_ALLOWED_TEXT = "The machine is not switched on for this user."
 FETCH_REFUSED = "I can't fetch that address."
 
 
@@ -43,6 +46,10 @@ def _guarded(fn):
     """Quota, busy and path problems become plain sentences for the model (the step can wrap up)."""
 
     async def wrapped(user_id, args):
+        from mavis.machine.intake import user_allowed
+
+        if not user_allowed(user_id):  # MACHINE_USERS: the tools exist but this user is not on the list
+            return ToolOutput(model_note=NOT_ALLOWED_TEXT)
         try:
             return await fn(user_id, args)
         except QuotaExceeded as exc:
@@ -273,6 +280,64 @@ async def files_send(user_id: int, args: SendArgs) -> ToolOutput:
     return ToolOutput(user_text=f"Sent {name}.", model_note=f"sent {name} ({_size(len(data))})")
 
 
+class ChartSeries(BaseModel):
+    name: str = ""
+    values: list[float]
+
+
+class ChartSpec(BaseModel):
+    kind: Literal["line", "bar", "pie"] = "line"
+    title: str = Field(default="", max_length=120)
+    x: list[str]
+    series: list[ChartSeries] = Field(min_length=1, max_length=12)
+    x_label: str = ""
+    y_label: str = ""
+    filename: str = "chart.png"
+
+
+class XlsxSheet(BaseModel):
+    name: str
+    rows: list[list[str | float | int]]
+
+
+class XlsxSpec(BaseModel):
+    sheets: list[XlsxSheet] = Field(min_length=1, max_length=10)
+    filename: str = "table.xlsx"
+
+
+class DocArgs(DocOutline):
+    filename: str = "document.docx"
+
+
+class PdfArgs(DocOutline):
+    filename: str = "document.pdf"
+
+
+class DeckArgs(DeckOutline):
+    filename: str = "deck.pptx"
+
+
+def _builder(name: str, ext: str):
+    @_guarded
+    async def run(user_id: int, args) -> ToolOutput:
+        rt, task_id = _ctx()
+        data = args.model_dump(exclude={"filename"})
+        fname = Path(args.filename).stem + ext
+        res = await rt.build(user_id, task_id, name, data, fname)
+        return ToolOutput(model_note=_render(res))
+
+    run.__name__ = f"make_{name}"
+    return run
+
+
+def _builder_tool(name: str, ext: str, args_model: type[BaseModel], what: str) -> MavisTool:
+    return MavisTool(
+        f"make_{name}", what, args_model, RiskClass.WRITE_SELF, _builder(name, ext), AGENTS,
+        requires=Capability.SANDBOX, timeout_s=240,
+        progress_label=lambda a, out, e=ext: f"made {Path(a.filename).stem}{e}",
+    )
+
+
 _EXEC_TIMEOUT = lambda: get_settings().sandbox_exec_max_s + 30  # noqa: E731
 
 
@@ -388,6 +453,11 @@ def _tools() -> list[MavisTool]:
             requires=Capability.SANDBOX,
             progress_label=lambda a, out: f"sent {Path(a.path).name}",
         ),
+        _builder_tool("chart", ".png", ChartSpec, "Make a PNG chart (line, bar or pie) from data."),
+        _builder_tool("xlsx", ".xlsx", XlsxSpec, "Make an Excel workbook from sheets of rows."),
+        _builder_tool("docx", ".docx", DocArgs, "Make a Word document from an outline."),
+        _builder_tool("pdf", ".pdf", PdfArgs, "Make a PDF document from an outline."),
+        _builder_tool("pptx", ".pptx", DeckArgs, "Make a PowerPoint deck from an outline."),
     ]
 
 

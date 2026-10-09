@@ -210,6 +210,20 @@ Every incoming Gmail message is understood (kind, money, risk flags), scored aga
 - **Roll back**: set `ATTENTION_ENABLED=false` and restart the worker. The earlier email path is used again. The attention tables stay but are unused, and pending attention wakeups and its buttons are ignored. No migration downgrade is needed.
 - **Check it**: `uv run python scripts/verify_attention.py` runs the offline scenario tests. `--live` reads recent mail through Composio (read only) and refuses to run when `DATABASE_URL` points at a non-local host. It sends nothing and writes nothing.
 
+## Machine (code, files and documents)
+
+Off by default (`MACHINE_ENABLED=false`): no machine tools or specialists are registered and chat never mentions it. When on, a chat request to run code, analyse a file (CSV, Excel, PDF) the user sent, make a chart, or build a deck, document or spreadsheet becomes a task. The task gets a progress card at once, runs in a private AgentCore code interpreter (never on the host), and each file it makes is sent to the chat as soon as it exists. Telegram documents land in the user's workspace `inbox/`. Output of the machine is untrusted data: it taints the turn like web content, and anything outward still needs approval.
+
+To turn it on in production:
+
+1. Create the AWS resources once with the scripts in `deploy/aws` (the `mavis-ec2` role, the machine policy, the workspace bucket and the budget).
+2. Set in the server `.env`: `MACHINE_ENABLED=true`, `SANDBOX_BACKEND=agentcore` (or `auto`), `WORKSPACE_BACKEND=s3`, `WORKSPACE_BUCKET=<bucket>`, `AGENTCORE_REGION=ap-south-1`.
+3. Optional: `MACHINE_USERS=[<ids>]` to start with a few users, `MACHINE_PACKAGE_ALLOW=[...]` to limit installable packages, `MACHINE_USER_DAILY_MINUTES` and `MACHINE_USER_MONTHLY_USD` for quotas, `MAX_UPLOAD_MB` (Telegram allows 20 MB downloads), `ANALYST_MAX_STEPS`.
+4. Redeploy. `MACHINE_BROWSER_ENABLED` stays false until the browser slice ships.
+5. Check it live: `MAVIS_LIVE_AGENTCORE=1 AWS_PROFILE=<profile> AWS_REGION=ap-south-1 uv run pytest tests/machine/test_live_tools.py` (costs a few cents).
+
+Roll back by setting `MACHINE_ENABLED=false` and restarting the worker. Slack does not forward files to the machine yet; Telegram documents and photos do.
+
 ## Documentation
 
 - Design spec: [`docs/superpowers/specs/2026-10-02-mavis-pa-design.md`](docs/superpowers/specs/2026-10-02-mavis-pa-design.md)
