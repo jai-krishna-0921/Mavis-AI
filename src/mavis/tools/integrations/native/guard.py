@@ -218,42 +218,51 @@ def _secret_shaped(tok: str) -> bool:
     return len(t) >= 4 and not t.startswith(("[redacted", "http")) and "@" not in t
 
 
+LOOKAHEAD = 10  # tokens after a keyword in which its value may sit ("OTP for this transaction is 482913")
+
+
+def _sentence_end(raw: str) -> bool:
+    b = _bare(raw)
+    return raw.endswith(("!", "?")) or (raw.endswith(".") and (len(b) > 3 or any(c.isdigit() for c in b)))
+
+
+def _is_copula(raw: str) -> bool:
+    b = _fold(_bare(raw))
+    return b in _COPULAS or raw.endswith((":", "=")) or raw in (":", "=") or "=" in raw
+
+
 def _scan_secret_after(text: str, words: frozenset[str], kind: str, shaped: Callable[[str], bool],
                        *, need_copula: bool, back: bool) -> str:
-    """For each keyword token, mask the first value-shaped token that follows it after only filler words.
-    With `back`, also a code that precedes it joined by a copula ("482913 is your verification code")."""
+    """For each keyword token, mask the value-shaped token that follows it: directly after only filler
+    words, or later in the same sentence when it follows a copula or colon ("... is 482913").
+    With `back`, also a code that precedes the keyword joined by a copula ("482913 is your code")."""
     toks = list(_TOKEN.finditer(text))
     spans: list[tuple[int, int]] = []
+
+    def span(m: re.Match[str]) -> tuple[int, int]:
+        raw = m.group(0)
+        lead = len(raw) - len(raw.lstrip(_EDGE))
+        return m.start() + lead, m.start() + lead + len(_bare(raw))
+
     for i, m in enumerate(toks):
-        word = _fold(_bare(m.group(0))).replace(" ", "")
-        if word not in words:
+        if _fold(_bare(m.group(0))).replace(" ", "") not in words:
             continue
-        prev = _fold(_bare(toks[i - 1].group(0))) if i else ""
-        if prev in _NOT_SECRET_PREFIX:
+        if i and _fold(_bare(toks[i - 1].group(0))) in _NOT_SECRET_PREFIX:
             continue
-        saw_copula = m.group(0).endswith((":", "=")) or "=" in m.group(0)
-        j = i + 1
-        fillers = 0
-        while j < len(toks):
+        saw_copula = _is_copula(m.group(0))
+        only_filler = True
+        for j in range(i + 1, min(len(toks), i + 1 + LOOKAHEAD)):
             raw = toks[j].group(0)
-            b = _fold(_bare(raw))
-            if shaped(raw) and (saw_copula or not need_copula):
-                lead = len(raw) - len(raw.lstrip(_EDGE))
-                spans.append((toks[j].start() + lead, toks[j].start() + lead + len(_bare(raw))))
+            if shaped(raw) and (_is_copula(toks[j - 1].group(0)) or (only_filler and (saw_copula or not need_copula))):
+                spans.append(span(toks[j]))
                 break
-            if b in _COPULAS or raw.endswith((":", "=")) or raw in (":", "="):
+            if _is_copula(raw):
                 saw_copula = True
-            if b in _FILLER or b in _COPULAS or not b or raw.endswith((":", "=")):
-                fillers += 1
-                j += 1
-                if fillers > 5:
-                    break
-                continue
-            break
-        else:
-            pass
+            elif _fold(_bare(raw)) not in _FILLER and _bare(raw):
+                only_filler = False
+            if _sentence_end(raw):
+                break
         if back and i >= 2:
-            # "<code> is/was your ... <keyword>": the code sits at most 4 filler tokens before the keyword
             k, steps = i - 1, 0
             while k >= 0 and steps < 5:
                 b = _fold(_bare(toks[k].group(0)))
@@ -261,10 +270,8 @@ def _scan_secret_after(text: str, words: frozenset[str], kind: str, shaped: Call
                     k -= 1
                     steps += 1
                     continue
-                if shaped(toks[k].group(0)) and any(
-                        _fold(_bare(toks[x].group(0))) in _COPULAS for x in range(k + 1, i)):
-                    lead = len(toks[k].group(0)) - len(toks[k].group(0).lstrip(_EDGE))
-                    spans.append((toks[k].start() + lead, toks[k].start() + lead + len(_bare(toks[k].group(0)))))
+                if shaped(toks[k].group(0)) and any(_is_copula(toks[x].group(0)) for x in range(k + 1, i)):
+                    spans.append(span(toks[k]))
                 break
     return _apply_spans(text, spans, kind)
 

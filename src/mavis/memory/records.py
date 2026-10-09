@@ -260,22 +260,20 @@ def _content(name: str) -> list[str]:
 
 def name_in_record(name: str, record_words: list[str]) -> bool:
     """The record names this entity: its words appear in order as whole words, or at least half of its
-    content words do and one of them is not a generic word. Substrings never count ("Anna" is not in
-    "Joanna"); function words and generic nouns ("project", "team") do not identify anything."""
+    content words do. Substrings never count ("Anna" is not in "Joanna"); a name made only of function or
+    generic words ("project", "the team") identifies nothing and is never grounded."""
     if is_user(name):
         return True
     full = _words(name)
-    if not full:
+    content = [w for w in full if w not in _GENERIC and len(w) >= 2]
+    if not content:
         return False
     n = len(full)
     if any(all(_same_word(full[j], record_words[i + j]) for j in range(n))
            for i in range(len(record_words) - n + 1)):
         return True
-    content = _content(name)
-    if not content:
-        return False
     hit = sum(any(_same_word(c, w) for w in record_words) for c in content)
-    return hit >= math.ceil(len(content) / 2) and hit > 0
+    return hit >= math.ceil(len(content) / 2)
 
 
 def _text_grounded(title: str, record_words: list[str]) -> bool:
@@ -419,6 +417,26 @@ def record_facts(rec: Mapping[str, Any], people: list[Person], x: Extraction, tz
     return x.model_copy(update={"entities": entities, "relations": relations})
 
 
+def with_given_names(x: Extraction, existing: list[Entity]) -> Extraction:
+    """People are asked about by first name ("what did Meera say"), and the spotter only finds names and
+    aliases. A person gets their given name as an alias when no other person in the graph shares it."""
+    def given(name: str) -> str:
+        parts = _words(name)
+        return parts[0] if len(parts) >= 2 and len(parts[0]) >= 3 and parts[0] not in _GENERIC else ""
+
+    taken: dict[str, set[str]] = {}
+    for e in [*existing, *x.entities]:
+        if e.label == "Person" and (g := given(e.name)):
+            taken.setdefault(g, set()).add(normalize_name(e.name))
+    out = []
+    for e in x.entities:
+        g = given(e.name) if e.label == "Person" else ""
+        if g and len(taken.get(g, ())) == 1 and g not in {normalize_name(a) for a in e.aliases}:
+            e = e.model_copy(update={"aliases": [*e.aliases, g.capitalize()]})
+        out.append(e)
+    return x.model_copy(update={"entities": out})
+
+
 def demote_single_valued(rel: Relation) -> Relation:
     """A record must not close a fact the user stated ("works at"): its version is a plain relation."""
     return rel.model_copy(update={"rel": "RELATED_TO"}) if rel.rel in SINGLE_VALUED_RELS else rel
@@ -450,7 +468,9 @@ async def learn_record(memory: MemoryService, user_id: int, p: Mapping[str, Any]
     extraction = bind_people(extraction, people, self_names)
     extraction = record_facts(rec, people, extraction, user.timezone)
 
-    resolution = await resolve(extraction, await memory.graph.entities(user_id), memory.embedder)
+    existing = await memory.graph.entities(user_id)
+    extraction = with_given_names(extraction, existing)
+    resolution = await resolve(extraction, existing, memory.embedder)
     source = third_party_ref(ref)
     for entity in resolution.entities:
         await memory.graph.upsert_entity(user_id, entity)
