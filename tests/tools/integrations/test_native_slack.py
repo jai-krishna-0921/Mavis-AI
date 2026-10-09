@@ -185,7 +185,7 @@ async def test_send_blank_text_never_calls_slack():
     ("account_inactive", FailureKind.AUTH),
     ("token_revoked", FailureKind.AUTH),
     ("missing_scope", FailureKind.AUTH),
-    ("internal_error", FailureKind.UNAVAILABLE),
+    ("internal_error", FailureKind.UNCONFIRMED),  # a send may have been posted
     ("some_new_unknown_code", FailureKind.UNKNOWN),
 ])
 async def test_ok_false_codes_map_to_kinds(code, kind):
@@ -243,25 +243,79 @@ async def test_ratelimited_inside_a_200_body_also_waits_once():
     assert res.ok and len(api.sleeps) == 1
 
 
-async def test_5xx_retries_once_then_unavailable():
-    ok = {"ok": True, "channel": "C0000GEN01", "ts": "1.1"}
-    api = Api(**{"chat.postMessage": [httpx.Response(503), ok]})
-    assert (await api.executor().execute(USER, "slack.send", {"channel": "C0000GEN01", "text": "x"})).ok
-    api = Api(**{"chat.postMessage": [httpx.Response(502)]})
-    res = await api.executor().execute(USER, "slack.send", {"channel": "C0000GEN01", "text": "x"})
+HISTORY = {"channel": "C0000GEN01", "limit": 5}
+SEND = {"channel": "C0000GEN01", "text": "x"}
+
+
+async def test_a_read_retries_a_5xx_once_then_is_unavailable():
+    ok = {"ok": True, "messages": []}
+    api = Api(**{"conversations.history": [httpx.Response(503), ok]})
+    assert (await api.executor().execute(USER, "slack.history", HISTORY)).ok
+    api = Api(**{"conversations.history": [httpx.Response(502)]})
+    res = await api.executor().execute(USER, "slack.history", HISTORY)
     assert res.error_kind is FailureKind.UNAVAILABLE and len(api.seen) == 2
 
 
-async def test_transport_error_retries_once():
+async def test_a_read_retries_a_transport_error_once():
     calls = []
 
     def boom(request):
         calls.append(1)
-        raise httpx.ConnectError("down")
+        raise httpx.ReadTimeout("slow")
+
+    api = Api(**{"conversations.history": boom})
+    res = await api.executor().execute(USER, "slack.history", HISTORY)
+    assert res.error_kind is FailureKind.UNAVAILABLE and len(calls) == 2
+
+
+@pytest.mark.parametrize("exc", [httpx.ReadTimeout("slow"), httpx.ReadError("reset"),
+                                 httpx.RemoteProtocolError("cut"), httpx.WriteTimeout("slow")],
+                         ids=lambda e: type(e).__name__)
+async def test_a_send_that_may_have_reached_slack_is_called_exactly_once(exc):
+    calls = []
+
+    def boom(request):
+        calls.append(1)
+        raise exc
 
     api = Api(**{"chat.postMessage": boom})
-    res = await api.executor().execute(USER, "slack.send", {"channel": "C0000GEN01", "text": "x"})
-    assert res.error_kind is FailureKind.UNAVAILABLE and len(calls) == 2
+    res = await api.executor().execute(USER, "slack.send", SEND)
+    assert len(calls) == 1 and api.sleeps == []
+    assert res.error_kind is FailureKind.UNCONFIRMED and "unknown" in res.error.lower()
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+async def test_a_5xx_on_a_send_is_terminal_and_unconfirmed(status):
+    api = Api(**{"chat.postMessage": [httpx.Response(status)]})
+    res = await api.executor().execute(USER, "slack.send", SEND)
+    assert len(api.seen) == 1 and api.sleeps == []
+    assert res.error_kind is FailureKind.UNCONFIRMED
+
+
+@pytest.mark.parametrize("code", ["internal_error", "fatal_error", "request_timeout", "service_unavailable"])
+async def test_a_server_error_code_on_a_send_is_unconfirmed(code):
+    api = Api(**{"chat.postMessage": {"ok": False, "error": code}})
+    res = await api.executor().execute(USER, "slack.send", SEND)
+    assert len(api.seen) == 1 and res.error_kind is FailureKind.UNCONFIRMED
+
+
+@pytest.mark.parametrize("exc", [httpx.ConnectError("down"), httpx.ConnectTimeout("slow"),
+                                 httpx.PoolTimeout("busy")], ids=lambda e: type(e).__name__)
+async def test_a_send_that_never_left_is_retried_once(exc):
+    calls = []
+
+    def boom(request):
+        calls.append(1)
+        if len(calls) == 1:
+            raise exc
+        return httpx.Response(200, json={"ok": True, "channel": "C0000GEN01", "ts": "1.1"})
+
+    api = Api(**{"chat.postMessage": boom})
+    res = await api.executor().execute(USER, "slack.send", SEND)
+    assert res.ok and len(calls) == 2
+    api = Api(**{"chat.postMessage": lambda r: (_ for _ in ()).throw(exc)})
+    res = await api.executor().execute(USER, "slack.send", SEND)
+    assert res.error_kind is FailureKind.UNAVAILABLE
 
 
 async def test_unsupported_action_and_handles():
