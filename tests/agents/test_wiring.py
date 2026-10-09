@@ -45,11 +45,14 @@ def _wakeup(user_id: int, kind: str, reason: str) -> Event:
                  source="timer", payload={"kind": kind, "reason": reason, "wakeup_id": 1}, trust=Trust.SYSTEM)
 
 
+from mavis.machine.intake import on_user_message as file_intake  # noqa: E402
+
+
 def test_register_installs_handlers(settings):
     register_default_handlers()
     register_default_handlers()  # idempotent: nothing is registered twice
     events = runner._event_handlers
-    assert events[EventType.USER_MESSAGE] == [conversation.run_turn]
+    assert events[EventType.USER_MESSAGE] == [file_intake, conversation.run_turn]
     # attention is on by default and appends its own TASK_COMPLETED handler (first_sync only)
     assert events[EventType.TASK_COMPLETED] == [integrations_wiring.dispatch_task_completed,
                                                 get_intake().on_task_completed]
