@@ -71,14 +71,15 @@ class OutboxSender:
         if not chats:
             raise RuntimeError(f"user {row.user_id} has no chat id")
         ids: list[int] = []
-        for i, chat in enumerate(chats):
+        delivered = False
+        for chat in chats:
             try:
                 ids += await self._send_to(chat, msg)
-            except ChannelRateLimited:
-                raise
+                delivered = True
             except Exception as exc:  # noqa: BLE001
-                if i == 0:
-                    raise  # the first destination decides retry; later copies are best effort
+                if not delivered:
+                    raise  # nothing went out yet: the retry (or backoff for a 429) is safe
+                # a destination already delivered, so a retry would duplicate it: later copies are best effort
                 log.warning("outbox.extra_channel_failed", outbox_id=row.id, error=type(exc).__name__)
         await outbox.mark_sent(row.id, ids)
 

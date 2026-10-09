@@ -29,16 +29,20 @@ _NUMBER = re.compile(r"^(\s*)\d{1,9}[.)]\s+(.*)$")
 _QUOTE = re.compile(r"^\s{0,3}>\s?(.*)$")
 _TABLE_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+# Every span is bounded (code and emphasis 500 characters, a link label 200, a url 1000): an unclosed marker
+# then costs one bounded scan, so a line of N markers is O(N * bound) instead of O(N^2). A longer span is
+# left as literal text. A label cannot hold '[' and a url holds '(' only as a closed pair, so a run of
+# brackets fails at once.
 _INLINE = re.compile(
     r"""(?P<esc>\\[\\`*_{}\[\]()#+\-.!~|>])
-    |`(?P<code>[^`\n]+)`
-    |\[(?P<label>[^\]\n]+)\]\((?P<url>[^)\s]+)(?:\s+"[^"]*")?\)
-    |\*\*\*(?P<bi>[^\n]+?)\*\*\*
-    |\*\*(?P<b1>[^\n]+?)\*\*
-    |(?<!\w)__(?P<b2>[^\n]+?)__(?!\w)
-    |~~(?P<s>[^\n]+?)~~
-    |\*(?!\s)(?P<i1>[^\n*]+?)(?<!\s)\*
-    |(?<!\w)_(?!\s)(?P<i2>[^\n_]+?)(?<!\s)_(?!\w)""",
+    |`(?P<code>[^`\n]{1,500})`
+    |\[(?P<label>[^\[\]\n]{1,200})\]\((?P<url>(?:[^()\s]|\([^()\s]*\)){1,1000})(?:\s{1,20}"[^"\n]{0,500}")?\)
+    |\*\*\*(?P<bi>[^\n]{1,500}?)\*\*\*
+    |\*\*(?P<b1>[^\n]{1,500}?)\*\*
+    |(?<!\w)__(?P<b2>[^\n]{1,500}?)__(?!\w)
+    |~~(?P<s>[^\n]{1,500}?)~~
+    |\*(?!\s)(?P<i1>[^\n*]{1,500}?)(?<!\s)\*
+    |(?<!\w)_(?!\s)(?P<i2>[^\n_]{1,500}?)(?<!\s)_(?!\w)""",
     re.VERBOSE,
 )
 

@@ -981,7 +981,7 @@ class GoogleExecutor:
         if len(a.markdown) > MAX_MARKDOWN_CHARS:
             raise GoogleError(FailureKind.INVALID_ARGUMENT,
                               f"document text is longer than {MAX_MARKDOWN_CHARS} characters", "markdown")
-        requests = markdown_requests(a.markdown)
+        requests = await asyncio.to_thread(markdown_requests, a.markdown)  # CPU work: not on the event loop
         doc = await self._json(uid, "POST", DOCS, idempotent=False, body={"title": a.title})
         doc_id = str(doc.get("documentId") or "")
         if not doc_id:

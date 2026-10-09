@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import time
+
+import pytest
+
 from mavis.tools.integrations.native.docs_markdown import markdown_requests, parse_inline, utf16_len
 
 
@@ -116,3 +120,24 @@ def test_ranges_count_utf16_units_not_characters():
     assert utf16_len("😀") == 2
     assert styles[0]["updateTextStyle"]["range"] == {"startIndex": 4, "endIndex": 5}
     assert covered(text, styles[0]) == "x"
+
+
+PATHOLOGICAL = {
+    "brackets": "[" * 100_000,
+    "stars": "*" * 100_000,
+    "ticks": "`" * 100_000,
+    "unders": "_" * 100_000,
+    "tildes": "~" * 100_000,
+    "open_links": "[a](" * 25_000,
+    "nested_links": "[" * 30_000 + "x" + "](u)" * 20_000,
+    "star_words": "*a " * 33_000,
+    "bracket_words": "[a " * 33_000,
+    "mixed": "**_[`~~" * 14_000,
+}
+
+
+@pytest.mark.parametrize("name", sorted(PATHOLOGICAL))
+def test_inline_parsing_is_linear_on_pathological_input(name):
+    start = time.perf_counter()
+    markdown_requests(PATHOLOGICAL[name])
+    assert time.perf_counter() - start < 1.0
