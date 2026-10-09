@@ -16,6 +16,7 @@ from mavis.web.sessions import Active
 
 CSRF_HEADER = "X-Mavis-CSRF"
 PRE_COOKIE = "mavis_login"
+LINK_COOKIE = "mavis_link"  # holds the pre-session secret a pending Google address is bound to
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 AUTH_PER_IP = 30  # sign-in starts and callbacks per minute per IP
@@ -50,13 +51,17 @@ def _secure() -> bool:
     return not get_settings().public_base_url.startswith("http://localhost")
 
 
+def _secure_for(name: str) -> bool:
+    return name.startswith("__Host-") or _secure()  # a __Host- cookie is only valid when Secure
+
+
 def set_cookie(response: Response, name: str, value: str, *, max_age: int, path: str = "/") -> None:
-    response.set_cookie(name, value, max_age=max_age, path=path, httponly=True, secure=_secure(),
+    response.set_cookie(name, value, max_age=max_age, path=path, httponly=True, secure=_secure_for(name),
                         samesite="lax")
 
 
 def clear_cookie(response: Response, name: str, *, path: str = "/") -> None:
-    response.delete_cookie(name, path=path, httponly=True, secure=_secure(), samesite="lax")
+    response.delete_cookie(name, path=path, httponly=True, secure=_secure_for(name), samesite="lax")
 
 
 def session_max_age() -> int:

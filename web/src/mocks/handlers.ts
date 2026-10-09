@@ -18,7 +18,7 @@ export const handlers = [
     const nonce = Math.random().toString(16).slice(2).padEnd(32, '0')
     const tail = body.invite ? `_${body.invite}` : ''
     return HttpResponse.json({
-      nonce, deep_link: `https://t.me/MavisAIBot?start=login_${nonce}${tail}`,
+      nonce, code: '4827', link_email: null, deep_link: `https://t.me/MavisAIBot?start=login_${nonce}${tail}`,
       expires_at: new Date(Date.now() + 600_000).toISOString(),
     })
   }),

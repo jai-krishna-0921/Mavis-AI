@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select, update
@@ -10,15 +11,31 @@ from mavis.access import UserTier
 from mavis.access.codes import InviteError, code_hash, generate_code, hint, normalize
 from mavis.config import get_settings
 from mavis.store.db import Session, utcnow
-from mavis.store.models import InviteCode, InviteRedemption
+from mavis.store.models import InviteCode, InviteRedemption, User
 
 
 def _active(now: datetime):
     return (InviteCode.revoked_at.is_(None)) & (InviteCode.expires_at > now)
 
 
+_creator_locks: dict[int, asyncio.Lock] = {}
+
+
 async def mint(*, created_by: int | None, uses: int = 1, days: int | None = None, tier: str = "standard",
-               tz: str | None = None, currency: str | None = None, label: str = "") -> tuple[InviteCode, str]:
+               tz: str | None = None, currency: str | None = None, label: str = "",
+               creator_cap: int | None = None) -> tuple[InviteCode, str]:
+    """`creator_cap` limits the creator's open codes. The count and the insert happen in one transaction that
+    holds the creator's row lock (Postgres), plus a per-creator lock in this process (SQLite has no row
+    locks), so two concurrent creates cannot both pass the check."""
+    if creator_cap is None or created_by is None:
+        return await _mint(created_by, uses, days, tier, tz, currency, label, None)
+    lock = _creator_locks.setdefault(created_by, asyncio.Lock())
+    async with lock:
+        return await _mint(created_by, uses, days, tier, tz, currency, label, creator_cap)
+
+
+async def _mint(created_by: int | None, uses: int, days: int | None, tier: str, tz: str | None,
+                currency: str | None, label: str, creator_cap: int | None) -> tuple[InviteCode, str]:
     s = get_settings()
     if tier not in {x.value for x in UserTier} or tier == UserTier.OWNER.value:
         raise InviteError("invalid")  # unknown tier, or owner: an invite never mints an owner
@@ -26,6 +43,12 @@ async def mint(*, created_by: int | None, uses: int = 1, days: int | None = None
         raise InviteError("limit")
     now = utcnow()
     async with Session() as session:
+        if creator_cap is not None:
+            await session.execute(select(User.id).where(User.id == created_by).with_for_update())
+            mine = await session.scalar(select(func.count(InviteCode.id)).where(
+                _active(now), InviteCode.created_by_user_id == created_by))
+            if (mine or 0) >= creator_cap:
+                raise InviteError("cap")
         active = await session.scalar(select(func.count(InviteCode.id)).where(_active(now)))
         if (active or 0) >= s.invite_max_active:
             raise InviteError("limit")

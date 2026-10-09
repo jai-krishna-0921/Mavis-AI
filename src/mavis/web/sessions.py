@@ -18,7 +18,7 @@ from mavis.domain import timeutil
 from mavis.store import db as dbm
 from mavis.store.models import User, WebSession
 
-COOKIE = "mavis_session"
+COOKIE = "__Host-mavis_session"  # __Host-: Secure, Path=/, no Domain, so no sibling host can plant or read it
 TOUCH_EVERY = timedelta(minutes=5)
 
 

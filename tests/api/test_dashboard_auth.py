@@ -140,6 +140,34 @@ async def test_requests_are_rate_limited_per_session(app, monkeypatch):
 # --- Telegram link sign-in --------------------------------------------------------------------------------
 
 
+async def ask(nonce, user_id, event_id="tg:ask"):
+    """The person opens the deep link in Telegram and presses Start."""
+    from mavis.web import login_gate
+
+    ev = Event(id=event_id, user_id=user_id, type=EventType.USER_MESSAGE, occurred_at=timeutil.now(),
+               source="telegram", payload={"text": f"/start login_{nonce}"}, trust=Trust.USER)
+    assert await login_gate.web_login_gate(ev) is False
+
+
+async def tap(user_id, data, event_id="tg:tap"):
+    ev = Event(id=event_id, user_id=user_id, type=EventType.BUTTON_PRESSED, occurred_at=timeutil.now(),
+               source="telegram", payload={"data": data}, trust=Trust.USER)
+    await logins.on_button(ev, data)
+
+
+async def approve_in_bot(nonce, user_id):
+    """Start, then the Approve button, from the same chat."""
+    await ask(nonce, user_id)
+    await tap(user_id, f"wl:y:{nonce}")
+
+
+async def outbox_rows(user_id):
+    from mavis.store.models import OutboxMessage
+
+    async with dbm.Session() as s:
+        return list((await s.scalars(select(OutboxMessage).where(OutboxMessage.user_id == user_id))).all())
+
+
 async def start_login(c, **body):
     r = await c.post(f"{API}/auth/telegram/start", json=body)
     assert r.status_code == 200, r.text
@@ -153,7 +181,8 @@ async def test_telegram_sign_in_end_to_end(app):
         assert started["deep_link"] == f"https://t.me/MavisTestBot?start=login_{nonce}"
         assert len(deep_payload := started["deep_link"].split("start=")[1]) <= 64 and deep_payload
         assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json() == {"status": "pending"}
-        assert await logins.bind(nonce, 3) is True  # the bot saw the nonce from user 3
+        assert len(started["code"]) == 4 and started["code"].isdigit()
+        await approve_in_bot(nonce, 3)  # user 3 pressed Start, then Approve
         r = await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})
         assert r.json() == {"status": "ok"} and sessions.COOKIE in r.headers["set-cookie"]
         assert (await c.get(f"{API}/me")).json()["user_id"] == "3"
@@ -164,7 +193,7 @@ async def test_telegram_sign_in_end_to_end(app):
 async def test_a_forwarded_link_cannot_sign_in_another_browser(app):
     async with new_client(app) as mine, new_client(app) as attacker:
         nonce = (await start_login(mine))["nonce"]
-        await logins.bind(nonce, 3)
+        await approve_in_bot(nonce, 3)
         r = await attacker.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})
         assert r.json() == {"status": "expired"} and (await attacker.get(f"{API}/me")).status_code == 401
         assert (await mine.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json()["status"] == "ok"
@@ -173,13 +202,15 @@ async def test_a_forwarded_link_cannot_sign_in_another_browser(app):
 async def test_nonce_expires_after_ten_minutes_and_binds_once(app, clock):
     async with new_client(app) as c:
         nonce = (await start_login(c))["nonce"]
-        assert await logins.bind(nonce, 3) is True
-        assert await logins.bind(nonce, 4) is False  # another chat cannot take over a bound nonce
+        await approve_in_bot(nonce, 3)
+        await ask(nonce, 4)
+        assert await logins.approve(nonce, 4) is False  # another chat cannot take over a bound nonce
         clock.advance(minutes=11)
         assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json() == {"status": "expired"}
         fresh = (await start_login(c))["nonce"]
+        await ask(fresh, 3)
         clock.advance(minutes=11)
-        assert await logins.bind(fresh, 3) is False
+        assert await logins.approve(fresh, 3) is False
 
 
 async def test_garbage_nonce_is_expired_not_an_error(app):
@@ -213,19 +244,24 @@ async def test_the_bot_signs_in_an_active_chat_and_says_so(app, channel):
     from mavis.web import login_gate
 
     async with new_client(app) as c:
-        nonce = (await start_login(c))["nonce"]
+        started = await start_login(c)
+        nonce, code = started["nonce"], started["code"]
         await users.update(3, telegram_chat_id=30003)
         ev = Event(id="tg:1", user_id=3, type=EventType.USER_MESSAGE, occurred_at=timeutil.now(),
                    source="telegram", payload={"text": f"/start login_{nonce}"}, trust=Trust.USER)
         assert await login_gate.web_login_gate(ev) is False
         await OutboxSender(channel).run_once()
-        assert channel.texts == ["You're signed in on the web. You can close this."]
+        (text,) = channel.texts
+        assert "Check that the code matches" in text and f" {logins.spaced(code)}" in text and "Approve" in text
+        assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json()["status"] == "pending"
+        await tap(3, f"wl:y:{nonce}")
+        await OutboxSender(channel).run_once()
+        assert channel.texts[-1] == "You're signed in on the web. You can close this."
         assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json()["status"] == "ok"
 
 
 async def test_a_new_chat_redeems_the_invite_in_the_link_then_is_signed_in(app, invite_mode, channel):
     from mavis.access import gate
-    from mavis.channels.outbox_sender import OutboxSender
 
     stranger, _ = await users.get_or_create_by_chat(777001, "Lena")
     _, plain = await invites.mint(created_by=1)
@@ -236,8 +272,8 @@ async def test_a_new_chat_redeems_the_invite_in_the_link_then_is_signed_in(app, 
                    source="telegram", payload={"text": payload, "pending": True}, trust=Trust.USER)
         assert await gate.access_gate(ev) is False
         assert (await users.get(stranger.id)).status == "active"
-        await OutboxSender(channel).run_once()
-        assert "You're signed in on the web. You can close this." in channel.texts
+        assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json()["status"] == "pending"
+        await tap(stranger.id, f"wl:y:{nonce}")
         assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json()["status"] == "ok"
         assert (await c.get(f"{API}/me")).json()["user_id"] == str(stranger.id)
 
@@ -254,7 +290,8 @@ async def test_a_new_chat_without_an_invite_is_not_signed_in(app, invite_mode, c
         await gate.access_gate(ev)
         assert (await users.get(stranger.id)).status == "pending"
         assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json()["status"] == "pending"
-        assert await logins.bind(nonce, stranger.id) is False  # pending users are not admitted in invite mode
+        await logins.request_approval(stranger.id, logins.StartLogin(nonce, None), "tg:11")
+        assert await logins.approve(nonce, stranger.id) is False  # pending users are not admitted in invite mode
 
 
 # --- Google sign-in ---------------------------------------------------------------------------------------
@@ -301,31 +338,30 @@ async def test_google_signs_in_the_user_whose_email_is_confirmed(app, google):
         assert (await c.get(f"{API}/me")).json()["email"] == "me@kripya.com"
 
 
-async def test_google_signs_in_the_user_with_a_native_google_grant(app, google, tokens):
+async def test_a_native_google_grant_alone_never_signs_anyone_in(app, google, tokens):
     await tokens.save(6, NativeProvider.GOOGLE, account={"email": "me@kripya.com", "scopes": []},
                       access_token="a", refresh_token="r", expires_at=None)
     async with new_client(app) as c:
         r = await google_callback(c, google, await begin_google(c))
-        assert r.headers["location"] == "/workspace" and (await c.get(f"{API}/me")).json()["user_id"] == "6"
+        assert r.headers["location"].startswith("/link-telegram?i=")
+        assert (await c.get(f"{API}/me")).status_code == 401
 
 
 async def test_unknown_email_never_creates_a_user_and_goes_to_link_telegram(app, google):
     before = await user_count()
     async with new_client(app) as c:
         r = await google_callback(c, google, await begin_google(c), email="stranger@x.com")
-        assert r.headers["location"].startswith("/link-telegram?t=")
+        assert r.headers["location"].startswith("/link-telegram?i=")
         assert (await c.get(f"{API}/me")).status_code == 401
     assert await user_count() == before
 
 
 async def test_completing_telegram_after_google_confirms_that_email(app, google):
-    from urllib.parse import unquote
-
     async with new_client(app) as c:
         r = await google_callback(c, google, await begin_google(c), email="new@kripya.com")
-        token = unquote(r.headers["location"].split("t=")[1])
-        nonce = (await start_login(c, link_token=token))["nonce"]
-        await logins.bind(nonce, 7)
+        link_id = r.headers["location"].split("?i=")[1]
+        nonce = (await start_login(c, link_id=link_id))["nonce"]
+        await approve_in_bot(nonce, 7)
         assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json()["status"] == "ok"
     assert await emails.user_for("new@kripya.com") == 7
     async with new_client(app) as c2:  # next time Google alone signs them in
@@ -333,9 +369,9 @@ async def test_completing_telegram_after_google_confirms_that_email(app, google)
         assert r.headers["location"] == "/workspace"
 
 
-async def test_a_tampered_link_token_is_refused(app):
+async def test_an_unknown_link_id_is_refused(app):
     async with new_client(app) as c:
-        r = await c.post(f"{API}/auth/telegram/start", json={"link_token": "abc.def"})
+        r = await c.post(f"{API}/auth/telegram/start", json={"link_id": "abc"})
         assert r.status_code == 400 and r.json()["error"] == "link_expired"
 
 
@@ -416,3 +452,141 @@ async def test_confirmed_emails_are_unique(app):
     assert await emails.confirm(1, "a@x.com", "google_grant") and not await emails.confirm(2, "A@x.com", "google_signin")
     async with dbm.Session() as s:
         assert int(await s.scalar(select(func.count()).select_from(UserEmail))) == 1
+
+
+# --- approval in the bot (a forwarded link must not sign anyone in) ---------------------------------------
+
+
+UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+
+
+async def test_pressing_start_alone_never_signs_the_browser_in(app, channel):
+    """The attack: the nonce belongs to the attacker's browser, the victim presses Start on the forwarded link."""
+    async with new_client(app) as attacker:
+        nonce = (await start_login(attacker))["nonce"]
+        await ask(nonce, 3)  # the victim pressed Start
+        poll = await attacker.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})
+        assert poll.json() == {"status": "pending"} and (await attacker.get(f"{API}/me")).status_code == 401
+        await tap(3, f"wl:n:{nonce}")  # the victim sees a stranger's request and taps Not me
+        assert (await attacker.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json() == {"status": "expired"}
+        assert await logins.approve(nonce, 3) is False  # a late Approve on the same message is dead too
+
+
+async def test_the_confirmation_shows_what_is_asking_and_the_code(app, channel):
+    from mavis.channels.outbox_sender import OutboxSender
+
+    async with new_client(app) as c:
+        r = await c.post(f"{API}/auth/telegram/start", json={},
+                         headers={"user-agent": UA, "x-forwarded-for": "203.0.113.77", "cf-ipcountry": "DE"})
+        started = r.json()
+        await users.update(3, telegram_chat_id=30003)
+        await ask(started["nonce"], 3)
+        await OutboxSender(channel).run_once()
+        (text,) = channel.texts
+        assert "Chrome on Linux" in text and "DE (near 203.0.x.x)" in text and "UTC" in text
+        assert "203.0.113.77" not in text  # the address is masked
+        digits = " ".join(started["code"])
+        assert f"Check that the code matches the one on the sign in page: {digits}" in text
+        assert "\u2014" not in text and "\u2013" not in text
+        rows = await outbox_rows(3)
+        assert [[b["label"] for b in line] for line in rows[0].buttons] == [["Approve", "Not me"]]
+        assert [[b["data"] for b in line] for line in rows[0].buttons] == [[f"wl:y:{started['nonce']}", f"wl:n:{started['nonce']}"]]
+
+
+def test_agent_and_address_descriptions():
+    assert logins.describe_agent(UA) == "Chrome on Linux"
+    assert logins.describe_agent("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1") == "Safari on iOS"
+    assert logins.describe_agent("") == "An unknown browser"
+    assert logins.mask_ip("198.51.100.9") == "198.51.x.x" and logins.mask_ip("2001:db8:1:2::3") == "2001:db8:x:x"
+    assert logins.describe_place("198.51.100.9", "") == "198.51.x.x"
+
+
+async def test_approve_is_single_use_for_the_person_asked_and_expires_with_the_nonce(app, clock):
+    async with new_client(app) as c:
+        nonce = (await start_login(c))["nonce"]
+        assert await logins.approve(nonce, 3) is False  # never asked: Start was not pressed
+        await ask(nonce, 3)
+        assert await logins.approve(nonce, 4) is False  # not the person it was sent to
+        assert await logins.approve(nonce, 3) is True
+        assert await logins.approve(nonce, 3) is False  # the button works once
+        late = (await start_login(c))["nonce"]
+        await ask(late, 3)
+        clock.advance(minutes=11)
+        assert await logins.approve(late, 3) is False
+
+
+async def test_the_login_page_code_and_deep_link_carry_no_session(app):
+    async with new_client(app) as c:
+        started = await start_login(c)
+        assert set(started) == {"nonce", "deep_link", "expires_at", "code", "link_email"}
+        assert sessions.COOKIE not in c.cookies
+
+
+async def test_signing_in_revokes_the_session_the_browser_already_held(app):
+    c, _ = await signed_in(app, 1)
+    old = c.cookies.get(sessions.COOKIE)
+    async with c:
+        nonce = (await start_login(c))["nonce"]
+        await approve_in_bot(nonce, 3)
+        assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json()["status"] == "ok"
+        assert (await c.get(f"{API}/me")).json()["user_id"] == "3"
+    assert await sessions.lookup(old) is None
+    assert await sessions.count(1) == 0
+
+
+async def test_the_session_cookie_is_a_host_cookie(app):
+    assert sessions.COOKIE == "__Host-mavis_session"
+    async with new_client(app) as c:
+        nonce = (await start_login(c))["nonce"]
+        await approve_in_bot(nonce, 3)
+        flags = (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).headers["set-cookie"].lower()
+        assert "__host-mavis_session=" in flags and "secure" in flags and "path=/;" in flags + ";"
+        assert "domain" not in flags
+
+
+# --- linking a Google address through Telegram -----------------------------------------------------------
+
+
+async def stash(c, google, email="new@kripya.com"):
+    r = await google_callback(c, google, await begin_google(c), email=email)
+    return r.headers["location"].split("?i=")[1]
+
+
+async def test_the_link_url_carries_no_address_and_only_its_browser_can_use_it(app, google):
+    async with new_client(app) as c, new_client(app) as other:
+        link_id = await stash(c, google)
+        assert "kripya" not in link_id and "@" not in link_id
+        assert (await c.get(f"{API}/auth/telegram/link", params={"i": link_id})).json() == {"email": "new@kripya.com"}
+        # the same URL in another browser (forwarded) is useless
+        assert (await other.get(f"{API}/auth/telegram/link", params={"i": link_id})).status_code == 404
+        r = await other.post(f"{API}/auth/telegram/start", json={"link_id": link_id})
+        assert r.status_code == 400 and r.json()["error"] == "link_expired"
+        assert (await c.post(f"{API}/auth/telegram/start", json={"link_id": link_id})).status_code == 200
+
+
+async def test_the_link_is_spent_once_approved_and_expires(app, google, clock):
+    async with new_client(app) as c:
+        link_id = await stash(c, google)
+        nonce = (await start_login(c, link_id=link_id))["nonce"]
+        await approve_in_bot(nonce, 7)
+        assert (await c.post(f"{API}/auth/telegram/start", json={"link_id": link_id})).status_code == 400
+    async with new_client(app) as c2:
+        link2 = await stash(c2, google, email="later@kripya.com")
+        clock.advance(minutes=16)
+        assert (await c2.post(f"{API}/auth/telegram/start", json={"link_id": link2})).status_code == 400
+
+
+async def test_an_address_is_linked_only_after_the_person_approves(app, google, channel):
+    from mavis.channels.outbox_sender import OutboxSender
+
+    async with new_client(app) as c:
+        link_id = await stash(c, google, email="attacker@evil.example")
+        nonce = (await start_login(c, link_id=link_id))["nonce"]
+        await users.update(3, telegram_chat_id=30003)
+        await ask(nonce, 3)  # the victim opens the forwarded link
+        await OutboxSender(channel).run_once()
+        assert "links the Google address attacker@evil.example to your Mavis account" in channel.texts[0]
+        assert await emails.user_for("attacker@evil.example") is None
+        await tap(3, f"wl:n:{nonce}")
+        assert await emails.user_for("attacker@evil.example") is None
+        assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json() == {"status": "expired"}

@@ -147,7 +147,7 @@ async def _pending(user: User, event: Event) -> bool:
     await users.modify_nested(user.id, _STATE_KEY, lambda cur: {**cur, "activation_event": event.id})
     await activate(user.id, invite, now)
     if login is not None:
-        await logins.complete(user.id, login, event.id)  # the same link that admitted them signs them in
+        await logins.request_approval(user.id, login, event.id)  # the link that admitted them asks to confirm
     return False  # the redemption message itself is not a chat turn; onboarding takes it from here
 
 
@@ -209,7 +209,7 @@ async def access_gate(event: Event) -> bool:
             from mavis.web import logins
 
             if (login := logins.parse_start(str(event.payload.get("text", "")))) is not None:
-                await logins.complete(user.id, login, event.id)  # a retry after a crash before binding
+                await logins.request_approval(user.id, login, event.id)  # a retry after a crash before asking
             return False  # a retry of the very message that redeemed the code is not a chat turn
         return True
     if event.source == routing.SLACK_SOURCE:

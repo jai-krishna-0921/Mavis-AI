@@ -527,6 +527,8 @@ class NativeOAuthState(Base):
     pending_id: Mapped[int | None] = mapped_column(nullable=True)
     expires_at: Mapped[datetime] = mapped_column(index=True)
     origin: Mapped[str | None] = mapped_column(String(8), nullable=True)  # "web": started from the dashboard
+    # web: the session that began it
+    session_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class PersonalLayerRow(Base):
@@ -604,6 +606,24 @@ class WebLoginNonce(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(index=True)
     consumed_at: Mapped[datetime | None] = mapped_column(default=None)
+    # What the confirmation message tells the person who is asked to approve (never an id or a secret).
+    code: Mapped[str] = mapped_column(String(4), default="", server_default="")
+    agent_hint: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    place_hint: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    pending_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), default=None)
+
+
+class WebPendingLink(Base):
+    """A Google address waiting to be linked to a Telegram account. The URL carries only the opaque id;
+    the row is usable only from the browser holding the matching cookie, and is spent once approved."""
+
+    __tablename__ = "web_pending_links"
+
+    id_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    pre_hash: Mapped[str] = mapped_column(String(64))
+    email: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(index=True)
 
 
 class UserEmail(Base):
