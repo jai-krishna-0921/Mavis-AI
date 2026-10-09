@@ -14,29 +14,52 @@ def extras(query: str) -> list[str]:
     return [t for t in search_query(query).split() if t.startswith("-") and t not in query.split()]
 
 
-@pytest.mark.parametrize("query", [
-    "", "newer_than:14d", "after:1790000000 -in:sent", "is:unread newer_than:2d", "in:inbox older_than:1y",
-    "label:work after:2026/01/01", "has:attachment larger:5M", "(is:unread OR is:starred) newer_than:7d",
-])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "",
+        "newer_than:14d",
+        "after:1790000000 -in:sent",
+        "is:unread newer_than:2d",
+        "in:inbox older_than:1y",
+        "label:work after:2026/01/01",
+        "has:attachment larger:5M",
+        "(is:unread OR is:starred) newer_than:7d",
+    ],
+)
 def test_listings_exclude_spam_trash_and_bulk_categories(query):
     assert extras(query) == SPAM_TRASH + CATS
 
 
-@pytest.mark.parametrize("query", [
-    "from:alice newer_than:30d", "to:bob@x.com", "subject:invoice", "invoice", '"quarterly report"',
-    "from:amazon.com", "list:news.example.com", "filename:pdf budget", "{from:a from:b}", "rfc822msgid:<x@y>",
-    "(from:alice OR from:bob)",
-])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "from:alice newer_than:30d",
+        "to:bob@x.com",
+        "subject:invoice",
+        "invoice",
+        '"quarterly report"',
+        "from:amazon.com",
+        "list:news.example.com",
+        "filename:pdf budget",
+        "{from:a from:b}",
+        "rfc822msgid:<x@y>",
+        "(from:alice OR from:bob)",
+    ],
+)
 def test_targeted_searches_keep_categories_but_still_skip_spam_and_trash(query):
     assert extras(query) == SPAM_TRASH
 
 
-@pytest.mark.parametrize(("query", "named"), [
-    ("category:promotions newer_than:7d", "promotions"),
-    ("newer_than:7d category:social", "social"),
-    ("label:forums", "forums"),
-    ("-category:promotions newer_than:1d", "promotions"),
-])
+@pytest.mark.parametrize(
+    ("query", "named"),
+    [
+        ("category:promotions newer_than:7d", "promotions"),
+        ("newer_than:7d category:social", "social"),
+        ("label:forums", "forums"),
+        ("-category:promotions newer_than:1d", "promotions"),
+    ],
+)
 def test_a_category_named_by_the_query_is_not_excluded_again_but_the_others_are(query, named):
     added = extras(query)
     assert f"-category:{named}" not in added
@@ -47,9 +70,14 @@ def test_an_unlisted_category_changes_nothing():
     assert extras("category:updates newer_than:1d") == SPAM_TRASH + CATS
 
 
-@pytest.mark.parametrize(("query", "missing"), [
-    ("in:trash", "-in:trash"), ("in:spam newer_than:3d", "-in:spam"), ("label:spam", "-in:spam"),
-])
+@pytest.mark.parametrize(
+    ("query", "missing"),
+    [
+        ("in:trash", "-in:trash"),
+        ("in:spam newer_than:3d", "-in:spam"),
+        ("label:spam", "-in:spam"),
+    ],
+)
 def test_a_mailbox_named_by_the_query_is_not_excluded(query, missing):
     assert missing not in search_query(query).split()
 
@@ -65,4 +93,4 @@ def test_negated_terms_do_not_make_a_query_targeted():
 
 
 def test_original_query_is_preserved_verbatim_first():
-    assert search_query("from:alice  subject:\"a b\"").startswith('from:alice  subject:"a b" ')
+    assert search_query('from:alice  subject:"a b"').startswith('from:alice  subject:"a b" ')

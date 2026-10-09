@@ -93,33 +93,61 @@ async def test_network_failure_is_retried_then_unavailable():
     assert res.error_kind is FailureKind.UNAVAILABLE and len(sleeps) == 1
 
 
-@pytest.mark.parametrize(("action", "args", "field"), [
-    ("mail.read", {"message_id": "nope"}, "message_id"),
-    ("mail.thread", {"thread_id": "nope"}, "thread_id"),
-    ("drive.meta", {"file_id": "nope"}, "file_id"),
-    ("docs.read", {"document_id": "nope"}, "document_id"),
-    ("sheets.read", {"spreadsheet_id": "nope", "range": "A1"}, "spreadsheet_id"),
-    ("calendar.update_event", {"event_id": "nope", "summary": "x"}, "event_id"),
-])
+@pytest.mark.parametrize(
+    ("action", "args", "field"),
+    [
+        ("mail.read", {"message_id": "nope"}, "message_id"),
+        ("mail.thread", {"thread_id": "nope"}, "thread_id"),
+        ("drive.meta", {"file_id": "nope"}, "file_id"),
+        ("docs.read", {"document_id": "nope"}, "document_id"),
+        ("sheets.read", {"spreadsheet_id": "nope", "range": "A1"}, "spreadsheet_id"),
+        ("calendar.update_event", {"event_id": "nope", "summary": "x"}, "event_id"),
+    ],
+)
 async def test_404_is_not_found_and_names_our_id_argument(action, args, field):
-    fake = FakeGoogle().on("GET", r".*", error(404, "notFound", "Not Found")).on("PATCH", r".*", error(404, "notFound"))
+    fake = (
+        FakeGoogle()
+        .on("GET", r".*", error(404, "notFound", "Not Found"))
+        .on("PATCH", r".*", error(404, "notFound"))
+    )
     res, _ = await run(fake, action=action, args=args)
     assert res.error_kind is FailureKind.NOT_FOUND and res.error_field == field
 
 
 async def test_400_names_our_field_when_google_names_its_parameter():
-    fake = FakeGoogle().on("GET", r"/events$", error(400, "timeRangeEmpty", "The specified time range is empty.", location="timeMax"))
-    res, _ = await run(fake, action="calendar.list", args={
-        "time_min": "2026-10-05T10:00:00+05:30", "time_max": "2026-10-05T09:00:00+05:30"})
+    fake = FakeGoogle().on(
+        "GET",
+        r"/events$",
+        error(400, "timeRangeEmpty", "The specified time range is empty.", location="timeMax"),
+    )
+    res, _ = await run(
+        fake,
+        action="calendar.list",
+        args={"time_min": "2026-10-05T10:00:00+05:30", "time_max": "2026-10-05T09:00:00+05:30"},
+    )
     assert res.error_kind is FailureKind.INVALID_ARGUMENT and res.error_field == "time_max"
 
 
 async def test_400_with_field_violation_details_maps_the_leaf_segment():
-    body = {"error": {"code": 400, "message": "Invalid", "status": "INVALID_ARGUMENT",
-                      "details": [{"fieldViolations": [{"field": "attendees[0].email"}]}]}}
+    body = {
+        "error": {
+            "code": 400,
+            "message": "Invalid",
+            "status": "INVALID_ARGUMENT",
+            "details": [{"fieldViolations": [{"field": "attendees[0].email"}]}],
+        }
+    }
     fake = FakeGoogle().on("POST", r"/events$", httpx.Response(400, json=body))
-    res, _ = await run(fake, action="calendar.create_event", args={
-        "summary": "x", "start": "2026-10-05T10:00:00+05:30", "duration_minutes": 30, "attendees": ["a@x.com"]})
+    res, _ = await run(
+        fake,
+        action="calendar.create_event",
+        args={
+            "summary": "x",
+            "start": "2026-10-05T10:00:00+05:30",
+            "duration_minutes": 30,
+            "attendees": ["a@x.com"],
+        },
+    )
     assert res.error_kind is FailureKind.INVALID_ARGUMENT and res.error_field == "attendees"
 
 
@@ -130,11 +158,17 @@ async def test_400_on_a_vendor_field_we_do_not_have_sets_no_field():
 
 
 async def test_file_without_access_is_not_found_and_disabled_api_is_unavailable():
-    res, _ = await run(FakeGoogle().on("GET", r".*", error(403, "forbidden", "no access")),
-                       action="drive.meta", args={"file_id": "f"})
+    res, _ = await run(
+        FakeGoogle().on("GET", r".*", error(403, "forbidden", "no access")),
+        action="drive.meta",
+        args={"file_id": "f"},
+    )
     assert res.error_kind is FailureKind.NOT_FOUND
-    res, _ = await run(FakeGoogle().on("GET", r".*", error(403, "accessNotConfigured", "API disabled")),
-                       action="drive.meta", args={"file_id": "f"})
+    res, _ = await run(
+        FakeGoogle().on("GET", r".*", error(403, "accessNotConfigured", "API disabled")),
+        action="drive.meta",
+        args={"file_id": "f"},
+    )
     assert res.error_kind is FailureKind.UNAVAILABLE
 
 
@@ -163,8 +197,17 @@ def test_every_handled_action_exists_in_the_catalog_and_the_rest_stay_on_the_fal
     handled = set(ex._handlers)
     assert handled <= set(ACTIONS)
     assert all(ex.handles(a) for a in handled) and len(handled) == 23
-    for other in ("slack.send", "slack.history", "notion.search", "tasks.list", "meet.create", "docs.create",
-                  "drive.share", "sheets.append_row", "nonsense"):
+    for other in (
+        "slack.send",
+        "slack.history",
+        "notion.search",
+        "tasks.list",
+        "meet.create",
+        "docs.create",
+        "drive.share",
+        "sheets.append_row",
+        "nonsense",
+    ):
         assert not ex.handles(other)
 
 

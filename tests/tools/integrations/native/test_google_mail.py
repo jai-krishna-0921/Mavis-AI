@@ -24,20 +24,40 @@ GET = r"/gmail/v1/users/me/messages/[^/]+$"
 def get_by_id(messages: dict):
     def answer(request: httpx.Request) -> httpx.Response:
         mid = request.url.path.rsplit("/", 1)[1]
-        return httpx.Response(200, json=messages[mid]) if mid in messages else httpx.Response(
-            404, json={"error": {"code": 404, "message": "Requested entity was not found.",
-                                 "errors": [{"reason": "notFound"}]}})
+        return (
+            httpx.Response(200, json=messages[mid])
+            if mid in messages
+            else httpx.Response(
+                404,
+                json={
+                    "error": {
+                        "code": 404,
+                        "message": "Requested entity was not found.",
+                        "errors": [{"reason": "notFound"}],
+                    }
+                },
+            )
+        )
+
     return answer
 
 
 async def test_search_paginates_fetches_full_and_parses_through_normalizers():
     msgs = {f"m{i}": gmail_message(f"m{i}", subject=f"Subject {i}", text=f"Body {i}") for i in range(1, 6)}
-    msgs["m2"] = gmail_message("m2", labels=("INBOX",), text="Newsletter", extra_headers=(
-        ("List-Unsubscribe", "<mailto:unsub@acme.com>"),))
-    pages = {None: {"messages": [{"id": "m1"}, {"id": "m2"}], "nextPageToken": "P2", "resultSizeEstimate": 5},
-             "P2": {"messages": [{"id": "m3"}, {"id": "m4"}], "nextPageToken": "P3"},
-             "P3": {"messages": [{"id": "m5"}]}}
-    fake = FakeGoogle().on("GET", LIST, lambda r: httpx.Response(200, json=pages[r.url.params.get("pageToken")]))
+    msgs["m2"] = gmail_message(
+        "m2",
+        labels=("INBOX",),
+        text="Newsletter",
+        extra_headers=(("List-Unsubscribe", "<mailto:unsub@acme.com>"),),
+    )
+    pages = {
+        None: {"messages": [{"id": "m1"}, {"id": "m2"}], "nextPageToken": "P2", "resultSizeEstimate": 5},
+        "P2": {"messages": [{"id": "m3"}, {"id": "m4"}], "nextPageToken": "P3"},
+        "P3": {"messages": [{"id": "m5"}]},
+    }
+    fake = FakeGoogle().on(
+        "GET", LIST, lambda r: httpx.Response(200, json=pages[r.url.params.get("pageToken")])
+    )
     fake.on("GET", GET, get_by_id(msgs))
     ex, _ = fake.executor()
     res = await ex.execute(USER, "mail.search", {"query": "newer_than:7d", "max_results": 4})
@@ -80,8 +100,11 @@ async def test_search_with_no_matches_is_ok_and_empty():
 
 
 async def test_read_html_only_message_renders_text_and_lists_attachments():
-    html_root = multi("multipart/mixed", part("text/html", "<div>Hi <b>Sam</b></div><script>x()</script>"),
-                      attachment("plan.pdf", "application/pdf", 9000))
+    html_root = multi(
+        "multipart/mixed",
+        part("text/html", "<div>Hi <b>Sam</b></div><script>x()</script>"),
+        attachment("plan.pdf", "application/pdf", 9000),
+    )
     fake = FakeGoogle().on("GET", GET, httpx.Response(200, json=gmail_message("m9", payload=html_root)))
     ex, _ = fake.executor()
     res = await ex.execute(USER, "mail.read", {"message_id": "m9"})
@@ -128,10 +151,17 @@ def decode_raw(request: httpx.Request):
 
 
 async def test_send_builds_rfc5322_from_the_account():
-    fake = FakeGoogle().on("POST", r"/messages/send$", httpx.Response(200, json={"id": "s1", "threadId": "t5", "labelIds": ["SENT"]}))
+    fake = FakeGoogle().on(
+        "POST",
+        r"/messages/send$",
+        httpx.Response(200, json={"id": "s1", "threadId": "t5", "labelIds": ["SENT"]}),
+    )
     ex, _ = fake.executor()
-    res = await ex.execute(USER, "mail.send", {"to": ["a@x.com", "b@y.com"], "cc": ["c@z.com"],
-                                               "subject": "Plan ✓", "body": "Line 1\nLine 2"})
+    res = await ex.execute(
+        USER,
+        "mail.send",
+        {"to": ["a@x.com", "b@y.com"], "cc": ["c@z.com"], "subject": "Plan ✓", "body": "Line 1\nLine 2"},
+    )
     assert res.ok and res.data["messageId"] == "s1" and res.data["threadId"] == "t5"
     msg = decode_raw(fake.requests[-1])
     assert msg["From"] == "me@kripya.com" and msg["To"] == "a@x.com, b@y.com" and msg["Cc"] == "c@z.com"
@@ -147,7 +177,9 @@ async def test_send_without_a_known_account_omits_from():
 
 
 async def test_draft_creates_a_draft_not_a_send():
-    fake = FakeGoogle().on("POST", r"/drafts$", httpx.Response(200, json={"id": "d1", "message": {"id": "m1", "threadId": "t1"}}))
+    fake = FakeGoogle().on(
+        "POST", r"/drafts$", httpx.Response(200, json={"id": "d1", "message": {"id": "m1", "threadId": "t1"}})
+    )
     ex, _ = fake.executor()
     res = await ex.execute(USER, "mail.draft", {"to": ["a@x.com"], "subject": "s", "body": "b"})
     assert res.ok and res.data["draftId"] == "d1"
@@ -155,12 +187,21 @@ async def test_draft_creates_a_draft_not_a_send():
     assert not fake.calls("POST", r"/send")
 
 
-@pytest.mark.parametrize(("orig_subject", "expected"), [("Budget", "Re: Budget"), ("Re: Budget", "Re: Budget")])
+@pytest.mark.parametrize(
+    ("orig_subject", "expected"), [("Budget", "Re: Budget"), ("Re: Budget", "Re: Budget")]
+)
 async def test_reply_threads_to_the_latest_message(orig_subject, expected):
     older = gmail_message("m1", thread="t7", subject=orig_subject, ts=1000)
-    newer = gmail_message("m2", thread="t7", subject=orig_subject, ts=2000,
-                          extra_headers=(("References", "<m1@mail.acme.com>"),))
-    fake = FakeGoogle().on("GET", r"/threads/t7$", httpx.Response(200, json={"id": "t7", "messages": [newer, older]}))
+    newer = gmail_message(
+        "m2",
+        thread="t7",
+        subject=orig_subject,
+        ts=2000,
+        extra_headers=(("References", "<m1@mail.acme.com>"),),
+    )
+    fake = FakeGoogle().on(
+        "GET", r"/threads/t7$", httpx.Response(200, json={"id": "t7", "messages": [newer, older]})
+    )
     fake.on("POST", r"/messages/send$", httpx.Response(200, json={"id": "r1", "threadId": "t7"}))
     ex, _ = fake.executor()
     res = await ex.execute(USER, "mail.reply", {"thread_id": "t7", "to": "alice@acme.com", "body": "Yes."})
@@ -183,6 +224,8 @@ async def test_reply_to_an_empty_or_missing_thread_is_not_found():
 async def test_unsafe_header_text_is_an_invalid_argument_and_nothing_is_sent():
     fake = FakeGoogle().on("POST", r"/messages/send$", httpx.Response(200, json={"id": "s1"}))
     ex, _ = fake.executor()
-    res = await ex.execute(USER, "mail.send", {"to": ["a@x.com"], "subject": "hi\nBcc: evil@x.com", "body": "b"})
+    res = await ex.execute(
+        USER, "mail.send", {"to": ["a@x.com"], "subject": "hi\nBcc: evil@x.com", "body": "b"}
+    )
     assert not res.ok and res.error_kind.value == "invalid_argument"
     assert not fake.requests
