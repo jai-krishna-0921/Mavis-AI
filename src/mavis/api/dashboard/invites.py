@@ -47,14 +47,15 @@ async def list_invites(active: Active = Depends(common.authed)) -> list[dict]:
 @router.post("", status_code=201)
 async def create_invite(body: CreateBody, active: Active = Depends(common.authed)) -> dict:
     user = active.user
-    if (left := await left_for(user)) is not None and left <= 0:
-        raise DashError(409, "invite_cap", "You have used all your invite links. Revoke one to make another.")
     s = get_settings()
     try:
         label = " ".join((body.name or "").split())[:60]
         row, plain = await invites.mint(created_by=user.id, uses=s.invite_web_uses,
-                                        tier=UserTier.STANDARD.value, label=label)
-    except InviteError:
+                                        tier=UserTier.STANDARD.value, label=label, creator_cap=cap_for(user))
+    except InviteError as exc:
+        if exc.reason == "cap":
+            raise DashError(409, "invite_cap",
+                            "You have used all your invite links. Revoke one to make another.") from None
         raise DashError(409, "invite_cap", "Mavis has too many open invites right now. "
                                            "Try again later.") from None
     link = f"{s.public_base_url.rstrip('/')}/?invite={deep_link_param(plain)}"

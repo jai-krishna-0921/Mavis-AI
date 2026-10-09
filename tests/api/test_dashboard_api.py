@@ -23,7 +23,7 @@ from mavis.tools.integrations.native.oauth import GOOGLE_USERINFO_URL
 from mavis.tools.integrations.native.tokens import GOOGLE_TOKEN_URL
 from mavis.web import emails, sessions
 from tests.api.dash_helpers import *  # noqa: F403 - fixtures and helpers
-from tests.api.dash_helpers import query, signed_in
+from tests.api.dash_helpers import new_client, query, signed_in
 
 API = "/api/v1"
 G = NativeProvider.GOOGLE
@@ -145,7 +145,7 @@ async def test_connect_returns_the_native_url_and_the_callback_returns_to_the_wo
         vendor.routes[GOOGLE_USERINFO_URL] = lambda req: httpx.Response(200, json={"sub": "9", "email": "Me@Kripya.com"})
         cb = await c.get("/oauth/google/callback", params={"code": "c", "state": query(url)["state"]})
         assert cb.status_code == 303 and cb.headers["location"] == "/workspace?connected=google"
-    assert await emails.user_for("me@kripya.com") == 1  # the connected address now signs them in
+    assert await emails.user_for("me@kripya.com") is None  # a grant never becomes a sign-in identity
 
 
 async def test_a_failed_web_connect_also_returns_to_the_workspace(app, oauth):
@@ -302,6 +302,66 @@ async def test_the_owner_has_no_invite_cap(app):
         assert (await c.get(f"{API}/me")).json()["invites_left"] is None
         for _ in range(5):
             assert (await c.post(f"{API}/invites", headers=csrf, json={})).status_code == 201
+
+
+async def test_concurrent_invite_creates_cannot_exceed_the_cap(app):
+    import asyncio
+
+    c, csrf = await signed_in(app, 1)  # standard tier: 3 links
+    async with c:
+        results = await asyncio.gather(*[c.post(f"{API}/invites", headers=csrf, json={}) for _ in range(8)])
+        codes = sorted(r.status_code for r in results)
+        assert codes == [201] * 3 + [409] * 5
+        assert len((await c.get(f"{API}/invites")).json()) == 3
+
+
+# --- connector consent is bound to the session that began it ----------------------------------------------
+
+
+def google_grant_routes(vendor, email="victim@kripya.com"):
+    vendor.routes[GOOGLE_TOKEN_URL] = lambda req: httpx.Response(200, json={
+        "access_token": "ya29", "refresh_token": "1//r", "expires_in": 3600,
+        "scope": "openid email https://www.googleapis.com/auth/gmail.readonly"})
+    vendor.routes[GOOGLE_USERINFO_URL] = lambda req: httpx.Response(200, json={"sub": "9", "email": email})
+
+
+async def test_a_forwarded_web_connect_link_saves_nothing_for_another_browser(app, oauth, vendor, tokens):
+    google_grant_routes(vendor)
+    attacker, csrf = await signed_in(app, 1)
+    async with attacker, new_client(app) as victim:
+        url = (await attacker.post(f"{API}/connectors/google/connect", headers=csrf, json={})).json()["url"]
+        # the victim (no session, or another one) lands on the forwarded callback
+        r = await victim.get("/oauth/google/callback", params={"code": "c", "state": query(url)["state"]})
+        assert r.status_code == 400 and "Continue from the dashboard" in r.text
+        assert await tokens.grant(1, NativeProvider.GOOGLE) is None
+        # the state is spent, so the attacker's own browser cannot finish it either
+        r = await attacker.get("/oauth/google/callback", params={"code": "c", "state": query(url)["state"]})
+        assert await tokens.grant(1, NativeProvider.GOOGLE) is None
+    # a different signed-in user (another session) is refused as well
+        other, _ = await signed_in(app, 2)
+        url = (await attacker.post(f"{API}/connectors/google/connect", headers=csrf, json={})).json()["url"]
+        r = await other.get("/oauth/google/callback", params={"code": "c", "state": query(url)["state"]})
+        assert r.status_code == 400 and await tokens.grant(1, NativeProvider.GOOGLE) is None
+
+
+async def test_a_web_connect_finishes_in_the_session_that_began_it_and_never_confirms_the_email(app, oauth, vendor, tokens):
+    google_grant_routes(vendor)
+    c, csrf = await signed_in(app, 1)
+    async with c:
+        url = (await c.post(f"{API}/connectors/google/connect", headers=csrf, json={})).json()["url"]
+        r = await c.get("/oauth/google/callback", params={"code": "c", "state": query(url)["state"]})
+        assert r.status_code == 303 and await tokens.grant(1, NativeProvider.GOOGLE) is not None
+    assert await emails.user_for("victim@kripya.com") is None
+
+
+async def test_a_telegram_started_connect_link_still_works_without_a_session(app, oauth, vendor, tokens):
+    google_grant_routes(vendor)
+    state = query(await oauth.authorize_url(1, NativeProvider.GOOGLE))["state"]
+    async with new_client(app) as c:
+        r = await c.get("/oauth/google/callback", params={"code": "c", "state": state})
+        assert r.status_code == 200 and "victim@kripya.com" in r.text
+    assert await tokens.grant(1, NativeProvider.GOOGLE) is not None
+    assert await emails.user_for("victim@kripya.com") is None  # and it is not a sign-in identity
 
 
 # --- account deletion -------------------------------------------------------------------------------------

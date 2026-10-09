@@ -41,6 +41,8 @@ describe('login polling', () => {
     const btn = await screen.findByRole('link', { name: 'Continue with Telegram' })
     expect(btn.getAttribute('href')).toMatch(/^https:\/\/t\.me\/MavisAIBot\?start=login_[0-9a-f]+_abc$/)
     expect(screen.getByRole('img', { name: /QR code/ })).toBeInTheDocument()
+    expect(screen.getByText('4 8 2 7')).toBeInTheDocument()
+    expect(screen.getByText(/Waiting for you to approve in Telegram/)).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'Workspace' })).toBeInTheDocument()
   })
 

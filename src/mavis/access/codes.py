@@ -15,7 +15,7 @@ _STRIP = re.compile(r"[\s\-_]+")
 
 
 class InviteError(Exception):
-    def __init__(self, reason: Literal["invalid", "limit"]) -> None:
+    def __init__(self, reason: Literal["invalid", "limit", "cap"]) -> None:
         super().__init__(reason)
         self.reason = reason
 

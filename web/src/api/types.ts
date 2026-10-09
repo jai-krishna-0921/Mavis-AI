@@ -61,5 +61,5 @@ export type Preferences = {
 // `link` is only returned when the invite is created: the server keeps a hash of the code, so the list gives `hint`.
 export type Invite = { code: string; link: string | null; hint?: string; name?: string | null; uses: number; max_uses: number | null }
 
-export type TelegramStart = { nonce: string; deep_link: string; expires_at: string }
+export type TelegramStart = { nonce: string; deep_link: string; expires_at: string; code: string; link_email: string | null }
 export type PollStatus = { status: 'pending' | 'ok' | 'expired' }

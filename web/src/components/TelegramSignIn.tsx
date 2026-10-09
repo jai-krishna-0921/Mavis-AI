@@ -9,7 +9,7 @@ import styles from './TelegramSignIn.module.css'
 
 type Phase = 'starting' | 'waiting' | 'expired' | 'error'
 
-export function TelegramSignIn({ invite, linkToken, pollIntervalMs = 2000, to = '/workspace' }: { invite?: string; linkToken?: string; pollIntervalMs?: number; to?: string }) {
+export function TelegramSignIn({ invite, linkId, pollIntervalMs = 2000, to = '/workspace' }: { invite?: string; linkId?: string; pollIntervalMs?: number; to?: string }) {
   const [start, setStart] = useState<TelegramStart | null>(null)
   const [phase, setPhase] = useState<Phase>('starting')
   const [error, setError] = useState('')
@@ -21,12 +21,12 @@ export function TelegramSignIn({ invite, linkToken, pollIntervalMs = 2000, to = 
 
   useEffect(() => {
     let alive = true
-    api.telegramStart(invite, linkToken).then(
+    api.telegramStart(invite, linkId).then(
       (s) => { if (alive) { setStart(s); setPhase('waiting') } },
       (e: unknown) => { if (alive) { setError(e instanceof ApiError ? e.message : 'Could not start sign in.'); setPhase('error') } },
     )
     return () => { alive = false }
-  }, [invite, linkToken, attempt])
+  }, [invite, linkId, attempt])
 
   useEffect(() => {
     if (!start || phase !== 'waiting') return
@@ -80,7 +80,11 @@ export function TelegramSignIn({ invite, linkToken, pollIntervalMs = 2000, to = 
           Continue with Telegram
         </a>
         <p className={ui.status} role="status" style={{ marginTop: 12 }}>
-          Waiting for you to press Start in Telegram. This page signs you in on its own.
+          Waiting for you to approve in Telegram. Press Start, then tap Approve. This page signs you in on its own.
+        </p>
+        <p className={styles.code} aria-label={`Sign in code ${start.code.split('').join(' ')}`}>
+          <span className={ui.status}>Check that the code in Telegram matches</span>
+          <strong>{start.code.split('').join(' ')}</strong>
         </p>
       </div>
       <div className={styles.qr}>

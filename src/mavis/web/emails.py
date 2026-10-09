@@ -34,15 +34,11 @@ async def confirm(user_id: int, email: str, source: str) -> bool:
 
 
 async def user_for(email: str) -> int | None:
-    """The user with this email confirmed: an explicit confirmation, or an active native Google grant."""
+    """The user with this email confirmed. Only an explicit confirmation counts: a connected Google account
+    does not, because a consent link can be forwarded to someone else."""
     email = norm(email)
     async with dbm.Session() as s:
-        uid = await s.scalar(select(UserEmail.user_id).where(UserEmail.email == email))
-        if uid is not None:
-            return uid
-        return await s.scalar(select(NativeGrant.user_id).where(
-            NativeGrant.provider == NativeProvider.GOOGLE.value, NativeGrant.account_key == email,
-            NativeGrant.status == "ACTIVE"))
+        return await s.scalar(select(UserEmail.user_id).where(UserEmail.email == email))
 
 
 async def primary(user_id: int) -> str | None:

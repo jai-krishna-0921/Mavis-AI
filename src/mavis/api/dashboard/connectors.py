@@ -101,7 +101,8 @@ async def connect(cid: str, active: Active = Depends(common.authed),
     if oauth is None or not oauth_mod.configured(meta["provider"]):
         raise DashError(503, "not_configured", f"{meta['name']} sign-in is not set up on this Mavis yet.")
     try:
-        url = await oauth.authorize_url(active.user.id, meta["provider"], None, origin=WEB_ORIGIN)
+        url = await oauth.authorize_url(active.user.id, meta["provider"], None, origin=WEB_ORIGIN,
+                                        session_hash=active.session_id)
     except oauth_mod.OAuthError:
         raise DashError(503, "unavailable", f"{meta['name']} sign-in is not available right now.") from None
     return {"url": url}
