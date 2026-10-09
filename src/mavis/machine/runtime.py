@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import mimetypes
+import shlex
 import time
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
@@ -19,9 +20,10 @@ from pathlib import Path
 import structlog
 
 from mavis.config import get_settings
+from mavis.domain.errors import ActionFailed
 from mavis.domain.tasks import TaskOrigin, TaskStatus
 from mavis.machine.errors import MachineBusy, QuotaExceeded, SessionUserMismatch
-from mavis.machine.paths import is_hidden, safe_name
+from mavis.machine.paths import artifact_file, is_hidden, safe_name
 from mavis.machine.ports import (
     ExecRequest,
     ExecResult,
@@ -128,8 +130,9 @@ class MachineRuntime:
             await live.session.write(f.path, await self.store.get(user_id, f.path))
 
     # --- operations -----------------------------------------------------------------
-    async def exec(self, user_id: int, task_id: int, req: ExecRequest, *,
-                   attempt_label: str = "") -> ExecResult:
+    async def exec(
+        self, user_id: int, task_id: int, req: ExecRequest, *, record: bool = True
+    ) -> ExecResult:
         session = await self.session(user_id, task_id)
         req = req.model_copy(update={"timeout_s": max(1, min(int(req.timeout_s),
                                                              get_settings().sandbox_exec_max_s))})
@@ -139,8 +142,46 @@ class MachineRuntime:
         if skipped:
             result.stderr = (result.stderr + "\n" if result.stderr else "") + (
                 "Not saved to the workspace because storage is full: " + ", ".join(skipped))
-        self._log.setdefault(task_id, []).append(result)
+        if record:  # internal calls (installs, builders) are not attempts the user should see
+            self._log.setdefault(task_id, []).append(result)
         return result
+
+    async def install(self, user_id: int, task_id: int, packages: list[str]) -> ExecResult:
+        """Wheels are resolved on the worker (no internet in the sandbox) and installed from the workspace."""
+        from mavis.machine.wheels import WheelCache
+
+        wheels = await WheelCache().resolve(packages)
+        for filename, blob in wheels:
+            await self.write_in(
+                user_id, task_id, f".mavis/wheels/{filename}", blob, provenance=Provenance.MAVIS
+            )
+        names = " ".join(shlex.quote(p) for p in packages)
+        cmd = f"python -m pip install --no-index --find-links .mavis/wheels --quiet {names}"
+        req = ExecRequest(language="shell", timeout_s=180, code=cmd)
+        return await self.exec(user_id, task_id, req, record=False)
+
+    async def ensure_packages(self, user_id: int, task_id: int, imports: dict[str, str]) -> None:
+        """Install the packages whose import names are missing in the session (import name -> package)."""
+        probe = (
+            "import importlib.util as u\n"
+            f"print(' '.join(m for m in {list(imports)!r} if u.find_spec(m) is None))"
+        )
+        req = ExecRequest(language="python", code=probe, timeout_s=30)
+        res = await self.exec(user_id, task_id, req, record=False)
+        missing = sorted({imports[m] for m in res.stdout.split() if m in imports})
+        if missing:
+            res = await self.install(user_id, task_id, missing)
+            if not res.ok:
+                why = (res.stderr or res.error or "")[-300:]
+                raise ActionFailed(f"Could not install {', '.join(missing)}: {why}")
+
+    async def extract_text(self, user_id: int, task_id: int, path: str, max_chars: int) -> str:
+        """Text of a workspace file. Plain text only until the document builders (Task 18) replace this."""
+        data = await self.store.get(user_id, path)
+        try:
+            return data.decode("utf-8")[:max_chars]
+        except UnicodeDecodeError:
+            return "(binary file; text extraction comes with the document builders)"
 
     async def write_in(self, user_id: int, task_id: int, path: str, data: bytes, *,
                        provenance: Provenance) -> None:
@@ -192,27 +233,36 @@ class MachineRuntime:
         live.listing = {p: e.sha256 for p, e in now.items()}
         return saved, skipped
 
-    async def _new_artifact(self, user_id: int, task_id: int, path: str, data: bytes, *, final: bool) -> None:
-        folder = get_settings().artifacts_dir / f"u{int(user_id)}" / f"t{int(task_id)}"
-        local = folder / safe_name(Path(path).name)
+    async def add_artifact(
+        self, user_id: int, task_id: int, name: str, data: bytes, *, title: str = ""
+    ) -> int:
+        local = artifact_file(user_id, task_id, name)
         local.parent.mkdir(parents=True, exist_ok=True)
         local.write_bytes(data)
-        aid = await tasks.add_artifact(task_id, user_id, kind=local.suffix.lstrip(".") or "file",
-                                       path=str(local),
-                                       mime=mimetypes.guess_type(local.name)[0] or "application/octet-stream",
-                                       title=local.name, size=len(data))
+        return await tasks.add_artifact(
+            task_id, user_id, kind=local.suffix.lstrip(".") or "file", path=str(local),
+            mime=mimetypes.guess_type(local.name)[0] or "application/octet-stream",
+            title=title or local.name, size=len(data),
+        )
+
+    async def deliver(self, user_id: int, task_id: int, aid: int, **kw) -> bool:
+        deliver = self._deliver
+        if deliver is None:
+            from mavis.initiative.task_delivery import deliver_artifact_now as deliver
+        return await deliver(user_id, task_id, aid, **kw)
+
+    async def _new_artifact(self, user_id: int, task_id: int, path: str, data: bytes, *, final: bool) -> None:
+        name = safe_name(Path(path).name)
+        aid = await self.add_artifact(user_id, task_id, name, data)
         task = await tasks.get(task_id)
         if task is not None and task.origin == TaskOrigin.USER.value:
-            deliver = self._deliver
-            if deliver is None:
-                from mavis.initiative.task_delivery import deliver_artifact_now as deliver
             # the closing sync still hands over what was made, unless the user cancelled the task
             end = final and task.status != TaskStatus.CANCELLED.value
             if end or not final:
-                await deliver(user_id, task_id, aid, **({"end_of_task": True} if end else {}))
+                await self.deliver(user_id, task_id, aid, **({"end_of_task": True} if end else {}))
         from mavis.channels.progress_card import get_cards
 
-        await get_cards().tool_called(task_id, f"made {local.name}")
+        await get_cards().tool_called(task_id, f"made {name}")
 
     # --- lifecycle --------------------------------------------------------------------
     async def release(self, task_id: int) -> None:

@@ -623,13 +623,15 @@ class ToolRegistry:
         finally:
             current_user_id.reset(token)
         user_text = ""
+        override: bool | None = None
         if isinstance(out, ToolOutput):
+            override = out.untrusted
             user_text, out = out.user_text, out.for_model()
         text = out if isinstance(out, str) else json.dumps(out, default=str, ensure_ascii=False)
         text = truncate(text)
         if audited and not failed:
             await audit.record(user_id, actor=actor, action=tool.name, detail={**detail, "outcome": "ok"})
-        if not tool.untrusted_output:
+        if not (tool.untrusted_output if override is None else override):
             return text, user_text
         if run is not None:
             run.saw_untrusted(text)
