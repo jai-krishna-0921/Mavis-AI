@@ -183,6 +183,15 @@ class NativeSlackLookup:
         find = getattr(tokens, "user_for_slack", None)
         return await find(team_id, slack_user_id) if find is not None else None
 
+    async def bot_account(self, team_id: str) -> dict | None:
+        """The workspace bot's non-secret facts (bot_user_id, ...), or None when no bot is installed."""
+        find = getattr(getattr(get_provider(), "tokens", None), "bot_account", None)
+        return await find(team_id) if find is not None else None
+
+    async def bot_dm_owner(self, team_id: str, channel: str) -> int | None:
+        find = getattr(getattr(get_provider(), "tokens", None), "bot_dm_owner", None)
+        return await find(team_id, channel) if find is not None else None
+
 
 @lru_cache
 def get_activator() -> Activator:

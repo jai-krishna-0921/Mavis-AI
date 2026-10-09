@@ -62,6 +62,8 @@ class OutboxMessage(Base):
     photo_path: Mapped[str | None] = mapped_column(String(1024))
     media: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
     proactive: Mapped[bool] = mapped_column(default=False)
+    # chat handle of a non-default channel (Slack)
+    route: Mapped[str | None] = mapped_column(String(200), default=None)
     dedupe_key: Mapped[str | None] = mapped_column(String(200), unique=True)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     attempts: Mapped[int] = mapped_column(default=0)

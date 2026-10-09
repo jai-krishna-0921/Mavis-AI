@@ -47,6 +47,7 @@ GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_REVOKE_URL = "https://slack.com/api/auth.revoke"
+SLACK_OPEN_DM_URL = "https://slack.com/api/conversations.open"
 
 _GMAIL = "https://www.googleapis.com/auth/gmail"
 GOOGLE_SCOPES = (
@@ -60,6 +61,12 @@ SLACK_USER_SCOPES = (
     "channels:history", "groups:history", "im:history", "mpim:history",
     "channels:read", "groups:read", "im:read", "mpim:read",
     "users:read", "users:read.email", "chat:write", "search:read",
+)
+
+# Bot scopes: Mavis as a bot user in the workspace (DM and @mention chat, cards, reactions, files).
+SLACK_BOT_SCOPES = (
+    "chat:write", "im:history", "im:read", "im:write", "app_mentions:read", "reactions:write",
+    "users:read", "files:write", "commands",
 )
 
 _ERRORS = {"bad_state", "expired_state", "replayed_state", "denied", "exchange_failed", "not_configured",
@@ -190,7 +197,8 @@ class NativeOAuth:
                  "code_challenge_method": "S256"}
             return f"{GOOGLE_AUTH_URL}?{urlencode(q)}"
         q = {"client_id": st.slack_client_id, "redirect_uri": redirect_uri(provider),
-             "user_scope": ",".join(SLACK_USER_SCOPES), "state": state}
+             "scope": ",".join(SLACK_BOT_SCOPES), "user_scope": ",".join(SLACK_USER_SCOPES),
+             "state": state}
         return f"{SLACK_AUTH_URL}?{urlencode(q)}"
 
     # --- finishing -----------------------------------------------------------------------------------
@@ -222,11 +230,13 @@ class NativeOAuth:
 
     async def complete(self, state: str, code: str, provider: NativeProvider) -> Completed:
         st, pending = await self._state(state, provider)
+        bot = None
         try:
             if provider is NativeProvider.GOOGLE:
                 account, access, refresh, expires = await self._google(code, st.verifier)
             else:
                 account, access, refresh, expires = await self._slack(code)
+                bot = account.pop("_bot", None)  # the workspace bot token travels beside the user's
         except OAuthError as exc:
             raise OAuthError(exc.kind, user_id=st.user_id, pending_id=pending) from None
         key, value = (("email", account.get("email")) if provider is NativeProvider.GOOGLE
@@ -239,6 +249,8 @@ class NativeOAuth:
                                    refresh_token=refresh, expires_at=expires)
         except AccountTaken:  # the check above can lose a race; the database constraint cannot
             raise OAuthError("account_taken", user_id=st.user_id, pending_id=pending) from None
+        if bot is not None:
+            await self._save_bot(st.user_id, bot)
         return Completed(st.user_id, provider, pending, account)
 
     async def _post(self, url: str, **kw) -> dict:
@@ -293,7 +305,38 @@ class NativeOAuth:
                    "user_id": str(authed["id"]),
                    "scopes": sorted(scope.replace(",", " ").split()) if isinstance(scope, str) else []}
         refresh = authed.get("refresh_token") if isinstance(authed.get("refresh_token"), str) else None
+        bot_token = body.get("access_token")
+        if isinstance(bot_token, str) and bot_token and body.get("bot_user_id"):
+            bot_scope = body.get("scope")
+            account["_bot"] = {
+                "token": bot_token,
+                "account": {"team_id": account["team_id"], "team_name": account["team_name"],
+                            "user_id": account["user_id"], "bot_user_id": str(body["bot_user_id"]),
+                            "scopes": sorted(bot_scope.replace(",", " ").split())
+                            if isinstance(bot_scope, str) else []},
+            }
         return account, access, refresh, _expiry(authed)
+
+    async def _save_bot(self, user_id: int, bot: dict) -> None:
+        """Keep the bot token sealed beside the user grant, keyed by team and the authorizing user, and note
+        the user's DM with the bot (so events in it are never read as third-party records). Best effort: a
+        failure leaves Slack reading working without the bot."""
+        account = dict(bot["account"])
+        try:
+            r = await send_capped(self._http, "POST", SLACK_OPEN_DM_URL, max_bytes=TOKEN_BYTES,
+                                  headers={"Authorization": f"Bearer {bot['token']}"},
+                                  json={"users": account["user_id"]})
+            data = r.json()
+            channel = (data.get("channel") or {}).get("id") if isinstance(data, dict) else None
+            if isinstance(channel, str) and channel:
+                account["dm"] = channel
+        except (ResponseTooLarge, httpx.HTTPError, ValueError):
+            pass
+        try:
+            await self.tokens.save(user_id, NativeProvider.SLACK_BOT, account=account,
+                                   access_token=bot["token"], refresh_token=None, expires_at=None)
+        except AccountTaken:
+            pass
 
     # --- revoke --------------------------------------------------------------------------------------
 
@@ -313,6 +356,8 @@ class NativeOAuth:
             except (ResponseTooLarge, httpx.HTTPError):
                 pass
         await self.tokens.delete(user_id, provider)
+        if provider is NativeProvider.SLACK:
+            await self.tokens.delete(user_id, NativeProvider.SLACK_BOT)
 
 
 def _expiry(body: dict):
