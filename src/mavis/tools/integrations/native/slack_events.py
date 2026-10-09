@@ -139,7 +139,7 @@ def get_dedupe() -> EventDedupe:
 
 
 def keep_message(m: dict) -> bool:
-    """Structural filter shared by webhook, backfill and poll. Bots, system subtypes and empty text are out."""
+    """Structural filter shared by webhook, backfill and poll: no bots, system subtypes or empty text."""
     if m.get("bot_id") or m.get("bot") or m.get("hidden"):
         return False
     subtype = m.get("subtype")
@@ -211,7 +211,8 @@ async def handle_callback(
                 if isinstance(a, dict) and a.get("user_id") and not a.get("is_bot")]
     for auth in grantees:
         slack_user = str(auth["user_id"])
-        mavis_user = await lookup.user_for_slack(str(auth.get("team_id") or team), slack_user) if lookup else None
+        auth_team = str(auth.get("team_id") or team)
+        mavis_user = await lookup.user_for_slack(auth_team, slack_user) if lookup else None
         if mavis_user is None:
             counts["unmapped"] += 1
             continue
@@ -234,7 +235,7 @@ async def handle_request(
     secret: str, headers: Mapping[str, str], body: bytes, lookup: SlackUserLookup | None, bus: EventBus,
     *, now: float | None = None, dedupe: EventDedupe | None = None,
 ) -> dict[str, Any]:
-    """Verify, then parse. Returns the JSON response body. Raises WebhookVerificationError / IntegrationError."""
+    """Verify, then parse. Returns the JSON response body; raises on a bad signature or payload."""
     if len(body) > MAX_BODY_BYTES:
         raise IntegrationError("Slack body too large")
     verify_signature(secret, headers, body, now=now)
@@ -263,7 +264,7 @@ def _ts_float(ts: Any) -> float:
 
 
 def conversation_order(channels: list[dict]) -> list[dict]:
-    """DMs and group DMs first, then the rest; each group by most recent activity (`updated`, newest first)."""
+    """DMs and group DMs first, then the rest; each group newest `updated` first."""
     return sorted(
         channels, key=lambda c: (0 if c.get("kind") in DM_KINDS else 1, -float(c.get("updated") or 0))
     )
@@ -272,7 +273,8 @@ def conversation_order(channels: list[dict]) -> list[dict]:
 async def _history(provider: IntegrationProvider, user_id: int, args: dict) -> dict | None:
     res = await provider.execute(UserRef(user_id=user_id), "slack.history", args)
     if not res.ok:
-        log.warning("slack.history_failed", user_id=user_id, kind=res.error_kind.value if res.error_kind else "")
+        kind = res.error_kind.value if res.error_kind else ""
+        log.warning("slack.history_failed", user_id=user_id, kind=kind)
         return None
     return res.data if isinstance(res.data, dict) else None
 
@@ -368,5 +370,5 @@ async def poll_messages(
         out.setdefault(cid, default_since)
         newest = max((_ts_float(m.get("ts")) for m in messages), default=0.0)
         if newest > _ts_float(out.get(cid)):
-            out[cid] = max((str(m["ts"]) for m in messages if _ts_float(m.get("ts")) == newest))
+            out[cid] = max(str(m["ts"]) for m in messages if _ts_float(m.get("ts")) == newest)
     return published, out, start + len(window)
