@@ -117,6 +117,7 @@ function ConnectorRow({ c }: { c: Connector }) {
           </ul>
         )}
         {c.missing_scopes.length > 0 && <div className="row-sub mt-3">Not allowed yet: {c.missing_scopes.join(', ')}.</div>}
+        {c.notice && <div className="row-sub mt-3" data-testid={`${c.id}-notice`}>{c.notice}</div>}
         {err && <p className="error" role="alert">{err}</p>}
       </div>
       <div className="row-actions">

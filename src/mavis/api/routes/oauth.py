@@ -20,9 +20,12 @@ from mavis.bus.base import EventBus
 from mavis.domain import timeutil
 from mavis.domain.events import Job, JobKind
 from mavis.domain.messages import Outbound
+from mavis.domain.policy import Capability
 from mavis.store import db as dbm
 from mavis.store.models import User
+from mavis.store.repo import connections
 from mavis.tools.integrations import get_connection_cache, get_provider
+from mavis.tools.integrations.actions import GOOGLE_ANCHOR, workspace_enabled
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.oauth import OAuthError
@@ -52,6 +55,14 @@ _USER_TEXT = {
 
 
 WEB_ORIGIN = "web"
+
+
+def _capability(provider: NativeProvider) -> Capability:
+    """The capability a finished consent for this vendor is checked as (the Google anchor when Workspace is
+    on, since one consent covers every Google service)."""
+    if provider is NativeProvider.SLACK:
+        return Capability.SLACK
+    return GOOGLE_ANCHOR if workspace_enabled() else Capability.GMAIL
 
 
 def _back_to_dashboard(error: str | None, *, connected: str | None = None) -> RedirectResponse:
@@ -163,12 +174,16 @@ async def oauth_callback(
     await _remember_identity(done.user_id, native, done.account)
     # A granted Google address is not a sign-in identity: anyone can be handed a consent link. An address
     # becomes one only through a Google sign-in by the signed-in user, or the approved Telegram link.
-    if done.pending_id is not None:
-        now = timeutil.now()
-        await bus.enqueue(Job(
-            id=f"conncheck:{done.pending_id}:{int(now.timestamp()) // THROTTLE_S}",
-            user_id=done.user_id, kind=JobKind.CONNECTION_CHECK, payload={"pending_id": done.pending_id},
-        ))
+    # Every finished consent is checked and activated (announcement, first sync, polling). A consent that
+    # did not start from a /connect link (the dashboard's button) has no pending request yet: make one.
+    pending_id = done.pending_id
+    if pending_id is None:
+        pending_id = await connections.create_pending(done.user_id, _capability(native), "", None)
+    now = timeutil.now()
+    await bus.enqueue(Job(
+        id=f"conncheck:{pending_id}:{int(now.timestamp()) // THROTTLE_S}",
+        user_id=done.user_id, kind=JobKind.CONNECTION_CHECK, payload={"pending_id": pending_id},
+    ))
     # Login CSRF: a consent link forwarded to someone else links THEIR account to the sender's Mavis user.
     # Both ends are told exactly what was linked to whom, so a surprised person can undo it.
     outside = _external(native, done.account)

@@ -14,6 +14,7 @@ from mavis.api.dashboard import common
 from mavis.api.dashboard.common import DashError
 from mavis.domain.policy import Capability
 from mavis.memory.vault import VaultError, get_vault
+from mavis.tools.integrations.actions import consent_notice
 from mavis.tools.integrations.native import oauth as oauth_mod
 from mavis.tools.integrations.native import router as native_router
 from mavis.tools.integrations.native.base import NativeProvider
@@ -69,7 +70,8 @@ def _entry(cid: str, grant: Grant | None) -> dict:
     return {"id": cid, "name": meta["name"], "description": meta["description"], "status": status,
             "account": account, "scopes_granted": granted if status == "active" else [],
             "missing_scopes": [n for n in services if n not in granted] if status == "active" else [],
-            "connected_at": grant.updated_at.isoformat() if grant and grant.updated_at else None}
+            "connected_at": grant.updated_at.isoformat() if grant and grant.updated_at else None,
+            "notice": consent_notice(meta["capability"]) or None}
 
 
 async def connector_list(user_id: int, provider: Any) -> list[dict]:
@@ -105,7 +107,7 @@ async def connect(cid: str, active: Active = Depends(common.authed),
                                         session_hash=active.session_id)
     except oauth_mod.OAuthError:
         raise DashError(503, "unavailable", f"{meta['name']} sign-in is not available right now.") from None
-    return {"url": url}
+    return {"url": url, "notice": consent_notice(meta["capability"]) or None}
 
 
 class DisconnectBody(BaseModel):

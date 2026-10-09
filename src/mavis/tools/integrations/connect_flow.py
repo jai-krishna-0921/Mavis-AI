@@ -32,13 +32,14 @@ from mavis.tools.integrations.actions import (
     GOOGLE_CAPABILITIES,
     WORKSPACE_ROW,
     active_capabilities,
+    consent_notice,
     display_name,
     is_google,
     workspace_enabled,
 )
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connections import ConnectionCache
-from mavis.worker.locks import claim
+from mavis.worker.locks import claim, release
 
 log = structlog.get_logger()
 
@@ -254,6 +255,8 @@ class ConnectFlow:
             lead = f"Let's connect your {name}. One tap here:"
         text = (f"{lead}\nYou'll sign in on {BRANDS[capability]}'s own page. No password comes to me, "
                 "and you can revoke access anytime.")
+        if notice := consent_notice(capability):
+            text += f"\n{notice}"
         await self.send(user_id, text, [
             [Button(label=f"Connect {name}", url=url)],
             [Button(label="Not now", data=f"{NOT_NOW_PREFIX}{pending_id}")],
@@ -582,6 +585,8 @@ class ConnectFlow:
         polling = {k: v for k, v in st.get("polling", {}).items() if k not in dropped}
         if synced != st.get("synced", {}):
             await self.state.update(user_id, {"synced": synced})
+        for dropped_name in dropped:  # the "first sync is running" claim must not outlive the connection
+            await release(f"first_sync:{user_id}:{dropped_name}")
         if polling != st.get("polling", {}):
             await self.state.update(user_id, {"polling": polling})
         forgotten = await self._forget_learned(user_id, capability) if forget else 0

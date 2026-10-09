@@ -20,6 +20,8 @@ from mavis.bus.inprocess import InProcessBus
 from mavis.channels.fake import FakeChannel
 from mavis.channels.outbox_sender import OutboxSender
 from mavis.domain import timeutil
+from mavis.domain.decisions import ComposedMessage, InitiativeDecision
+from mavis.memory.personal_layer import LayerDraft
 from mavis.domain.memory import Entity, Extraction, Relation
 from mavis.tools.integrations.native.oauth import GOOGLE_SCOPES, SLACK_BOT_SCOPES, SLACK_USER_SCOPES
 from tests.fakes.llm import FakeLLM
@@ -318,11 +320,24 @@ class JourneyLLM(FakeLLM):
     """Chat replies are scripted (push_text). Memory extraction is answered from the text itself, so a
     record's graph facts follow what the record says, whatever the order the worker learns them in."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.other_structured: list[str] = []
+
     people = (("Priya Nair", "Acme", "the Q3 vendor contract"), ("Dev Patel", "Phoenix", "the Phoenix cutover"),
               ("Mara Lindqvist", "Nordwind", "the Nordwind pilot"), ("Tomas Weber", "Helix", "the Helix audit"))
 
     async def structured(self, schema, system, user, tier=None, priority="interactive", fallback=None):
+        if schema is ComposedMessage:  # the proactive "here is what I noticed" after a first sync
+            self.structured_calls.append({"schema": schema, "system": system, "user": user, "tier": tier})
+            return ComposedMessage(send=True, messages=["I had a look through what you just connected. Ask me about it any time."])
+        if schema is InitiativeDecision:  # the live-event reasoner: nothing here is worth interrupting for
+            self.structured_calls.append({"schema": schema, "system": system, "user": user, "tier": tier})
+            return InitiativeDecision(ignore_reason="routine")
+        if schema is LayerDraft:  # the personal layer's optional phrasing pass: no rewording
+            return LayerDraft()
         if schema is not Extraction:
+            self.other_structured.append(schema.__name__)
             return await super().structured(schema, system, user, tier, priority=priority, fallback=fallback)
         self.structured_calls.append({"schema": schema, "system": system, "user": user, "tier": tier})
         text = str(user)

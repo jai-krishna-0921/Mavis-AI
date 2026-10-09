@@ -25,6 +25,7 @@ export type Connector = {
   scopes_granted: string[]
   missing_scopes: string[]
   connected_at: string | null
+  notice?: string | null
 }
 
 export type VaultKind = 'person' | 'organisation' | 'project' | 'fact' | 'preference'

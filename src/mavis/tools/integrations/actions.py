@@ -45,6 +45,18 @@ BRANDS: dict[Capability, str] = {
     Capability.SLACK: "Slack", Capability.NOTION: "Notion",
     **{c: "Google" for c in WORKSPACE_CAPABILITIES},
 }
+GOOGLE_UNVERIFIED_NOTICE = "Google will say it has not verified Mavis yet. Tap Advanced, then Go to Mavis AI."
+
+
+def consent_notice(capability: Capability) -> str:
+    """One short line to read before opening a consent screen that will look alarming. Today that is Google's
+    "has not verified this app" page for our own (External, unverified) OAuth app; empty everywhere else."""
+    s = get_settings()
+    if BRANDS.get(capability) != "Google" or s.integration_provider != "native" or s.google_oauth_verified:
+        return ""
+    return GOOGLE_UNVERIFIED_NOTICE
+
+
 CAPABILITY_PURPOSE: dict[Capability, str] = {
     Capability.GMAIL: "check and handle your email",
     Capability.CALENDAR: "work with your calendar",
