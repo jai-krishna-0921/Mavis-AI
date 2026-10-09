@@ -83,7 +83,9 @@ class ConnectorIngest:
             ident = await load_identities(user_id)
             decision = guard.should_ingest_slack(n, await guard.load_mute(user_id))
             if decision:
-                team = str(n.get("team") or ident["team"])
+                # The workspace id of the user's own grant names the record, so a webhook, a poll and a
+                # backfill of one message share a reference; the event's team only marks foreign workspaces.
+                team = ident["team"] or str(n.get("team") or "")
                 directory = await self._names_for(user_id, team, n)
                 job = records.slack_record(user_id, n, team=team, self_ids=ident, directory=directory,
                                            self_names=await self._names(user_id))
