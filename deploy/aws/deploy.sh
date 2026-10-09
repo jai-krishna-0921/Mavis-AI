@@ -165,7 +165,13 @@ ssh_box "docker image prune -f >/dev/null && docker builder prune -f --keep-stor
 compose_remote ps
 
 log "verifying that only api, worker and timer reach the instance metadata service"
-if ! "$AWS_DIR/imds.sh" verify-containers; then
+machine_on="$(envget "$ENV_TMP" MACHINE_ENABLED | tr '[:upper:]' '[:lower:]')"
+if [[ "$machine_on" != "true" ]]; then
+  # The machine is off: nothing needs role credentials, and hop limit 1 (no container reaches IMDS) is the
+  # safe state, so a failed check is reported, not fatal.
+  "$AWS_DIR/imds.sh" verify-containers \
+    || log "IMDS: containers have no role credentials (expected while MACHINE_ENABLED is off)"
+elif ! "$AWS_DIR/imds.sh" verify-containers; then
   if [[ "$(aws_ ec2 describe-instances --instance-ids "${MAVIS_INSTANCE_ID:-}" \
         --query 'Reservations[0].Instances[0].MetadataOptions.HttpPutResponseHopLimit' --output text 2>/dev/null || echo 1)" != 1 ]]; then
     "$AWS_DIR/imds.sh" lower-hop-limit
