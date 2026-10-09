@@ -129,7 +129,7 @@ def _split(value: str) -> tuple[bytes, bytes]:
     if not sep:
         raise NotSealedError("malformed sealed value")
     try:
-        return base64.b64decode(wrapped), base64.b64decode(ct)
+        return base64.b64decode(wrapped, validate=True), base64.b64decode(ct, validate=True)
     except (binascii.Error, ValueError):
         raise NotSealedError("malformed sealed value") from None
 
