@@ -202,7 +202,8 @@ async def run_mute(f: ConnectFlow, user_id: int, name: str, args: list[str]) -> 
 
     if not args:
         if name == "unmute":
-            await f.send(user_id, "Which one? e.g. /unmute news@example.com, /unmute example.com or /unmute C0123ABCD")
+            await f.send(user_id, "Which one? e.g. /unmute news@example.com, /unmute example.com "
+                                  "or /unmute C0123ABCD")
         else:
             await f.send(user_id, guard.describe_mute(await guard.load_mute(user_id)))
         return
