@@ -33,8 +33,9 @@ async def test_test_chat_sends_go_to_the_sink_and_others_pass_through(test_chat)
     await ch.send_text(OWNER, "for the owner")
     assert inner.texts == ["for the owner"]
     rows = read_sink(test_chat.data_dir)
-    assert [r["kind"] for r in rows] == ["text", "document"]
+    assert [r["kind"] for r in rows] == ["text", "document", "reaction"]
     assert rows[0]["text"] == "hello test" and rows[0]["buttons"] == [["OK"]]
+    assert rows[2]["text"] == "\N{EYES}" and rows[2]["message_id"] == 5
     assert all(r["chat_id"] == TEST_CHAT for r in rows)
     json.dumps(rows)
 
