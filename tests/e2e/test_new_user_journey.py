@@ -950,3 +950,15 @@ async def test_cancelling_on_the_consent_screen_connects_nothing_and_says_so(j):
     texts = j.tg.texts(7301)
     assert "Google sign-in was cancelled, so nothing was connected. Tell me when you want to try again." in texts
     assert "Slack sign-in was cancelled, so nothing was connected. Tell me when you want to try again." in texts
+
+
+async def test_a_code_pasted_inside_a_sentence_still_lets_the_person_in(j):
+    link, _ = await j.owner_invite()
+    param = parse_qs(urlsplit(link).query)["start"][0]
+    code = f"{param[:3]}-{param[3:8]}-{param[8:]}"
+    out = await j.tg.say(7401, f"Hi Mavis! My invite is {code}, thanks. Also my phone is 555 0100", "Noor")
+    assert out[0].text.startswith("Hi Noor, I'm Mavis")
+    assert (await users.get_by_chat(7401)).status == "active"
+    from mavis.store.repo import messages
+
+    assert not any("555" in m.content for m in await messages.recent((await users.get_by_chat(7401)).id, 20))
