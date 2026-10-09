@@ -63,3 +63,11 @@ export type Invite = { code: string; link: string | null; hint?: string; name?: 
 
 export type TelegramStart = { nonce: string; deep_link: string; expires_at: string; code: string; link_email: string | null }
 export type PollStatus = { status: 'pending' | 'ok' | 'expired' }
+
+// Public, unauthenticated settings (GET /config). Every Telegram link on the site comes from here.
+export type PublicConfig = {
+  bot_username: string | null
+  bot_url: string | null
+  slack_enabled: boolean
+  google_signin_enabled: boolean
+}

@@ -12,13 +12,16 @@ const needCsrf = (req: Request) =>
 const PAGE = 8
 
 export const handlers = [
+  http.get(`${B}/config`, () => HttpResponse.json({
+    bot_username: 'Mavis247_bot', bot_url: 'https://t.me/Mavis247_bot', slack_enabled: true, google_signin_enabled: true,
+  })),
   http.post(`${B}/auth/telegram/start`, async ({ request }) => {
     const body = (await request.json().catch(() => ({}))) as { invite?: string }
     db().resetPoll()
     const nonce = Math.random().toString(16).slice(2).padEnd(32, '0')
     const tail = body.invite ? `_${body.invite}` : ''
     return HttpResponse.json({
-      nonce, code: '4827', link_email: null, deep_link: `https://t.me/MavisAIBot?start=login_${nonce}${tail}`,
+      nonce, code: '4827', link_email: null, deep_link: `https://t.me/Mavis247_bot?start=login_${nonce}${tail}`,
       expires_at: new Date(Date.now() + 600_000).toISOString(),
     })
   }),
