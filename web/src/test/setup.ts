@@ -5,6 +5,15 @@ import { server } from '../mocks/server'
 import { resetDb } from '../mocks/db'
 import { setCsrf, setUnauthorizedHandler } from '../api/client'
 
+// jsdom has no matchMedia; report nothing matching so scroll animations stay off in tests.
+Object.defineProperty(window, 'matchMedia', {
+  configurable: true,
+  value: (query: string) => ({
+    matches: false, media: query, onchange: null,
+    addEventListener: () => {}, removeEventListener: () => {}, addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+  }),
+})
+
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 beforeEach(() => {
   resetDb()

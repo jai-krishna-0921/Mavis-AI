@@ -12,21 +12,50 @@ const loggedOut = () => server.use(
 )
 
 describe('landing', () => {
-  it('shows Text Mavis and Sign in, and the animated Weave', async () => {
+  it('builds every Text Mavis link from the public config, not from a built-in bot name', async () => {
     loggedOut()
     renderApp('/')
-    expect(await screen.findByRole('link', { name: /Text Mavis/ })).toHaveAttribute('href', expect.stringContaining('t.me'))
-    expect(screen.getByRole('link', { name: 'Sign in' })).toBeInTheDocument()
-    expect(screen.getByTestId('weave')).toBeInTheDocument()
+    const links = await screen.findAllByRole('link', { name: /Text Mavis/ })
+    expect(links.length).toBeGreaterThanOrEqual(3)
+    for (const l of links) expect(l).toHaveAttribute('href', 'https://t.me/Mavis247_bot')
+    expect(screen.getAllByRole('link', { name: 'Sign in' }).length).toBeGreaterThan(0)
+    expect(screen.getAllByTestId('weave').length).toBeGreaterThan(0)
   })
+
+  it('serves the configured bot when it changes', async () => {
+    loggedOut()
+    server.use(http.get('/api/v1/config', () => HttpResponse.json({
+      bot_username: 'OtherBot', bot_url: 'https://t.me/OtherBot', slack_enabled: false, google_signin_enabled: false,
+    })))
+    renderApp('/')
+    const links = await screen.findAllByRole('link', { name: /Text Mavis/ })
+    for (const l of links) expect(l).toHaveAttribute('href', 'https://t.me/OtherBot')
+  })
+
+  it('hides the Telegram link and offers a retry when the config cannot load', async () => {
+    loggedOut()
+    let fail = true
+    server.use(http.get('/api/v1/config', () => fail
+      ? HttpResponse.json({ error: 'not_found', message: 'Not found.' }, { status: 404 })
+      : HttpResponse.json({ bot_username: 'Mavis247_bot', bot_url: 'https://t.me/Mavis247_bot', slack_enabled: true, google_signin_enabled: true })))
+    const user = userEvent.setup()
+    renderApp('/')
+    const retry = (await screen.findAllByRole('button', { name: /Retry/ }, { timeout: 8000 }))[0]
+    expect(screen.queryByRole('link', { name: /Text Mavis/ })).not.toBeInTheDocument()
+    expect(document.body.innerHTML).not.toContain('MavisAIBot')
+    fail = false
+    await user.click(retry)
+    expect((await screen.findAllByRole('link', { name: /Text Mavis/ }))[0]).toHaveAttribute('href', 'https://t.me/Mavis247_bot')
+  }, 15_000)
 
   it('describes Mavis in its own words with its real examples', async () => {
     loggedOut()
     renderApp('/')
-    expect(await screen.findByRole('heading', { name: 'An assistant that lives in the chat you already use.' })).toBeInTheDocument()
-    expect(screen.getByText('catch up on what you missed in Slack')).toBeInTheDocument()
-    expect(screen.getByText('remind you before a deadline slips')).toBeInTheDocument()
-    expect(screen.queryByText(/dispute an unwarranted bill/)).not.toBeInTheDocument()
+    expect(await screen.findByRole('heading', { level: 1, name: 'The assistant that lives in your chat.' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'How Mavis works' })).toBeInTheDocument()
+    expect(document.querySelector('[data-promise]')).toHaveTextContent(/never as instructions/)
+    expect(screen.getByRole('region', { name: 'Example conversations' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Text Mavis.' })).toBeInTheDocument()
   })
 })
 
@@ -39,7 +68,7 @@ describe('login polling', () => {
     server.use(http.get('/api/v1/auth/telegram/poll', () => { signedIn = true; return HttpResponse.json({ status: 'ok' }) }))
     renderApp('/login?invite=abc')
     const btn = await screen.findByRole('link', { name: 'Continue with Telegram' })
-    expect(btn.getAttribute('href')).toMatch(/^https:\/\/t\.me\/MavisAIBot\?start=login_[0-9a-f]+_abc$/)
+    expect(btn.getAttribute('href')).toMatch(/^https:\/\/t\.me\/Mavis247_bot\?start=login_[0-9a-f]+_abc$/)
     expect(screen.getByRole('img', { name: /QR code/ })).toBeInTheDocument()
     expect(screen.getByText('4 8 2 7')).toBeInTheDocument()
     expect(screen.getByText(/Waiting for you to approve in Telegram/)).toBeInTheDocument()
@@ -199,6 +228,7 @@ describe('preferences', () => {
     await user.click(screen.getByLabelText('both'))
     await user.click(screen.getByRole('button', { name: 'Save changes' }))
     expect(await screen.findByText('Saved')).toBeInTheDocument()
+    expect(await screen.findByText('Preferences saved')).toBeInTheDocument()
     expect(db().preferences).toMatchObject({ name: 'Jai K', proactive_channel: 'both' })
   })
 
@@ -216,7 +246,7 @@ describe('preferences', () => {
     expect(go).toBeEnabled()
     await user.click(go)
     await waitFor(() => expect(db().deleted).toBe(true))
-    expect(await screen.findByRole('link', { name: /Text Mavis/ })).toBeInTheDocument()
+    expect((await screen.findAllByRole('link', { name: /Text Mavis/ }))[0]).toBeInTheDocument()
   })
 })
 

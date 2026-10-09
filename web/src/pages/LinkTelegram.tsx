@@ -1,11 +1,10 @@
 import { Navigate, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
+import { EnvelopeSimple } from '@phosphor-icons/react'
 import { api } from '../api/client'
 import { useMe } from '../api/hooks'
 import { TelegramSignIn } from '../components/TelegramSignIn'
-import { Weave } from '../components/Weave'
-import ui from '../styles/ui.module.css'
-import styles from './Login.module.css'
+import { AuthShell } from '../components/AuthShell'
 
 export function LinkTelegram({ pollIntervalMs }: { pollIntervalMs?: number }) {
   const [params] = useSearchParams()
@@ -14,17 +13,19 @@ export function LinkTelegram({ pollIntervalMs }: { pollIntervalMs?: number }) {
   const pending = useQuery({ queryKey: ['pending-link', linkId], queryFn: () => api.pendingLink(linkId!), enabled: !!linkId, retry: false })
   if (me.data) return <Navigate to="/workspace" replace />
   return (
-    <main className={styles.page}>
-      <Weave size={44} title="Mavis AI" />
-      <h1 className={styles.h1}>Link your Telegram first</h1>
-      <p className={ui.lede}>
-        We could not find a Mavis account for that Google address. Mavis lives in chat, so start there. Once you are in,
-        your Google address is confirmed on your account and you can use either way to sign in next time.
-      </p>
-      {pending.data && <p className={ui.status}>Google address to link: {pending.data.email}. Telegram will ask you to approve this.</p>}
-      <section className={styles.block} aria-label="Telegram sign in">
+    <AuthShell
+      title="Link your Telegram first"
+      lede="We could not find a Mavis account for that Google address. Mavis lives in chat, so start there. Once you are in, your Google address is confirmed on your account and you can use either way to sign in next time."
+    >
+      {pending.data && (
+        <p className="status mb-6 flex items-start gap-2 rounded-2xl border border-white/10 bg-black/25 p-3">
+          <EnvelopeSimple size={18} weight="light" className="mt-0.5 shrink-0" aria-hidden="true" />
+          <span>Google address to link: {pending.data.email}. Telegram will ask you to approve this.</span>
+        </p>
+      )}
+      <section aria-label="Telegram sign in">
         <TelegramSignIn invite={params.get('invite') ?? undefined} linkId={linkId} pollIntervalMs={pollIntervalMs} />
       </section>
-    </main>
+    </AuthShell>
   )
 }
