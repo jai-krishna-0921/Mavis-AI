@@ -127,7 +127,23 @@ def get_intake() -> Intake:
 def get_connector_ingest():
     from mavis.attention.connector_ingest import ConnectorIngest
 
-    return ConnectorIngest()
+    return ConnectorIngest(directory=slack_directory)
+
+
+async def slack_directory(user_id: int, team: str, ids: frozenset[str]) -> dict[str, dict[str, str]]:
+    """Display names for Slack ids, through the native Slack executor's cached users.info (none without it)."""
+    from mavis.tools.integrations import get_provider
+    from mavis.tools.integrations.native.base import NativeProvider
+
+    executor = getattr(get_provider(), "executors", {}).get(NativeProvider.SLACK)
+    if executor is None:
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for sid in sorted(ids)[:10]:
+        info = await executor.user_info(user_id, team, sid)
+        if info and not info.get("is_bot"):
+            out[sid] = {"name": info.get("name", ""), "email": info.get("email", "")}
+    return out
 
 
 @lru_cache
@@ -259,6 +275,10 @@ async def close_attention() -> None:
 def register_attention() -> None:
     if not get_settings().attention_enabled:
         log.info("attention.disabled")  # the Phase 5 email path stays as it is
+        # The knowledge graph does not depend on triage: mail and Slack records still reach the guard.
+        ingest = get_connector_ingest()
+        register_event_handler(EventType.SLACK_MESSAGE, ingest.on_slack_event)
+        register_event_handler(EventType.EMAIL_RECEIVED, ingest.on_email_event)
         return
     intake, pipeline = get_intake(), get_pipeline()
     register_event_handler(EventType.EMAIL_RECEIVED, intake.on_email, replace=True)

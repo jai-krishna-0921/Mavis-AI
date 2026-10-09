@@ -171,7 +171,7 @@ def email_record(user_id: int, n: dict, *, self_ids: Mapping[str, Iterable[str]]
     )
 
 
-_MENTION = re.compile(r"<@([UW][A-Z0-9]{6,})(?:\|[^>]*)?>")
+MENTION = re.compile(r"<@([UW][A-Z0-9]{6,})(?:\|[^>]*)?>")
 
 
 def slack_record(user_id: int, n: dict, *, team: str, self_ids: Mapping[str, Iterable[str]],
@@ -193,14 +193,14 @@ def slack_record(user_id: int, n: dict, *, team: str, self_ids: Mapping[str, Ite
 
     person(uid, str(n.get("user_name") or ""), str(n.get("user_email") or ""), "sender")
     raw = str(n.get("text") or "")
-    for m in _MENTION.finditer(raw):
+    for m in MENTION.finditer(raw):
         person(m.group(1), "", "", "mention")
 
     def mention_name(m: re.Match[str]) -> str:
         p = people.get(m.group(1))
         return "@" + (p.canonical() if p and p.canonical() else m.group(1))
 
-    body = redact(_MENTION.sub(mention_name, raw))[:BODY_CAP]
+    body = redact(MENTION.sub(mention_name, raw))[:BODY_CAP]
     when = timeutil.ensure_utc(_dt(ts)) or timeutil.now()
     sender = people[uid]
     where = "a direct message" if channel[:1] == "D" else "channel " + channel

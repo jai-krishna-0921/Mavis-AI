@@ -148,18 +148,22 @@ _SECRET_PARAM_NAMES = (
 _SIGNED_PARAM = re.compile(r"(?i)((?<![A-Za-z])(?:x-amz-)?signature|sig)=([^\s\"'&<>]{8,})")
 _SECRET_PARAM = re.compile(
     rf"(?i)((?<![A-Za-z]){_SECRET_PARAM_NAMES}[\"']?\s*[=:]\s*[\"']?)([^\s\"'&<>]{{8,}})")
+_PASSWORD_PARAM = re.compile(
+    r"(?i)((?<![A-Za-z])(?:password|passwd|passphrase|pwd|pw|pass)[\"']?\s*=\s*[\"']?)([^\s\"'&<>]{4,})")
+_NOT_A_VALUE = frozenset({"true", "false", "null", "none", "undefined", "yes", "no", "on", "off", "nil"})
 _LONG_TOKEN = re.compile(r"(?<![\w/+=.-])[A-Za-z0-9][A-Za-z0-9_+=/-]{23,}(?![\w+=/-])")
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 # Words that mean "a secret value follows". Vocabulary, not reply templates: the value is matched by shape.
 _OTP_WORDS = frozenset({
     "otp", "code", "codes", "pin", "cvv", "cvc", "cvv2", "passcode", "token", "tan", "mfa", "2fa",
+    "mpin", "tpin", "upipin", "upi-pin", "upi_pin",
     "verification", "verify", "verifizierung", "verifizierungscode", "bestatigungscode", "sicherheitscode",
     "codigo", "codice", "kode", "kod", "securite", "seguridad", "sicherheit",
     "код", "пароль", "verificacion", "verificação", "verificacao", "doğrulama", "dogrulama",
 })
 _PASSWORD_WORDS = frozenset({
-    "password", "passwort", "passwd", "pwd", "pass", "passphrase", "contrasena", "contrasenia", "senha",
+    "password", "passwort", "passwd", "pwd", "pw", "pass", "passphrase", "contrasena", "contrasenia", "senha",
     "motdepasse", "parola", "wachtwoord", "losenord", "salasana", "haslo", "heslo", "пароль",
 })
 _NOT_SECRET_PREFIX = frozenset({
@@ -177,6 +181,42 @@ _FILLER = frozenset({"your", "the", "a", "an", "is", "are", "was", "es", "ist", 
                      "(", ")", "\u2013", "\u2192", "->", "=>", "ist:", "is:", "mfa", "2fa", "auth", "authentication",
                      "confirmation", "access", "single-use", "single", "di", "de", "del", "du", "des", "von",
                      "da", "do", "lautet", "verifica", "verificacion", "verificação", "bestatigung", "validation", "validacion", "con", "per", "pour", "fur", "für", "zur"})
+
+# Words that also mean something else (a code name, a postal PIN, a token count): a value counts only when
+# it follows the word directly, never "somewhere later in the sentence".
+_WEAK_OTP = frozenset({"code", "codes", "pin", "token", "tan"})
+_POSTAL_CONTEXT = frozenset({"postal", "zip", "area", "delivery", "address", "city", "district", "pincode",
+                             "locality", "ship", "shipping", "billing", "dispatch", "courier", "region"})
+_CLAUSE_CLOSERS = frozenset({"and", "or", "but", "then", "if", "to", "for", "as", "at", "on", "in", "with", "by",
+                             "valid", "expires", "expire", "is", "was", "please", "thanks", "thank", "do",
+                             "don't", "dont", "never", "will", "within", "from", "so", "when", "which"})
+# "pass" alone is a common word: it names a credential only after a word that makes it one.
+_CREDENTIAL_CONTEXT = frozenset({"login", "log-in", "my", "your", "new", "temp", "temporary", "wifi", "wi-fi",
+                                 "email", "mail", "account", "app", "admin", "root", "user", "ssh", "db",
+                                 "vpn", "portal", "the", "initial", "default"})
+_YEAR = re.compile(r"^(?:19|20)\d{2}$")
+_CREDENTIAL_SYMBOLS = frozenset("!#$%^&*_+=~?")
+
+
+def _credential_shaped(tok: str) -> bool:
+    """A value that reads like a password even without "is": it has a digit or symbol, or mixes case, and is
+    not a plain word, a year or a short number."""
+    t = _bare(tok)
+    if len(t) < 5 or t.startswith(("[redacted", "http")) or re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", t):
+        return False
+    if t.isdigit():
+        return len(t) >= 6
+    has_digit = any(c.isdigit() for c in t)
+    has_symbol = any(c in _CREDENTIAL_SYMBOLS for c in t)
+    mixed = any(c.islower() for c in t) and any(c.isupper() for c in t) and not t.istitle()
+    return has_digit or has_symbol or mixed
+
+
+def _strong_credential(tok: str) -> bool:
+    """After a bare "pass" with no credential context: letters and digits together, six or more chars."""
+    t = _bare(tok)
+    return len(t) >= 6 and any(c.isdigit() for c in t) and any(c.isalpha() for c in t)
+
 
 _CJK_CODE = re.compile(
     r"((?:验证码|驗證碼|校验码|動態密碼|动态密码|認証コード|認証番号|確認コード|인증번호|인증코드|확인코드|"
@@ -226,13 +266,17 @@ def _sentence_end(raw: str) -> bool:
     return raw.endswith(("!", "?")) or (raw.endswith(".") and (len(b) > 3 or any(c.isdigit() for c in b)))
 
 
+_SEPARATORS = frozenset({"-", "\u2013", "\u2014", "->", "=>", "\u2192", ":", "="})
+
+
 def _is_copula(raw: str) -> bool:
     b = _fold(_bare(raw))
-    return b in _COPULAS or raw.endswith((":", "=")) or raw in (":", "=") or "=" in raw
+    return (b in _COPULAS or raw.endswith((":", "=")) or raw in _SEPARATORS or "=" in raw)
 
 
 def _scan_secret_after(text: str, words: frozenset[str], kind: str, shaped: Callable[[str], bool],
-                       *, need_copula: bool, back: bool) -> str:
+                       *, need_copula: bool, back: bool, weak: frozenset[str] = frozenset(),
+                       adjacent: Callable[[str], bool] | None = None) -> str:
     """For each keyword token, mask the value-shaped token that follows it: directly after only filler
     words, or later in the same sentence when it follows a copula or colon ("... is 482913").
     With `back`, also a code that precedes the keyword joined by a copula ("482913 is your code")."""
@@ -245,15 +289,32 @@ def _scan_secret_after(text: str, words: frozenset[str], kind: str, shaped: Call
         return m.start() + lead, m.start() + lead + len(_bare(raw))
 
     for i, m in enumerate(toks):
-        if _fold(_bare(m.group(0))).replace(" ", "") not in words:
+        kw = _fold(_bare(m.group(0))).replace(" ", "")
+        if kw not in words:
             continue
-        if i and _fold(_bare(toks[i - 1].group(0))) in _NOT_SECRET_PREFIX:
+        prev = [_fold(_bare(toks[x].group(0))) for x in range(max(0, i - 4), i)]
+        if prev and prev[-1] in _NOT_SECRET_PREFIX:
             continue
+        is_weak = kw in weak
+        if is_weak and (_POSTAL_CONTEXT & set(prev) or (kw == "pin" and i + 1 < len(toks)
+                        and _fold(_bare(toks[i + 1].group(0))) in ("code", "codes"))
+                        or (kw in ("code", "codes") and prev[-1:] == ["pin"])):
+            continue  # a postal PIN code, not a one-time PIN
+        strict = kw == "pass" and not (_is_copula(m.group(0)) or (prev and prev[-1] in _CREDENTIAL_CONTEXT))
         saw_copula = _is_copula(m.group(0))
         only_filler = True
         for j in range(i + 1, min(len(toks), i + 1 + LOOKAHEAD)):
             raw = toks[j].group(0)
-            if shaped(raw) and (_is_copula(toks[j - 1].group(0)) or (only_filler and (saw_copula or not need_copula))):
+            direct = only_filler and (saw_copula or not need_copula)
+            near = _is_copula(toks[j - 1].group(0)) and not is_weak
+            adj = only_filler and adjacent is not None and adjacent(raw) and (
+                not strict or _strong_credential(raw))
+            if shaped(raw) and (near or direct or adj):
+                b = _bare(raw)
+                if is_weak and b.isdigit() and len(b) == 4:
+                    nxt = _fold(_bare(toks[j + 1].group(0))) if j + 1 < len(toks) else ""
+                    if nxt and not raw[-1:] in _EDGE and nxt not in _CLAUSE_CLOSERS:
+                        break  # "code 2026 budget review": a number inside a phrase, not a code
                 spans.append(span(toks[j]))
                 break
             if _is_copula(raw):
@@ -370,6 +431,9 @@ def _redact_secret_params(text: str) -> str:
             return m.group(0)
         return m.group(1) + _mask("secret")
 
+    text = _PASSWORD_PARAM.sub(
+        lambda m: m.group(0) if m.group(2).lower() in _NOT_A_VALUE or m.group(2).startswith("[redacted")
+        else m.group(1) + _mask("password"), text)
     text = _SIGNED_PARAM.sub(lambda m: m.group(1) + "=" + _mask("secret"), text)
     return _SECRET_PARAM.sub(sub, text)
 
@@ -409,11 +473,90 @@ def _redact_long_tokens(text: str) -> str:
     return _LONG_TOKEN.sub(sub, text)
 
 
+_INVISIBLE = re.compile("[\u00ad\u034f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+_URL_CREDENTIALS = re.compile(r"(?i)\b([a-z][a-z0-9+.-]{1,15}://[^\s:/@\[\]]+:)([^\s@/]+)(@)")
+_AWS_SECRET = re.compile(
+    r"(?i)(aws[_\s.-]?secret[_\s.-]?(?:access[_\s.-]?)?key[\"']?\s*[=:]?\s*[\"']?)([A-Za-z0-9/+=]{30,})")
+_CVV = re.compile(
+    r"(?i)(?<![A-Za-z0-9])((?:cvv2?|cvc2?|csc|cid|security code)(?:\s*(?:no\.?|number|code))?\s*"
+    r"(?:is|are|:|=|-|#)?\s*)(\d{3,4})(?![\w]|[ \u00a0]\d)")
+_DIGIT_GROUPS = r"\d(?:[ \u00a0]?\d){3,7}"
+_GLUED_CODE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])((?:otp|passcode|mpin|tpin|upi[ _-]?pin|pin|code|token|tan|mfa|2fa|"
+    r"(?:verification|security|auth|login|access)[ _-]?code|one[ _-]?time[ _-]?(?:password|code|pin))"
+    r"(?P<sep>\s{0,2}[:=#_\-\u2013]\s{0,2}))(" + _DIGIT_GROUPS + r")(?![\w])")
+_PURPOSE_WORDS = (r"verif\w*|log ?in|sign ?in|otp|pin|passcode|code|confirm\w*|authenticat\w*|authori[sz]\w*|"
+                  r"activat\w*|reset|unlock|password|cvv|transaction|payment|upi|account|access|register\w*")
+_CODE_BEFORE_PURPOSE = re.compile(
+    r"(?i)\b((?:use|enter|type|input|submit|quote|share|provide|key in|insert|give)\s+(?:the\s+|this\s+|your\s+)?"
+    r"(?:(?:code|otp|pin|passcode)\s+)?)(" + _DIGIT_GROUPS + r")(?=\s*,?\s*(?:to|as|for|in|at|on)\b[^.!?\n]{0,60}?\b(?:"
+    + _PURPOSE_WORDS + r")\b)")
+_GROUPED_RUN = re.compile(r"(?<![\w.,:/#$\u20ac\u00a3\u20b9+%-])(\d{1,4}(?:[ \u00a0]\d{1,4}){1,7})(?![\w%]|[.,:/-]\d)")
+_CODE_KEYWORDS = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:otp|passcode|mpin|tpin|upi[ _-]?pin|pin|code|token|tan|mfa|2fa|"
+    r"one[ _-]?time|verification|verify|security|password|login)(?![A-Za-z0-9])")
+
+
+def _redact_url_credentials(text: str) -> str:
+    return _URL_CREDENTIALS.sub(lambda m: m.group(1) + _mask("password") + m.group(3), text)
+
+
+def _redact_aws_secret(text: str) -> str:
+    return _AWS_SECRET.sub(lambda m: m.group(1) + _mask("key"), text)
+
+
+def _redact_cvv(text: str) -> str:
+    return _CVV.sub(lambda m: m.group(1) + _mask("otp"), text)
+
+
+def _redact_glued_codes(text: str) -> str:
+    """"OTP:482913", "OTP-482913", "code=482913" (also inside a URL query): keyword and value without the
+    spaces the token scanner needs. A weak word (code, pin, token) joined by a hyphen or underscore needs
+    six digits, and a bare year after a weak word is left alone."""
+    def sub(m: re.Match[str]) -> str:
+        kw = _fold(m.group(1)[: len(m.group(1)) - len(m.group("sep"))]).strip()
+        digits = re.sub(r"\D", "", m.group(3))
+        if not 4 <= len(digits) <= 8:
+            return m.group(0)
+        if kw in _WEAK_OTP:
+            if _YEAR.match(digits) or (m.group("sep").strip() in ("-", "_", "\u2013") and len(digits) < 6):
+                return m.group(0)
+        return m.group(1) + _mask("otp")
+
+    return _GLUED_CODE.sub(sub, text)
+
+
+def _redact_code_before_purpose(text: str) -> str:
+    """"Use 123456 to verify your login", "Enter 4821 as your UPI PIN": the value comes first and the
+    purpose after it, with no "is" between."""
+    return _CODE_BEFORE_PURPOSE.sub(
+        lambda m: m.group(1) + _mask("otp") if 4 <= len(re.sub(r"\D", "", m.group(2))) <= 8 else m.group(0), text)
+
+
+def _join_spaced_codes(text: str) -> str:
+    """"482 913" and "4 8 2 9 1 3" next to a code word become one run, so the scanner sees one value.
+    Groups must be uniform (the last may be shorter), 4 to 8 digits in all: dates, phone numbers and
+    amounts have other shapes and are left as they are."""
+    def sub(m: re.Match[str]) -> str:
+        groups = re.split(r"[ \u00a0]", m.group(1))
+        size = len(groups[0])
+        total = sum(map(len, groups))
+        uniform = all(len(g) == size for g in groups[:-1]) and len(groups[-1]) <= size
+        if not (uniform and 4 <= total <= 8):
+            return m.group(0)
+        near = text[max(0, m.start() - 40):m.start()] + " " + text[m.end():m.end() + 60]
+        if not _CODE_KEYWORDS.search(near):
+            return m.group(0)
+        return "".join(groups)
+
+    return _GROUPED_RUN.sub(sub, text)
+
+
 def redact(text: str) -> str:
     """Text with credentials and financial identifiers masked as [redacted:<kind>]. Pure and idempotent."""
     if not text:
         return text
-    t = text
+    t = _INVISIBLE.sub("", text)  # zero-width characters can split a keyword or a code
     t = _PRIVATE_KEY.sub(_mask("private-key"), t)
     t = _JWT.sub(_mask("token"), t)
     t = _KEY_SHAPES.sub(_mask("key"), t)
@@ -424,8 +567,15 @@ def redact(text: str) -> str:
     t = _redact_aadhaar(t)
     t = _PAN.sub(_mask("pan"), t)
     t = _redact_accounts(t)
-    t = _scan_secret_after(t, _PASSWORD_WORDS, "password", _secret_shaped, need_copula=True, back=False)
-    t = _scan_secret_after(t, _OTP_WORDS, "otp", _code_shaped, need_copula=False, back=True)
+    t = _redact_url_credentials(t)
+    t = _redact_aws_secret(t)
+    t = _redact_cvv(t)
+    t = _redact_glued_codes(t)
+    t = _redact_code_before_purpose(t)
+    t = _join_spaced_codes(t)
+    t = _scan_secret_after(t, _PASSWORD_WORDS, "password", _secret_shaped, need_copula=True, back=False,
+                           adjacent=_credential_shaped)
+    t = _scan_secret_after(t, _OTP_WORDS, "otp", _code_shaped, need_copula=False, back=True, weak=_WEAK_OTP)
     t = _CJK_CODE.sub(lambda m: m.group(1) + _mask("otp"), t)
     t = _redact_long_tokens(t)
     return t

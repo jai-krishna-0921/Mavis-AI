@@ -39,6 +39,7 @@ USER_MISS_TTL_S = 300.0
 CHANNELS_TTL_S = 300.0
 MAX_USER_LOOKUPS = 40  # users.info calls one tool call may make (Tier 4: 100 a minute)
 MAX_CACHE = 5000
+MAX_CHANNEL_CACHE = 200
 _ID = re.compile(r"^[CGD][A-Z0-9]{8,}$")
 
 # Slack answers some failures with ok:false after it may already have acted.
@@ -117,8 +118,8 @@ class SlackExecutor:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._tokens, self._client, self._sleep, self._clock = tokens, client, sleep, clock
-        self._users: dict[tuple[str, str], tuple[float, dict | None]] = {}
-        self._channels: dict[tuple[str, int], tuple[float, list[dict]]] = {}
+        self._users: dict[tuple[int, str, str], tuple[float, dict | None]] = {}
+        self._channels: dict[tuple[int, str, int], tuple[float, list[dict]]] = {}
 
     def handles(self, action: str) -> bool:
         return action in ACTIONS
@@ -218,7 +219,7 @@ class SlackExecutor:
 
     async def user_info(self, user_id: int, team: str, slack_user: str) -> dict | None:
         """Cached users.info -> {"id","name","email"} or None. Internal helper, not a model-facing action."""
-        key = (team, slack_user)
+        key = (user_id, team, slack_user)
         hit = self._users.get(key)
         if hit and hit[0] > self._clock():
             return hit[1]
@@ -247,7 +248,7 @@ class SlackExecutor:
         out: dict[str, dict] = {}
         lookups = 0
         for uid in dict.fromkeys(i for i in ids if i):
-            cached = self._users.get((team, uid))
+            cached = self._users.get((user_id, team, uid))
             if not (cached and cached[0] > self._clock()):
                 if lookups >= MAX_USER_LOOKUPS:
                     continue
@@ -261,7 +262,7 @@ class SlackExecutor:
 
     async def list_conversations(self, user_id: int, *, members_only: bool = True) -> list[dict]:
         team, _ = await self._account(user_id)
-        key = (team, int(members_only))
+        key = (user_id, team, int(members_only))
         hit = self._channels.get(key)
         if hit and hit[0] > self._clock():
             return hit[1]
@@ -292,6 +293,11 @@ class SlackExecutor:
                 "topic": _s((c.get("topic") or {}).get("value"))[:200],
                 "updated": _num(c.get("updated")),
             })
+        if len(self._channels) >= MAX_CHANNEL_CACHE:
+            now = self._clock()
+            self._channels = {k: v for k, v in self._channels.items() if v[0] > now}
+            if len(self._channels) >= MAX_CHANNEL_CACHE:
+                self._channels.clear()
         self._channels[key] = (self._clock() + CHANNELS_TTL_S, out)
         return out
 

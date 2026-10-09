@@ -65,8 +65,6 @@ def sync_window(name: str, default: int) -> int:
         return default
 
 
-SLACK_CHANNELS_PER_SYNC = 20
-SLACK_PER_CHANNEL = 30
 CALENDAR_BACK_DAYS, CALENDAR_AHEAD_DAYS = 7, 30
 
 
@@ -217,33 +215,16 @@ class FirstSync:
             noticed.append(f"{len(events)} event(s) in the next two weeks")
         return noticed
 
-    async def _slack_records(self, user_id: int, channels: list[dict]) -> int:
-        """The last SYNC_SLACK_DAYS of messages from the channels the user is in, newest first and capped."""
-        since = (self.clock() - timedelta(days=sync_window("sync_slack_days", 7))).timestamp()
-        kept = 0
-        for c in channels[:SLACK_CHANNELS_PER_SYNC]:
-            cid = str(pick(c, "id", "channel", default=""))
-            if not cid:
-                continue
-            data = await self._execute(user_id, "slack.history", {"channel": cid, "limit": SLACK_PER_CHANNEL})
-            for raw in extract_list(data, "messages", "data.messages"):
-                m = normalize_slack({**raw, "channel": cid})
-                try:
-                    if float(m["ts"]) < since:
-                        continue
-                except ValueError:
-                    continue
-                team = m["team"] or str(c.get("team", ""))
-                kept += bool(await self.connectors.slack(user_id, {**m, "team": team}))
-        return kept
-
     async def _slack(self, user_id: int) -> list[str]:
         data = await self._execute(user_id, "slack.channels", {})
         if data is None:
             return []
         channels = extract_list(data, "channels", "data.channels")
         if self.connectors is not None:
-            await self._slack_records(user_id, channels)
+            from mavis.tools.integrations.native.slack_events import backfill
+
+            await backfill(self.provider, None, user_id, days=sync_window("sync_slack_days", 7),
+                           now=self.clock(), sink=self.connectors)
         names = [str(pick(c, "name", default="")) for c in channels]
         names = [n for n in names if n]
         if names:

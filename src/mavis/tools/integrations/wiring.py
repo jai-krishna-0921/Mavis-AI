@@ -174,6 +174,16 @@ async def known_names(user_id: int) -> set[str]:
     return names
 
 
+class NativeSlackLookup:
+    """slack_events.SlackUserLookup backed by the native token store. Resolved on every call, so it follows
+    whatever provider is configured: Composio-only builds have no native grants and answer None."""
+
+    async def user_for_slack(self, team_id: str, slack_user_id: str) -> int | None:
+        tokens = getattr(get_provider(), "tokens", None)
+        find = getattr(tokens, "user_for_slack", None)
+        return await find(team_id, slack_user_id) if find is not None else None
+
+
 @lru_cache
 def get_activator() -> Activator:
     s = get_settings()
@@ -318,6 +328,9 @@ def register_integrations(registry: ToolRegistry | None = None) -> None:
         registry.capability_check = capability_check
         registry.capability_reason = capability_reason
         registry.available = tool_available
+    from mavis.tools.integrations.native import slack_events
+
+    slack_events.set_user_lookup(NativeSlackLookup())  # Events API deliveries -> the Mavis user
     flow = get_connect_flow()
     # A task that needs an account pauses on a connect interrupt; ConnectFlow sends the link and
     # resumes the task (RESUME_TASK) once the account is active, declined or failed.

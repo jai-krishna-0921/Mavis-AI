@@ -131,6 +131,15 @@ class NativeRouter:
                               f"{action} needs; the user must reconnect and allow it")
         return await self.fallback.execute(user, action, args)
 
+    async def uses_native(self, user_id: int, capability: Capability) -> bool:
+        """Does an ACTIVE native grant serve this capability for the user? Triggers never exist for it
+        (they stay with Composio), so the poller is the inbound path."""
+        provider = provider_of(capability)
+        if not self._ready(provider):
+            return False
+        grant = await self._active_grant(user_id, provider)
+        return grant is not None and covers(grant, capability)
+
     @staticmethod
     def _permitted(grant: Grant, action: str, capability: Capability) -> bool:
         if grant.provider is NativeProvider.SLACK:

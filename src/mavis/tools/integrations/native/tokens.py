@@ -132,6 +132,17 @@ class NativeTokenStore:
                 NativeGrant.provider == provider.value, NativeGrant.status == ACTIVE))
             return next((r.user_id for r in rows if (r.account or {}).get(account_key) == value), None)
 
+    async def user_for_slack(self, team_id: str, slack_user_id: str) -> int | None:
+        """The Mavis user whose ACTIVE Slack grant belongs to this Slack user in this team. Uses the unique
+        (provider, account_key) index, so it is one indexed row lookup per webhook delivery."""
+        key = account_key(NativeProvider.SLACK, {"team_id": team_id, "user_id": slack_user_id})
+        if not (team_id and slack_user_id and key):
+            return None
+        async with dbm.Session() as s:
+            return await s.scalar(select(NativeGrant.user_id).where(
+                NativeGrant.provider == NativeProvider.SLACK.value, NativeGrant.account_key == key,
+                NativeGrant.status == ACTIVE))
+
     async def reveal(self, user_id: int, provider: NativeProvider) -> tuple[str, str | None] | None:
         """(access, refresh) for a revoke call. Only the OAuth module uses this."""
         async with dbm.Session() as s:

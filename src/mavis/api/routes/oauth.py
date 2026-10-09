@@ -83,6 +83,21 @@ async def _tell(user_id: int, text: str) -> None:
         log.warning("oauth.notify_failed", error=type(exc).__name__)
 
 
+async def _remember_identity(user_id: int, provider: NativeProvider, account: dict) -> None:
+    """The linked account is the user's own: its address / Slack id map to the user node in the graph.
+    Best effort: a failure here must not undo the connection."""
+    from mavis.attention.connector_ingest import remember_identity
+
+    try:
+        if provider is NativeProvider.GOOGLE:
+            await remember_identity(user_id, emails=(str(account.get("email") or ""),))
+        else:
+            await remember_identity(user_id, slack_ids=(str(account.get("user_id") or ""),),
+                                    team=str(account.get("team_id") or ""))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("oauth.identity_failed", provider=provider.value, error=type(exc).__name__)
+
+
 @router.get("/oauth/{provider}/callback", response_class=HTMLResponse)
 async def oauth_callback(
     provider: str, code: str | None = None, state: str | None = None, error: str | None = None,
@@ -118,6 +133,7 @@ async def oauth_callback(
                                       "and try again from Telegram.", 400)
 
     get_connection_cache().invalidate(done.user_id)
+    await _remember_identity(done.user_id, native, done.account)
     if done.pending_id is not None:
         now = timeutil.now()
         await bus.enqueue(Job(
