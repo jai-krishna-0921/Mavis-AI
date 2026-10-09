@@ -23,14 +23,13 @@ import structlog
 
 from mavis.config import get_settings
 from mavis.machine.errors import SandboxPathError
-from mavis.machine.paths import clip, guard, safe_env
+from mavis.machine.paths import WORK_DIRS, clip, guard, safe_env
 from mavis.machine.ports import BackendHealth, ExecRequest, ExecResult, FileEntry
 from mavis.machine.s3store import MetaReads, put_with_quota
 from mavis.store.repo import machine as repo_machine
 
 log = structlog.get_logger(__name__)
 _ids = itertools.count(1)
-_WORK_DIRS = ("inbox", "out", "work", ".mavis/tmp")
 _NO_SOCKETS = (
     "import socket as _s\n"
     "def _blocked(*a, **k):\n    raise OSError('network is disabled in this sandbox')\n"
@@ -69,7 +68,7 @@ class LocalSession:
     def __init__(self, root: Path, python: str) -> None:
         self.id = f"local-{os.getpid()}-{next(_ids)}"
         self.root, self._python = root, python
-        for d in _WORK_DIRS:
+        for d in WORK_DIRS:
             (root / d).mkdir(parents=True, exist_ok=True)
         self._procs: set[asyncio.subprocess.Process] = set()
         self.closed = False

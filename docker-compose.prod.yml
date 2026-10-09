@@ -71,6 +71,7 @@ x-app-env: &app-env
   AGENTCORE_REGION: ${AGENTCORE_REGION:-ap-south-1}
   AGENTCORE_CODE_INTERPRETER_ID: ${AGENTCORE_CODE_INTERPRETER_ID:-aws.codeinterpreter.v1}
   AGENTCORE_BROWSER_ID: ${AGENTCORE_BROWSER_ID:-aws.browser.v1}
+  E2B_API_KEY: ${E2B_API_KEY:-}
   WORKSPACE_BACKEND: ${WORKSPACE_BACKEND:-auto}
   WORKSPACE_BUCKET: ${WORKSPACE_BUCKET:-}
   WORKSPACE_PREFIX: ${WORKSPACE_PREFIX:-ws/}
@@ -147,7 +148,7 @@ services:
   worker:
     <<: *app
     command: ["mavis", "worker"]
-    mem_limit: 640m            # loads the ONNX embedding model (~400 MB resident)
+    mem_limit: 900m            # ONNX embedding model (~400 MB resident) plus the machine runtime (sync, S3, boto3)
     healthcheck:
       # process liveness: PID 1 is tini, so look for the real `mavis worker` command line
       test: ["CMD", "python", "-c", "import os,sys;sys.exit(0 if any(b'mavis\\x00worker' in open(f'/proc/{p}/cmdline','rb').read() for p in os.listdir('/proc') if p.isdigit() and p!=str(os.getpid()) and os.path.exists(f'/proc/{p}/cmdline')) else 1)"]
