@@ -323,3 +323,39 @@ async def test_unsupported_action_and_handles():
     assert ex.handles("slack.history") and not ex.handles("mail.search") and not ex.handles("slack.users")
     assert ex.provider is NativeProvider.SLACK
     assert (await ex.execute(USER, "mail.search", {})).error_kind is FailureKind.INVALID_ARGUMENT
+
+
+class PerUserTokens(Tokens):
+    async def access_token(self, user_id, provider, *, force=False):
+        return f"xoxp-user{user_id}"
+
+
+async def test_channel_and_name_caches_never_cross_users_of_one_team():
+    def conversations(request):
+        who = request.headers["authorization"]
+        mine = chan("C0000MINE1" if who.endswith("1") else "C0000MINE2", "private-" + who[-1],
+                    is_private=True, is_channel=False)
+        return httpx.Response(200, json={"ok": True, "channels": [mine]})
+
+    def info(request):
+        who = request.headers["authorization"][-1]
+        return httpx.Response(200, json=user_info("U0SHARED01", f"Seen by {who}"))
+
+    api = Api(**{"conversations.list": conversations, "users.info": info})
+    ex = api.executor(PerUserTokens())
+    a = await ex.execute(UserRef(user_id=1), "slack.channels", {})
+    b = await ex.execute(UserRef(user_id=2), "slack.channels", {})
+    assert [c["id"] for c in a.data["channels"]] == ["C0000MINE1"]
+    assert [c["id"] for c in b.data["channels"]] == ["C0000MINE2"]
+    assert (await ex.user_info(1, TEAM, "U0SHARED01"))["name"] == "Seen by 1"
+    assert (await ex.user_info(2, TEAM, "U0SHARED01"))["name"] == "Seen by 2"
+
+
+async def test_the_channel_cache_is_bounded():
+    from mavis.tools.integrations.native import slack as slack_mod
+
+    api = Api(**{"conversations.list": {"ok": True, "channels": [chan("C0000GEN01", "general")]}})
+    ex = api.executor(PerUserTokens())
+    for uid in range(slack_mod.MAX_CHANNEL_CACHE + 25):
+        await ex.execute(UserRef(user_id=uid), "slack.channels", {})
+    assert len(ex._channels) <= slack_mod.MAX_CHANNEL_CACHE

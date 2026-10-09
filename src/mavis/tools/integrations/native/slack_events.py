@@ -168,6 +168,11 @@ def build_event(
     name = str(message.get("from") or "").strip()
     if name:
         payload["from"] = name
+        if name != str(message.get("user") or "") and not payload.get("user_name"):
+            payload["user_name"] = name  # a resolved display name, not the bare Slack id
+    email = str(message.get("from_email") or "").strip()
+    if email and not payload.get("user_email"):
+        payload["user_email"] = email
     payload["from_me"] = from_me
     for key, value in (("team", team), ("channel_type", channel_type), ("channel_name", channel_name)):
         if value:
@@ -279,12 +284,20 @@ async def _history(provider: IntegrationProvider, user_id: int, args: dict) -> d
     return res.data if isinstance(res.data, dict) else None
 
 
+class RecordSink(Protocol):
+    async def on_slack_event(self, event: Event) -> None: ...
+
+
 async def backfill(
-    provider: IntegrationProvider, bus: EventBus, user_id: int, *, days: int, now: datetime,
-    per_channel: int = PER_CHANNEL_CAP, total: int = TOTAL_CAP,
+    provider: IntegrationProvider, bus: EventBus | None, user_id: int, *, days: int, now: datetime,
+    per_channel: int = PER_CHANNEL_CAP, total: int = TOTAL_CAP, sink: RecordSink | None = None,
 ) -> int:
-    """Publish the last `days` of kept messages: DMs first, then member channels by recent activity, at most
-    `per_channel` kept messages per conversation and `total` overall. Returns events newly published."""
+    """Deliver the last `days` of kept messages: DMs first, then member channels by recent activity, at most
+    `per_channel` kept messages per conversation and `total` overall. With a `sink` (the connector ingest)
+    each message goes straight to the guard and record learning, so a week of history is never fed to the
+    live-event reasoner as if it were news; otherwise it is published on the bus. A message the webhook or
+    poll already delivered is a no-op downstream (event id on the bus, record id in learning). Returns the
+    number delivered."""
     res = await provider.execute(UserRef(user_id=user_id), "slack.channels", {})
     if not res.ok:
         log.warning("slack.backfill_channels_failed", user_id=user_id)
@@ -305,13 +318,20 @@ async def backfill(
             for m in page.get("messages") or []:
                 if not isinstance(m, dict) or not keep_message(m) or kept >= per_channel or seen >= total:
                     continue
+                if _ts_float(m.get("ts")) < float(oldest):
+                    continue  # the window is ours to enforce, whatever the server returned
                 kept += 1
                 seen += 1
                 event = build_event(
                     user_id, m, cid, "backfill", from_me=bool(m.get("from_me")),
                     channel_type=str(chan.get("kind") or ""), channel_name=str(chan.get("name") or ""),
                 )
-                if event is not None and await bus.publish(event):
+                if event is None:
+                    continue
+                if sink is not None:
+                    await sink.on_slack_event(event)
+                    published += 1
+                elif bus is not None and await bus.publish(event):
                     published += 1
             cursor = str(page.get("next_cursor") or "")
             if not (page.get("has_more") and cursor):

@@ -179,6 +179,9 @@ class FakeConnectors:
         self.slack_msgs.append(n)
         return True
 
+    async def on_slack_event(self, event):
+        await self.slack(event.user_id, event.payload)
+
 
 def windows(monkeypatch, **kw):
     from types import SimpleNamespace

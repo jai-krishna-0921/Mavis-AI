@@ -296,3 +296,98 @@ async def test_mute_list_round_trip_in_user_settings(user):
     await guard.remove_mute(user.id, "spam.io")
     assert (await guard.load_mute(user.id)).domains == frozenset()
     assert await guard.add_mute(user.id, "not a target") is None
+
+
+# --- forms found in review: spacing, glue, order, extra keywords, URLs, invisible characters ---------------
+
+
+def _spaced(code: str, size: int) -> str:
+    return " ".join(code[i:i + size] for i in range(0, len(code), size))
+
+
+@pytest.mark.parametrize("template", [
+    "Your code is {c}", "OTP {c}", "OTP is {c}", "UPI PIN: {c}", "mpin {c}", "Security code - {c}",
+])
+@pytest.mark.parametrize("size", [1, 2, 3])
+def test_codes_split_by_spaces_are_masked(template, size):
+    for _ in range(3):
+        code = rand(string.digits, RNG.choice([4, 6, 6]))
+        out = redact(template.format(c=_spaced(code, size)))
+        assert not any(ch.isdigit() for ch in out), out
+
+
+@pytest.mark.parametrize("template", [
+    "OTP:{c}", "OTP-{c}", "otp = {c}", "code={c}", "https://app.example.com/verify?x=1&code={c}&y=2",
+    "Use {c} to verify your login", "Enter {c} as your UPI PIN", "Please type {c} for confirming the payment",
+    "upipin: {c}", "UPI-PIN {c}", "TPIN {c}",
+])
+def test_codes_glued_or_before_their_keyword_are_masked(template):
+    for _ in range(4):
+        code = rand(string.digits, RNG.choice([4, 6, 8]))
+        out = redact(template.format(c=code))
+        assert code not in out and "[redacted:" in out, out
+
+
+@pytest.mark.parametrize("template", ["cvv: {c}", "CVV {c}", "CVC2 = {c}", "card security code {c}"])
+def test_three_digit_cvv_is_masked(template):
+    for n in (3, 4):
+        code = rand(string.digits, n)
+        assert code not in redact(template.format(c=code))
+
+
+@pytest.mark.parametrize("template", [
+    "aws_secret_access_key = {k}", "AWS_SECRET_ACCESS_KEY={k}", "aws secret access key: {k}",
+    '"aws_secret_access_key": "{k}"',
+])
+def test_aws_secret_keys_with_slashes_are_masked(template):
+    key = "".join(RNG.choice(string.ascii_letters + string.digits + "/+") for _ in range(40))
+    assert key not in redact(template.format(k=key))
+
+
+@pytest.mark.parametrize("template", [
+    "pw={p}", "login pw: {p}", "passwd {p}", "password - {p}", "pass {p}", "one time password {p}",
+    "Password = {p}",
+])
+def test_password_forms_are_masked(template):
+    for value in (rand(string.ascii_letters, 5) + rand(string.digits, 3) + "!", rand(string.digits, 6)):
+        if template == "pass {p}" and value.isdigit():
+            continue
+        assert value not in redact(template.format(p=value))
+
+
+@pytest.mark.parametrize("url", [
+    "postgres://svc:{p}@db.internal:5432/app", "https://alice:{p}@files.example.com/x",
+    "smtp://mailer:{p}@smtp.example.com",
+])
+def test_credentials_inside_urls_are_masked_and_the_rest_kept(url):
+    pw = rand(string.ascii_letters + string.digits, 12)
+    out = redact(f"connect with {url.format(p=pw)} now")
+    assert pw not in out and "@" in out and out.endswith(" now")
+
+
+def test_zero_width_characters_do_not_hide_a_secret():
+    zw = "​"
+    for text in ("O" + zw + "TP is 48" + zw + "2913", "pass" + zw + "word: Tr0ub4dor" + zw + "9x",
+                 "code is " + zw.join("482913")):
+        out = redact(text)
+        assert "482913" not in out and "Tr0ub4dor9x" not in out and "[redacted:" in out, out
+    assert redact("a" + zw + "b") == "ab"
+
+
+@pytest.mark.parametrize("text", [
+    "The code for project is 5050",
+    "Meeting code 2026 budget review",
+    "token count is 5000",
+    "PIN code is 560001",
+    "Deliver to PIN code 400001 Mumbai",
+    "Our access code names are Alpha and Beta",
+    "boarding pass 1234567 at gate 5",
+    "Please pass the salt",
+    "The password reset link has expired",
+    "Sync on 12 10 2026 about the code review",
+    "Call 98765 43210 about the code",
+    "Version code 3 of the plan has 1500 items",
+    "Enter the building through gate 4 for the meeting",
+])
+def test_over_masking_lookalikes_survive(text):
+    assert redact(text) == text

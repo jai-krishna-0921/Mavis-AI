@@ -66,12 +66,21 @@ class Poller:
     async def ensure_chains(self, user_id: int) -> int:
         """Re-arm a missing poll wakeup for every capability this user polls. The scheduler collapses
         onto an existing pending one, so this is safe to call at any time. Returns how many were asked."""
-        polling = (await self.state.get(user_id)).get("polling", {})
-        armed = 0
-        for capability in POLLABLE:
-            if polling.get(capability.value):
+        polling = dict((await self.state.get(user_id)).get("polling", {}))
+        native = getattr(self.provider, "uses_native", None)
+        armed, healed = 0, False
+        for capability in sorted(POLLABLE, key=lambda c: c.value):
+            wanted = bool(polling.get(capability.value))
+            if not wanted and native is not None:
+                # An ACTIVE native grant has no triggers: it is polled even if activation never recorded it.
+                wanted = bool(await native(user_id, capability))
+                if wanted:
+                    polling[capability.value], healed = True, True
+            if wanted:
                 await self.schedule(user_id, self.clock(), capability.value, POLL_KIND)
                 armed += 1
+        if healed:
+            await self.state.update(user_id, {"polling": polling})
         return armed
 
     async def ensure_all_chains(self) -> int:
