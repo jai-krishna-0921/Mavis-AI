@@ -1,4 +1,0 @@
-.services { list-style: none; display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0; margin: 10px 0 0; }
-.services li { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; text-transform: capitalize; }
-.on { color: var(--ink); }
-.off { color: var(--muted); opacity: 0.6; text-decoration: line-through; text-decoration-color: var(--hairline); }
