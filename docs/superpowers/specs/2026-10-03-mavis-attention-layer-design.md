@@ -77,16 +77,16 @@ EMAIL_RECEIVED -> attention.Intake.on_email          (under the per-user "initia
 
 Everything else plugs into existing registries without editing their owners:
 
-| Registry | Owner | What attention registers |
-|---|---|---|
-| `worker.runner.register_event_handler` | Phase 1 | `EMAIL_RECEIVED` (replace), `TASK_COMPLETED` (append: start backfill after Gmail first sync), `BUTTON_PRESSED` dispatcher (idempotent) |
-| `agents.buttons.register_button_handler` | Phase 4/5 | prefix `at:` |
-| `timers.system.register_system_wakeup` | Phase 3 | `system_attention_drain`, `system_attention_speak`, `system_attn_backfill`, `system_evening_wrap` |
-| `worker.runner.register_startup_hook` | Phase 5 | re-arm drains, evening wraps, pending backfills |
-| `initiative.routines.register_morning_hook` | Phase 5 | evening-wrap self-heal, retention purge, backfill check |
-| `initiative.routines.register_brief_source` | Phase 3 | `AttentionBrief` (replaces Phase 5 `InboxBrief`) |
-| `initiative.hooks.ENRICHERS` | Phase 5 | sender facts for emails forwarded to the reasoner |
-| `agents.context_hooks` (new) | this layer | chat digest provider |
+| Registry                                      | Owner      | What attention registers                                                                                                                     |
+| --------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `worker.runner.register_event_handler`      | Phase 1    | `EMAIL_RECEIVED` (replace), `TASK_COMPLETED` (append: start backfill after Gmail first sync), `BUTTON_PRESSED` dispatcher (idempotent) |
+| `agents.buttons.register_button_handler`    | Phase 4/5  | prefix`at:`df7f0abce7c341ea9338aace788045cd.H07ZvTgOyb5X1RUIiBqlan6a                                                                       |
+| `timers.system.register_system_wakeup`      | Phase 3    | `system_attention_drain`, `system_attention_speak`, `system_attn_backfill`, `system_evening_wrap`                                    |
+| `worker.runner.register_startup_hook`       | Phase 5    | re-arm drains, evening wraps, pending backfills                                                                                              |
+| `initiative.routines.register_morning_hook` | Phase 5    | evening-wrap self-heal, retention purge, backfill check                                                                                      |
+| `initiative.routines.register_brief_source` | Phase 3    | `AttentionBrief` (replaces Phase 5 `InboxBrief`)                                                                                         |
+| `initiative.hooks.ENRICHERS`                | Phase 5    | sender facts for emails forwarded to the reasoner                                                                                            |
+| `agents.context_hooks` (new)                | this layer | chat digest provider                                                                                                                         |
 
 Kill switch: `ATTENTION_ENABLED=false` skips `register_attention()` entirely and the legacy Phase 5 path is untouched and live again.
 
@@ -152,16 +152,16 @@ The system prompt is generic. It defines each kind in plain words ("money_moveme
 
 ### 6.3 Signals (each adds a weight and a reason; weights combine as a noisy-or into [0, 1])
 
-| Code | Weight | Reason text (example) |
-|---|---|---|
-| `amount_ratio` | `min(1, log10(ratio))` when ratio >= 2 vs typical (counterparty median if >= 3 samples, else method or overall median if >= 5) | "about 12x your usual for this payee" |
-| `large_amount` (cold start) | 0.7 when no typical exists and amount >= the per-currency threshold | "a large amount, and I don't know your usual spending yet" |
-| `new_counterparty` | 0.4 with >= 5 payments of history, else 0.15 | "the first payment I've seen to this payee" |
-| `odd_hour` | 0.3 when the +-1 h histogram share < 3% (>= 10 samples), else 0.25 for 00:00 to 05:59 | "at 02:00, in the middle of the night" |
-| `burst` | 0.3 when this is the 3rd or later debit within an hour | "3 payments within an hour" |
-| `new_sender` | 0.2 | "the first email I've seen from this sender" |
-| `lookalike_domain` | 0.6 when the domain is not established but is within difflib 0.88 of an established one | "the sender's address imitates one you get mail from" |
-| `risk:<flag>` | 0.2 to 0.6 per security flag | "it mentions a password or recovery change" |
+| Code                          | Weight                                                                                                                           | Reason text (example)                                      |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `amount_ratio`              | `min(1, log10(ratio))` when ratio >= 2 vs typical (counterparty median if >= 3 samples, else method or overall median if >= 5) | "about 12x your usual for this payee"                      |
+| `large_amount` (cold start) | 0.7 when no typical exists and amount >= the per-currency threshold                                                              | "a large amount, and I don't know your usual spending yet" |
+| `new_counterparty`          | 0.4 with >= 5 payments of history, else 0.15                                                                                     | "the first payment I've seen to this payee"                |
+| `odd_hour`                  | 0.3 when the +-1 h histogram share < 3% (>= 10 samples), else 0.25 for 00:00 to 05:59                                            | "at 02:00, in the middle of the night"                     |
+| `burst`                     | 0.3 when this is the 3rd or later debit within an hour                                                                           | "3 payments within an hour"                                |
+| `new_sender`                | 0.2                                                                                                                              | "the first email I've seen from this sender"               |
+| `lookalike_domain`          | 0.6 when the domain is not established but is within difflib 0.88 of an established one                                          | "the sender's address imitates one you get mail from"      |
+| `risk:<flag>`               | 0.2 to 0.6 per security flag                                                                                                     | "it mentions a password or recovery change"                |
 
 Reason texts never include a domain, address, link or raw counterparty.
 
@@ -263,12 +263,12 @@ Buttons ride on the last bubble via one additive executor change: `deliver(..., 
 
 Button data `at:{action}:{observation_id}` (under Telegram's 64-byte limit). The press is a `BUTTON_PRESSED` event with `trust=USER`: it is the user's own action, so anything it creates is trusted.
 
-| Button | Effect | Reply |
-|---|---|---|
-| `at:y` Yes, that was me | record the held debit into the baselines; feedback `confirmed`; store a `confirmed` preference vector; offset for the kind +0.03 | "Thanks, noted..." |
-| `at:n` No, help me | feedback `disputed`; open a `CONCERN` loop (importance 5, `source=event.id`, a trusted `tg:` id) titled from computed facts only; book an `AGENT` wakeup in 2 h on that loop (the reasoner follows up); offset -0.05 | generic next steps: open the banking or payment app directly, block the method there, report via the app or official site, never via the email |
-| `at:m` Don't tell me about these | `mute` preference vector; offset +0.1 | "Got it..." |
-| `at:a` Always tell me | `always` preference vector; offset -0.1 | "Will do..." |
+| Button                             | Effect                                                                                                                                                                                                                        | Reply                                                                                                                                          |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `at:y` Yes, that was me          | record the held debit into the baselines; feedback`confirmed`; store a `confirmed` preference vector; offset for the kind +0.03                                                                                           | "Thanks, noted..."                                                                                                                             |
+| `at:n` No, help me               | feedback`disputed`; open a `CONCERN` loop (importance 5, `source=event.id`, a trusted `tg:` id) titled from computed facts only; book an `AGENT` wakeup in 2 h on that loop (the reasoner follows up); offset -0.05 | generic next steps: open the banking or payment app directly, block the method there, report via the app or official site, never via the email |
+| `at:m` Don't tell me about these | `mute` preference vector; offset +0.1                                                                                                                                                                                       | "Got it..."                                                                                                                                    |
+| `at:a` Always tell me            | `always` preference vector; offset -0.1                                                                                                                                                                                     | "Will do..."                                                                                                                                   |
 
 Offsets live in `users.state["attention"]["offsets"][kind]`, bounded to [-0.2, +0.3]. They are added to the ask threshold and subtracted from the score, so a mute makes that kind harder to surface and "always" easier. Replies are not proactive messages (they answer a tap) and are deduped by `reply:{event.id}:{i}`. A `/attention` command is out of scope; the buttons are the cheap path.
 
@@ -325,20 +325,20 @@ structlog events: `attention.observed` (kind, verdict, method, score, attention,
 
 ### 14.6 Settings (all `ATTENTION_*`, in `config.py`)
 
-| Setting | Default |
-|---|---|
-| `attention_enabled` | `true` |
-| `attention_understand_per_window` / `attention_window_s` | `4` / `120` |
-| `attention_max_attempts` | `2` |
-| `attention_currency` | `INR` |
-| `attention_large_amounts` | `{"INR": 10000, "USD": 150, "EUR": 150, "GBP": 120}` |
-| `attention_ask_threshold` / `attention_notify_threshold` / `attention_brief_threshold` | `0.6` / `0.7` / `0.35` |
-| `attention_pref_similarity` | `0.8` |
-| `attention_allow_urgent` | `true` |
-| `attention_retention_days` | `90` |
-| `attention_backfill_max` | `40` |
-| `attention_digest_hours` | `24` |
-| `attention_evening_enabled` / `attention_evening_time` | `true` / `20:30` |
+| Setting                                                                                      | Default                                                |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `attention_enabled`                                                                        | `true`                                               |
+| `attention_understand_per_window` / `attention_window_s`                                 | `4` / `120`                                        |
+| `attention_max_attempts`                                                                   | `2`                                                  |
+| `attention_currency`                                                                       | `INR`                                                |
+| `attention_large_amounts`                                                                  | `{"INR": 10000, "USD": 150, "EUR": 150, "GBP": 120}` |
+| `attention_ask_threshold` / `attention_notify_threshold` / `attention_brief_threshold` | `0.6` / `0.7` / `0.35`                           |
+| `attention_pref_similarity`                                                                | `0.8`                                                |
+| `attention_allow_urgent`                                                                   | `true`                                               |
+| `attention_retention_days`                                                                 | `90`                                                 |
+| `attention_backfill_max`                                                                   | `40`                                                 |
+| `attention_digest_hours`                                                                   | `24`                                                 |
+| `attention_evening_enabled` / `attention_evening_time`                                   | `true` / `20:30`                                   |
 
 ## 15. Data model
 
@@ -361,20 +361,20 @@ New wakeup kinds: `system_attention_drain`, `system_attention_speak`, `system_at
 
 The attention layer is new modules plus small additive edits. Expected conflicts and how to resolve them:
 
-| File | Change here | Parallel work | Resolution |
-|---|---|---|---|
-| `initiative/executor.py` | `buttons` param on `notify` and `deliver`, attached to the last bubble | qa-hardening: notify suppression after a chat turn, budget suppression, decision persistence | keep both; buttons only thread through to `Outbound` |
-| `initiative/handler.py` | none | qa-hardening: stale deferred revalidation, default wakeups, decision persistence | none (attention owns its own deferral) |
-| `initiative/composer.py` | none (imports `scrub_untrusted_origin`, `CHECK_DIRECTLY`) | qa-hardening: scrub gaps | if renamed, update `attention/sanitize.py` import; attention benefits from stronger scrubbing |
-| `initiative/routines.py` | `unregister_brief_source(name)` | qa-hardening: default wakeups | additive |
-| `domain/wakeups.py` | 4 new kinds | qa-hardening may add kinds | additive enum union |
-| `config.py` | `ATTENTION_*` block | qa-hardening and Phase 4 settings | additive |
-| `store/models.py` + migration | 4 tables, `0008_attention` | `0006_initiative_decisions` (qa-hardening), `0007_orchestrator` (Phase 4) | re-point `down_revision` to the head at merge time |
-| `llm/models.py` | public `unavailable_s()` | none known | additive |
-| `memory/vector.py` | `client` property | none known | additive |
-| `agents/simple_turn.py`, `agents/persona.py` | `gather_context` call, Gmail copy | Phase 4 replaces `simple_turn` with `conversation.py` | Phase 4 must call `context_hooks.gather_context` in its context assembly |
-| `worker/handlers.py` | `register_attention()` last | Phase 4 registrations | keep attention last (it replaces `EMAIL_RECEIVED`, appends to `TASK_COMPLETED`) |
-| `tests/conftest.py` | reset fixture for attention singletons | others append fixtures | additive |
+| File                                             | Change here                                                                  | Parallel work                                                                                | Resolution                                                                                     |
+| ------------------------------------------------ | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `initiative/executor.py`                       | `buttons` param on `notify` and `deliver`, attached to the last bubble | qa-hardening: notify suppression after a chat turn, budget suppression, decision persistence | keep both; buttons only thread through to`Outbound`                                          |
+| `initiative/handler.py`                        | none                                                                         | qa-hardening: stale deferred revalidation, default wakeups, decision persistence             | none (attention owns its own deferral)                                                         |
+| `initiative/composer.py`                       | none (imports`scrub_untrusted_origin`, `CHECK_DIRECTLY`)                 | qa-hardening: scrub gaps                                                                     | if renamed, update`attention/sanitize.py` import; attention benefits from stronger scrubbing |
+| `initiative/routines.py`                       | `unregister_brief_source(name)`                                            | qa-hardening: default wakeups                                                                | additive                                                                                       |
+| `domain/wakeups.py`                            | 4 new kinds                                                                  | qa-hardening may add kinds                                                                   | additive enum union                                                                            |
+| `config.py`                                    | `ATTENTION_*` block                                                        | qa-hardening and Phase 4 settings                                                            | additive                                                                                       |
+| `store/models.py` + migration                  | 4 tables,`0008_attention`                                                  | `0006_initiative_decisions` (qa-hardening), `0007_orchestrator` (Phase 4)                | re-point`down_revision` to the head at merge time                                            |
+| `llm/models.py`                                | public`unavailable_s()`                                                    | none known                                                                                   | additive                                                                                       |
+| `memory/vector.py`                             | `client` property                                                          | none known                                                                                   | additive                                                                                       |
+| `agents/simple_turn.py`, `agents/persona.py` | `gather_context` call, Gmail copy                                          | Phase 4 replaces`simple_turn` with `conversation.py`                                     | Phase 4 must call`context_hooks.gather_context` in its context assembly                      |
+| `worker/handlers.py`                           | `register_attention()` last                                                | Phase 4 registrations                                                                        | keep attention last (it replaces`EMAIL_RECEIVED`, appends to `TASK_COMPLETED`)             |
+| `tests/conftest.py`                            | reset fixture for attention singletons                                       | others append fixtures                                                                       | additive                                                                                       |
 
 ## 18. Risks
 

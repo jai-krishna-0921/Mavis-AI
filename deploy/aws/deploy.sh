@@ -89,6 +89,7 @@ rsync_box -az --delete \
   --exclude '.git' --exclude '.venv/' --exclude 'data/' --exclude '.env' --exclude '.env.*' \
   --exclude 'deploy/aws/state.env' --exclude '*.pem' --exclude '__pycache__/' --exclude '.pytest_cache/' \
   --exclude '.ruff_cache/' --exclude '.superpowers/' --exclude '.mcp.json' --exclude 'docs/' --exclude 'tests/' \
+  --exclude '.worktrees/' --exclude 'instinct_screenshots/' --exclude 'node_modules/' \
   "$REPO_ROOT/" "$MAVIS_SSH_USER@$MAVIS_EIP:$MAVIS_REMOTE_DIR/"
 
 log "installing .env (mode 600)"
@@ -121,6 +122,12 @@ if ! \$C run --rm migrate; then
   exit 1
 fi
 \$C up -d --wait --wait-timeout 300 && RC=0
+# rsync replaces the Caddyfile with a new inode, which a single-file bind mount does not follow: recreate
+# caddy only when the file changed, so routes like /oauth/* go live without a needless TLS restart
+CADDY_SHA="\$(sha256sum Caddyfile | cut -d' ' -f1)"
+if [ "\$CADDY_SHA" != "\$(cat .caddy.sha 2>/dev/null)" ]; then
+  \$C up -d --force-recreate caddy && echo "\$CADDY_SHA" > .caddy.sha
+fi
 REMOTE
 ssh_box "cd $MAVIS_REMOTE_DIR && rm -f .deploy.rc && setsid nohup bash .deploy-remote.sh > .deploy.log 2>&1 < /dev/null &"
 for _ in $(seq 1 240); do
