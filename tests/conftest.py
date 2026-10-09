@@ -10,6 +10,10 @@ import pytest
 from pydantic import BaseModel
 
 from mavis.bus import set_bus
+
+# Tests never read a developer .env, whatever the working directory (a local DASHBOARD_ENABLED=true once
+# changed what Slack and API tests saw). Settings still read the process env, which fixtures control.
+from mavis.config import Settings  # noqa: E402
 from mavis.domain.events import Event, Job
 from mavis.domain.memory import Extraction, RecallContext
 from mavis.domain.messages import Outbound
@@ -18,6 +22,8 @@ from mavis.memory.graph import SqliteGraphStore
 from mavis.memory.service import MemoryService, set_memory
 from mavis.memory.vector import QdrantVectorStore
 from tests.memory.fakes import HashEmbedder
+
+Settings.model_config["env_file"] = None
 
 TEST_ENV = {
     "ENV": "dev",
