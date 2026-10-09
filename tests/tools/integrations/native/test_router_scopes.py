@@ -1,4 +1,4 @@
-"""Which Google actions a grant's scopes allow: a table keyed by action name, any-of sets, all groups needed."""
+"""Which Google actions a grant allows: a table keyed by action, any-of scope sets, all groups needed."""
 
 from __future__ import annotations
 
