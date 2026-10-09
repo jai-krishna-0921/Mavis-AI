@@ -3,7 +3,8 @@
 # instance, and IMDSv2. The hop limit is raised to 2 (so the api, worker and timer containers can use the role)
 # ONLY after the DOCKER-USER rule that keeps every other container away from 169.254.169.254 is verified on the
 # box (imds.sh install, run by bootstrap.sh and deploy.sh); a failed check afterwards lowers it to 1 again.
-# Attaches NO policies: each plan adds its own inline policy (mavis-backups, mavis-machine) in its own script.
+# Attaches one inline policy itself, mavis-secrets-read (read-only access to /mavis/prod/* in SSM Parameter Store);
+# other plans add theirs (mavis-backups, mavis-machine) in their own scripts.
 # Idempotent. Dry run by default.
 #   deploy/aws/iam-role.sh            print the plan
 #   deploy/aws/iam-role.sh --apply    create what is missing
@@ -61,6 +62,21 @@ else
     [[ -n "${MAVIS_SKIP_PROPAGATION_WAIT:-}" ]] || sleep 10
   done
 fi
+# Read-only: the box can decrypt and read its own configuration, nothing else. No ssm:Put*, no Delete*, no
+# DescribeParameters. GetParametersByPath on /mavis/prod/ is authorised against the path itself as well as its
+# children. kms:Decrypt only through SSM in this region (the AWS managed key alias/aws/ssm; its id is not pinned).
+ACCT="$(aws_ sts get-caller-identity --query Account --output text)"
+SSM_ARN="arn:aws:ssm:$AWS_REGION:$ACCT:parameter/mavis/prod"
+SECRETS_POLICY="$(cat <<JSON
+{"Version":"2012-10-17","Statement":[
+ {"Sid":"ReadMavisParameters","Effect":"Allow","Action":["ssm:GetParametersByPath","ssm:GetParameters","ssm:GetParameter"],"Resource":["$SSM_ARN","$SSM_ARN/*"]},
+ {"Sid":"DecryptViaSsmOnly","Effect":"Allow","Action":["kms:Decrypt"],"Resource":"arn:aws:kms:$AWS_REGION:$ACCT:key/*","Condition":{"StringEquals":{"kms:ViaService":"ssm.$AWS_REGION.amazonaws.com"}}}
+]}
+JSON
+)"
+SECRETS_POLICY="${SECRETS_POLICY//$'\n'/}"
+act "putting inline policy mavis-secrets-read on $ROLE" -- iam put-role-policy --role-name "$ROLE" \
+  --policy-name mavis-secrets-read --policy-document "$SECRETS_POLICY"
 # 1. the guard must be in place first; refuse to raise the hop limit when it is not
 if [[ "$APPLY" == 1 ]]; then
   "$AWS_DIR/imds.sh" verify-rule || die "refusing to raise the instance metadata hop limit: run deploy/aws/imds.sh install and fix the failure above"

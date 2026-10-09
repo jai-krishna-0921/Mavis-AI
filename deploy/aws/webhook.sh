@@ -9,13 +9,15 @@ state_require
 case "${1:-}" in
   set)
     log "make sure no local 'mavis dev' / demo poller is running for this bot"
-    ssh_box "sed -i 's/^TELEGRAM_MODE=.*/TELEGRAM_MODE=webhook/' $MAVIS_REMOTE_DIR/.env"
+    printf webhook | "$AWS_DIR/secrets.sh" set TELEGRAM_MODE --apply
+    "$AWS_DIR/secrets.sh" render-remote
     compose_remote up -d --wait --wait-timeout 300 api
     compose_remote exec -T api mavis telegram set-webhook
     compose_remote exec -T api mavis telegram info ;;
   delete)
     compose_remote exec -T api mavis telegram delete-webhook
-    ssh_box "sed -i 's/^TELEGRAM_MODE=.*/TELEGRAM_MODE=polling/' $MAVIS_REMOTE_DIR/.env"
+    printf polling | "$AWS_DIR/secrets.sh" set TELEGRAM_MODE --apply
+    "$AWS_DIR/secrets.sh" render-remote
     log "webhook deleted; recreate api so it stops re-setting it: deploy/aws/deploy.sh --no-webhook" ;;
   info) compose_remote exec -T api mavis telegram info ;;
   *) die "usage: webhook.sh set|delete|info" ;;

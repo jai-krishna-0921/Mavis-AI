@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sync the repo to the box, write a production .env, build on the box, start the stack, migrate.
+# Sync the repo to the box, push the config to SSM, render it on the box, build on the box, start the stack, migrate.
 #   deploy.sh              full deploy; the api sets the Telegram webhook (stop any local `mavis dev` first)
 #   deploy.sh --verify-machine  after deploying, run the machine demo suite on the box (mirrored to the owner)
 #   deploy.sh --no-webhook TELEGRAM_MODE=polling: nothing on the box touches Telegram (use before migrate-data)
@@ -27,22 +27,40 @@ if [[ -n "${MAVIS_DOMAIN:-}" ]]; then
     || die "$MAVIS_HOST resolves to '${resolved:-nothing}', not $MAVIS_EIP: fix its DNS A record first"
 fi
 
-# --- build the prod .env locally in a private temp file ----------------------
-# An existing .env on the box is the base: its keys are preserved (so generated secrets never rotate)
-# and only missing or empty keys are added. ENV, PUBLIC_BASE_URL, DOMAIN and TELEGRAM_MODE always follow
-# this run. An ssh failure aborts: it must never look like "no .env yet".
+# --- build the desired key set locally in a private temp file -----------------
+# The base is what SSM Parameter Store already holds (/mavis/prod/*): its keys are preserved (so generated
+# secrets never rotate) and only missing or empty keys are added. ENV, PUBLIC_BASE_URL, DOMAIN and
+# TELEGRAM_MODE always follow this run. A failed read aborts: it must never look like "no secrets yet".
+# The set is then pushed to SSM (changed keys only) and the box renders it to tmpfs. No .env is shipped.
 umask 077
 ENV_TMP="$(mktemp)"
-trap 'rm -f "$ENV_TMP"' EXIT
+trap 'rm -f "$ENV_TMP" "$ENV_TMP.n"' EXIT
 
-REMOTE_ENV="$MAVIS_REMOTE_DIR/.env"
+REMOTE_ENV="$MAVIS_REMOTE_DIR/.env"   # the legacy plaintext file; removed after a successful switch
+"$AWS_DIR/secrets.sh" pull --to "$ENV_TMP"
 rc=0
 ssh_box "test -f $REMOTE_ENV" || rc=$?
 case "$rc" in
-  0) log "preserving existing keys from $REMOTE_ENV"; ssh_box "cat $REMOTE_ENV" >"$ENV_TMP" ;;
-  1) log "no .env on the box yet; generating secrets" ;;
+  0) LEGACY=1 ;;
+  1) LEGACY=0 ;;
   *) die "ssh check for $REMOTE_ENV failed (exit $rc); refusing to continue so secrets are not rotated" ;;
 esac
+if [[ -z "$(envget "$ENV_TMP" NATIVE_TOKEN_KEK)" ]]; then
+  # No KEK in SSM. Generating one is only safe on a truly fresh install: a new KEK would orphan every
+  # sealed Google/Slack grant.
+  [[ "$LEGACY" == 0 ]] || die "SSM has no NATIVE_TOKEN_KEK but the box still has $REMOTE_ENV: run deploy/aws/secrets.sh seed-from-box --apply first"
+  [[ ! -s "$ENV_TMP" ]] || die "SSM /mavis/prod/ is populated but has no NATIVE_TOKEN_KEK; refusing to generate a new one (see docs/SECRETS.md)"
+  log "SSM is empty and the box has no .env: fresh install, generating secrets"
+else
+  log "preserving existing keys from SSM /mavis/prod/"
+fi
+if [[ "$LEGACY" == 1 ]]; then
+  # every key in the old file must already be in SSM, or deleting it afterwards would lose it (names only)
+  legacy_keys="$(ssh_box "sudo grep -oE '^[A-Z][A-Z0-9_]*=.' $REMOTE_ENV | cut -d= -f1 | sort -u")" || die "cannot read $REMOTE_ENV"
+  missing=""
+  for k in $legacy_keys; do [[ -n "$(envget "$ENV_TMP" "$k")" ]] || missing="$missing $k"; done
+  [[ -z "$missing" ]] || die "keys only in $REMOTE_ENV, not in SSM:$missing. Run deploy/aws/secrets.sh seed-from-box --apply"
+fi
 
 # set_key KEY VALUE [force]: append if missing, fill if empty, replace only when forced.
 set_key() {
@@ -107,22 +125,25 @@ rsync_box -az --delete \
   --exclude '.worktrees/' --exclude 'instinct_screenshots/' --exclude 'node_modules/' \
   "$REPO_ROOT/" "$MAVIS_SSH_USER@$MAVIS_EIP:$MAVIS_REMOTE_DIR/"
 
-log "installing .env (mode 600)"
-scp_box "$ENV_TMP" "$MAVIS_REMOTE_DIR/.env.new"
-ssh_box "chmod 600 $MAVIS_REMOTE_DIR/.env.new && mv $MAVIS_REMOTE_DIR/.env.new $MAVIS_REMOTE_DIR/.env"
+log "pushing changed keys to SSM (values are never printed)"
+"$AWS_DIR/secrets.sh" push --apply --with-deploy --file "$ENV_TMP"
+MACHINE_ON="$(envget "$ENV_TMP" MACHINE_ENABLED | tr '[:upper:]' '[:lower:]')"
+rm -f "$ENV_TMP" "$ENV_TMP.n"
+log "installing the render unit and rendering $MAVIS_ENV_FILE on the box (tmpfs, root, mode 600)"
+"$AWS_DIR/secrets.sh" install-box
+"$AWS_DIR/secrets.sh" render-remote
 
 # --- build + start ---------------------------------------------------------------
 # A 2 GB box cannot build (uv sync + model download) next to the full stack, so the worker and timer
 # are stopped for the build. The whole stop/build/start sequence runs DETACHED on the box with its own
 # EXIT trap: if this laptop disconnects or this script is killed, the box still finishes and always
 # brings the worker and timer back (on the new image if the build succeeded, else on the old one).
-rm -f "$ENV_TMP" "$ENV_TMP.n"
 log "building and starting on the box (detached; first build takes several minutes)"
 ssh_box "cat > $MAVIS_REMOTE_DIR/.deploy-remote.sh" <<REMOTE
 #!/usr/bin/env bash
 set -uo pipefail
 cd $MAVIS_REMOTE_DIR
-C="docker compose -f $MAVIS_COMPOSE_FILE --profile prod"
+C="docker compose --env-file $MAVIS_ENV_FILE -f $MAVIS_COMPOSE_FILE --profile prod"
 rm -f .deploy.rc
 trap '\$C up -d worker timer >/dev/null 2>&1; echo "\${RC:-1}" > .deploy.rc' EXIT
 \$C stop worker timer >/dev/null 2>&1 || true
@@ -145,14 +166,14 @@ fi
 \$C up -d --wait --wait-timeout 300 && RC=0
 # rsync replaces the Caddyfile with a new inode, which a single-file bind mount does not follow: recreate
 # caddy only when the file or the public host (DOMAIN) changed, so routes like /oauth/* go live without a needless TLS restart
-CADDY_SHA="\$( (cat Caddyfile; grep -E '^DOMAIN=' .env) | sha256sum | cut -d' ' -f1)"  # the file or the host changed
+CADDY_SHA="\$( (cat Caddyfile; grep -E '^DOMAIN=' $MAVIS_ENV_FILE) | sha256sum | cut -d' ' -f1)"  # the file or the host changed
 if [ "\$CADDY_SHA" != "\$(cat .caddy.sha 2>/dev/null)" ]; then
   \$C up -d --force-recreate caddy && echo "\$CADDY_SHA" > .caddy.sha
 fi
 REMOTE
-ssh_box "cd $MAVIS_REMOTE_DIR && rm -f .deploy.rc && setsid nohup bash .deploy-remote.sh > .deploy.log 2>&1 < /dev/null &"
+ssh_box "cd $MAVIS_REMOTE_DIR && rm -f .deploy.rc && setsid nohup sudo bash .deploy-remote.sh > .deploy.log 2>&1 < /dev/null &"
 for _ in $(seq 1 240); do
-  sleep 10
+  sleep "${MAVIS_POLL_S:-10}"
   rc="$(ssh_box "cat $MAVIS_REMOTE_DIR/.deploy.rc 2>/dev/null" || true)"
   [[ -n "$rc" ]] && break
 done
@@ -160,12 +181,17 @@ if [[ "${rc:-}" != 0 ]]; then
   ssh_box "tail -n 40 $MAVIS_REMOTE_DIR/.deploy.log" || true
   die "remote build/start failed or timed out (rc=${rc:-none}); worker and timer were restarted on the box"
 fi
+if [[ "$LEGACY" == 1 ]]; then
+  log "switch complete: removing the plaintext $REMOTE_ENV (SSM is the only copy)"
+  ssh_box "sudo shred -u $REMOTE_ENV 2>/dev/null || sudo rm -f $REMOTE_ENV"
+fi
+ssh_box "sudo rm -f $MAVIS_REMOTE_DIR/.env.new"
 log "pruning dangling images and old build cache"
 ssh_box "docker image prune -f >/dev/null && docker builder prune -f --keep-storage 1GB >/dev/null"
 compose_remote ps
 
 log "verifying that only api, worker and timer reach the instance metadata service"
-machine_on="$(envget "$ENV_TMP" MACHINE_ENABLED | tr '[:upper:]' '[:lower:]')"
+machine_on="$MACHINE_ON"
 if [[ "$machine_on" != "true" ]]; then
   # The machine is off: nothing needs role credentials, and hop limit 1 (no container reaches IMDS) is the
   # safe state, so a failed check is reported, not fatal.

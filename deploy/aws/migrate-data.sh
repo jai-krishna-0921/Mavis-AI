@@ -26,7 +26,7 @@ trap cleanup EXIT
 # qcurl ARGS...: curl against the box's qdrant from a one-off container on the compose network
 # (qdrant publishes no host port). Stdin is passed through, so snapshots can be streamed in.
 qcurl() {
-  ssh_box "cd $MAVIS_REMOTE_DIR && docker compose -f $MAVIS_COMPOSE_FILE run --rm -T --no-deps migrate curl -fsS $*"
+  ssh_box "cd $MAVIS_REMOTE_DIR && $COMPOSE_BOX run --rm -T --no-deps migrate curl -fsS $*"
 }
 
 log "checking the demo sources are reachable"
@@ -72,13 +72,13 @@ compose_remote stop api worker timer
 compose_remote up -d --wait --wait-timeout 300 postgres redis qdrant neo4j
 
 log "restoring postgres"
-ssh_box "cd $MAVIS_REMOTE_DIR && docker compose -f $MAVIS_COMPOSE_FILE exec -T postgres psql -v ON_ERROR_STOP=1 -q -U mavis -d mavis <$REMOTE_TMP/pg.sql >/dev/null"
+ssh_box "cd $MAVIS_REMOTE_DIR && $COMPOSE_BOX exec -T postgres psql -v ON_ERROR_STOP=1 -q -U mavis -d mavis <$REMOTE_TMP/pg.sql >/dev/null"
 compose_remote run --rm migrate
 
 log "restoring qdrant"
 for c in $COLLECTIONS; do
   qcurl -X DELETE "'http://qdrant:6333/collections/$c?wait=true'" >/dev/null
-  ssh_box "cd $MAVIS_REMOTE_DIR && docker compose -f $MAVIS_COMPOSE_FILE run --rm -T --no-deps migrate \\
+  ssh_box "cd $MAVIS_REMOTE_DIR && $COMPOSE_BOX run --rm -T --no-deps migrate \\
     curl -fsS -X POST -F 'snapshot=@-;filename=$c.snapshot' \\
     'http://qdrant:6333/collections/$c/snapshots/upload?priority=snapshot&wait=true'" \
     <"$WORK/qdrant/$c.snapshot" >/dev/null
@@ -90,7 +90,7 @@ compose_remote run --rm --no-deps -v "$REMOTE_TMP:/migrate:ro" migrate python /m
 
 # --- 4. verify, clean up, restart ---------------------------------------------------
 log "row counts: demo vs box"
-ssh_box "cd $MAVIS_REMOTE_DIR && docker compose -f $MAVIS_COMPOSE_FILE exec -T postgres psql -U mavis -d mavis -Atc \
+ssh_box "cd $MAVIS_REMOTE_DIR && $COMPOSE_BOX exec -T postgres psql -U mavis -d mavis -Atc \
   \"select 'box tables', count(*) from information_schema.tables where table_schema='public'\""
 docker exec "$DEMO_PG_CONTAINER" psql -U mavis -d mavis -Atc \
   "select 'demo tables', count(*) from information_schema.tables where table_schema='public'"
