@@ -15,6 +15,7 @@ from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType
 from mavis.domain.messages import Button, Outbound
+from mavis.domain.policy import Capability
 from mavis.domain.wakeups import WakeupKind
 from mavis.store.db import utcnow
 from mavis.store.models import InviteCode, User
@@ -32,6 +33,7 @@ PICK = "Which one is yours?"
 CURRENCY = "I'll show money in {money}. Say 'use USD' any time to change it."
 FIRST_VALUE = "What's one thing you want off your mind this week? A bill, a call, a deadline."
 CONNECT = "Want me to keep an eye on your Gmail and calendar too?"
+CONNECT_WITH_SLACK = "Want me to keep an eye on your email, calendar and Slack too?"
 
 
 async def _say(user_id: int, text: str, key: str, buttons: list[list[Button]] | None = None) -> None:
@@ -94,6 +96,10 @@ async def on_button(event: Event, data: str) -> None:
         from mavis.tools.integrations.actions import GOOGLE_ANCHOR
 
         await _flow(None).start(uid, GOOGLE_ANCHOR, "")
+    elif data == "ob:conn:slack":
+        from mavis.agents.commands import _flow
+
+        await _flow(None).start(uid, Capability.SLACK, "")
     elif data == "ob:conn:later":
         await _state(uid, connect_declined_at=utcnow().isoformat())
 
@@ -135,8 +141,14 @@ async def after_first_value(user_id: int, reason: str = "") -> None:
     if st.get("step") != "first_turn":
         return
     await _state(user_id, step="done")
-    await _say(user_id, CONNECT, "connect", [[Button(label="Connect Google", data="ob:conn:google"),
-                                              Button(label="Later", data="ob:conn:later")]])
+    from mavis.tools.integrations.native.base import NativeProvider
+    from mavis.tools.integrations.native.oauth import configured
+
+    slack = configured(NativeProvider.SLACK)  # offered only where the Slack sign-in is set up
+    row = [Button(label="Connect Google", data="ob:conn:google"),
+           *([Button(label="Connect Slack", data="ob:conn:slack")] if slack else []),
+           Button(label="Later", data="ob:conn:later")]
+    await _say(user_id, CONNECT_WITH_SLACK if slack else CONNECT, "connect", [row])
 
 
 async def onboarding_gate(event: Event) -> bool:
@@ -162,12 +174,25 @@ async def onboarding_gate(event: Event) -> bool:
     return not await on_text(user, str(event.payload.get("text", "")))
 
 
+ALREADY_IN = ("You're already in, {name}. Tell me what's on your mind, or send /connect to link your Google "
+              "or Slack.")
+
+
+async def start_command(event: Event, user: User, args: list[str]) -> str:
+    """/start from someone who is already in (the invite link tapped again, or Start pressed twice). The
+    access gate has dealt with pending people and the web login gate with sign-in links, so what reaches
+    here is never a chat turn for the model."""
+    return ALREADY_IN.format(name=(user.name or "there").split()[0])
+
+
 def register() -> None:
+    from mavis.access.commands import register_user_command
     from mavis.timers.system import register_system_wakeup
     from mavis.worker.gates import register_event_gate
 
     if start not in gate.on_activated:
         gate.on_activated.append(start)
+    register_user_command("start", start_command)
     register_button_handler(PREFIX, on_button)
     register_event_gate("onboarding", onboarding_gate, order=30)
     register_system_wakeup(WakeupKind.SYSTEM_ONBOARD_CONNECT.value, after_first_value)

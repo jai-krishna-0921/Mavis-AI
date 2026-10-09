@@ -46,8 +46,19 @@ def normalize(text: str) -> str | None:
     return s
 
 
+_EMBEDDED = re.compile(
+    r"(?<![A-Za-z0-9])MAV[-\s_]?([0-9A-Za-z]{5})[-\s_]?([0-9A-Za-z]{5})(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def find_code(text: str) -> str | None:
+    """The canonical code written inside a longer message ("my invite is MAV-7K3QZ-9XW2B, thanks"). Only
+    the MAV prefixed shape counts, so ordinary words and numbers are never taken for a code."""
+    m = _EMBEDDED.search(text or "")
+    return normalize("MAV" + m.group(1) + m.group(2)) if m else None
+
+
 def looks_like_code(text: str) -> bool:
-    return normalize(text) is not None
+    return normalize(text) is not None or find_code(text) is not None
 
 
 def display(code: str) -> str:

@@ -20,9 +20,12 @@ from mavis.bus.base import EventBus
 from mavis.domain import timeutil
 from mavis.domain.events import Job, JobKind
 from mavis.domain.messages import Outbound
+from mavis.domain.policy import Capability
 from mavis.store import db as dbm
 from mavis.store.models import User
+from mavis.store.repo import connections
 from mavis.tools.integrations import get_connection_cache, get_provider
+from mavis.tools.integrations.actions import GOOGLE_ANCHOR, workspace_enabled
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.oauth import OAuthError
@@ -52,6 +55,23 @@ _USER_TEXT = {
 
 
 WEB_ORIGIN = "web"
+_NOTHING_ALLOWED = (
+    "You signed in with {account} but did not allow any Google service, so nothing is connected. "
+    "Send /connect google to try again and leave every box ticked.")
+
+
+def _capability(provider: NativeProvider) -> Capability:
+    """The capability a finished consent for this vendor is checked as (the Google anchor when Workspace is
+    on, since one consent covers every Google service)."""
+    if provider is NativeProvider.SLACK:
+        return Capability.SLACK
+    return GOOGLE_ANCHOR if workspace_enabled() else Capability.GMAIL
+
+
+async def _nothing_allowed(integrations: IntegrationProvider, user_id: int) -> bool:
+    access = getattr(integrations, "google_access", None)
+    found = await access(user_id) if access is not None else None
+    return found is not None and not found[0]
 
 
 def _back_to_dashboard(error: str | None, *, connected: str | None = None) -> RedirectResponse:
@@ -160,15 +180,28 @@ async def oauth_callback(
                                       "and try again from Telegram.", 400)
 
     get_connection_cache().invalidate(done.user_id)
+    if native is NativeProvider.GOOGLE and await _nothing_allowed(integrations, done.user_id):
+        # Every service box was unticked: there is nothing to connect, so do not call it connected.
+        await oauth.revoke(done.user_id, native)
+        await _tell(done.user_id, _NOTHING_ALLOWED.format(account=_external(native, done.account)))
+        if done.origin == WEB_ORIGIN:
+            return _back_to_dashboard(f"{native.value}_nothing_allowed")
+        return _page("Nothing was allowed", (
+            "You did not allow any Google service, so nothing was connected. Go back to Telegram, ask me "
+            "to connect Google again, and leave the boxes ticked."), 400)
     await _remember_identity(done.user_id, native, done.account)
     # A granted Google address is not a sign-in identity: anyone can be handed a consent link. An address
     # becomes one only through a Google sign-in by the signed-in user, or the approved Telegram link.
-    if done.pending_id is not None:
-        now = timeutil.now()
-        await bus.enqueue(Job(
-            id=f"conncheck:{done.pending_id}:{int(now.timestamp()) // THROTTLE_S}",
-            user_id=done.user_id, kind=JobKind.CONNECTION_CHECK, payload={"pending_id": done.pending_id},
-        ))
+    # Every finished consent is checked and activated (announcement, first sync, polling). A consent that
+    # did not start from a /connect link (the dashboard's button) has no pending request yet: make one.
+    pending_id = done.pending_id
+    if pending_id is None:
+        pending_id = await connections.create_pending(done.user_id, _capability(native), "", None)
+    now = timeutil.now()
+    await bus.enqueue(Job(
+        id=f"conncheck:{pending_id}:{int(now.timestamp()) // THROTTLE_S}",
+        user_id=done.user_id, kind=JobKind.CONNECTION_CHECK, payload={"pending_id": pending_id},
+    ))
     # Login CSRF: a consent link forwarded to someone else links THEIR account to the sender's Mavis user.
     # Both ends are told exactly what was linked to whom, so a surprised person can undo it.
     outside = _external(native, done.account)

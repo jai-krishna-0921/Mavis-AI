@@ -32,7 +32,8 @@ RESPONSE_URL_PREFIX = "https://hooks.slack.com/"
 SLASH_COMMANDS = frozenset({"channel", "connect", "connections", "disconnect"})
 KEEP_OPEN_SUFFIXES = (":edit",)  # pressing Edit does not close the card
 NOT_YOURS = "This card isn't yours, so I left it alone."
-UNKNOWN = "I don't know you yet. Open Mavis on Telegram, send /connect slack and approve it first."
+UNKNOWN = ("I don't know you yet. Mavis is by invite: join on Telegram with your invite link, then send "
+           "/connect slack there.")
 NO_DM = "I can't reach your DM with me yet. Message me there once, then try again."
 
 Poster = Callable[[str, dict], Awaitable[None]]

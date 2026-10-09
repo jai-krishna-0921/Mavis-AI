@@ -9,7 +9,7 @@ from typing import Any
 
 import structlog
 
-from mavis.access.codes import looks_like_code
+from mavis.access.codes import display, find_code, looks_like_code
 from mavis.access.inbound import get_inbound_limiter
 from mavis.bus.base import EventBus
 from mavis.channels.test_sink import FIXTURE_PREFIX, MIRROR_HEADER, active_test_chat, is_test_chat
@@ -171,6 +171,8 @@ async def ingest_update(data: dict[str, Any], bus: EventBus, answer: Answerer | 
         # Spec 4.2: no message content is stored or carried for pending users, only what the gate needs.
         text = str(payload.get("text", ""))
         keep = text.startswith("/start") or looks_like_code(text)
+        if keep and not text.startswith("/start") and (embedded := find_code(text)) is not None:
+            text = display(embedded)  # a code inside a sentence: carry the code only, never the sentence
         payload = {"text": text if keep else "", "message_id": payload.get("message_id"), "pending": True}
         if keep and (m := _COMMAND.match(text)):
             payload["command"] = m.group(1).lower()

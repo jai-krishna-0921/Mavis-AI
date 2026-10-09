@@ -164,6 +164,9 @@ class Settings(BaseSettings):
     slack_client_secret: str = ""
     slack_signing_secret: str = ""
     native_token_kek: str = ""  # 32 random bytes, base64: wraps the data key of every sealed grant token
+    # The Google OAuth app is External and unverified until Google reviews it; the connect prompt warns about
+    # the "Google hasn't verified this app" screen. Set true once the app is verified to drop the warning.
+    google_oauth_verified: bool = False
     native_token_kek_previous: str = ""  # comma list of retired KEKs, kept only to unwrap during rotation
     # --- web dashboard (spec 2026-10-09): /api/v1 answers 404 unless DASHBOARD_ENABLED ----------------------
     dashboard_enabled: bool = False

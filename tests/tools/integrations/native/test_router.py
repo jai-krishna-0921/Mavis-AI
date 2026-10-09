@@ -266,3 +266,35 @@ def test_load_executors_skips_absent_modules_but_not_broken_ones(monkeypatch, cl
     monkeypatch.setattr(importlib, "import_module", broken)
     with pytest.raises(ModuleNotFoundError):
         _load_executors(None, client)
+
+
+async def test_router_is_configured_when_native_is_even_with_no_fallback_key(parts):
+    """Defect: `configured` fell through to Composio, so a native-only Mavis answered /connect with
+    "Connections aren't set up" and hid every integration tool."""
+    fallback, _, _, router = parts
+    fallback.configured = False
+    assert router.configured is True  # the native Google/Slack sign-in is set up (native_env)
+
+
+async def test_router_is_not_configured_when_neither_side_is(parts, monkeypatch):
+    fallback, _, _, router = parts
+    fallback.configured = False
+    for key in ("GOOGLE_OAUTH_CLIENT_ID", "SLACK_CLIENT_ID"):
+        monkeypatch.setenv(key, "")
+    from mavis.config import get_settings
+
+    get_settings.cache_clear()
+    assert router.configured is False
+    fallback.configured = True
+    assert router.configured is True
+
+
+async def test_router_offers_only_what_it_can_connect(parts):
+    """A native-only Mavis (no Composio key) must not offer Notion or any service nothing can serve."""
+    fallback, _, _, router = parts
+    fallback.configured = False
+    assert router.can_connect(Capability.GMAIL) and router.can_connect(Capability.DRIVE)
+    assert router.can_connect(Capability.SLACK)
+    assert not router.can_connect(Capability.NOTION)
+    fallback.configured = True
+    assert router.can_connect(Capability.NOTION)

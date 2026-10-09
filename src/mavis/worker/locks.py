@@ -31,6 +31,15 @@ async def claim(key: str, ttl_s: float) -> bool:
     return True
 
 
+async def release(key: str) -> None:
+    """Drop a claim early, so the next `claim(key, ...)` can win (a connection removed and made again)."""
+    client = get_redis()
+    if client is not None:
+        await client.delete(f"mavis:claim:{key}")
+        return
+    _claims.pop(key, None)
+
+
 @contextlib.asynccontextmanager
 async def lock(key: str, timeout_s: float = 300) -> AsyncIterator[None]:
     """Named mutual exclusion (in-process FIFO asyncio lock, then a Redis lock across processes)."""
