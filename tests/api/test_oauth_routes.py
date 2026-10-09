@@ -46,12 +46,20 @@ async def test_google_success_enqueues_the_connection_check(web, oauth, vendor):
     assert job.kind is JobKind.CONNECTION_CHECK and job.user_id == 5 and job.payload == {"pending_id": 12}
 
 
-async def test_slack_success_without_a_pending_tells_the_user(web, oauth, vendor):
+async def test_slack_success_without_a_pending_tells_the_user_and_still_activates(web, oauth, vendor):
+    """A consent that did not start from a /connect link (the dashboard button) gets a pending request made
+    for it, so the connection is checked, announced and first-synced like any other."""
+    from mavis.domain.policy import Capability
+    from mavis.store.repo import connections
+
     c, bus = web
     slack_vendor(vendor)
     state = query(await oauth.authorize_url(5, S))["state"]
     r = await c.get("/oauth/slack/callback", params={"code": "c", "state": state})
-    assert r.status_code == 200 and bus.jobs == []
+    assert r.status_code == 200
+    [job] = bus.jobs
+    [pending] = await connections.open_for(5, Capability.SLACK)
+    assert job.kind is JobKind.CONNECTION_CHECK and job.payload == {"pending_id": pending.id}
     [text] = await outbox()
     assert text.startswith("Slack is connected") and "Kripya" in text
 
