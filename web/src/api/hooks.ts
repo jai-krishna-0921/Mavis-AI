@@ -1,11 +1,15 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError } from './client'
+import { hasSessionHint } from '../lib/session'
 import type { ConnectorId, Preferences, VaultKind } from './types'
 
-export const useMe = () =>
+// `publicPage` is for pages anyone can open: /me is only asked when this browser has signed in before,
+// so anonymous visitors never hit an authenticated endpoint.
+export const useMe = (opts: { publicPage?: boolean } = {}) =>
   useQuery({
     queryKey: ['me'],
     queryFn: api.me,
+    enabled: !opts.publicPage || hasSessionHint(),
     retry: (n, e) => !(e instanceof ApiError && e.status === 401) && n < 1,
     staleTime: 60_000,
   })

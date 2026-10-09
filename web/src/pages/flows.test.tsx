@@ -19,7 +19,18 @@ describe('landing', () => {
     expect(links.length).toBeGreaterThanOrEqual(3)
     for (const l of links) expect(l).toHaveAttribute('href', 'https://t.me/Mavis247_bot')
     expect(screen.getAllByRole('link', { name: 'Sign in' }).length).toBeGreaterThan(0)
-    expect(screen.getAllByTestId('weave').length).toBeGreaterThan(0)
+    expect(screen.getAllByTestId('logo').length).toBeGreaterThan(0)
+  })
+
+  it('never calls the authenticated /me endpoint for an anonymous visitor', async () => {
+    localStorage.clear()
+    const seen = vi.fn()
+    server.use(http.get('/api/v1/me', () => { seen(); return HttpResponse.json({ error: 'unauthorized', message: 'x' }, { status: 401 }) }))
+    renderApp('/')
+    await screen.findAllByRole('link', { name: /Text Mavis/ })
+    renderApp('/login')
+    await screen.findByRole('link', { name: 'Continue with Telegram' })
+    expect(seen).not.toHaveBeenCalled()
   })
 
   it('serves the configured bot when it changes', async () => {
@@ -51,7 +62,7 @@ describe('landing', () => {
   it('describes Mavis in its own words with its real examples', async () => {
     loggedOut()
     renderApp('/')
-    expect(await screen.findByRole('heading', { level: 1, name: 'The assistant that lives in your chat.' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { level: 1, name: 'Hand off the busywork. Mavis handles it in chat.' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'How Mavis works' })).toBeInTheDocument()
     expect(document.querySelector('[data-promise]')).toHaveTextContent(/never as instructions/)
     expect(screen.getByRole('region', { name: 'Example conversations' })).toBeInTheDocument()

@@ -5,7 +5,7 @@ import { ArrowClockwise, ArrowUpRight, ShieldCheck, TelegramLogo, Timer } from '
 import { api, ApiError } from '../api/client'
 import type { TelegramStart } from '../api/types'
 import { QrCode } from './QrCode'
-import { Weave } from './Weave'
+import { Logo } from './Logo'
 import { Skeleton } from './Ui'
 
 type Phase = 'starting' | 'waiting' | 'expired' | 'error'
@@ -91,18 +91,18 @@ export function TelegramSignIn({ invite, linkId, pollIntervalMs = 2000, to = '/w
       </a>
 
       <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto]">
-        <div className="flex flex-col justify-between gap-4 rounded-3xl border border-white/10 bg-black/25 p-5" aria-label={`Sign in code ${spaced}`}>
+        <div className="flex flex-col justify-between gap-4 rounded-3xl border border-line-strong bg-sunken p-5" aria-label={`Sign in code ${spaced}`}>
           <p className="flex items-start gap-2 text-[13px] text-muted"><ShieldCheck size={18} weight="light" className="mt-px shrink-0" aria-hidden="true" /> Check that Telegram shows the same code</p>
           <strong className="tnum block whitespace-nowrap text-5xl font-bold tracking-[0.12em] text-ink">{spaced}</strong>
         </div>
-        <div className="hidden justify-items-center gap-3 rounded-3xl border border-white/10 bg-black/25 p-4 sm:grid">
+        <div className="hidden justify-items-center gap-3 rounded-3xl border border-line-strong bg-sunken p-4 sm:grid">
           <QrCode value={start.deep_link} label="QR code that opens Mavis in Telegram" size={148} />
           <p className="status max-w-[148px] text-center">On a computer? Scan with your phone.</p>
         </div>
       </div>
 
       <div className="flex items-start gap-3 text-sm text-muted" role="status">
-        <span className="mt-0.5"><Weave size={22} animated /></span>
+        <span className="mt-0.5"><Logo size={22} live /></span>
         <p>Waiting for you to approve in Telegram. Press Start, then tap Approve. This page signs you in on its own.</p>
       </div>
     </div>

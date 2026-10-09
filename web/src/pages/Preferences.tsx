@@ -82,7 +82,7 @@ function PrefsForm({ initial }: { initial: Prefs }) {
         </div>
       </div>
 
-      <fieldset className="m-0 mb-6 rounded-3xl border border-white/10 p-5">
+      <fieldset className="m-0 mb-6 rounded-3xl border border-line-strong p-5">
         <legend className="label px-2">Quiet hours</legend>
         <label className="check">
           <input type="checkbox" checked={quiet !== null} onChange={(e) => set('quiet_hours', e.target.checked ? { start: '22:00', end: '07:00' } : null)} />
@@ -106,7 +106,7 @@ function PrefsForm({ initial }: { initial: Prefs }) {
         <legend className="label mb-3">Where Mavis reaches out first</legend>
         <div className="grid grid-cols-3 gap-2">
           {(['telegram', 'slack', 'both'] as const).map((c) => (
-            <label key={c} className="check cursor-pointer justify-center rounded-2xl border border-white/10 px-3 py-3 transition-colors duration-300 hover:border-white/20 has-[:checked]:border-accent/60 has-[:checked]:bg-accent/[0.08] has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-accent-hi">
+            <label key={c} className="check cursor-pointer justify-center rounded-2xl border border-line-strong px-3 py-3 transition-colors duration-300 hover:border-ink/30 has-[:checked]:border-accent-hi/60 has-[:checked]:bg-accent-soft has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-navy-hi">
               <input className="sr-only" type="radio" name="channel" value={c} checked={f.proactive_channel === c} onChange={() => set('proactive_channel', c)} />
               <span className="capitalize">{c}</span>
             </label>

@@ -25,7 +25,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         role="status" aria-live="polite"
       >
         {items.map((t) => (
-          <div key={t.id} className="toast-in pointer-events-auto flex max-w-md items-center gap-3 rounded-full border border-white/10 bg-raised/90 py-2.5 pl-3.5 pr-5 text-sm shadow-[0_18px_40px_-18px_rgba(0,0,0,0.9)] backdrop-blur-xl">
+          <div key={t.id} className="toast-in pointer-events-auto flex max-w-md items-center gap-3 rounded-full border border-line-strong bg-surface py-2.5 pl-3.5 pr-5 text-sm shadow-pop">
             {t.tone === 'ok'
               ? <CheckCircle size={20} weight="light" className="shrink-0 text-ok" />
               : <WarningCircle size={20} weight="light" className="shrink-0 text-danger" />}
