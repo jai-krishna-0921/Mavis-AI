@@ -47,7 +47,20 @@ def test_every_action_the_google_executor_handles_has_a_scope_entry():
         (["calendar.readonly"], ["calendar.list", "calendar.find"],
          ["calendar.create_event", "calendar.update_event"]),
         (["calendar"], ["calendar.create_event", "calendar.list"], []),
-        (["drive.readonly"], ["drive.search", "drive.read", "docs.read", "sheets.read", "sheets.find"], []),
+        (["drive.readonly"], ["drive.search", "drive.read", "docs.read", "sheets.read", "sheets.find"],
+         ["drive.share", "drive.move", "docs.comment", "docs.create", "docs.insert_text", "sheets.append_row",
+          "tasks.list", "meet.create"]),
+        (["drive"], ["drive.search", "drive.create_folder", "drive.move", "drive.share", "drive.upload_file",
+                     "docs.comment", "docs.create", "docs.insert_text", "sheets.create", "sheets.append_row",
+                     "sheets.update_range"], ["tasks.add", "meet.create"]),
+        (["documents"], ["docs.create", "docs.insert_text"],
+         ["docs.comment", "sheets.create", "drive.share"]),
+        (["spreadsheets"], ["sheets.create", "sheets.append_row", "sheets.update_range"],
+         ["docs.create", "drive.share"]),
+        (["tasks"], ["tasks.list", "tasks.get", "tasks.add", "tasks.patch", "tasks.delete"], ["meet.create"]),
+        (["tasks.readonly"], ["tasks.list", "tasks.get"], ["tasks.add", "tasks.patch", "tasks.delete"]),
+        (["meetings.space.created"], ["meet.create", "meet.transcript"], ["tasks.list"]),
+        (["meetings.space.readonly"], ["meet.transcript"], ["meet.create"]),
         (["drive.file"], [], ["drive.search", "drive.read", "docs.read", "sheets.read"]),
         (["drive.appdata"], [], ["drive.search", "drive.read"]),
         (["contacts.readonly"], ["contacts.search", "contacts.list"], ["mail.search", "drive.search"]),
@@ -122,3 +135,35 @@ async def test_status_follows_what_the_grant_can_do(parts, tokens):
     await grant(tokens, G, [A + "gmail.send"])
     assert (await router.status(U))["gmail"] is ConnectionState.ACTIVE
     assert (await router.status(U))["googlecalendar"] is not ConnectionState.ACTIVE
+
+
+WRITES = ["drive.create_folder", "drive.move", "drive.share", "drive.upload_file", "docs.create",
+          "docs.insert_text", "docs.comment", "sheets.create", "sheets.append_row", "sheets.update_range",
+          "tasks.add", "tasks.patch", "tasks.delete", "meet.create"]
+
+
+@pytest.mark.parametrize("action", WRITES)
+async def test_a_grant_from_before_the_write_scopes_never_writes_and_offers_a_reconnect(
+    tokens, oauth, client, action
+):
+    fallback = FakeProvider()
+    ex = FakeExecutor(G, set(WRITES) | {"tasks.list", "docs.read"})
+    router = NativeRouter(fallback, tokens, oauth, [ex], client)
+    await grant(tokens, G, ["openid", A + "drive.readonly", A + "gmail.readonly"])
+    res = await router.execute(U, action, {})
+    assert not res.ok and res.error_kind is FailureKind.PERMISSION_MISSING
+    assert ex.calls == [] and fallback.executed == []
+    text = failure_text(res.error_kind, ACTIONS[action].capability.value)
+    assert "Reconnect" in text and "—" not in text and "–" not in text
+    assert (await router.execute(U, "docs.read", {})).ok  # reads on the old grant keep working
+
+
+async def test_a_full_grant_runs_the_writes_natively(tokens, oauth, client):
+    fallback = FakeProvider()
+    ex = FakeExecutor(G, set(WRITES))
+    router = NativeRouter(fallback, tokens, oauth, [ex], client)
+    await grant(tokens, G, [A + s for s in ("drive", "documents", "spreadsheets", "tasks",
+                                            "meetings.space.created")])
+    for action in WRITES:
+        assert (await router.execute(U, action, {})).ok
+    assert len(ex.calls) == len(WRITES) and fallback.executed == []

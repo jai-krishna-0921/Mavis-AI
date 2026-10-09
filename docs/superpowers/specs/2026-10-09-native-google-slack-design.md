@@ -29,8 +29,12 @@ generic connectors framework, multi-user, revenue intelligence) is parked until 
    production does not. Unverified means a one-time "Google hasn't verified this app" screen (Advanced, then
    continue) and a lifetime cap of 100 users. Verification (restricted Gmail scopes need a security assessment) is
    a later task.
-   Scopes: `openid email profile gmail.readonly gmail.send gmail.compose calendar.events drive.readonly
-   contacts.readonly`. Request `access_type=offline`, `prompt=consent`, `include_granted_scopes=true`, PKCE S256.
+   Scopes: `openid email profile gmail.readonly gmail.send gmail.compose calendar.events drive documents
+   spreadsheets tasks meetings.space.created meetings.space.readonly contacts.readonly`. `drive` (full) replaces
+   `drive.readonly`: commenting on, sharing, moving and appending to the user's existing files needs it
+   (`drive.file` only reaches files the app made), and it covers every read. A grant made before the Workspace
+   write scopes existed keeps working for reads; a write it lacks the scope for answers permission-missing with a
+   reconnect offer and never reaches Google. Request `access_type=offline`, `prompt=consent`, `include_granted_scopes=true`, PKCE S256.
 3. **Slack app is an internal, single-workspace app** (not distributed): internal customer-built apps keep Tier 3
    limits for `conversations.history/replies`; distributed non-Marketplace apps are capped at 1 request a minute
    and 15 messages. User token (`xoxp`) so Mavis reads what the user can read and posts as the user.
@@ -93,7 +97,10 @@ src/mavis/tools/integrations/native/
   router.py        NativeRouter(IntegrationProvider): per-capability routing, merged status, connect links
   http.py          shared httpx client: timeouts, 429 Retry-After, 5xx backoff, size cap, vendor error to FailureKind
   google.py        GoogleExecutor(NativeExecutor): mail.*, calendar.*, drive.search|list_recent|read|meta|download,
-                   docs.read, sheets.find|read, contacts.search|list
+                   docs.read, sheets.find|read, contacts.search|list; Workspace writes drive.create_folder|move|
+                   share|upload_file, docs.create|insert_text|comment, sheets.create|append_row|update_range,
+                   tasks.list|get|add|patch|delete, meet.create|transcript
+  docs_markdown.py Markdown to Docs batchUpdate requests (headings, lists, bold, italic, code, links)
   gmail_mime.py    MIME walk to text (text/plain preferred, html to text), headers, attachment names
   slack.py         SlackExecutor(NativeExecutor): slack.channels|history|send (+ internal slack.users)
   slack_events.py  signature verify, url_verification, event to Event via normalize.slack_event, dedupe
@@ -101,6 +108,14 @@ src/mavis/tools/integrations/native/
 api routes:        GET /oauth/{google|slack}/callback, POST /webhooks/slack
 migration:         0015_native_grants (parked branches renumber after this ships)
 ```
+
+Workspace writes (decision 8 retry rules apply): creates, appends, shares, uploads, comments, task adds and Meet
+creates are declared non-idempotent, so a 5xx or read error ends as "may or may not have happened" and is never
+repeated; a move, a cell range write, a task patch or delete is idempotent. `docs.create` makes the document, then
+writes the converted Markdown in one atomic `batchUpdate`; if that fails for a definite reason the empty document is
+trashed. Uploads are one multipart request, at most 5 MB, and only read from `ARTIFACTS_DIR`. `docs.append`,
+`drive.upload`, `tasks.complete` and `tasks.update` are composed by `workspace_tools` from the primitives above, so
+their approval and allowlist steps still run first. A cell value that starts like a formula is written RAW.
 
 Executor results use the keys `normalize.py` already reads (`messageId threadId sender subject messageText
 labelIds messageTimestamp`, Calendar's native event JSON, Slack's native message JSON), so the poller, intake and
@@ -121,7 +136,7 @@ self-addressed send, a Slack DM to self.
 
 ## Owner setup (needed for the live check)
 
-Google Cloud console: new project, enable Gmail, Calendar, Drive, People APIs; OAuth consent screen External,
+Google Cloud console: new project, enable Gmail, Calendar, Drive, Docs, Sheets, Tasks, Meet, People APIs; OAuth consent screen External,
 publish to production; OAuth client "Web application" with the redirect URI above; give client id and secret.
 Slack: api.slack.com/apps, create from manifest (we provide it), install to the workspace; give client id,
 client secret and signing secret.

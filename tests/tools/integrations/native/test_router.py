@@ -16,7 +16,9 @@ G, S = NativeProvider.GOOGLE, NativeProvider.SLACK
 U = UserRef(user_id=1)
 ALL_GOOGLE = ["openid", "https://www.googleapis.com/auth/gmail.readonly",
               "https://www.googleapis.com/auth/calendar.events",
-              "https://www.googleapis.com/auth/drive.readonly",
+              "https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/documents",
+              "https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/tasks",
+              "https://www.googleapis.com/auth/meetings.space.created",
               "https://www.googleapis.com/auth/contacts.readonly"]
 
 
@@ -138,9 +140,8 @@ async def test_status_full_google_grant_activates_all_native_capabilities(parts,
     _, _, _, router = parts
     await grant(tokens, G, ALL_GOOGLE)
     st = await router.status(U)
-    for cap in ("gmail", "googlecalendar", "drive", "docs", "sheets", "contacts"):
+    for cap in ("gmail", "googlecalendar", "drive", "docs", "sheets", "contacts", "tasks", "meet"):
         assert st[cap] is ConnectionState.ACTIVE
-    assert st.get("tasks") is not ConnectionState.ACTIVE and st.get("meet") is not ConnectionState.ACTIVE
 
 
 async def test_revoked_grant_shows_failed_unless_composio_is_active(parts, tokens):
@@ -180,7 +181,14 @@ async def test_connect_link_carries_the_pending_id(parts, oauth, vendor):
     assert done.pending_id == 42
 
 
-@pytest.mark.parametrize("toolkit", ["notion", "tasks", "meet"])
+@pytest.mark.parametrize("toolkit", ["tasks", "meet"])
+async def test_tasks_and_meet_connect_through_the_native_google_sign_in(parts, toolkit):
+    fallback, *_, router = parts
+    url = await router.connect_link(U, toolkit, "https://mavis.test/cb")
+    assert "accounts.google.com" in url and fallback.links == []
+
+
+@pytest.mark.parametrize("toolkit", ["notion"])
 async def test_connect_link_stays_on_composio_for_the_rest(parts, toolkit):
     fallback, *_, router = parts
     await router.connect_link(U, toolkit, "https://mavis.test/cb")
@@ -234,7 +242,10 @@ async def test_subscribe_parse_catalog_and_extras_delegate(parts):
 def test_covers_rules():
     from mavis.tools.integrations.native.tokens import Grant
     g = Grant(1, G, "ACTIVE", {"scopes": ALL_GOOGLE})
-    assert covers(g, Capability.DOCS) and not covers(g, Capability.TASKS) and not covers(g, Capability.SLACK)
+    assert covers(g, Capability.DOCS) and covers(g, Capability.TASKS) and not covers(g, Capability.SLACK)
+    legacy = Grant(1, G, "ACTIVE", {"scopes": ["https://www.googleapis.com/auth/drive.readonly"]})
+    assert covers(legacy, Capability.DOCS) and not covers(legacy, Capability.TASKS)
+    assert not covers(legacy, Capability.MEET)
     assert covers(Grant(1, S, "ACTIVE", {}), Capability.SLACK)
     assert not covers(Grant(1, S, "ACTIVE", {}), Capability.GMAIL)
 
