@@ -94,3 +94,17 @@ async def previous_user_event(user_id: int, event_id: str) -> tuple[str, timedel
 
 def _aware(ts: datetime) -> datetime:
     return ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)
+
+
+async def clear_history(user_id: int) -> dict[str, int]:
+    """Forget the stored transcript used as chat context: the messages and the rolling summaries built from
+    them. Memory (facts, graph, vectors), knowledge and connections live elsewhere and are not touched."""
+    from sqlalchemy import delete
+
+    from mavis.store.models import ConversationSummary
+
+    async with Session() as s:
+        gone = await s.execute(delete(Message).where(Message.user_id == user_id))
+        summaries = await s.execute(delete(ConversationSummary).where(ConversationSummary.user_id == user_id))
+        await s.commit()
+    return {"messages": gone.rowcount or 0, "summaries": summaries.rowcount or 0}

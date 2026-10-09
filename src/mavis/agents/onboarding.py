@@ -43,7 +43,7 @@ async def _state(user_id: int, **patch) -> dict:
     return await users.update_nested(user_id, "onboarding", patch)
 
 
-async def start(user: User, invite: InviteCode) -> None:
+async def start(user: User, invite: InviteCode | None) -> None:
     s = get_settings()
     first = (user.name or "there").split()[0]
     await _state(user.id, step="clock", started_at=utcnow().isoformat(), tz_confirmed=False)

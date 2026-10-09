@@ -75,6 +75,14 @@ What Mavis can and cannot do today, what it costs, and what would lift each limi
 - Secrets (OTPs, passwords, API keys, card, bank, Aadhaar, PAN numbers) are masked before anything is stored. Masking is best effort, not a guarantee.
 - A Google or Slack consent link is valid for 10 minutes and works once. Do not forward it: whoever consents links their account to your Mavis.
 
+## 8a. Clearing the chat (/clear)
+
+- Telegram only. In Slack, `/clear` replies that clearing is Telegram only (Mavis keeps Slack messages).
+- "Clear this chat" deletes messages from the last 47 hours (Telegram refuses deletes at 48 hours). Bots can delete their own messages and the user's messages in private chats. Older messages stay until the user taps the chat name, then Clear history.
+- Mavis deletes the message ids it noted (stored from release 0019 on), plus a sliding range of up to `CLEAR_FALLBACK_SPAN` ids below the newest known one for messages it never saw. Undeletable messages are skipped quietly.
+- `/clear` is limited to `CLEAR_MAX_PER_HOUR` asks per user per hour. The command menu is not managed by the repo (no setMyCommands), so `/clear` is listed in `/settings` instead.
+- Operators can reset one user on the server with `uv run python scripts/reset_user.py <user id>`; it logs per-table row counts first and keeps no backup.
+
 ## 9. Not built yet (parked by owner decision)
 
 - Revenue intelligence (HubSpot, Salesforce, Fathom, org roles).

@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     inbound_burst: int = 60
     inbound_pending_rate_per_min: float = 5.0
     inbound_pending_burst: int = 3
+    # /clear (agents.clear): at most this many asks per user per hour, and how far down from the newest known
+    # message id the delete sweep reaches for messages Mavis never noted (ids are sequential per chat).
+    clear_max_per_hour: int = 4
+    clear_fallback_span: int = 300
 
     privacy_url: str = ""  # linked by /privacy and the bot description (Telegram requires it)
 
