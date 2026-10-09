@@ -234,7 +234,7 @@ async def test_disconnect_without_native_grant_goes_to_composio(parts):
 async def test_subscribe_parse_catalog_and_extras_delegate(parts):
     fallback, *_, router = parts
     assert await router.subscribe(U, "gmail.new", {}) == "ti_1"
-    assert router.parse_webhook({}, b"") == []
+    assert await router.parse_webhook({}, b"") == []
     assert [t.slug for t in await router.catalog()]
     assert await router.retire_legacy_triggers(U) == 0  # Composio-only extra still reachable
 

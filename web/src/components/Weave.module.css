@@ -1,0 +1,12 @@
+.weave { display: block; }
+.ring { fill: none; stroke: var(--weave-ink); stroke-width: 54; stroke-linecap: round; }
+.gap { fill: none; stroke: var(--bg); stroke-width: 86; }
+.orange { fill: none; stroke: var(--weave-orange); stroke-width: 54; stroke-linecap: round; }
+.animated .orange {
+  stroke-dasharray: 62 38;
+  animation: loop 3.6s linear infinite;
+}
+@keyframes loop { to { stroke-dashoffset: -100; } }
+@media (prefers-reduced-motion: reduce) {
+  .animated .orange { animation: none; }
+}

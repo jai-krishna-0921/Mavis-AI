@@ -70,8 +70,23 @@ def verify_signature(
         raise WebhookVerificationError("invalid webhook signature")
 
 
+def peek_provider_user(body: bytes) -> object:
+    """The provider-side user id a (verified) webhook body names, or None."""
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    meta, data = payload.get("metadata") or {}, payload.get("data") or payload.get("payload") or {}
+    if not isinstance(meta, dict) or not isinstance(data, dict):
+        return None
+    return meta.get("user_id") or data.get("user_id")
+
+
 def parse_composio_webhook(
-    headers: Mapping[str, str], body: bytes, secret: str, *, now: float | None = None
+    headers: Mapping[str, str], body: bytes, secret: str, *, now: float | None = None,
+    resolver: Callable[[object], int | None] = user_from_provider_id,
 ) -> list[Event]:
     verify_signature(secret, headers, body, now=now)
     try:
@@ -85,7 +100,7 @@ def parse_composio_webhook(
     if not isinstance(meta, dict) or not isinstance(data, dict):
         raise IntegrationError("webhook metadata/data is not a JSON object")
     slug = str(meta.get("trigger_slug") or payload.get("trigger_name") or payload.get("type") or "").upper()
-    user_id = user_from_provider_id(meta.get("user_id") or data.get("user_id"))
+    user_id = resolver(meta.get("user_id") or data.get("user_id"))
     builder = SLUG_BUILDERS.get(slug) or _BUILDERS.get(slug.split("_", 1)[0])
     if user_id is None or builder is None:
         return []

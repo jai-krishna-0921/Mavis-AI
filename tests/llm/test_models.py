@@ -912,6 +912,13 @@ async def test_best_effort_call_timeout_is_the_short_one_and_holds_no_cooldown(c
     assert models._ollama.cooldown_until == 0.0
 
 
+async def test_local_limiter_is_the_default_backend(settings):
+    from mavis.llm.limiter import LocalLimiterAdapter, get_limiter, reset_limiters
+
+    reset_limiters()
+    assert isinstance(get_limiter(False), LocalLimiterAdapter)
+    assert isinstance(get_limiter(True), LocalLimiterAdapter)
+
 # --- E2E run 2 (R4): a background timeout never blocks interactive work -------------------------------
 
 

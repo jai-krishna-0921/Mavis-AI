@@ -65,8 +65,19 @@ async def client(vendor):
         yield c
 
 
+async def seed_users(count: int = 40, status: str = "active") -> None:
+    """Mavis users 1..count. Connecting an account now needs a user the access rules admit, as in prod."""
+    from mavis.store import db as dbm
+    from mavis.store.models import User
+
+    async with dbm.Session() as s:
+        s.add_all(User(id=i, timezone="UTC", state={}, status=status) for i in range(1, count + 1))
+        await s.commit()
+
+
 @pytest.fixture
 async def tokens(native_env, db, client):
+    await seed_users()
     return NativeTokenStore(client)
 
 

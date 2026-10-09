@@ -29,6 +29,7 @@ from mavis.initiative import wiring as initiative_wiring
 from mavis.initiative.briefs_integrations import CalendarBrief, InboxBrief
 from mavis.initiative.email_triage import EmailTriage, email_prefilter
 from mavis.initiative.untrusted import wrap_untrusted
+from mavis.memory import personal_layer
 from mavis.timers.system import register_system_wakeup
 from mavis.tools.integrations import get_connection_cache, get_provider
 from mavis.tools.integrations.actions import (
@@ -153,6 +154,15 @@ async def heal_poll_chains(user_id: int) -> None:
     await get_poller().ensure_chains(user_id)
 
 
+async def check_provider_key() -> None:
+    """A non-prod stack must not share a Composio key that holds prod accounts (spec 6.2)."""
+    from mavis.tools.integrations.identity import check_shared_key
+
+    s = get_settings()
+    if s.integration_provider == "composio" and s.composio_api_key:
+        await check_shared_key(get_provider())
+
+
 async def heal_all_poll_chains() -> None:
     armed = await get_poller().ensure_all_chains()
     log.info("poller.chains_ensured", armed=armed)
@@ -232,7 +242,8 @@ def get_first_sync() -> FirstSync:
     from mavis.loops.service import LoopService
 
     return FirstSync(provider=get_provider(), memory=JobLearner(), loops=LoopService(get_bus()),
-                     bus=_LazyBus(), tz_of=user_timezone, connectors=get_connector_ingest())
+                     bus=_LazyBus(), tz_of=user_timezone, connectors=get_connector_ingest(),
+                     meetings=personal_layer.record_meetings, after_sync=personal_layer.schedule)
 
 
 @lru_cache
@@ -366,6 +377,7 @@ def register_integrations(registry: ToolRegistry | None = None) -> None:
     register_system_wakeup(POLL_KIND, get_poller().on_wakeup)
     # Self-healing: the poll chain lives in the wakeups table, so re-arm it on start and each morning.
     register_startup_hook(heal_all_poll_chains)
+    register_startup_hook(check_provider_key)
     routines.register_morning_hook(heal_poll_chains)
     if workspace_enabled():
         routines.register_morning_hook(nudge_upgrade)

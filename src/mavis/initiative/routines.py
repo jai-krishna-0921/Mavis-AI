@@ -11,20 +11,23 @@ from typing import Any, Protocol
 import structlog
 from sqlalchemy import func, select
 
+from mavis.access import web_prefs
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import NotifyIntent
 from mavis.domain.events import Trust
+from mavis.domain.jitter import user_offset
 from mavis.domain.loops import LoopKind, LoopOrigin, LoopUpsert
 from mavis.domain.messages import Role
 from mavis.domain.timefmt import due_label
-from mavis.domain.wakeups import WakeupKind
+from mavis.domain.wakeups import WakeupKind, WakeupStatus
 from mavis.initiative.executor import InitiativeExecutor
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.loops.service import LoopService
 from mavis.policy import outcomes
 from mavis.store.db import Session
 from mavis.store.models import Message
+from mavis.store.repo import users
 from mavis.timers.service import WakeupService
 
 log = structlog.get_logger()
@@ -152,6 +155,22 @@ class Routines:
                     raise
                 log.exception("routines.reschedule_failed", user=user.id)
 
+    async def on_timezone_change(self, user_id: int, old: str, new: str) -> None:
+        """The user moved: the morning check-in is re-anchored to their new local time. One-off reminders keep
+        their absolute instant (they are stored in UTC and untouched here)."""
+        user = await users.get(user_id)
+        morning = [lp for lp in await self._loops.active(user_id)
+                   if lp.kind is LoopKind.ROUTINE and lp.title == MORNING_TITLE]
+        if not morning:
+            return
+        now = timeutil.now()
+        recent = await self._wakeups.history(user_id, WakeupKind.ROUTINE, now - timedelta(days=2))
+        fired_today = [w for w in recent
+                       if w.status is WakeupStatus.FIRED and now - timedelta(hours=20) < w.due_at <= now]
+        await self._wakeups.cancel_where(user_id, [WakeupKind.ROUTINE], morning[0].id)
+        # a check-in that already went out in the old zone is not repeated in the new one the same day
+        await self._schedule_morning(user, morning[0].id, next_day=bool(fired_today))
+
     async def reschedule(self, user, loop_id: int | None) -> None:
         """A check-in that fired far too late is skipped; the next one is booked for tomorrow."""
         await self._schedule_morning(user, loop_id, next_day=True)
@@ -215,6 +234,7 @@ class Routines:
 
     async def _schedule_morning(self, user, loop_id: int | None, next_day: bool) -> int:
         at = await self.next_morning_time(user, next_day=next_day)
+        at += user_offset(user.id)  # spread the fan-out over the first minutes
         local_day = timeutil.to_local(at, user.timezone).date().isoformat()
         return await self._wakeups.wake_me(
             user.id, at, MORNING_TITLE, loop_id, WakeupKind.ROUTINE,
@@ -234,6 +254,8 @@ class Routines:
         return candidate.astimezone(UTC)
 
     async def learned_checkin_time(self, user, weekend: bool) -> time:
+        if (chosen := web_prefs.morning_time(user)) is not None:
+            return _parse_hhmm(chosen)  # what the user set beats what Mavis learned
         default = _parse_hhmm(get_settings().morning_checkin_time)
         since = timeutil.now() - timedelta(days=7)
         async with Session() as s:

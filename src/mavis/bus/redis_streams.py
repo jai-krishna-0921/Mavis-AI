@@ -13,10 +13,10 @@ from redis.exceptions import ResponseError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from mavis.bus.base import BLOCK_MS, SELF_RETRYING, EventHandler, JobHandler, Stream, run_with_inline_retries
+from mavis.config import get_settings
 from mavis.domain.events import Event, Job
 
 log = structlog.get_logger(__name__)
-MAXLEN = 100_000
 EVENTS_READ_COUNT = 10  # events are short; batching them is unchanged
 JOBS_READ_COUNT = 1  # see consume_jobs
 
@@ -43,8 +43,8 @@ class RedisStreamsBus:
         if not fresh:
             return False
         try:
-            await self._r.xadd(Stream.EVENTS.value, {"data": event.model_dump_json()}, maxlen=MAXLEN,
-                               approximate=True)
+            await self._r.xadd(Stream.EVENTS.value, {"data": event.model_dump_json()},
+                               maxlen=get_settings().stream_maxlen, approximate=True)
         except BaseException:
             # release the dedupe key so a retry of this event is not mistaken for a duplicate
             await self._r.delete(f"mavis:seen:{event.id}")
@@ -52,8 +52,8 @@ class RedisStreamsBus:
         return True
 
     async def enqueue(self, job: Job) -> None:
-        await self._r.xadd(Stream.JOBS.value, {"data": job.model_dump_json()}, maxlen=MAXLEN,
-                           approximate=True)
+        await self._r.xadd(Stream.JOBS.value, {"data": job.model_dump_json()},
+                           maxlen=get_settings().stream_maxlen, approximate=True)
 
     async def consume_events(self, group: str, consumer: str, handler: EventHandler) -> None:
         self_retrying = getattr(handler, SELF_RETRYING, False)

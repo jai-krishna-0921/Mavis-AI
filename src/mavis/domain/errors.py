@@ -49,6 +49,11 @@ class LLMError(MavisError):
     """Model unreachable, timed out, or produced unusable output after retries."""
 
 
+class BudgetExceededLLM(LLMError):
+    """The current user's daily budget does not allow this call (Phase 11). Callers treat it as any
+    LLMError: background work is skipped or falls back to its heuristic."""
+
+
 class ConnectionRequired(MavisError):
     def __init__(self, capability: Capability, reason: str, *, revoked: bool = False) -> None:
         super().__init__(f"{capability.value} not connected: {reason}")
@@ -114,3 +119,8 @@ class NoSuchConnection(IntegrationError):
 
 class WebhookVerificationError(IntegrationError):
     """Inbound webhook failed signature/timestamp verification."""
+
+
+class StartupRefused(RuntimeError):
+    """A startup check found a configuration that must not run. Unlike other startup-hook failures it stops
+    the process (a staging stack sharing the prod Composio key, for one)."""

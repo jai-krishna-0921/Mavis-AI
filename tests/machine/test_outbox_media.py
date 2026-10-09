@@ -3,6 +3,7 @@ from __future__ import annotations
 from mavis.channels.fake import FakeChannel
 from mavis.channels.outbox_sender import OutboxSender
 from mavis.domain.messages import Outbound
+from mavis.store import artifacts
 from mavis.store.repo import outbox, users
 
 
@@ -13,20 +14,22 @@ async def _user(chat):
 
 async def test_photo_row_is_sent_as_a_photo(db):
     u = await _user(6001)
-    await outbox.enqueue_now(Outbound(user_id=u.id, text="Screenshot of tea.example", photo_path="/tmp/t.png",
+    shot = str(artifacts.user_dir(u.id) / "t.png")
+    await outbox.enqueue_now(Outbound(user_id=u.id, text="Screenshot of tea.example", photo_path=shot,
                                       dedupe_key="task:1:shot:1"))
     ch = FakeChannel()
     assert await OutboxSender(ch).run_once() == 1
-    assert ch.photos == [(6001, "/tmp/t.png", "Screenshot of tea.example")]
+    assert ch.photos == [(6001, shot, "Screenshot of tea.example")]
 
 
 async def test_album_row_is_sent_as_a_media_group(db):
     u = await _user(6002)
+    shots = [str(artifacts.user_dir(u.id) / n) for n in ("a.png", "b.png", "c.png")]
     await outbox.enqueue_now(Outbound(user_id=u.id, text="step 1\nstep 2\nstep 3",
-                                      media=["/a.png", "/b.png", "/c.png"], dedupe_key="task:2:album"))
+                                      media=shots, dedupe_key="task:2:album"))
     ch = FakeChannel()
     await OutboxSender(ch).run_once()
-    assert ch.albums == [(6002, ["/a.png", "/b.png", "/c.png"], ["step 1", "step 2", "step 3"])]
+    assert ch.albums == [(6002, shots, ["step 1", "step 2", "step 3"])]
 
 
 async def test_paced_rows_are_not_claimed_this_pass(db, monkeypatch):

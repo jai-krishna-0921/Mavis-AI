@@ -8,6 +8,7 @@ from typing import Literal
 
 from mavis.channels.base import MessageGone
 from mavis.channels.formatting import to_plain
+from mavis.channels.sent_log import note_sent
 from mavis.channels.text import split_text
 from mavis.config import get_settings
 from mavis.domain.messages import Button
@@ -27,10 +28,15 @@ class FakeChannel:
         self.sent: list[SentItem] = []
         self.fail_next: list[Exception] = []
         self.reactions: list[tuple[int, int, str | None]] = []  # (chat_id, message_id, emoji or None=clear)
+        self.left: list[int] = []  # chats the bot was told to leave
         self.edits: list[tuple[int, int, str, list[list[Button]]]] = []  # (chat, message, text, buttons)
         self.photos: list[tuple[int, str, str]] = []  # (chat_id, path, caption)
         self.albums: list[tuple[int, list[str], list[str]]] = []  # (chat_id, paths, captions)
         self.gone: set[int] = set()  # message ids whose edit raises MessageGone
+        self.deleted: list[tuple[int, list[int]]] = []  # (chat_id, ids) per delete_messages call
+        self.delete_results: list[bool | Exception] = []  # scripted outcome per call; empty = success
+        self.undeletable: set[int] = set()  # ids the provider skips (too old, already gone)
+        self.record_ids = False  # True: note sent ids in the store like TelegramChannel (needs a database)
         self._next_id = 1
 
     @property
@@ -40,6 +46,10 @@ class FakeChannel:
     def _maybe_fail(self) -> None:
         if self.fail_next:
             raise self.fail_next.pop(0)
+
+    async def _note(self, chat_id: int, ids: list[int]) -> None:
+        if self.record_ids:
+            await note_sent(chat_id, ids)
 
     def _id(self) -> int:
         self._next_id += 1
@@ -55,12 +65,15 @@ class FakeChannel:
             last = i == len(chunks) - 1
             self.sent.append(SentItem("text", chat_id, chunk, (buttons or []) if last else []))
             ids.append(self._id())
+        await self._note(chat_id, ids)
         return ids
 
     async def send_document(self, chat_id: int, path: str, caption: str = "") -> int:
         self._maybe_fail()
         self.sent.append(SentItem("document", chat_id, caption, path=path))
-        return self._id()
+        msg_id = self._id()
+        await self._note(chat_id, [msg_id])
+        return msg_id
 
     async def send_typing(self, chat_id: int) -> None:
         self.sent.append(SentItem("typing", chat_id))
@@ -76,7 +89,9 @@ class FakeChannel:
         self._maybe_fail()
         self.photos.append((chat_id, path, caption))
         self.sent.append(SentItem("photo", chat_id, caption, path=path))
-        return self._id()
+        msg_id = self._id()
+        await self._note(chat_id, [msg_id])
+        return msg_id
 
     async def send_media_group(self, chat_id: int, paths: list[str],
                                captions: list[str] | None = None) -> list[int]:
@@ -84,10 +99,25 @@ class FakeChannel:
         caps = list(captions or [""] * len(paths))
         self.albums.append((chat_id, list(paths), caps))
         self.sent.append(SentItem("album", chat_id, " | ".join(caps)))
-        return [self._id() for _ in paths]
+        ids = [self._id() for _ in paths]
+        await self._note(chat_id, ids)
+        return ids
 
     async def react(self, chat_id: int, message_id: int, emoji: str | None) -> None:
         self.reactions.append((chat_id, message_id, emoji))
+
+    async def delete_messages(self, chat_id: int, message_ids: list[int]) -> bool:
+        if not 1 <= len(message_ids) <= 100:
+            raise ValueError("deleteMessages takes 1 to 100 ids")
+        outcome = self.delete_results.pop(0) if self.delete_results else True
+        if isinstance(outcome, Exception):
+            raise outcome
+        if outcome:
+            self.deleted.append((chat_id, [m for m in message_ids if m not in self.undeletable]))
+        return outcome
+
+    async def leave_chat(self, chat_id: int) -> None:
+        self.left.append(chat_id)
 
     async def download_file(self, file_id: str, dest_path: str) -> str:
         Path(dest_path).parent.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 - test double

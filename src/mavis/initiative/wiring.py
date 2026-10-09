@@ -16,6 +16,7 @@ from mavis.initiative.quiet import QuietTracker
 from mavis.initiative.reasoner import Reasoner
 from mavis.initiative.routines import Routines
 from mavis.loops.service import LoopService, loops_from_extraction
+from mavis.memory import personal_layer
 from mavis.policy.pings import PingPolicy
 from mavis.timers.runner import TimerRunner
 from mavis.timers.service import WakeupService
@@ -46,7 +47,8 @@ def build_initiative(bus: EventBus, memory, *, leader: LeaderLock | None = None,
     quiet = QuietTracker(wakeups)
     executor = InitiativeExecutor(bus, loops, wakeups, policy, composer, quiet)
     routines = Routines(loops, wakeups, executor)
-    handler = InitiativeHandler(filt=EventFilter(embed), reasoner=reasoner, executor=executor, loops=loops,
+    filt = EventFilter(embed, centrality=personal_layer.centrality)
+    handler = InitiativeHandler(filt=filt, reasoner=reasoner, executor=executor, loops=loops,
                                 wakeups=wakeups, routines=routines, quiet=quiet)
     timer = TimerRunner(bus, wakeups, leader or make_leader(), get_settings().timer_interval_s, loops=loops)
     return Initiative(bus, loops, wakeups, policy, composer, reasoner, quiet, executor, routines, handler,
@@ -84,6 +86,9 @@ def wire_initiative(register_handlers: bool = True) -> Initiative:
     if init.loops_from_extraction not in memory.on_extraction:
         memory.on_extraction.append(init.loops_from_extraction)
     memory.set_loops_reader(init.loops)
+    from mavis.access.preferences import register_timezone_hook
+
+    register_timezone_hook(init.routines.on_timezone_change)
     if register_handlers:
         register(init.handler)
     return init

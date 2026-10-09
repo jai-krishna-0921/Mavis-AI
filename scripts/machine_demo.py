@@ -337,14 +337,20 @@ async def report_to_owner(s: Settings, out: Path, summary: str, results) -> None
     if owner is None:
         print("the mirror chat has no user row: the report stays in the saved run folder")
         return
-    shots = [str(p) for p in sorted(out.glob("*/screenshots/*"))[:4]]  # noqa: ASYNC240
+    from mavis.store import artifacts
+
     run = out.name
+    # Files reach Telegram only from the user's own artifacts directory (spec 6.1): stage the report there.
+    picked = sorted(out.glob("*/screenshots/*"))[:4]  # noqa: ASYNC240
+    cases = [p.parent.parent.name for p in picked]
+    shots = [str(artifacts.stage(owner.id, p, name=f"{run}-{i}-{p.name}")) for i, p in enumerate(picked)]
+    report = artifacts.stage(owner.id, out / "report.html", name=f"{run}-report.html")
     await outbox.enqueue_now(Outbound(user_id=owner.id, text=f"[test] Machine demo {run}\n{summary}",
                                       dedupe_key=f"e2e:{run}:summary"))
     if len(shots) >= 2:
-        await outbox.enqueue_now(Outbound(user_id=owner.id, media=shots, text="\n".join(Path(p).parent.parent.name
-                                          for p in shots), dedupe_key=f"e2e:{run}:album"))
-    await outbox.enqueue_now(Outbound(user_id=owner.id, text="report.html", document_path=str(out / "report.html"),
+        await outbox.enqueue_now(Outbound(user_id=owner.id, media=shots, text="\n".join(cases),
+                                          dedupe_key=f"e2e:{run}:album"))
+    await outbox.enqueue_now(Outbound(user_id=owner.id, text="report.html", document_path=str(report),
                                       dedupe_key=f"e2e:{run}:report"))
 
 

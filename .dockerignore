@@ -13,3 +13,7 @@ scripts/__pycache__
 .ruff_cache
 .superpowers
 *.pem
+
+web/node_modules
+web/dist
+.worktrees

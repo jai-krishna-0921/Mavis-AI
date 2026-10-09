@@ -64,7 +64,8 @@ def get_engine() -> AsyncEngine:
         kwargs: dict[str, Any] = (
             {"connect_args": {"timeout": 30}}
             if url.startswith("sqlite")
-            else {"pool_size": 10, "max_overflow": 10, "pool_pre_ping": True}
+            else {"pool_size": get_settings().db_pool_size, "max_overflow": get_settings().db_max_overflow,
+                "pool_pre_ping": True}
         )
         _engine = create_async_engine(url, **kwargs)
         _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)

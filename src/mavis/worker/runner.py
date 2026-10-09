@@ -16,10 +16,12 @@ import structlog
 from mavis.bus.base import SELF_RETRYING, EventBus, run_with_inline_retries
 from mavis.channels import presence, routing
 from mavis.config import get_settings
-from mavis.domain.errors import LLMError
+from mavis.domain.errors import LLMError, StartupRefused
 from mavis.domain.events import Event, EventType, Job, JobKind, Trust
 from mavis.domain.messages import Outbound
+from mavis.llm.context import bind_user
 from mavis.store.repo import outbox, users
+from mavis.worker import gates
 from mavis.worker.locks import lock, user_lock
 
 log = structlog.get_logger(__name__)
@@ -31,6 +33,8 @@ WORKER_GROUP = "workers"
 FALLBACK_TEXT = "Give me a sec, my brain is a bit slow right now. Try me again in a minute?"
 
 CHAT_EVENT_TYPES = frozenset({EventType.USER_MESSAGE, EventType.BUTTON_PRESSED})
+# Event types no handler claims, only an event gate (Phase 11): they must still reach run_gates.
+GATE_ONLY_TYPES = frozenset({EventType.RATE_LIMITED, EventType.CHAT_MEMBER})
 
 _ack_tasks: set[asyncio.Task] = set()  # strong refs so fire-and-forget acks are not GC'd
 
@@ -62,12 +66,16 @@ def clear_handlers() -> None:
     _event_handlers.clear()
     _job_handlers.clear()
     _startup_hooks.clear()
+    gates.clear_gates()
 
 
 async def run_startup_hooks() -> None:
     for fn in list(_startup_hooks):
         try:
             await fn()
+        except StartupRefused:
+            log.error("worker.startup_refused", hook=getattr(fn, "__name__", "?"))
+            raise
         except Exception as exc:  # noqa: BLE001 - a failed heal must not keep the worker down
             log.warning("worker.startup_hook_failed", hook=getattr(fn, "__name__", "?"),
                         error=type(exc).__name__)
@@ -100,6 +108,8 @@ async def _acknowledge(event: Event) -> None:
     if event.type is not EventType.USER_MESSAGE or message_id is None \
             or event.source not in ("telegram", routing.SLACK_SOURCE):
         return
+    if event.payload.get("pending"):
+        return  # not admitted by the access gate yet: no reaction (a Telegram call) for strangers
     try:
         user = await users.get(event.user_id)
         chat = routing.turn_chat(event, user)
@@ -109,9 +119,21 @@ async def _acknowledge(event: Event) -> None:
         log.warning("worker.ack_failed", error=type(exc).__name__)
 
 
+def _purpose(event: Event) -> str:
+    """What an LLM call made while handling this event is for (usage metering, spec 9.2)."""
+    if event.type in CHAT_EVENT_TYPES:
+        return "chat"
+    return {EventType.EMAIL_RECEIVED: "attention", EventType.WAKEUP: "initiative"}.get(event.type, "other")
+
+
+def _job_purpose(job: Job) -> str:
+    return {JobKind.RUN_TASK: "task", JobKind.RESUME_TASK: "task", JobKind.LEARN: "memory",
+            JobKind.CONSOLIDATE: "memory"}.get(job.kind, "other")
+
+
 async def handle_event(event: Event) -> None:
     handlers = list(_event_handlers.get(event.type, []))
-    if not handlers:
+    if not handlers and event.type not in GATE_ONLY_TYPES:
         log.debug("worker.no_handler", event_type=event.type)
         return
     with structlog.contextvars.bound_contextvars(event_id=event.id, user_id=event.user_id):
@@ -127,9 +149,13 @@ async def handle_event(event: Event) -> None:
         route_token = routing.bind(event)  # replies queued by this turn go back to the channel it came from
         try:
             async with _event_lock(event):
-                await run_with_inline_retries(
-                    lambda: _run_handlers(event, handlers), what="event", ref=event.id
-                )
+                async def attempt() -> None:
+                    # Event gates (access, commands, cooldowns) run before any handler, on every attempt
+                    with bind_user(event.user_id, _purpose(event)):
+                        if await gates.run_gates(event):
+                            await _run_handlers(event, handlers)
+
+                await run_with_inline_retries(attempt, what="event", ref=event.id)
         finally:
             routing.unbind(route_token)
 
@@ -142,7 +168,8 @@ async def handle_job(job: Job) -> None:
     if fn is None:
         log.warning("worker.no_job_handler", kind=job.kind)
         return
-    with structlog.contextvars.bound_contextvars(job_id=job.id, user_id=job.user_id, kind=job.kind.value):
+    with structlog.contextvars.bound_contextvars(job_id=job.id, user_id=job.user_id, kind=job.kind.value), \
+            bind_user(job.user_id, _job_purpose(job)):
         await fn(job)
 
 
@@ -153,6 +180,22 @@ async def run_worker(bus: EventBus, consumer: str, concurrency: int | None = Non
     """
     n = max(1, concurrency or get_settings().worker_concurrency)
     await run_startup_hooks()
+    s = get_settings()
+    if s.worker_scheduler == "mailbox":
+        from mavis import bus as bus_mod
+        from mavis.worker.mailbox import MemoryMailbox, RedisMailbox
+        from mavis.worker.scheduler import Scheduler
+
+        client = bus_mod.get_redis()
+        backend = (RedisMailbox(client, lease_ms=s.mailbox_lease_ms, take=s.coalesce_max_messages,
+                                cap=s.mailbox_cap) if client is not None
+                   else MemoryMailbox(lease_ms=s.mailbox_lease_ms, take=s.coalesce_max_messages,
+                                      cap=s.mailbox_cap))
+        sched = Scheduler(backend, reap_on_idle=client is None)
+        mail_loops = [bus.consume_events(WORKER_GROUP, f"{consumer}-{i}", sched.intake) for i in range(n)]
+        mail_loops += [bus.consume_jobs(WORKER_GROUP, f"{consumer}-{i}", handle_job) for i in range(n)]
+        await asyncio.gather(*mail_loops, *sched.executors(consumer))
+        return
     loops = []
     for i in range(n):
         name = f"{consumer}-{i}"

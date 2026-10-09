@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 
 import structlog
@@ -39,6 +41,32 @@ def wakeup_event(w: Wakeup, loop_trusted: bool = True) -> Event:
     )
 
 
+TickFn = Callable[[], Awaitable[object]]
+_ticks: dict[str, tuple[TickFn, float]] = {}
+_last_tick: dict[str, float] = {}
+
+
+def register_timer_tick(name: str, fn: TickFn, every_s: float) -> None:
+    """Periodic plumbing in the timer role (single leader): reapers, watchdog, cleanups."""
+    _ticks[name] = (fn, every_s)
+
+
+def clear_timer_ticks() -> None:
+    _ticks.clear()
+    _last_tick.clear()
+
+
+async def _run_ticks() -> None:
+    now = time.monotonic()
+    for name, (fn, every) in list(_ticks.items()):
+        if now - _last_tick.get(name, float("-inf")) >= every:
+            _last_tick[name] = now
+            try:
+                await fn()
+            except Exception:  # noqa: BLE001
+                log.exception("timer.tick_hook_failed", hook=name)
+
+
 class TimerRunner:
     def __init__(self, bus: EventBus, wakeups: WakeupService, leader: LeaderLock, interval_s: float,
                  loops: LoopService | None = None) -> None:
@@ -69,6 +97,7 @@ class TimerRunner:
                 log.info("timer.loops_expired", count=expired)
         if fired:
             log.info("timer.fired", count=len(fired))
+        await _run_ticks()
         return len(fired)
 
     async def run_forever(self, stop: asyncio.Event | None = None) -> None:
@@ -88,9 +117,14 @@ class TimerRunner:
 
 
 async def run_timer(stop: asyncio.Event | None = None) -> None:
-    from mavis.bus import get_bus
+    from mavis.bus import get_bus, get_redis
 
     bus = get_bus()
+    s = get_settings()
+    if s.worker_scheduler == "mailbox" and (client := get_redis()) is not None:
+        from mavis.worker.mailbox import RedisMailbox
+
+        register_timer_tick("mailbox_reaper", RedisMailbox(client).reap, 15)
     runner = TimerRunner(bus, WakeupService(), make_leader(), get_settings().timer_interval_s,
                          loops=LoopService(bus))
     await runner.run_forever(stop)

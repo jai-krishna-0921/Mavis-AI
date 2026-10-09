@@ -19,7 +19,7 @@ from typing import Any
 import structlog
 
 from mavis.domain.events import Event, EventType
-from mavis.memory import records
+from mavis.memory import controls, personal, records
 from mavis.store.repo import profile as profile_repo
 from mavis.store.repo import users
 from mavis.tools.integrations.native import guard
@@ -61,27 +61,62 @@ class ConnectorIngest:
         return [n for n in (user.name, card.name) if n]
 
     async def email(self, user_id: int, n: dict) -> IngestDecision:
-        """Queue one normalized email for learning. Returns the decision (graph, bulk or drop)."""
+        """Queue one normalized email for learning. Returns the decision (graph, bulk or drop). Mail the user
+        sent is their own words: it teaches their address and goes to the self-authored path."""
         try:
             ident = await load_identities(user_id)
-            if n.get("from_me") or "SENT" in {str(x).upper() for x in n.get("labels") or []}:
-                if n.get("from_address"):
-                    await remember_identity(user_id, emails=(str(n["from_address"]),))
+            labels = {str(x).upper() for x in n.get("labels") or []}
+            own = bool(n.get("from_me")) or "SENT" in labels
+            if own and n.get("from_address"):
+                await remember_identity(user_id, emails=(str(n["from_address"]),))
+                ident = await load_identities(user_id)
+            if "gmail" in await controls.paused(user_id):
+                return IngestDecision("drop", "paused")
+            mute = await guard.load_mute(user_id)
+            if own:
+                if not labels & (guard.EXCLUDED_LABELS | {"DRAFT"}):
+                    job = records.email_record(user_id, n, self_ids=ident, self_names=await self._names(user_id))
+                    if job is not None and job.authored:
+                        await self._authored(job, mute)
                 return IngestDecision("drop", "own_mail")
-            decision = guard.should_ingest_email(n, await guard.load_mute(user_id))
+            decision = guard.should_ingest_email(n, mute)
             if decision:
                 job = records.email_record(user_id, n, self_ids=ident, self_names=await self._names(user_id))
                 if job is not None:
-                    await self._submit(job)
+                    await self._offer(job, mute)
             return decision
         except Exception as exc:  # noqa: BLE001 - ingest must never break triage
             log.warning("connector_ingest.email_failed", error=type(exc).__name__, exc_info=True)
             return IngestDecision("drop", "error")
 
+    async def _offer(self, job: records.RecordJob, mute: guard.Mute) -> None:
+        """A kept record: its people count toward the personal layer, and it is learned unless its sender is
+        one the user told Mavis to stop learning about."""
+        if job.authored:
+            await self._authored(job, mute)
+            return
+        await personal.note_record(job)
+        if not await personal.sender_suppressed(job):
+            await self._submit(job)
+
+    async def _authored(self, job: records.RecordJob, mute: guard.Mute) -> None:
+        """The user's own words. Muted recipients and channels are respected; the style measure always sees
+        the message; an extraction (a LEARN job) needs enough words and a slot in today's budget."""
+        if any(mute.hits(address=p.email) for p in job.people if not p.is_user and p.email):
+            return
+        await personal.note_record(job)
+        body = job.text.partition("\n\n")[2]
+        if len(body.split()) < controls.MIN_AUTHORED_WORDS or not await controls.take_authored_budget(job.user_id):
+            return
+        await self._submit(job)
+
     async def slack(self, user_id: int, n: dict) -> IngestDecision:
         try:
+            if "slack" in await controls.paused(user_id):
+                return IngestDecision("drop", "paused")
             ident = await load_identities(user_id)
-            decision = guard.should_ingest_slack(n, await guard.load_mute(user_id))
+            mute = await guard.load_mute(user_id)
+            decision = guard.should_ingest_slack(n, mute)
             if decision:
                 # The workspace id of the user's own grant names the record, so a webhook, a poll and a
                 # backfill of one message share a reference; the event's team only marks foreign workspaces.
@@ -90,7 +125,7 @@ class ConnectorIngest:
                 job = records.slack_record(user_id, n, team=team, self_ids=ident, directory=directory,
                                            self_names=await self._names(user_id))
                 if job is not None:
-                    await self._submit(job)
+                    await self._offer(job, mute)
             return decision
         except Exception as exc:  # noqa: BLE001
             log.warning("connector_ingest.slack_failed", error=type(exc).__name__, exc_info=True)

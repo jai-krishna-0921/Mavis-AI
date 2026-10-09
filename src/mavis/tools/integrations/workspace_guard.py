@@ -21,6 +21,7 @@ from typing import Any
 
 import structlog
 
+from mavis import bus
 from mavis.domain.errors import ActionFailed
 from mavis.domain.policy import RiskClass
 from mavis.domain.tasks import TaskOrigin
@@ -58,7 +59,16 @@ def created_ids(data: Any) -> list[str]:
     return found
 
 
-def record_created(task_id: int | None, ids: Iterable[str]) -> None:
+WSGUARD_TTL_S = 86400
+
+
+def _wsguard_key(task_id: int) -> str:
+    return f"mavis:wsguard:t{int(task_id)}"
+
+
+async def record_created(task_id: int | None, ids: Iterable[str]) -> None:
+    """Remember what a task made. Written through to Redis (another worker process may read it); the
+    in-memory dict is the fallback and the local cache."""
     ids = [i for i in ids if i]
     if task_id is None or not ids:
         return
@@ -66,10 +76,23 @@ def record_created(task_id: int | None, ids: Iterable[str]) -> None:
     _created.move_to_end(task_id)
     while len(_created) > MAX_TRACKED_TASKS:
         _created.popitem(last=False)
+    if (client := bus.get_redis()) is not None:
+        try:
+            await client.sadd(_wsguard_key(task_id), *ids)
+            await client.expire(_wsguard_key(task_id), WSGUARD_TTL_S)
+        except Exception as exc:  # noqa: BLE001 - the local copy still serves this process
+            log.warning("wsguard.redis_write_failed", error=type(exc).__name__)
 
 
-def created_by(task_id: int) -> set[str]:
-    return set(_created.get(task_id, ()))
+async def created_by(task_id: int) -> set[str]:
+    found = set(_created.get(task_id, ()))
+    if (client := bus.get_redis()) is not None:
+        try:
+            found |= {m.decode() if isinstance(m, bytes) else str(m)
+                      for m in await client.smembers(_wsguard_key(task_id))}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("wsguard.redis_read_failed", error=type(exc).__name__)
+    return found
 
 
 # --- users.state["workspace"] -------------------------------------------------------------------------
@@ -411,7 +434,7 @@ async def tainted_scope(ctx: ToolContext) -> Scope | None:
     run = current_run.get()
     if not (task.tainted or (run is not None and run.tainted)):
         return None
-    created = set(created_by(task.id))
+    created = await created_by(task.id)
     for _ in range(MAX_PARENT_HOPS):
         if task.parent_id is None:
             break
@@ -419,7 +442,7 @@ async def tainted_scope(ctx: ToolContext) -> Scope | None:
         if parent is None:
             break
         task = parent
-        created |= created_by(task.id)
+        created |= await created_by(task.id)
     # Only a goal the walk proved is the root counts: a missing parent or a chain longer than
     # MAX_PARENT_HOPS leaves `task` mid-chain, and a mid-chain goal is model text, so fail closed.
     at_root = task.parent_id is None

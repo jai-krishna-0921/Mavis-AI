@@ -18,7 +18,7 @@ OWNER = 111
 def test_chat(settings, monkeypatch):
     monkeypatch.setattr(settings, "live_test_enabled", True)
     monkeypatch.setattr(settings, "test_telegram_chat_id", TEST_CHAT)
-    monkeypatch.setattr(settings, "allowed_telegram_chat_ids", [OWNER])
+    monkeypatch.setattr(settings, "owner_telegram_chat_ids", [OWNER])
     return settings
 
 
@@ -33,8 +33,9 @@ async def test_test_chat_sends_go_to_the_sink_and_others_pass_through(test_chat)
     await ch.send_text(OWNER, "for the owner")
     assert inner.texts == ["for the owner"]
     rows = read_sink(test_chat.data_dir)
-    assert [r["kind"] for r in rows] == ["text", "document"]
+    assert [r["kind"] for r in rows] == ["text", "document", "reaction"]
     assert rows[0]["text"] == "hello test" and rows[0]["buttons"] == [["OK"]]
+    assert rows[2]["text"] == "\N{EYES}" and rows[2]["message_id"] == 5
     assert all(r["chat_id"] == TEST_CHAT for r in rows)
     json.dumps(rows)
 
@@ -84,7 +85,7 @@ async def test_test_path_is_off_unless_enabled_and_synthetic(test_chat, monkeypa
                                                              allowlist):
     monkeypatch.setattr(test_chat, "live_test_enabled", enabled)
     monkeypatch.setattr(test_chat, "test_telegram_chat_id", chat)
-    monkeypatch.setattr(test_chat, "allowed_telegram_chat_ids", allowlist)
+    monkeypatch.setattr(test_chat, "owner_telegram_chat_ids", allowlist)
     assert active_test_chat() is None
     set_channel(None)
     try:

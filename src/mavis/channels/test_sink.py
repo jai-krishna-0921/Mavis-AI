@@ -41,7 +41,7 @@ def active_test_chat(s: Settings | None = None) -> int | None:
     chat = s.test_telegram_chat_id
     if not s.live_test_enabled or chat is None:
         return None
-    if chat in s.allowed_telegram_chat_ids:
+    if chat in s.owner_telegram_chat_ids:
         reason = "the test chat is in ALLOWED_TELEGRAM_CHAT_IDS (a real user's replies would be swallowed)"
     elif chat >= SYNTHETIC_BELOW:
         reason = f"the test chat id must be below {SYNTHETIC_BELOW} so it can never be a real Telegram chat"
@@ -53,10 +53,15 @@ def active_test_chat(s: Settings | None = None) -> int | None:
     return None
 
 
+def is_test_chat(chat_id: int | None, s: Settings | None = None) -> bool:
+    """True when `chat_id` is an enabled, safe synthetic test chat (contract E)."""
+    return chat_id is not None and chat_id == active_test_chat(s)
+
+
 def _mirror_chat(s: Settings) -> int | None:
     """The owner's chat to mirror into: set, allowlisted, and never the test chat itself."""
     chat = s.test_mirror_chat_id
-    if chat is None or chat not in s.allowed_telegram_chat_ids:
+    if chat is None or chat not in s.owner_telegram_chat_ids:
         return None
     return chat
 
@@ -80,6 +85,9 @@ class SinkChannel:
 
     def _is_test(self, chat_id: int) -> bool:
         """Shared contract E: the single place that decides whether a chat is the sink's."""
+        return chat_id == self._test
+
+    def _is_test(self, chat_id: int) -> bool:
         return chat_id == self._test
 
     def _record(self, kind: str, chat_id: int, text: str, **extra: Any) -> int:
@@ -168,8 +176,10 @@ class SinkChannel:
             await self._inner.send_typing(chat_id)
 
     async def react(self, chat_id: int, message_id: int, emoji: str | None) -> None:
-        if not self._is_test(chat_id):
-            await self._inner.react(chat_id, message_id, emoji)
+        if self._is_test(chat_id):  # recorded so live checks can see the mood reactions too
+            self._record("reaction", chat_id, emoji or "", message_id=message_id)
+            return
+        await self._inner.react(chat_id, message_id, emoji)
 
     async def download_file(self, file_id: str, dest_path: str) -> str:
         if not file_id.startswith(FIXTURE_PREFIX):
@@ -182,3 +192,7 @@ class SinkChannel:
         Path(dest_path).parent.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 - small local copy
         Path(dest_path).write_bytes(src.read_bytes())  # noqa: ASYNC240
         return dest_path
+
+    async def leave_chat(self, chat_id: int) -> None:
+        if not self._is_test(chat_id):
+            await self._inner.leave_chat(chat_id)

@@ -61,7 +61,7 @@ async def test_fixture_ids_cannot_escape(sink, tmp_path, monkeypatch, bad):
 def mirrored(settings, monkeypatch):
     from mavis.config import get_settings
 
-    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", "[555001]")
+    monkeypatch.setenv("OWNER_TELEGRAM_CHAT_IDS", "[555001]")
     monkeypatch.setenv("TEST_MIRROR_CHAT_ID", "555001")
     get_settings.cache_clear()
     inner = FakeChannel()
@@ -94,7 +94,7 @@ async def test_mirror_requires_the_chat_to_be_allowlisted(settings, monkeypatch)
 async def test_fixture_file_id_from_a_real_chat_is_stripped(settings, db, recording_bus, monkeypatch):
     from mavis.channels.telegram_updates import ingest_update
 
-    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", "[3141]")
+    monkeypatch.setenv("OWNER_TELEGRAM_CHAT_IDS", "[3141]")
     from mavis.config import get_settings
     get_settings.cache_clear()
     update = {"update_id": 9001, "message": {"message_id": 1, "date": 1_760_000_000, "chat": {"id": 3141},
@@ -109,7 +109,7 @@ async def test_reply_to_a_mirror_message_is_ignored(settings, db, recording_bus,
     from mavis.channels.telegram_updates import ingest_update
     from mavis.config import get_settings
 
-    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", "[2718]")
+    monkeypatch.setenv("OWNER_TELEGRAM_CHAT_IDS", "[2718]")
     get_settings.cache_clear()
     update = {"update_id": 9002, "message": {"message_id": 2, "date": 1_760_000_000, "chat": {"id": 2718},
               "from": {"first_name": "Bo"}, "text": "nice",

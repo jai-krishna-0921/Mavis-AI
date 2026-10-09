@@ -57,8 +57,8 @@ def safe_name(name: str, default: str = "file") -> str:
 
 
 def artifact_file(user_id: int, task_id: int, name: str):
-    """Where a machine output is kept on the host before delivery. The one place that knows the layout, so
-    the per-user artifact directories (store.artifacts.user_dir) can replace it at merge."""
-    from mavis.config import get_settings
+    """Where a machine output is kept on the host before delivery: the per-user artifact directory, so the
+    outbox and drive_upload guards (store.artifacts.guard) accept it."""
+    from mavis.store.artifacts import user_dir
 
-    return get_settings().artifacts_dir / f"u{int(user_id)}" / f"t{int(task_id)}" / safe_name(name)
+    return user_dir(user_id, task_id) / safe_name(name)

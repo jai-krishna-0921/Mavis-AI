@@ -33,6 +33,8 @@ class Channel(Protocol):
 
     async def download_file(self, file_id: str, dest_path: str) -> str: ...
 
+    async def leave_chat(self, chat_id: int) -> None:
+        """Leave a group or channel the bot was added to (Phase 11: private chats only)."""
     async def edit_text(self, chat_id: int, message_id: int, text: str,
                         buttons: list[list[Button]] | None = None) -> None:
         """Replace a message's text and keyboard (None removes it). Unchanged text is success.
@@ -42,3 +44,8 @@ class Channel(Protocol):
 
     async def send_media_group(self, chat_id: int, paths: list[str],
                                captions: list[str] | None = None) -> list[int]: ...
+
+    async def delete_messages(self, chat_id: int, message_ids: list[int]) -> bool:
+        """Delete up to 100 messages in one call (Telegram deleteMessages). Ids that no longer exist or are
+        too old are skipped by the provider. Returns False when the provider refused the whole batch (or the
+        channel cannot delete); raises ChannelRateLimited on 429."""
