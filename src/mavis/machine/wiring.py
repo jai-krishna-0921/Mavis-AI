@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import structlog
+
 from mavis import machine
 from mavis.agents import cancellation
 from mavis.agents.context_hooks import register_context_provider
@@ -11,6 +13,7 @@ from mavis.config import get_settings
 from mavis.machine import intake
 from mavis.worker.runner import register_startup_hook
 
+log = structlog.get_logger(__name__)
 _reaper: asyncio.Task | None = None
 
 
@@ -37,7 +40,7 @@ async def _purge_workspace(user_id: int) -> dict:
 def register_machine() -> None:
     """Flags off: nothing is registered and get_runtime() stays whatever it was (None by default), except
     the deletion step, which must run whenever a user's workspace might exist."""
-    from mavis.agents.specialists import register_machine_specialists, unregister_machine_specialists
+    from mavis.agents.specialists import unregister_machine_specialists
     from mavis.store.repo.deletion import register_deletion_step
 
     register_deletion_step("workspace", _purge_workspace)
@@ -49,6 +52,16 @@ def register_machine() -> None:
         from mavis.machine.selection import build_runtime
 
         machine.set_runtime(build_runtime())
+    s = get_settings()
+    if s.env == "prod" and not s.machine_allow_egress:
+        # tools appear only after a probe from inside a session shows the interpreter has no network
+        register_startup_hook(_gate_on_isolation)
+        return
+    _activate()
+
+
+def _activate() -> None:
+    from mavis.agents.specialists import register_machine_specialists
     from mavis.tools.machine_tools import register_machine_tools
     from mavis.tools.registry import get_registry
 
@@ -57,3 +70,20 @@ def register_machine() -> None:
     register_context_provider(intake.inbox_context)
     cancellation.register_cancel_hook(_cancel_hook)
     register_startup_hook(_start_reaper)
+
+
+async def _gate_on_isolation() -> None:
+    from mavis.machine.isolation import check_isolation
+
+    rt = machine.get_runtime()
+    if rt is None:
+        return
+    result = await check_isolation(rt.sandbox)
+    if not result.isolated:
+        log.error("machine.disabled_egress", detail=result.detail,
+                  hint="use a SANDBOX custom interpreter (deploy/aws/machine.sh --custom-interpreter) "
+                       "or set MACHINE_ALLOW_EGRESS=true to accept network access")
+        machine.set_runtime(None)  # uploads and chat see the machine as off
+        return
+    _activate()
+    await _start_reaper()
