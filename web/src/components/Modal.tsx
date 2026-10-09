@@ -28,10 +28,10 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
 
   return (
     <div
-      className="overlay-in fixed inset-0 z-50 grid place-items-center bg-black/65 p-4 backdrop-blur-sm"
+      className="overlay-in fixed inset-0 z-50 grid place-items-center bg-ink/40 p-4 backdrop-blur-sm"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="dialog-in panel max-h-[90dvh] w-full max-w-[540px] overflow-auto" role="dialog" aria-modal="true" aria-labelledby={titleId} ref={ref}>
+      <div className="dialog-in panel shadow-pop max-h-[90dvh] w-full max-w-[540px] overflow-auto" role="dialog" aria-modal="true" aria-labelledby={titleId} ref={ref}>
         <div className="panel-core relative">
           <h2 id={titleId} className="pr-10 text-2xl font-bold tracking-tight">{title}</h2>
           <button type="button" className="btn btn-sm absolute right-4 top-4 !min-h-0 !size-9 !p-0" aria-label="Close dialog" onClick={onClose}>

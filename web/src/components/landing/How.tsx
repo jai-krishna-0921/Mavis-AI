@@ -8,8 +8,8 @@ const STEPS = [
     body: 'Ask in plain words, the way you would text a person. There is no app to learn and no commands to remember.',
     visual: (
       <div className="grid gap-2 text-sm" aria-hidden="true">
-        <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-navy-hi/25 px-4 py-2.5">What do I owe people this week?</div>
-        <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-white/[0.06] px-4 py-2.5 text-ink/90">Looking now. Give me a moment.</div>
+        <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-navy text-white px-4 py-2.5">What do I owe people this week?</div>
+        <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-sunken px-4 py-2.5 text-ink">Looking now. Give me a moment.</div>
       </div>
     ),
     Icon: ChatCircleDots,
@@ -20,7 +20,7 @@ const STEPS = [
     visual: (
       <div className="flex flex-wrap gap-2 text-[13px]" aria-hidden="true">
         {['Gmail', 'Calendar', 'Drive', 'Slack'].map((s, i) => (
-          <span key={s} className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 ${i < 3 ? 'border-ok/25 bg-ok/[0.07]' : 'border-white/10 text-muted'}`}>
+          <span key={s} className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 ${i < 3 ? 'border-ok/30 bg-ok-soft' : 'border-line-strong text-muted'}`}>
             {i < 3 ? <Check size={14} weight="bold" className="text-ok" /> : <Lock size={14} weight="light" />} {s}
           </span>
         ))}
@@ -32,10 +32,10 @@ const STEPS = [
     title: 'It proposes, you decide',
     body: 'Drafts, bookings and messages wait for your yes. Nothing leaves your account until you approve it.',
     visual: (
-      <div className="rounded-2xl border border-accent/25 bg-accent/[0.06] p-4 text-sm" aria-hidden="true">
+      <div className="rounded-2xl border border-accent-hi/25 bg-accent-soft p-4 text-sm" aria-hidden="true">
         <div className="text-xs font-medium text-accent-hi">Ready to send to Daniel</div>
-        <p className="mt-1.5 text-ink/90">I will pay invoice 2291 on the 3rd. Could you resend it with the PO number?</p>
-        <div className="mt-3 flex gap-2 text-xs font-semibold"><span className="rounded-full bg-accent px-3 py-1 text-bg">Approve</span><span className="rounded-full border border-white/15 px-3 py-1 text-muted">Change</span></div>
+        <p className="mt-1.5 text-ink">I will pay invoice 2291 on the 3rd. Could you resend it with the PO number?</p>
+        <div className="mt-3 flex gap-2 text-xs font-semibold"><span className="rounded-full bg-accent-hi px-3 py-1 text-white">Approve</span><span className="rounded-full border border-line-strong px-3 py-1 text-muted">Change</span></div>
       </div>
     ),
     Icon: Check,
@@ -44,9 +44,9 @@ const STEPS = [
     title: 'It remembers, and forgets on request',
     body: 'Useful facts go into your Vault, where you can read them, correct them or delete them whenever you like.',
     visual: (
-      <div className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm" aria-hidden="true">
+      <div className="flex items-center justify-between gap-3 rounded-2xl border border-line bg-bg p-4 text-sm" aria-hidden="true">
         <div><div className="font-semibold">Prefers aisle seats</div><div className="text-[13px] text-muted">You told Mavis</div></div>
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-danger/30 px-3 py-1 text-xs text-danger"><Eraser size={14} weight="light" /> Forget</span>
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-danger/30 bg-danger-soft px-3 py-1 text-xs text-danger"><Eraser size={14} weight="light" /> Forget</span>
       </div>
     ),
     Icon: Eraser,
@@ -72,7 +72,7 @@ export function How() {
   }, { scope: root })
 
   return (
-    <section id="how" ref={root} className="relative px-5 py-32 md:py-48">
+    <section id="how" ref={root} className="relative px-5 py-20 md:py-32">
       <div className="mx-auto max-w-6xl lg:grid lg:grid-cols-[5fr_7fr] lg:gap-16" data-how-rail>
         <div className="lg:relative">
           <div data-how-title className="lg:flex lg:h-[100dvh] lg:items-center">
@@ -84,11 +84,11 @@ export function How() {
         </div>
         <ol className="m-0 mt-16 grid list-none gap-6 p-0 lg:mt-0 lg:gap-0">
           {STEPS.map((s, i) => (
-            <li key={s.title} className="lg:flex lg:min-h-[90dvh] lg:items-center" data-reveal>
-              <div className="panel w-full" data-step>
+            <li key={s.title} className="lg:flex lg:min-h-[78dvh] lg:items-center" data-reveal>
+              <div className="panel w-full shadow-lift" data-step>
                 <div className="panel-core">
                   <div className="mb-6 flex items-center gap-4">
-                    <span className="tnum grid size-11 place-items-center rounded-full bg-accent text-base font-bold text-bg">{i + 1}</span>
+                    <span className="tnum grid size-11 place-items-center rounded-full bg-accent-hi text-base font-bold text-white">{i + 1}</span>
                     <s.Icon size={26} weight="light" className="text-muted" aria-hidden="true" />
                   </div>
                   <h3 className="text-2xl font-bold tracking-[-0.02em] sm:text-3xl">{s.title}</h3>
