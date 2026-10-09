@@ -31,6 +31,11 @@ def _project(name, files):
     }
 
 
+@pytest.fixture(autouse=True)
+def _open_allowlist(settings, monkeypatch):
+    monkeypatch.setattr(settings, "machine_package_allow", ["*"])  # the fake index has its own names
+
+
 @pytest.fixture
 def index():
     with respx.mock(assert_all_called=False) as mock:

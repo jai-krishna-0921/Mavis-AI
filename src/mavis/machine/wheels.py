@@ -18,9 +18,10 @@ from packaging.markers import default_environment
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name, parse_wheel_filename
 
-from mavis.config import get_settings
+from mavis.config import Settings, get_settings
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+DEFAULT_ALLOW: list[str] = list(Settings.model_fields["machine_package_allow"].default)
 ACCEPT = "application/vnd.pypi.simple.v1+json"
 
 
@@ -78,7 +79,8 @@ class WheelCache:
         return r
 
     async def resolve(self, packages: list[str], max_total: int = 40) -> list[tuple[str, bytes]]:
-        allow = {canonicalize_name(p) for p in get_settings().machine_package_allow}
+        listed = get_settings().machine_package_allow or DEFAULT_ALLOW
+        allow = set() if listed == ["*"] else {canonicalize_name(p) for p in listed}
         for p in packages:
             if not _NAME.match(str(p or "")):
                 raise ValueError(f"not a package name: {str(p)[:40]!r}")
@@ -126,13 +128,20 @@ class WheelCache:
         self, client: httpx.AsyncClient, filename: str, url: str, sha256: str | None = None
     ) -> bytes:
         cached = self.cache_dir / filename
+        seal = self.cache_dir / f"{filename}.sha256"
         if cached.is_file():
-            return cached.read_bytes()
+            blob = cached.read_bytes()
+            digest = hashlib.sha256(blob).hexdigest()
+            trusted = sha256 or (seal.read_text().strip() if seal.is_file() else None)
+            if trusted == digest:  # re-hashed on every use: a tampered cache entry is refetched
+                return blob
         blob = (await self._get(client, url)).content
-        if sha256 and hashlib.sha256(blob).hexdigest() != sha256:
+        digest = hashlib.sha256(blob).hexdigest()
+        if sha256 and digest != sha256:
             raise ValueError(f"{filename} does not match the hash the index published")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         cached.write_bytes(blob)
+        seal.write_text(digest)
         return blob
 
     @staticmethod
