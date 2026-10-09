@@ -170,3 +170,38 @@ async def test_a_consent_link_dies_after_ten_minutes_and_after_one_use(oauth, ve
         [row] = await s.scalars(select(NativeOAuthState))
     from mavis.domain import timeutil
     assert (timeutil.ensure_utc(row.expires_at) - timeutil.now()).total_seconds() <= 600
+
+
+async def test_a_google_connect_teaches_the_users_address(web, oauth, vendor, user):
+    from mavis.attention.connector_ingest import load_identities
+
+    c, _ = web
+    google_vendor(vendor, email="Jai.K@Kripya.com")
+    state = query(await oauth.authorize_url(user.id, G, 12))["state"]
+    assert (await c.get("/oauth/google/callback", params={"code": "c", "state": state})).status_code == 200
+    assert (await load_identities(user.id))["emails"] == ["jai.k@kripya.com"]
+
+
+async def test_a_slack_connect_teaches_the_users_slack_id_and_workspace(web, oauth, vendor, user):
+    from mavis.attention.connector_ingest import load_identities
+
+    c, _ = web
+    slack_vendor(vendor)
+    state = query(await oauth.authorize_url(user.id, S))["state"]
+    assert (await c.get("/oauth/slack/callback", params={"code": "c", "state": state})).status_code == 200
+    ident = await load_identities(user.id)
+    assert ident["slack_ids"] == ["U1"] and ident["team"] == "T1"
+
+
+async def test_a_failure_teaching_the_identity_does_not_undo_the_connection(web, oauth, vendor, user, monkeypatch):
+    from mavis.attention import connector_ingest
+
+    async def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(connector_ingest, "remember_identity", boom)
+    c, bus = web
+    google_vendor(vendor)
+    state = query(await oauth.authorize_url(user.id, G, 12))["state"]
+    r = await c.get("/oauth/google/callback", params={"code": "c", "state": state})
+    assert r.status_code == 200 and len(bus.jobs) == 1
