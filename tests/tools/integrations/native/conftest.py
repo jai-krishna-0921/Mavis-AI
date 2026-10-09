@@ -19,7 +19,8 @@ def new_kek() -> str:
 @pytest.fixture
 def native_env(settings, monkeypatch):
     for key, value in {
-        "NATIVE_TOKEN_KEK": new_kek(), "GOOGLE_OAUTH_CLIENT_ID": "gid", "GOOGLE_OAUTH_CLIENT_SECRET": "gsecret",
+        "NATIVE_TOKEN_KEK": new_kek(), "GOOGLE_OAUTH_CLIENT_ID": "gid",
+        "GOOGLE_OAUTH_CLIENT_SECRET": "gsecret",
         "SLACK_CLIENT_ID": "sid", "SLACK_CLIENT_SECRET": "ssecret", "PUBLIC_BASE_URL": "https://mavis.test",
     }.items():
         monkeypatch.setenv(key, value)
