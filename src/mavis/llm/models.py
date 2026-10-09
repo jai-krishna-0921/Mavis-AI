@@ -206,7 +206,12 @@ class _Limiter:
 
     def hold_background(self, seconds: float, best_effort: bool = False) -> None:
         """Keep a timed-out background call's slot occupied for `seconds`, but hand it back the moment an
-        interactive caller needs one: a background timeout must never make a chat reply wait."""
+        interactive caller needs one: a background timeout must never make a chat reply wait. A caller
+        already queued gets the slot now (nothing would reclaim it later); otherwise the hold applies."""
+        now = asyncio.get_running_loop().time()
+        if any(self._effective_rank(w, now) == 0 and not w.fut.done() for w in self._waiters):
+            self.release(best_effort)  # frees the slot once and dispatches it to the waiter
+            return
         hold: list[Any] = [None, best_effort]  # [timer handle, best_effort]
 
         def end() -> None:
