@@ -247,6 +247,13 @@ async def _drive(task_id: int, user_id: int, graph_input: Any) -> None:
         progress.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await progress
+        from mavis import machine
+
+        if (rt := machine.get_runtime()) is not None:
+            try:
+                await rt.release(task_id)
+            except Exception:  # noqa: BLE001 - never block the queue on a machine problem
+                log.exception("task.machine_release_failed", task_id=task_id)
 
     try:
         if result is not None:

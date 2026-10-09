@@ -614,3 +614,12 @@ def _reset_cancellation():
     cancellation.reset_for_tests()
     yield
     cancellation.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _reset_machine_runtime():
+    from mavis import machine
+
+    machine.set_runtime(None)
+    yield
+    machine.set_runtime(None)
