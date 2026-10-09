@@ -19,6 +19,9 @@ PASSTHROUGH: set[str] = {
     "INTEGRATION_PROVIDER", "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "SLACK_CLIENT_ID",
     "SLACK_CLIENT_SECRET", "SLACK_SIGNING_SECRET", "NATIVE_TOKEN_KEK", "NATIVE_TOKEN_KEK_PREVIOUS",
     "SYNC_GMAIL_DAYS", "SYNC_SLACK_DAYS", "SYNC_CALENDAR_BACK_DAYS", "SYNC_CALENDAR_AHEAD_DAYS",
+    # Web dashboard (spec 2026-10-09)
+    "DASHBOARD_ENABLED", "GOOGLE_SIGNIN_ENABLED", "DASHBOARD_SESSION_DAYS", "TELEGRAM_BOT_USERNAME",
+    "INVITE_CAP_STANDARD", "INVITE_CAP_TRUSTED", "INVITE_WEB_USES",
 }
 
 
@@ -81,8 +84,8 @@ def test_verify_machine_runs_in_the_worker_that_writes_the_sink():
 
 def test_the_reverse_proxy_serves_the_oauth_callback_and_the_slack_webhook():
     caddy = (ROOT / "Caddyfile").read_text()
-    public = next(ln for ln in caddy.splitlines() if "@public path" in ln).split()
-    assert "/oauth/*" in public and "/webhooks/*" in public
+    public = next(ln for ln in caddy.splitlines() if "@api path" in ln).split()
+    assert "/api/*" in public and "/oauth/*" in public and "/webhooks/*" in public
     assert "/telegram/webhook" in public and "/connect/callback" in public
 
 
