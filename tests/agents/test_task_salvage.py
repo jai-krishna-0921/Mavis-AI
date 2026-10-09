@@ -269,6 +269,7 @@ async def test_delivery_failing_after_the_claim_still_tells_the_user_and_closes_
 
     tid, aid = await _salvage_with_broken_publish(user, fake_llm, rec_bus, monkeypatch, fails)
     assert (await tasks.get(tid)).status == TaskStatus.PARTIAL
-    told = "".join(m.text for m in sent) + "".join("".join(e.payload["messages"]) for e in _delivered(rec_bus))
+    events = "".join("".join(e.payload["messages"]) for e in _delivered(rec_bus))
+    told = "".join(m.text for m in sent) + events
     assert "FINAL ANSWER" in told
     assert (await approvals.get(aid)).status != "pending"

@@ -436,7 +436,7 @@ async def test_learn_tainted_turn_still_stores_the_users_own_fact(memory, user, 
     clock.set(local(IST, 5, 18, 0))
     fake_llm.push_structured(_x(relations=[
         _rel("User", "Priya", "Priya is the user's sister and lives in Pune", "FAMILY_OF")]))
-    await memory.learn(user.id, learn_text("my sister Priya lives in Pune", "Summary of your inbox: ...", None),
-                       "tg:update:61", Trust.USER, anchor_at=clock.t, strict=True)
+    said = learn_text("my sister Priya lives in Pune", "Summary of your inbox: ...", None)
+    await memory.learn(user.id, said, "tg:update:61", Trust.USER, anchor_at=clock.t, strict=True)
     assert [d["statement"] for d in await memory.graph.dump(user.id)] == [
         "Priya is the user's sister and lives in Pune"]
