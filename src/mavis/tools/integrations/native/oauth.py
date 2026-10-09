@@ -53,7 +53,14 @@ GOOGLE_SCOPES = (
     "openid", "email", "profile",
     f"{_GMAIL}.readonly", f"{_GMAIL}.send", f"{_GMAIL}.compose",
     "https://www.googleapis.com/auth/calendar.events",
-    "https://www.googleapis.com/auth/drive.readonly",
+    # drive (full): editing, moving, commenting on and sharing the user's EXISTING files needs it; drive.file
+    # only reaches files this app made. It also covers every read, so drive.readonly is not asked for.
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/meetings.space.created",  # create Meet links
+    "https://www.googleapis.com/auth/meetings.space.readonly",  # read transcripts of the user's meetings
     "https://www.googleapis.com/auth/contacts.readonly",
 )
 SLACK_USER_SCOPES = (
