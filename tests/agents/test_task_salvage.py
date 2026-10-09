@@ -174,3 +174,55 @@ async def test_crash_after_work_finished_delivers_it_and_logs_no_exception(
 
 def test_verdict_model_still_importable() -> None:
     assert CriticVerdict(accept=True).accept
+
+
+# --- partial_messages: finished work is delivered, never silently lost ------------------------------------
+
+
+def _state(deps: dict[str, list[str]], texts: dict[str, str]) -> dict:
+    plan = Plan(goal="g", steps=[PlanStep(id=i, agent="research", instruction=i, depends_on=d)
+                                 for i, d in deps.items()])
+    return {"plan": plan.model_dump(), "results": {k: {"ok": True, "text": v} for k, v in texts.items()}}
+
+
+@pytest.mark.parametrize(("deps", "texts", "expect_in", "expect_out"), [
+    # independent steps: the last one does not fold the others in, so all are delivered
+    ({"s1": [], "s2": [], "s3": []}, {"s1": "ONE", "s2": "TWO", "s3": "THREE"}, ["ONE", "TWO", "THREE"], []),
+    # a chain: the closing step folds in the earlier ones, it is the answer alone
+    ({"s1": [], "s2": ["s1"], "s3": ["s2"]}, {"s1": "ONE", "s2": "TWO", "s3": "THREE"}, ["THREE"],
+     ["ONE", "TWO"]),
+    # mixed: s3 builds on s2 only, so s1 would be lost if s3 stood alone
+    ({"s1": [], "s2": [], "s3": ["s2"]}, {"s1": "ONE", "s2": "TWO", "s3": "THREE"}, ["ONE", "TWO", "THREE"],
+     []),
+    # a diamond: transitive dependencies count
+    ({"a": [], "b": ["a"], "c": ["a"], "d": ["b", "c"]}, {"a": "AA", "b": "BB", "c": "CC", "d": "DD"},
+     ["DD"], ["AA", "BB", "CC"]),
+    # an unfinished middle step is not owed: the closing step covers every finished one
+    ({"s1": [], "s2": ["s1"], "s3": ["s1"]}, {"s1": "ONE", "s3": "THREE"}, ["THREE"], ["ONE"]),
+    # the closing step did not finish: everything that did is delivered in plan order
+    ({"s1": [], "s2": [], "s3": ["s1", "s2"]}, {"s1": "ONE", "s2": "TWO"}, ["ONE", "TWO"], []),
+])
+def test_partial_delivery_follows_the_dependencies(deps, texts, expect_in, expect_out):
+    text = "\n".join(og.partial_messages(_state(deps, texts), lead=""))
+    assert all(t in text for t in expect_in)
+    assert not any(t in text for t in expect_out)
+    if len(expect_in) > 1:
+        assert [text.index(t) for t in expect_in] == sorted(text.index(t) for t in expect_in)  # plan order
+
+
+def test_more_than_three_bubbles_say_that_the_rest_was_cut():
+    big = "x" * 3000
+    deps = {f"s{i}": [] for i in range(1, 6)}
+    msgs = og.partial_messages(_state(deps, {k: big for k in deps}))
+    assert len(msgs) == 3 and msgs[0] == og.PARTIAL_LEAD  # the lead plus two body bubbles
+    assert msgs[-1].endswith(og.CUT_NOTE)
+    assert not any(c in m for m in msgs for c in "—–")
+    short = og.partial_messages(_state({"s1": [], "s2": []}, {"s1": "ONE", "s2": "TWO"}), lead="")
+    assert not any(og.CUT_NOTE in m for m in short)  # nothing was cut, nothing is said
+
+
+def test_bubbles_cap_keeps_the_limit_and_names_the_cut():
+    text = "\n\n".join("y" * 3000 for _ in range(7))
+    out = og._bubbles(text)
+    assert len(out) == 3 and out[-1].endswith(og.CUT_NOTE)
+    assert og._bubbles("short") == ["short"]
