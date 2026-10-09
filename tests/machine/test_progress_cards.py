@@ -346,6 +346,10 @@ async def test_default_interval_is_eight_seconds(settings):
 async def test_a_long_noisy_task_edits_at_most_every_interval_and_the_final_always_goes(setup, settings):
     """E2E run 2: 51 edits in 8 minutes. Updates every second now give one edit per interval."""
     cards, ch, clock, u, tid = setup
+    # the global pacer runs on real time; this test's fake clock sends 25 edits inside one real second
+    from mavis.channels import pacing
+
+    pacing.set_pacer(pacing.SendPacer(rate=10_000))
     stamps: list[float] = []
     real_edit = ch.edit_text
 
@@ -366,5 +370,7 @@ async def test_a_long_noisy_task_edits_at_most_every_interval_and_the_final_alwa
     assert all(b - a >= interval - 1e-9 for a, b in zip(stamps, stamps[1:], strict=False))
     clock.t += 1  # the final edit is never held back by the interval
     await cards.finalize(tid, CardFinal.DONE)
+    await _settle(cards, tid)  # the pacer may defer the final by a moment; it is never dropped
     assert len(stamps) == live_edits + 1
-    assert "page 119" in ch.edits[-1][2]
+    assert "page 119" in ch.edits[-2][2]  # the newest live update went out before the final card
+    assert ch.edits[-1][2].startswith("Done")
