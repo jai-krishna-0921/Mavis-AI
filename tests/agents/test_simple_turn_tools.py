@@ -169,7 +169,7 @@ async def test_injected_email_cannot_send_or_add_rules_without_approval(
     assert [j.payload["task_id"] for j in jobs if j.kind is JobKind.RUN_TASK] == [task.id]
     [learn] = [j for j in jobs if j.kind is JobKind.LEARN]
     assert "Mallory" not in learn.payload["text"] and "evil" not in learn.payload["text"]
-    assert learn.payload["trust"] == "untrusted"
+    assert learn.payload["trust"] == "user" and learn.payload["tainted"] is True  # strict grounding
 
 
 async def test_missing_connection_gives_connect_prompt(
@@ -315,7 +315,8 @@ async def test_tainted_turn_and_next_turn_learn_as_untrusted(
     await run_turn(msg_event(user.id, "thanks", "e3"))
 
     learns = [j for j in jobs if j.kind is JobKind.LEARN]
-    assert [j.payload["trust"] for j in learns] == ["untrusted", "untrusted", "user"]
+    assert [j.payload["tainted"] for j in learns] == [True, True, False]
+    assert {j.payload["trust"] for j in learns} == {"user"}
     assert "RSVP" in learns[1].payload["text"]  # the tainted reply is in turn 2's learn text
     log = await messages.recent(user.id)
     assert [simple_turn.is_tainted(m) for m in log if m.role == "assistant"] == [True, False, False]
@@ -352,7 +353,7 @@ async def test_retry_with_unknown_taint_assumes_tainted(db, channel, fake_llm, m
     assert fake_llm.calls == []
     assert simple_turn.is_tainted((await messages.recent(user.id))[-1])
     [learn] = [j for j in jobs if j.kind is JobKind.LEARN]
-    assert learn.payload["trust"] == "untrusted"
+    assert learn.payload["trust"] == "user" and learn.payload["tainted"] is True  # strict grounding
 
 
 async def test_digest_turn_is_tainted_and_small_talk_is_not(db, channel, fake_llm, memory, bus, monkeypatch):
@@ -375,11 +376,12 @@ async def test_digest_turn_is_tainted_and_small_talk_is_not(db, channel, fake_ll
     finally:
         context_hooks.clear_context_providers()
     learns = [j for j in jobs if j.kind is JobKind.LEARN]
-    assert [j.payload["trust"] for j in learns] == ["untrusted", "untrusted", "user"]
+    assert [j.payload["tainted"] for j in learns] == [True, True, False]
+    assert {j.payload["trust"] for j in learns} == {"user"}
     assert len(fake_llm.calls) == 3  # one model call per turn, no extra tool rounds
 
 
-@pytest.mark.parametrize(("untrusted", "trust"), [(True, "untrusted"), (False, "user")])
+@pytest.mark.parametrize(("untrusted", "trust"), [(True, "user"), (False, "user")])
 async def test_reply_after_proactive_ping_learns_at_its_trust(
     db, channel, fake_llm, memory, bus, monkeypatch, clock, untrusted, trust
 ) -> None:

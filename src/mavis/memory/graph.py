@@ -23,6 +23,38 @@ from mavis.memory.names import USER_KEY, is_user, node_key, normalize_name, sani
 from mavis.store import db as dbm
 from mavis.store.models import GraphEdge, GraphNode
 
+THIRD_PARTY_PREFIX = "tp:"  # source_ref namespace of edges learned from third-party records (mail, Slack)
+
+
+def third_party_ref(ref: str) -> str:
+    """The edge source_ref for a fact learned from a third-party record. Only our own record learning
+    writes it; a user's own words never carry this prefix, so it is the persisted trust marker."""
+    return (THIRD_PARTY_PREFIX + ref)[:200]
+
+
+def is_third_party(source_ref: str | None) -> bool:
+    return bool(source_ref) and str(source_ref).startswith(THIRD_PARTY_PREFIX)
+
+
+class Fact(str):
+    """A recalled edge statement. It is a plain str everywhere; `source_ref` says where it was learned
+    and `third_party` whether recall must hand it to the model as untrusted data."""
+
+    source_ref: str
+
+    def __new__(cls, text: str, source_ref: str = "") -> Fact:
+        obj = super().__new__(cls, text)
+        obj.source_ref = source_ref or ""
+        return obj
+
+    @property
+    def third_party(self) -> bool:
+        return is_third_party(self.source_ref)
+
+    @property
+    def origin(self) -> str:
+        return self.source_ref[len(THIRD_PARTY_PREFIX):] if self.third_party else self.source_ref
+
 
 class GraphStore(Protocol):
     async def init(self) -> None: ...
@@ -34,6 +66,8 @@ class GraphStore(Protocol):
     async def dump(self, user_id: int) -> list[dict]: ...
     async def forget(self, user_id: int, needle: str) -> int: ...
     async def delete_user(self, user_id: int) -> int: ...
+
+    async def forget_source(self, user_id: int, prefix: str) -> int: ...
     async def merge_entities(self, user_id: int, keep: str, drop: str, label: str) -> None: ...
 
 
@@ -131,6 +165,15 @@ class SqliteGraphStore:
                 )
             )
             same = [e for e in current if e.dst_key == dst]
+            if is_third_party(source_ref):
+                # Third-party text (a record from mail or Slack) never overwrites or ends what the user
+                # said or the system learned from the user: those edges keep their statement, source and
+                # validity. A conflicting single-valued fact from a record is not recorded at all.
+                if same and not is_third_party(same[0].source_ref):
+                    return
+                if not same and r in SINGLE_VALUED_RELS and any(
+                        not is_third_party(e.source_ref) for e in current):
+                    return
             if same:
                 edge = same[0]
                 edge.statement = rel.statement
@@ -183,7 +226,7 @@ class SqliteGraphStore:
         candidates = sorted(edges.values(), key=lambda e: e.valid_from, reverse=True)[: limit * 4]
         now = _now()
         ranked = sorted(candidates, key=lambda e: edge_score(e.confidence, e.valid_from, now), reverse=True)
-        return [e.statement for e in ranked[:limit]]
+        return [Fact(e.statement, e.source_ref) for e in ranked[:limit]]
 
     async def entities(self, user_id: int) -> list[Entity]:
         async with dbm.Session() as s:
@@ -201,7 +244,8 @@ class SqliteGraphStore:
             )
             return [
                 {"subject": names.get(e.src_key, e.src_key), "relation": e.rel,
-                 "object": names.get(e.dst_key, e.dst_key), "statement": e.statement}
+                 "object": names.get(e.dst_key, e.dst_key), "statement": e.statement,
+                 "source_ref": e.source_ref or ""}
                 for e in rows
             ]
 
@@ -237,6 +281,27 @@ class SqliteGraphStore:
             res = await s.execute(delete(GraphNode).where(GraphNode.user_id == user_id))
             await s.commit()
             return res.rowcount or 0
+
+    async def forget_source(self, user_id: int, prefix: str) -> int:
+        """Delete every edge learned from third-party records whose reference starts with `prefix`
+        ("gmail:", "slack:"), then the entities left with no edge at all. Returns the edges removed."""
+        if not prefix.strip():
+            return 0
+        like = escape_like(THIRD_PARTY_PREFIX + prefix) + "%"
+        async with dbm.Session() as s:
+            edges = list(await s.scalars(select(GraphEdge).where(
+                GraphEdge.user_id == user_id, GraphEdge.source_ref.like(like, escape="\\"))))
+            touched = {k for e in edges for k in (e.src_key, e.dst_key)} - {USER_KEY}
+            for e in edges:
+                await s.delete(e)
+            await s.flush()
+            for key in touched:
+                left = await s.scalar(select(GraphEdge.id).where(
+                    GraphEdge.user_id == user_id, or_(GraphEdge.src_key == key, GraphEdge.dst_key == key)).limit(1))
+                if left is None:
+                    await s.execute(delete(GraphNode).where(GraphNode.user_id == user_id, GraphNode.key == key))
+            await s.commit()
+            return len(edges)
 
     async def merge_entities(self, user_id: int, keep: str, drop: str, label: str) -> None:
         lab = sanitize_label(label)

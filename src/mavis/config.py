@@ -145,7 +145,19 @@ class Settings(BaseSettings):
     composio_timeout_s: float = 30.0
     integration_polling: bool = False
     integration_status_ttl_s: int = 60
-    integration_provider: Literal["composio"] = "composio"
+    integration_provider: Literal["composio", "native"] = "composio"
+    # --- native Google and Slack connectors (spec 2026-10-09) -------------------
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_signing_secret: str = ""
+    native_token_kek: str = ""  # 32 random bytes, base64: wraps the data key of every sealed grant token
+    native_token_kek_previous: str = ""  # comma list of retired KEKs, kept only to unwrap during rotation
+    sync_gmail_days: int = 14
+    sync_slack_days: int = 7
+    sync_calendar_back_days: int = 7
+    sync_calendar_ahead_days: int = 30
     tavily_api_key: str = ""
     web_search_enabled: bool = True  # WEB capability: Tavily when keyed, else DuckDuckGo; False turns it off
     # Google Workspace through Composio's googlesuper toolkit (spec 2026-10-03). Off: behaviour is exactly
@@ -174,6 +186,7 @@ class Settings(BaseSettings):
     task_step_parallelism: int = 1
     spawn_max_per_step: int = 3  # spawned workers one model step may start
     initiative_act_enabled: bool = True
+    task_await_ttl_s: float = 86400  # a task waiting on a connection or approval ends after this long
     task_timeout_max_s: float = 1200  # no task clock is ever extended past this
     machine_task_timeout_s: float = 900  # clock for a plan with a machine specialist (Phase 12)
     machine_file_max_mb: int = 50  # Telegram's bot upload limit; bigger files are named, not attached
@@ -183,7 +196,7 @@ class Settings(BaseSettings):
     # tasks that finish sooner get no card (0 for machine plans)
     progress_card_after_s: float = Field(4.0, ge=0, le=600)
     # at most one card edit per chat per interval
-    progress_edit_min_interval_s: float = Field(3.0, ge=0, le=60)
+    progress_edit_min_interval_s: float = Field(8.0, ge=0, le=60)  # Telegram rate-limit friendly
     # milestone photos per task (approval photos not counted)
     progress_max_screenshots: int = Field(4, ge=0, le=10)
     # messages per second across all chats (shared with the outbox)

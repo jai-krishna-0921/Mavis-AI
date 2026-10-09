@@ -75,6 +75,14 @@ def _no_inline_retries(request, monkeypatch) -> None:
     monkeypatch.setattr(base, "INLINE_RETRY_DELAYS_S", ())
 
 
+@pytest.fixture(autouse=True)
+def _no_task_llm_backoff(monkeypatch) -> None:
+    """Task LLM retries wait 2s/6s in production; tests that exercise them set their own delays."""
+    from mavis.agents import orchestrator_graph
+
+    monkeypatch.setattr(orchestrator_graph, "LLM_RETRY_DELAYS_S", ())
+
+
 @pytest.fixture
 def settings(tmp_path, monkeypatch) -> Iterator:
     """Isolated Settings: temp data dir, temp SQLite, no external services, no developer .env."""
@@ -367,7 +375,7 @@ class FakeMemory:
     async def recall(self, user_id: int, text: str) -> RecallContext:
         return self.recall_result or RecallContext(profile=self.profile)
 
-    async def learn(self, user_id: int, text: str, source_ref: str = "", trust=None) -> Extraction:
+    async def learn(self, user_id: int, text: str, source_ref: str = "", trust=None, **kwargs) -> Extraction:
         self.learned.append((user_id, text, source_ref))
         self.learned_trust.append(trust)
         return Extraction()

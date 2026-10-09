@@ -10,7 +10,7 @@ import structlog
 from mavis import bus
 from mavis.access import UserStatus, UserTier, budgets
 from mavis.access.codes import normalize
-from mavis.channels import get_channel
+from mavis.channels import get_channel, routing
 from mavis.channels.test_sink import is_test_chat
 from mavis.config import get_settings
 from mavis.domain.events import Event, EventType
@@ -203,6 +203,11 @@ async def access_gate(event: Event) -> bool:
                 and (user.state or {}).get(_STATE_KEY, {}).get("activation_event") == event.id):
             return False  # a retry of the very message that redeemed the code is not a chat turn
         return True
+    if event.source == routing.SLACK_SOURCE:
+        # Invite codes and re-admission happen on Telegram only. A Slack turn from a user who is not active
+        # (banned, pending, deleting, deleted) is dropped without a reply: the inbound lookup already
+        # refuses them, this is the second layer for an event that was queued before the status changed.
+        return False
     if status == UserStatus.DELETED and event.type is EventType.USER_MESSAGE:
         await users.update(user.id, status=UserStatus.PENDING.value, deleted_at=None)
         user = await users.get(user.id)

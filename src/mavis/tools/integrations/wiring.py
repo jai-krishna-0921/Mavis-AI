@@ -183,12 +183,37 @@ async def known_names(user_id: int) -> set[str]:
     return names
 
 
+class NativeSlackLookup:
+    """slack_events.SlackUserLookup backed by the native token store. Resolved on every call, so it follows
+    whatever provider is configured: Composio-only builds have no native grants and answer None."""
+
+    async def user_for_slack(self, team_id: str, slack_user_id: str) -> int | None:
+        tokens = getattr(get_provider(), "tokens", None)
+        find = getattr(tokens, "user_for_slack", None)
+        return await find(team_id, slack_user_id) if find is not None else None
+
+    async def bot_account(self, team_id: str) -> dict | None:
+        """The workspace bot's non-secret facts (bot_user_id, ...), or None when no bot is installed."""
+        find = getattr(getattr(get_provider(), "tokens", None), "bot_account", None)
+        return await find(team_id) if find is not None else None
+
+    async def bot_dm_owner(self, team_id: str, channel: str) -> int | None:
+        find = getattr(getattr(get_provider(), "tokens", None), "bot_dm_owner", None)
+        return await find(team_id, channel) if find is not None else None
+
+
 @lru_cache
 def get_activator() -> Activator:
     s = get_settings()
     # Without a webhook secret every webhook is rejected, so polling is the only inbound path.
     return Activator(provider=get_provider(), state=RepoUserState(), schedule=wakeup_schedule,
                      polling_forced=s.integration_polling or not s.composio_webhook_secret)
+
+
+async def forget_learned_source(user_id: int, prefix: str) -> int:
+    from mavis.memory.service import get_memory
+
+    return await get_memory().forget_source(user_id, prefix)
 
 
 @lru_cache
@@ -198,7 +223,7 @@ def get_connect_flow() -> ConnectFlow:
         schedule=wakeup_schedule, state=RepoUserState(), base_url=get_settings().public_base_url,
         on_active=get_activator().on_active, has_checks=connection_checks_pending,
         cancel_checks=cancel_connection_checks, on_google_active=google_activated,
-        on_google_begin=get_activator().begin_google,
+        on_google_begin=get_activator().begin_google, forget_source=forget_learned_source,
     )
 
 
@@ -211,11 +236,12 @@ def get_poller() -> Poller:
 
 @lru_cache
 def get_first_sync() -> FirstSync:
+    # Phase 4 / later: loops stay unused, third-party content never creates loops.
+    from mavis.attention.wiring import get_connector_ingest  # lazy: attention is wired after integrations
     from mavis.loops.service import LoopService
 
-    # Phase 4 / later: loops stay unused, third-party content never creates loops.
     return FirstSync(provider=get_provider(), memory=JobLearner(), loops=LoopService(get_bus()),
-                     bus=_LazyBus(), tz_of=user_timezone)
+                     bus=_LazyBus(), tz_of=user_timezone, connectors=get_connector_ingest())
 
 
 @lru_cache
@@ -326,6 +352,14 @@ def register_integrations(registry: ToolRegistry | None = None) -> None:
         registry.capability_check = capability_check
         registry.capability_reason = capability_reason
         registry.available = tool_available
+    from mavis.tools.integrations.native import slack_events
+
+    slack_events.set_user_lookup(NativeSlackLookup())  # Events API deliveries -> the Mavis user
+    # Slack records reach the guard and the graph whether or not attention triage is on (the same bound
+    # method registered by register_attention is deduped). Mail records go through Intake.on_email.
+    from mavis.attention.wiring import get_connector_ingest  # lazy: attention is wired after integrations
+
+    register_event_handler(EventType.SLACK_MESSAGE, get_connector_ingest().on_slack_event)
     flow = get_connect_flow()
     # A task that needs an account pauses on a connect interrupt; ConnectFlow sends the link and
     # resumes the task (RESUME_TASK) once the account is active, declined or failed.

@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from mavis.domain.events import EventType, Trust
 from mavis.domain.integrations import ToolResult
 from mavis.domain.policy import Capability
@@ -164,3 +165,64 @@ async def test_learn_refs_are_scoped_per_user(provider, fake_bus):
     refs = {(u, ref) for u, _, ref in mem.calls}
     assert (1, "first_sync:1:gmail:0") in refs and (2, "first_sync:2:gmail:0") in refs
     assert len({ref for _, ref in refs}) == len(refs)
+
+
+class FakeConnectors:
+    def __init__(self):
+        self.mail, self.slack_msgs = [], []
+
+    async def email(self, user_id, n):
+        self.mail.append(n)
+        return True
+
+    async def slack(self, user_id, n):
+        self.slack_msgs.append(n)
+        return True
+
+    async def on_slack_event(self, event):
+        await self.slack(event.user_id, event.payload)
+
+
+def windows(monkeypatch, **kw):
+    from types import SimpleNamespace
+
+    from mavis.tools.integrations import first_sync
+
+    monkeypatch.setattr(first_sync, "get_settings", lambda: SimpleNamespace(**kw))
+
+
+async def test_gmail_first_sync_reads_the_settings_window_and_learns_per_record(provider, fake_bus, monkeypatch):
+    windows(monkeypatch, sync_gmail_days=3)
+    provider.results["mail.search"] = ToolResult(ok=True, data=EMAILS)
+    sync, mem, _ = make(provider, fake_bus)
+    sync.connectors = FakeConnectors()
+    await sync.run(1, Capability.GMAIL)
+    [(_, _, args)] = [c for c in provider.executed if c[1] == "mail.search"]
+    assert args["query"].startswith("newer_than:3d ")
+    assert [m["message_id"] for m in sync.connectors.mail] == ["1", "2", "3"]  # every message, filtered by the guard
+    assert mem.calls == []  # no batch of one-liners: each record is its own LEARN job
+
+
+async def test_calendar_first_sync_window_is_a_week_back_and_a_month_ahead(provider, fake_bus):
+    provider.results["calendar.list"] = ToolResult(ok=True, data={"items": []})
+    sync, _, _ = make(provider, fake_bus)
+    await sync.run(1, Capability.CALENDAR)
+    [(_, _, args)] = [c for c in provider.executed if c[1] == "calendar.list"]
+    from datetime import datetime
+
+    lo, hi = datetime.fromisoformat(args["time_min"]), datetime.fromisoformat(args["time_max"])
+    assert (NOW - lo).days == 7 and (hi - NOW).days == 30
+
+
+async def test_slack_first_sync_reads_only_recent_messages_of_member_channels(provider, fake_bus, monkeypatch):
+    windows(monkeypatch, sync_slack_days=2)
+    fresh, old = NOW.timestamp() - 3600, NOW.timestamp() - 5 * 86400
+    provider.results["slack.channels"] = ToolResult(ok=True, data={"channels": [{"id": "C0GEN0001", "name": "general"}]})
+    provider.results["slack.history"] = ToolResult(ok=True, data={"messages": [
+        {"ts": f"{fresh:.6f}", "user": "U0ARJUN01", "text": "fresh"},
+        {"ts": f"{old:.6f}", "user": "U0ARJUN01", "text": "stale"}]})
+    sync, _, _ = make(provider, fake_bus)
+    sync.connectors = FakeConnectors()
+    await sync.run(1, Capability.SLACK)
+    assert [m["text"] for m in sync.connectors.slack_msgs] == ["fresh"]
+    assert sync.connectors.slack_msgs[0]["channel"] == "C0GEN0001"

@@ -68,7 +68,60 @@ async def _redis(user_id: int) -> dict:
     if client is not None:
         async for key in client.scan_iter(match=redis_keys.user_pattern(user_id), count=500):
             n += int(await client.delete(key))
+        from mavis.agents.reactions import ReactionLog
+
+        n += int(await client.delete(ReactionLog._key(user_id)))  # the one per-user key outside the pattern
     return {"keys": n}
+
+
+async def _markers(user_id: int) -> dict:
+    """Learn markers (processed_events): records are keyed by user (learn:<uid>:<source_ref>), chat turns
+    by the message's event id. They hold no text, but they name the user's messages, so they go too."""
+    from sqlalchemy import select
+
+    from mavis.store.db import Session
+    from mavis.store.models import Message
+    from mavis.store.repo import events
+
+    async with Session() as s:
+        refs = list(await s.scalars(select(Message.event_id).where(
+            Message.user_id == user_id, Message.event_id.is_not(None))))
+    n = await events.forget_prefix(f"learn:{user_id}:")
+    for ref in refs:
+        n += await events.forget_prefix(f"learn:{ref}")
+    return {"markers": n}
+
+
+async def _native(user_id: int) -> dict:
+    """Native Google and Slack grants: tell the vendor to drop each one (best effort), then erase the rows
+    (user grants, the workspace bot grant, in-flight consent states). The sweep at the end also covers a
+    deployment that no longer runs the native router."""
+    from sqlalchemy import delete, func, select
+
+    from mavis.store.db import Session
+    from mavis.store.models import NativeGrant, NativeOAuthState
+    from mavis.tools.integrations import get_provider
+    from mavis.tools.integrations.native.base import NativeProvider
+
+    oauth = getattr(get_provider(), "oauth", None)
+    revoked = 0
+    if oauth is not None:
+        for provider in (NativeProvider.GOOGLE, NativeProvider.SLACK):
+            try:
+                if await oauth.tokens.grant(user_id, provider) is not None:
+                    await oauth.revoke(user_id, provider)
+                    revoked += 1
+            except Exception as exc:  # noqa: BLE001 - the local erase below still removes the grant
+                log.warning("deletion.native_revoke_failed", provider=provider.value,
+                            error=type(exc).__name__)
+    async with Session() as s:
+        left = int(await s.scalar(select(func.count()).select_from(NativeGrant).where(
+            NativeGrant.user_id == user_id)) or 0)
+        await s.execute(delete(NativeGrant).where(NativeGrant.user_id == user_id))
+        gone = await s.execute(delete(NativeOAuthState).where(NativeOAuthState.user_id == user_id))
+        states = gone.rowcount
+        await s.commit()
+    return {"revoked": revoked, "swept": left, "states": states or 0}
 
 
 async def _composio(user_id: int) -> dict:
@@ -134,7 +187,9 @@ async def _checkpoints(user_id: int) -> dict:
 def _steps():
     yield "redis", _redis
     yield "composio", _composio
+    yield "native", _native
     yield from repo.EXTERNAL_STEPS.items()
+    yield "markers", _markers
     yield "checkpoints", _checkpoints
     yield "vector", _vector
     yield "graph", _graph

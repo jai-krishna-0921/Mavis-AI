@@ -268,10 +268,16 @@ def same_goal(a: str, b: str) -> bool:
     return len(ta & tb) / len(ta | tb) >= GOAL_DUPLICATE_SIMILARITY
 
 
+# Only work that is actually in motion can absorb a new request. A task waiting on the user (a connection or
+# an approval, AWAITING_APPROVAL) is not doing anything: absorbing the request would leave it stranded and
+# the reply would claim progress that is not happening.
+_IN_MOTION = (TaskStatus.QUEUED.value, TaskStatus.RUNNING.value)
+
+
 async def find_active_duplicate(user_id: int, goal: str) -> Task | None:
-    """A non-terminal planned task with the same goal (same_goal), so one request never runs twice."""
+    """A QUEUED or RUNNING planned task with the same goal (same_goal), so one request never runs twice."""
     for task in await active_for_user(user_id):
-        if task.kind == TaskKind.TASK.value and same_goal(task.goal, goal):
+        if task.status in _IN_MOTION and task.kind == TaskKind.TASK.value and same_goal(task.goal, goal):
             return task
     return None
 
@@ -323,3 +329,14 @@ async def undelivered_artifacts(task_id: int) -> list[Artifact]:
             .order_by(Artifact.id)
         )
         return list(rows)
+
+
+async def awaiting_started_before(started_before: datetime, user_id: int | None = None) -> list[Task]:
+    """Planned tasks paused for the user (connection or approval) since before `started_before`. The pause
+    began when the last run ended, so the run's start (reset by every resume) bounds it from below."""
+    q = select(Task).where(Task.status == TaskStatus.AWAITING_APPROVAL.value,
+                           Task.kind == TaskKind.TASK.value, Task.started_at < started_before)
+    if user_id is not None:
+        q = q.where(Task.user_id == user_id)
+    async with Session() as s:
+        return list(await s.scalars(q.order_by(Task.id)))

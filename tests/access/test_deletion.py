@@ -8,6 +8,7 @@ from mavis.store import models  # noqa: F401
 from mavis.store.db import Base
 from mavis.store.repo import deletion as repo
 from mavis.store.repo import messages, users
+from tests.tools.integrations.native.conftest import *  # noqa: F403 - fixtures
 
 
 def test_every_user_table_is_in_the_cascade():
@@ -180,3 +181,143 @@ async def test_owner_admin_delete_command(db, settings, bus, monkeypatch):
                                            "command": "admin_delete"}, trust=Trust.USER)
     assert await commands.command_gate(ev) is False
     assert (await users.get(victim)).status == "deleting"
+
+
+# --- native Google and Slack data (main's connectors) ----------------------------------------------------
+
+
+@pytest.fixture
+def native(native_env, db, client, vendor):
+    """A real NativeRouter over the fake Composio provider, so deletion reaches tokens, oauth and vendors."""
+    import functools
+
+    import httpx
+
+    from mavis.tools.integrations.native.oauth import GOOGLE_REVOKE_URL, SLACK_REVOKE_URL, NativeOAuth
+    from mavis.tools.integrations.native.router import NativeRouter
+    from mavis.tools.integrations.native.tokens import NativeTokenStore
+    from tests.tools.integrations.fakes import FakeProvider
+
+    vendor.routes[GOOGLE_REVOKE_URL] = lambda r: httpx.Response(200, json={})
+    vendor.routes[SLACK_REVOKE_URL] = lambda r: httpx.Response(200, json={"ok": True})
+    tokens = NativeTokenStore(client)
+    fallback = FakeProvider()
+    router = NativeRouter(fallback, tokens, NativeOAuth(tokens, client), [], client)
+    return router, tokens, fallback, functools.cache(lambda: router)
+
+
+async def _connect_native(tokens, uid: int, tag: str) -> None:
+    from mavis.tools.integrations.native.base import NativeProvider as P
+
+    await tokens.save(uid, P.GOOGLE, account={"email": f"{tag}@x.com", "scopes": []}, access_token=f"g-{tag}",
+                      refresh_token=f"gr-{tag}", expires_at=None)
+    await tokens.save(uid, P.SLACK, account={"team_id": "T1", "user_id": f"U{tag}", "scopes": []},
+                      access_token=f"s-{tag}", refresh_token=None, expires_at=None)
+    await tokens.save(uid, P.SLACK_BOT, account={"team_id": "T1", "user_id": f"U{tag}", "bot_user_id": "B1",
+                                                  "dm": f"D{tag}"}, access_token=f"b-{tag}",
+                      refresh_token=None, expires_at=None)
+
+
+async def test_deleting_a_user_erases_every_native_trace_and_only_theirs(db, memory, monkeypatch, native):
+    from sqlalchemy import select
+
+    from mavis.domain.memory import Relation
+    from mavis.domain.messages import Outbound
+    from mavis.memory.graph import third_party_ref
+    from mavis.store import db as dbm
+    from mavis.store.models import NativeGrant, NativeOAuthState, OutboxMessage, ProcessedEvent
+    from mavis.store.repo import events, outbox
+    from mavis.tools.integrations.native.base import NativeProvider as P
+
+    router, tokens, _fallback, cached = native
+    monkeypatch.setattr("mavis.tools.integrations.get_provider", cached)
+    a, b = await _seed(8101, "Ana"), await _seed(8102, "Ben")
+    for uid, tag in ((a, "a"), (b, "b")):
+        await _connect_native(tokens, uid, tag)
+        await router.oauth.authorize_url(uid, P.GOOGLE)  # an unfinished consent redirect
+        await outbox.enqueue_now(Outbound(user_id=uid, text="hi", dedupe_key=f"nat:{uid}",
+                                          route="slack:T1:D1"))
+        await events.record(f"learn:{uid}:gmail:m1")
+        await events.record(f"learn:{uid}:slack:T1:C1:1.1")
+        await memory.graph.upsert_relation(
+            uid, Relation(subject="Mira", rel="works_at", object="Acme", statement="Mira works at Acme"),
+            source_ref=third_party_ref("gmail:m1"))
+    assert await memory.graph.dump(a)
+
+    report = await deletion.run_steps(a)
+
+    assert report["native"]["revoked"] == 2 and report["native"]["states"] == 1
+    async with dbm.Session() as s:
+        grants = list(await s.scalars(select(NativeGrant)))
+        states = list(await s.scalars(select(NativeOAuthState)))
+        outs = list(await s.scalars(select(OutboxMessage)))
+        marks = [m.id for m in await s.scalars(select(ProcessedEvent))]
+    assert {g.user_id for g in grants} == {b} and len(grants) == 3  # B keeps google, slack and the bot grant
+    assert {st.user_id for st in states} == {b}
+    assert {o.user_id for o in outs} == {b} and all(o.route for o in outs)
+    assert marks == [f"learn:{b}:gmail:m1", f"learn:{b}:slack:T1:C1:1.1"]
+    assert await memory.graph.dump(a) == [] and await memory.graph.dump(b) != []
+    assert await tokens.user_for_slack("T1", "Ua") is None and await tokens.bot_dm_owner("T1", "Da") is None
+    assert await tokens.user_for_slack("T1", "Ub") == b
+
+
+async def test_vendors_are_told_to_drop_the_grants_but_a_vendor_failure_does_not_stop_deletion(
+        db, memory, monkeypatch, native, vendor):
+    import httpx
+
+    from mavis.tools.integrations.native.oauth import GOOGLE_REVOKE_URL, SLACK_REVOKE_URL
+
+    router, tokens, _, cached = native
+    monkeypatch.setattr("mavis.tools.integrations.get_provider", cached)
+    uid = await _seed(8103, "Cy")
+    await _connect_native(tokens, uid, "c")
+    vendor.routes[SLACK_REVOKE_URL] = lambda r: httpx.Response(500, json={})
+    await deletion.run_steps(uid)
+    assert len(vendor.to(GOOGLE_REVOKE_URL)) == 1 and len(vendor.to(SLACK_REVOKE_URL)) == 1
+    assert await tokens.grants(uid) == []
+    assert (await users.get(uid)).status == "deleted"
+
+
+async def test_native_rows_are_swept_without_the_native_router(db, memory, provider, native):
+    """INTEGRATION_PROVIDER switched back to Composio: the grants table still holds the user's tokens."""
+    _, tokens, _, _ = native
+    uid = await _seed(8104, "Di")
+    await _connect_native(tokens, uid, "d")
+    report = await deletion.run_steps(uid)  # the autouse fixture installs the plain fake provider
+    assert report["native"]["revoked"] == 0 and report["native"]["swept"] == 3
+    assert await tokens.grants(uid) == []
+
+
+async def test_a_deleted_user_cannot_be_reconnected_by_a_late_callback(db, memory, provider, native, vendor):
+    from mavis.tools.integrations.native.base import NativeProvider as P
+    from mavis.tools.integrations.native.oauth import OAuthError
+    from tests.tools.integrations.native.test_oauth import google_vendor, query
+
+    router, tokens, _, _ = native
+    uid = await _seed(8105, "Eli")
+    state = query(await router.oauth.authorize_url(uid, P.GOOGLE))["state"]
+    await deletion.run_steps(uid)
+    google_vendor(vendor)
+    with pytest.raises(OAuthError):
+        await router.oauth.complete(state, "code", P.GOOGLE)
+    assert await tokens.grants(uid) == []
+
+
+async def test_reaction_history_key_is_erased(db, memory, provider, fake_redis):
+    uid = await _seed(8106, "Fay")
+    await fake_redis.rpush(f"mavis:reactions:{uid}", "e1\tx")
+    await fake_redis.rpush(f"mavis:reactions:{uid + 1}", "e2\tx")
+    await deletion.run_steps(uid)
+    assert await fake_redis.exists(f"mavis:reactions:{uid}") == 0
+    assert await fake_redis.exists(f"mavis:reactions:{uid + 1}") == 1
+
+
+async def test_chat_learn_markers_go_with_the_messages(db, memory, provider):
+    from mavis.store.repo import events
+
+    uid = await _seed(8107, "Gus")
+    other = await _seed(8108, "Hal")
+    await events.record(f"learn:d:{uid}:0")  # the marker _seed's first message would have
+    await events.record(f"learn:d:{other}:0")
+    await deletion.run_steps(uid)
+    assert not await events.seen(f"learn:d:{uid}:0") and await events.seen(f"learn:d:{other}:0")

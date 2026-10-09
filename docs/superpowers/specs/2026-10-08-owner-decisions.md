@@ -13,3 +13,10 @@
 11. Disconnect: ask, with "forget everything from it" as the default.
 12. WhatsApp: linked from Telegram first; WhatsApp-only signup later.
 13. Access: invite codes. Server: t4g.medium (4 GB) as of 2026-10-08.
+
+## Revenue intelligence (2026-10-08)
+14. Primary CRM: **HubSpot** (sandbox/test portal to be provided by the owner; until then use HubSpot's developer test account).
+15. Mavis serves **the owner's own company first** (one org); external customer orgs later.
+16. Teams/Outlook: **off** until the owner confirms tenant-admin consent.
+17. First org users: the owner is org owner; teammates join by org invite with roles admin/manager/rep/viewer. Managers see team-level summaries and risk flags; full transcripts only for meetings they attended or that the rep shares.
+18. Market data: later phase, tracking/alerts/scenario analysis only, no predictions or advice.

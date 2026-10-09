@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from mavis.bus.base import EventBus
+from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.integrations import UserRef
@@ -55,6 +56,17 @@ class LoopWriter(Protocol):
     async def upsert(self, user_id: int, loop: LoopUpsert) -> Any: ...
 
 
+def sync_window(name: str, default: int) -> int:
+    """A first-sync window in days from settings (the core branch adds the settings; until then, defaults)."""
+    try:
+        return max(1, int(getattr(get_settings(), name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+CALENDAR_BACK_DAYS, CALENDAR_AHEAD_DAYS = 7, 30
+
+
 class FirstSync:
     def __init__(
         self,
@@ -65,7 +77,9 @@ class FirstSync:
         bus: EventBus,
         tz_of: Callable[[int], Awaitable[str]],
         clock: Callable[[], datetime] = timeutil.now,
+        connectors: Any = None,
     ) -> None:
+        self.connectors = connectors  # attention.connector_ingest.ConnectorIngest: records into the graph
         self.provider, self.memory, self.loops, self.bus = provider, memory, loops, bus
         self.tz_of, self.clock = tz_of, clock
 
@@ -109,7 +123,8 @@ class FirstSync:
             user_id,
             "mail.search",
             {
-                "query": "newer_than:14d -category:promotions -category:social",
+                "query": f"newer_than:{sync_window('sync_gmail_days', 14)}d "
+                         "-category:promotions -category:social",
                 "max_results": 50,
             },
         )
@@ -121,13 +136,17 @@ class FirstSync:
             for m in mails
             if "SENT" not in m["labels"]
         ]
-        await self._learn_batches(
-            user_id,
-            "Recent emails (untrusted content; extract people, organisations and events only):",
-            lines,
-            f"first_sync:{user_id}:gmail",
-            GMAIL_LEARN_JOBS,
-        )
+        if self.connectors is not None:
+            for m in mails:  # one record-grounded LEARN job per kept message (own mail teaches its address)
+                await self.connectors.email(user_id, m)
+        else:
+            await self._learn_batches(
+                user_id,
+                "Recent emails (untrusted content; extract people, organisations and events only):",
+                lines,
+                f"first_sync:{user_id}:gmail",
+                GMAIL_LEARN_JOBS,
+            )
         latest_by_thread: dict[str, dict] = {}
         for m in sorted(mails, key=lambda x: x["received_at"] or ""):
             latest_by_thread[m["thread_id"] or m["message_id"]] = m
@@ -167,8 +186,8 @@ class FirstSync:
             user_id,
             "calendar.list",
             {
-                "time_min": now.isoformat(),
-                "time_max": (now + timedelta(days=14)).isoformat(),
+                "time_min": (now - timedelta(days=CALENDAR_BACK_DAYS)).isoformat(),
+                "time_max": (now + timedelta(days=CALENDAR_AHEAD_DAYS)).isoformat(),
                 "max_results": 50,
             },
         )
@@ -199,7 +218,13 @@ class FirstSync:
         data = await self._execute(user_id, "slack.channels", {})
         if data is None:
             return []
-        names = [str(pick(c, "name", default="")) for c in extract_list(data, "channels", "data.channels")]
+        channels = extract_list(data, "channels", "data.channels")
+        if self.connectors is not None:
+            from mavis.tools.integrations.native.slack_events import backfill
+
+            await backfill(self.provider, None, user_id, days=sync_window("sync_slack_days", 7),
+                           now=self.clock(), sink=self.connectors)
+        names = [str(pick(c, "name", default="")) for c in channels]
         names = [n for n in names if n]
         if names:
             await self.memory.learn(

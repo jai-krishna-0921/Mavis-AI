@@ -1,5 +1,7 @@
 from datetime import timedelta
 
+import pytest
+
 from mavis.domain.events import Event, EventType, JobKind, Trust
 from mavis.domain.integrations import ConnectionState, PendingStatus
 from mavis.domain.policy import Capability
@@ -536,3 +538,34 @@ async def test_expiry_closes_and_resumes_every_waiting_task(db, provider, cache,
     assert await connections.open_for(1, Capability.CALENDAR) == []
     resumed = {j.payload["task_id"] for j in fake_bus.jobs if j.kind is JobKind.RESUME_TASK}
     assert resumed == {"a", "b", "c"}
+
+
+@pytest.mark.parametrize(("capability", "prefix"), [
+    (Capability.GMAIL, "gmail:"), (Capability.SLACK, "slack:"),
+])
+async def test_disconnect_forgets_what_was_learned_from_that_source(
+        db, provider, cache, fake_bus, rec, state, capability, prefix):
+    forgotten = []
+
+    async def forget(user_id, p):
+        forgotten.append((user_id, p))
+        return 3
+
+    provider.set_state(1, capability, ConnectionState.ACTIVE)
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    flow.forget_source = forget
+    await flow.disconnect(1, capability)
+    assert forgotten == [(1, prefix)]
+    assert "removed what I had learned" in rec.sent[-1].text
+    assert not any(c in rec.sent[-1].text for c in "—–")
+
+
+async def test_a_failing_forget_does_not_undo_the_disconnect(db, provider, cache, fake_bus, rec, state):
+    async def boom(user_id, p):
+        raise RuntimeError("down")
+
+    provider.set_state(1, Capability.SLACK, ConnectionState.ACTIVE)
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    flow.forget_source = boom
+    await flow.disconnect(1, Capability.SLACK)
+    assert provider.disconnected == [(1, "slack")] and "Disconnected Slack" in rec.sent[-1].text

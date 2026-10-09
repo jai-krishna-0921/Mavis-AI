@@ -38,6 +38,7 @@ class Lease(NamedTuple):
 class LimiterBackend(Protocol):
     async def acquire(self, priority: str, wait_s: float) -> Lease | None: ...
     def release(self, lease: Lease | None) -> None: ...
+    def hold_background(self, lease: Lease | None, seconds: float) -> None: ...
     def touch(self) -> None: ...
     def estimate_wait_s(self) -> float: ...
 
@@ -156,6 +157,11 @@ class LocalLimiterAdapter:
     def release(self, lease: Lease | None) -> None:
         self._inner.release(best_effort=lease is not None and lease.priority == "best_effort")
 
+    def hold_background(self, lease: Lease | None, seconds: float) -> None:
+        """A timed-out background call keeps its slot for `seconds`; chat may take it back (see _Limiter)."""
+        be = lease is not None and lease.priority == "best_effort"
+        self._inner.hold_background(seconds, best_effort=be)
+
     def touch(self) -> None:
         self._inner.touch()
 
@@ -187,6 +193,12 @@ class FallingBackLimiter:
             self._local.release(lease)
         elif self._shared is not None:
             self._shared.release(lease)
+
+    def hold_background(self, lease: Lease | None, seconds: float) -> None:
+        if lease is not None and lease.provider == "local":
+            self._local.hold_background(lease, seconds)
+        elif lease is not None:
+            asyncio.get_running_loop().call_later(seconds, self.release, lease)
 
     def touch(self) -> None:
         self._local.touch()

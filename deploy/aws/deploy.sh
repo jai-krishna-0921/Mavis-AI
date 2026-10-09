@@ -59,10 +59,15 @@ if [[ "$WEBHOOK" == 1 ]]; then set_key TELEGRAM_MODE webhook force; else set_key
 # Owner-supplied keys follow the local env file (a rotated or upgraded key must reach the box);
 # an empty local value never blanks the box. Generated secrets below are preserved instead.
 for k in OLLAMA_API_KEY TAVILY_API_KEY COMPOSIO_API_KEY TELEGRAM_BOT_TOKEN ALLOWED_TELEGRAM_CHAT_IDS \
-         LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY TEST_MIRROR_CHAT_ID; do
+         LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY TEST_MIRROR_CHAT_ID \
+         GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET SLACK_CLIENT_ID SLACK_CLIENT_SECRET \
+         SLACK_SIGNING_SECRET INTEGRATION_PROVIDER; do
   v="$(envget "$DEMO_ENV" "$k")"
   if [[ -n "$v" ]]; then set_key "$k" "$v" force; else set_key "$k" ""; fi
 done
+# Google and Slack run in house. The router still falls back to Composio for a user with no native grant,
+# so this is safe to force; it must not depend on what the local env file happens to say.
+set_key INTEGRATION_PROVIDER native force
 tz="$(envget "$DEMO_ENV" DEFAULT_TIMEZONE)"
 [[ -z "$tz" ]] || set_key DEFAULT_TIMEZONE "$tz"
 set_key COMPOSIO_WEBHOOK_SECRET ""
@@ -74,6 +79,9 @@ set_key TEST_TELEGRAM_CHAT_ID -1000000000000001
 set_key POSTGRES_PASSWORD "$(openssl rand -hex 24)"
 set_key NEO4J_PASSWORD "$(openssl rand -hex 24)"
 set_key TELEGRAM_WEBHOOK_SECRET "$(openssl rand -hex 24)"
+# Wraps every stored Google/Slack token. Generated once and never overwritten: replacing it would orphan
+# every sealed grant (rotation goes through NATIVE_TOKEN_KEK_PREVIOUS instead).
+set_key NATIVE_TOKEN_KEK "$(openssl rand -base64 32)"
 
 # --- ship code ----------------------------------------------------------------
 log "rsync repo -> $MAVIS_EIP:$MAVIS_REMOTE_DIR"
@@ -81,6 +89,7 @@ rsync_box -az --delete \
   --exclude '.git' --exclude '.venv/' --exclude 'data/' --exclude '.env' --exclude '.env.*' \
   --exclude 'deploy/aws/state.env' --exclude '*.pem' --exclude '__pycache__/' --exclude '.pytest_cache/' \
   --exclude '.ruff_cache/' --exclude '.superpowers/' --exclude '.mcp.json' --exclude 'docs/' --exclude 'tests/' \
+  --exclude '.worktrees/' --exclude 'instinct_screenshots/' --exclude 'node_modules/' \
   "$REPO_ROOT/" "$MAVIS_SSH_USER@$MAVIS_EIP:$MAVIS_REMOTE_DIR/"
 
 log "installing .env (mode 600)"
@@ -113,6 +122,12 @@ if ! \$C run --rm migrate; then
   exit 1
 fi
 \$C up -d --wait --wait-timeout 300 && RC=0
+# rsync replaces the Caddyfile with a new inode, which a single-file bind mount does not follow: recreate
+# caddy only when the file changed, so routes like /oauth/* go live without a needless TLS restart
+CADDY_SHA="\$(sha256sum Caddyfile | cut -d' ' -f1)"
+if [ "\$CADDY_SHA" != "\$(cat .caddy.sha 2>/dev/null)" ]; then
+  \$C up -d --force-recreate caddy && echo "\$CADDY_SHA" > .caddy.sha
+fi
 REMOTE
 ssh_box "cd $MAVIS_REMOTE_DIR && rm -f .deploy.rc && setsid nohup bash .deploy-remote.sh > .deploy.log 2>&1 < /dev/null &"
 for _ in $(seq 1 240); do

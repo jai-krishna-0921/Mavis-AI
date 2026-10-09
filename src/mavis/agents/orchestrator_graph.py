@@ -19,6 +19,7 @@ later prompt includes it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import mimetypes
 import operator
@@ -62,6 +63,11 @@ MAX_REVISIONS = 2
 MAX_STEPS = 8
 _STEP_DIGEST_CHARS = 3000
 _BG = {"priority": "background", "fallback": True}
+# Waits before retrying a planner, critic or responder call that failed (a deadline under load, a blip).
+LLM_RETRY_DELAYS_S: tuple[float, ...] = (2.0, 6.0)
+PARTIAL_LEAD = "I ran out of time before wrapping this up, so this is what I had finished:"
+EXPIRED_LEAD = "I couldn't get what I was waiting on, so I'm sending what I'd finished so far:"
+_PARTIAL_BUBBLE_CHARS = 3500
 
 PLANNER_PROMPT = """You are Mavis's planner. Break the user's goal into 1-6 steps for specialist agents.
 Run independent steps in parallel by leaving depends_on empty; add depends_on only when a step needs another
@@ -209,18 +215,39 @@ def _planner_system() -> str:
     return PLANNER_PROMPT.format(specialists=specialists, spawn_tools=spawn_tools)
 
 
+async def bg_structured(schema: Any, system: str, user_msg: str, **kwargs: Any) -> Any:
+    """A background structured call that survives a transient model error: LLMError (a deadline, a busy
+    provider) is retried after a short backoff, the last one is raised for the caller to degrade on."""
+    delays = iter(LLM_RETRY_DELAYS_S)
+    while True:
+        try:
+            return await llm.structured(schema, system, user_msg, **kwargs)
+        except LLMError as exc:
+            delay = next(delays, None)
+            if delay is None:
+                raise
+            log.warning("orchestrator.llm_retry", error=_err(exc), wait_s=delay)
+            await asyncio.sleep(delay)
+
+
 async def make_plan(goal: str, context: str) -> Plan:
     system = f"{_planner_system()}\n\n{UNTRUSTED_NOTE}"
     user_msg = f"Goal:\n{goal}\n\nContext:\n{context or '(none)'}"
+    fallback = Plan(goal=goal, steps=[PlanStep(id="s1", agent="research", instruction=goal)])
     for _ in range(2):
-        plan = await llm.structured(Plan, system, user_msg, tier=llm.Tier.SMART, **_BG)
+        try:
+            plan = await bg_structured(Plan, system, user_msg, tier=llm.Tier.SMART, **_BG)
+        except LLMError as exc:
+            # Planning is only a convenience: the work still gets done as one research step.
+            log.warning("planner.degraded_to_single_step", error=_err(exc))
+            return fallback
         try:
             validate_plan(plan)
             return plan
         except ValueError as exc:
             log.warning("planner.invalid_plan", error=str(exc))
             system = f"{system}\n\nYour previous plan was invalid: {exc}. Return a corrected plan."
-    return Plan(goal=goal, steps=[PlanStep(id="s1", agent="research", instruction=goal)])
+    return fallback
 
 
 async def planner(state: OrchestratorState) -> dict:
@@ -458,11 +485,15 @@ async def critic(state: OrchestratorState) -> dict:
     # Single-step plans skip review (preflight F26); so does a cancelled task.
     if rev >= MAX_REVISIONS or len(steps) < 2 or await _cancelled(state["task_id"]):
         return {"todo": []}
-    verdict = await llm.structured(
-        CriticVerdict, f"{CRITIC_PROMPT}\n\n{UNTRUSTED_NOTE}",
-        f"Goal:\n{state['goal']}\n\nStep results:\n{_digest(state)}",
-        tier=llm.Tier.SMART, **_BG,
-    )
+    try:
+        verdict = await bg_structured(
+            CriticVerdict, f"{CRITIC_PROMPT}\n\n{UNTRUSTED_NOTE}",
+            f"Goal:\n{state['goal']}\n\nStep results:\n{_digest(state)}",
+            tier=llm.Tier.SMART, **_BG,
+        )
+    except LLMError as exc:  # review is optional: what was gathered goes out as it is
+        log.warning("critic.skipped", error=_err(exc))
+        return {"todo": []}
     step_ids = {s["id"] for s in steps}
     redo = [s for s in verdict.revise_steps if s in step_ids]
     if verdict.accept or not redo:
@@ -706,12 +737,18 @@ async def responder(state: OrchestratorState) -> dict:
     user = await users.get(state["user_id"])
     actions = "\n".join(state.get("action_results", [])) or "(none)"
     system = f"{persona.system_prompt(user, utcnow(), '')}\n\n{RESPONDER_RULES}\n\n{UNTRUSTED_NOTE}"
-    msg = await llm.structured(
-        ComposedMessage, system,
-        f"The user asked: {state['goal']}\n\nWork results:\n{_digest(state) or '(no research steps)'}"
-        f"\n\nActions:\n{actions}",
-        tier=llm.Tier.SMART, **_BG,
-    )
+    try:
+        msg = await bg_structured(
+            ComposedMessage, system,
+            f"The user asked: {state['goal']}\n\nWork results:\n{_digest(state) or '(no research steps)'}"
+            f"\n\nActions:\n{actions}",
+            tier=llm.Tier.SMART, **_BG,
+        )
+    except LLMError as exc:
+        # The work is done; only the wording failed. Send the gathered output as it is.
+        log.warning("responder.degraded_to_raw_results", error=_err(exc))
+        raw = partial_messages(state, lead="")
+        return {"final_messages": raw or ["Done."]}
     texts = [register.mask_slurs(m).strip() for m in msg.messages if m.strip()][:3] or ["Done."]
     return {"final_messages": texts}
 
@@ -746,9 +783,82 @@ def derive_outcome(state: OrchestratorState) -> tuple[TaskStatus, str | None]:
     return TaskStatus.PARTIAL, "only part of it got done"
 
 
+CUT_NOTE = "(That was too long to send in full, so the rest is left out. Ask me and I will send it.)"
+
+
+def _bubbles(text: str, limit: int = 3) -> list[str]:
+    """`text` cut into chat bubbles at paragraph or line breaks, at most `limit`. Content past the cap is
+    never dropped silently: the last bubble says plainly that the rest was left out."""
+    out: list[str] = []
+    cur = ""
+    for para in text.strip().split("\n\n"):
+        while len(para) > _PARTIAL_BUBBLE_CHARS:
+            cut = para.rfind("\n", 0, _PARTIAL_BUBBLE_CHARS)
+            cut = cut if cut > 0 else _PARTIAL_BUBBLE_CHARS
+            if cur:
+                out.append(cur)
+                cur = ""
+            out.append(para[:cut].strip())
+            para = para[cut:].strip()
+        if cur and len(cur) + len(para) + 2 > _PARTIAL_BUBBLE_CHARS:
+            out.append(cur)
+            cur = ""
+        cur = f"{cur}\n\n{para}".strip() if cur else para
+    if cur:
+        out.append(cur)
+    if len(out) > limit:
+        out = [*out[:limit - 1], f"{out[limit - 1]}\n\n{CUT_NOTE}"]
+    return out
+
+
+def partial_messages(state: dict, lead: str = PARTIAL_LEAD) -> list[str]:
+    """What the task finished, as chat bubbles, with no model call (the model may be what failed).
+
+    The plan's last step alone is the answer only when it finished and (transitively) depends on every
+    other finished step, so it can have folded their output in. Otherwise (parallel steps, a closing step
+    that did not finish) every finished step is delivered in plan order. Empty when no step produced text."""
+    plan = Plan.model_validate(state["plan"]) if state.get("plan") else None
+    results = state.get("results", {})
+    order = [s.id for s in plan.steps] if plan else list(results)
+    done = [(sid, results[sid]) for sid in order
+            if results.get(sid, {}).get("ok") and str(results[sid].get("text") or "").strip()]
+    if not done:
+        return []
+    last_id = order[-1]
+    if done[-1][0] == last_id and _folds_in_all(plan, last_id, {sid for sid, _ in done}):
+        body = str(done[-1][1]["text"]).strip()  # the closing step already folds in the earlier ones
+    else:
+        body = "\n\n".join(str(r["text"]).strip() for _, r in done)
+    room = 2 if lead else 3
+    bubbles = _bubbles(register.mask_slurs(body), room)
+    return [lead, *bubbles] if lead else bubbles
+
+
+def _folds_in_all(plan: Plan | None, last_id: str, finished: set[str]) -> bool:
+    """True when `last_id` (transitively) depends on every other finished step. Without a plan there is no
+    dependency to rely on."""
+    if plan is None:
+        return len(finished) <= 1
+    deps = {s.id: s.depends_on for s in plan.steps}
+    seen: set[str] = set()
+    todo = list(deps.get(last_id, []))
+    while todo:
+        sid = todo.pop()
+        if sid not in seen:
+            seen.add(sid)
+            todo.extend(deps.get(sid, []))
+    return (finished - {last_id}) <= seen
+
+
 async def finish(state: OrchestratorState) -> dict:
+    status, reason = derive_outcome(state)
+    await complete_task(state, state.get("final_messages", []), status, reason)
+    return {}
+
+
+async def complete_task(state: dict, messages: list[str], status: TaskStatus, reason: str | None) -> bool:
+    """Record the terminal outcome by claim (a concurrent cancel wins) and publish the delivery event."""
     task_id, user_id = state["task_id"], state["user_id"]
-    messages = state.get("final_messages", [])
     artifacts = list(dict.fromkeys(state.get("artifacts", [])))
     recorded = {a.path for a in await tasks.artifacts_for(task_id)}  # specialists may record their own
     for path in (p for p in artifacts if p not in recorded):
@@ -763,13 +873,24 @@ async def finish(state: OrchestratorState) -> dict:
         # Taint picked up mid-run (a step read an email) lives only in the graph state: store it on the
         # row too, so delivery, redelivery and the next chat turn treat the result as untrusted.
         fields["tainted"] = True
-    status, reason = derive_outcome(state)
     if reason is not None:
         fields["error"] = reason  # plain words: shown in "recently failed"
     if not await tasks.claim(task_id, active, status, **fields):
         log.info("orchestrator.finish_skipped", task_id=task_id)
-        return {}
-    await _cards().finalize(task_id, final_of(status.value))
+        return False
+    try:
+        await _cards().finalize(task_id, final_of(status.value))
+    except Exception:  # noqa: BLE001 - the card is cosmetic; the result must still go out
+        log.warning("orchestrator.card_finalize_failed", task_id=task_id, exc_info=True)
+    await publish_completed(task_id, user_id, messages, artifacts, status)
+    return True
+
+
+async def publish_completed(
+    task_id: int, user_id: int, messages: list[str], artifacts: list[str], status: TaskStatus
+) -> None:
+    """Publish the delivery event of a task whose terminal status is already claimed. The event id is the
+    task's, so publishing it again (a retry after a failure here) can never deliver twice."""
     task = await tasks.get(task_id)
     await bus.get_bus().publish(Event(
         id=f"task:{task_id}:completed", user_id=user_id, type=EventType.TASK_COMPLETED,
@@ -780,7 +901,6 @@ async def finish(state: OrchestratorState) -> dict:
             "tainted": bool(task.tainted), "status": status.value,
         },
     ))
-    return {}
 
 
 def entry_route(state: OrchestratorState) -> str:

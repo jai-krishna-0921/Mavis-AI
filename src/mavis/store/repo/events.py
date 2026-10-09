@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +19,15 @@ async def claim(session: AsyncSession, event_id: str) -> bool:
     )
     res = await session.execute(stmt)
     return res.rowcount == 1
+
+
+async def forget_prefix(prefix: str) -> int:
+    """Drop processed markers whose id starts with `prefix` (so the records can be learned again)."""
+    like = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    async with Session() as s:
+        res = await s.execute(delete(ProcessedEvent).where(ProcessedEvent.id.like(like, escape="\\")))
+        await s.commit()
+        return res.rowcount or 0
 
 
 async def seen(event_id: str) -> bool:

@@ -16,7 +16,7 @@ from mavis.domain.decisions import TaskRequest
 from mavis.domain.messages import Role
 from mavis.domain.policy import RiskClass
 from mavis.domain.results import ToolOutput
-from mavis.domain.tasks import TaskOrigin
+from mavis.domain.tasks import TaskOrigin, TaskStatus
 from mavis.store.repo import messages, tasks
 from mavis.tools.registry import MavisTool, TaintPolicy, current_run, current_task_id, self_only_tainted
 
@@ -34,6 +34,8 @@ current_turn: ContextVar[TurnInfo | None] = ContextVar("current_turn", default=N
 START_TASK_USER = "On it: {goal}. I'll send it over when it's ready."
 START_TASK_NOTE = "Tell the user you're on it and will report back."
 TASK_EXISTS_USER = "I'm already working on that one, so I didn't start another."
+TASK_QUEUED_USER = ("That one is already queued and starts as soon as the current task is done, "
+                    "so I didn't start another.")
 ACK_GOAL_CHARS = 140
 
 
@@ -44,6 +46,8 @@ def task_ack(goal: str) -> str:
         text = text[:ACK_GOAL_CHARS].rsplit(" ", 1)[0].rstrip(" .!?;:,")
     text = text[:1].lower() + text[1:] if text[:2].istitle() or text[:2].islower() else text
     return START_TASK_USER.format(goal=text or "that")
+TASK_QUEUED_NOTE = ("Tell the user it is queued behind the current task, not running yet, "
+                    "and you'll report back.")
 TASK_EXISTS_NOTE = "Tell the user it's already in progress and you'll report back."
 CONNECT_RESULT = "Sent them the connect link and buttons. Don't repeat the link."
 
@@ -96,6 +100,9 @@ async def start_task(user_id: int, args: StartTaskArgs) -> ToolOutput:
         ref = f"turn:{turn.event_id}:start:{turn.starts}"
         turn.starts += 1
     if (dup := await find_duplicate(user_id, args.goal, ref)) is not None:
+        existing = await tasks.get(dup)  # say what it is really doing: queued is not running
+        if existing is not None and existing.status == TaskStatus.QUEUED:
+            return ToolOutput(TASK_QUEUED_USER, f"Task #{dup} is queued for it. {TASK_QUEUED_NOTE}")
         return ToolOutput(TASK_EXISTS_USER, f"Task #{dup} already runs it. {TASK_EXISTS_NOTE}")
     approved_tainted = await _approved_from_tainted_task()
     # The task is tainted whenever third-party text was anywhere in the prompt (the replayed window too),

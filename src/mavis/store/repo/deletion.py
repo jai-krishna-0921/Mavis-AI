@@ -11,7 +11,8 @@ from mavis.store.db import Base, Session
 
 # Children before parents. The meta-test fails when a table with user_id is missing here.
 USER_TABLES: tuple[str, ...] = (
-    "invite_redemptions", "artifacts", "task_cards", "pending_approvals", "tasks", "initiative_decisions",
+    "invite_redemptions", "native_oauth_states", "native_grants", "artifacts", "task_cards",
+    "pending_approvals", "tasks", "initiative_decisions",
     "wakeups",
     "ping_log", "loops", "connections_pending", "attention_prefs", "attention_money_baselines",
     "attention_senders", "attention_observations", "policy_rules", "outbox", "messages", "llm_usage",

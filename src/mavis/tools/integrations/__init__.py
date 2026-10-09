@@ -13,14 +13,19 @@ from mavis.tools.integrations.connections import ConnectionCache
 @lru_cache
 def get_provider() -> IntegrationProvider:
     s = get_settings()
-    if s.integration_provider == "composio":
+    if s.integration_provider in ("composio", "native"):
         from mavis.tools.integrations.composio import ComposioProvider
 
-        return ComposioProvider(
+        composio = ComposioProvider(
             api_key=s.composio_api_key, base_url=s.composio_base_url,
             webhook_secret=s.composio_webhook_secret, timeout_s=s.composio_timeout_s,
             workspace=s.google_workspace_enabled,
         )
+        if s.integration_provider == "native":
+            from mavis.tools.integrations.native.router import build_native_router
+
+            return build_native_router(composio)  # Composio stays as the fallback
+        return composio
     raise IntegrationError(f"unknown INTEGRATION_PROVIDER {s.integration_provider!r}")
 
 

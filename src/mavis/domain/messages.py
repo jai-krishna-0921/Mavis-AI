@@ -34,6 +34,7 @@ class Outbound(BaseModel):
     photo_path: str | None = None  # local image sent as a photo (text is the caption)
     media: list[str] = Field(default_factory=list)  # local images sent as one album (captions: text lines)
     proactive: bool = False
+    route: str | None = None  # chat handle of the channel to answer on (Slack); None = the default route
     dedupe_key: str | None = None
 
 
