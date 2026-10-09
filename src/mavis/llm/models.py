@@ -201,6 +201,36 @@ class _Limiter:
         self._last_be_start = float("-inf")
         self._be_inflight = 0
         self._tick: asyncio.TimerHandle | None = None
+        # slots a timed-out BACKGROUND call still holds (its abandoned request may run on server-side)
+        self._bg_holds: list[list[Any]] = []
+
+    def hold_background(self, seconds: float, best_effort: bool = False) -> None:
+        """Keep a timed-out background call's slot occupied for `seconds`, but hand it back the moment an
+        interactive caller needs one: a background timeout must never make a chat reply wait. A caller
+        already queued gets the slot now (nothing would reclaim it later); otherwise the hold applies."""
+        now = asyncio.get_running_loop().time()
+        if any(self._effective_rank(w, now) == 0 and not w.fut.done() for w in self._waiters):
+            self.release(best_effort)  # frees the slot once and dispatches it to the waiter
+            return
+        hold: list[Any] = [None, best_effort]  # [timer handle, best_effort]
+
+        def end() -> None:
+            if hold in self._bg_holds:
+                self._bg_holds.remove(hold)
+            self.release(best_effort)
+
+        hold[0] = asyncio.get_running_loop().call_later(seconds, end)
+        self._bg_holds.append(hold)
+
+    def _reclaim_background_hold(self) -> bool:
+        if not self._bg_holds:
+            return False
+        handle, best_effort = self._bg_holds.pop(0)
+        handle.cancel()
+        self._free += 1
+        if best_effort:
+            self._be_inflight = max(0, self._be_inflight - 1)
+        return True
 
     def touch(self) -> None:
         """A non-best_effort call ended just now (the lull and, with one slot, the grace run from it)."""
@@ -242,6 +272,8 @@ class _Limiter:
         loop = asyncio.get_running_loop()
         now = loop.time()
         rank = _RANK[priority]
+        if rank == 0 and self._free == 0:
+            self._reclaim_background_hold()
         if rank == 2:
             if self._single_slot_blocked(now):
                 raise LLMError(_YIELDED)
@@ -344,22 +376,32 @@ def _limiter(secondary: bool = False) -> _Limiter:
 
 
 class _OllamaState:
-    """Process-wide view of the Ollama account: global 429 backoff and timeout cooldown."""
+    """Process-wide view of the Ollama account: global 429 backoff (the account really is saturated for
+    everyone) and a timeout cooldown that is scoped to the LANE of the call that timed out. A background
+    call timing out says nothing about whether a chat reply would, so it never marks the interactive lane."""
 
     def __init__(self) -> None:
         self.backoff_until = 0.0
         self.level = 0
-        self.cooldown_until = 0.0
+        self._cooldowns: dict[str, float] = {}
+
+    @property
+    def cooldown_until(self) -> float:
+        return max(self._cooldowns.values(), default=0.0)
 
     def reset(self) -> None:
-        self.backoff_until = self.cooldown_until = 0.0
+        self.backoff_until = 0.0
+        self._cooldowns.clear()
         self.level = 0
 
     def backoff_remaining(self) -> float:
         return max(0.0, self.backoff_until - time.monotonic())
 
-    def unavailable_s(self) -> float:
-        return max(self.backoff_until, self.cooldown_until) - time.monotonic()
+    def unavailable_s(self, lane: str | None = None) -> float:
+        """Seconds until the account is usable for `lane` ("interactive" or "background"); None: for any
+        lane (background work waits out every lane's cooldown, chat only its own)."""
+        cooling = self._cooldowns.get(lane, 0.0) if lane is not None else self.cooldown_until
+        return max(self.backoff_until, cooling) - time.monotonic()
 
     def note_success(self) -> None:
         self.backoff_until = 0.0
@@ -374,9 +416,10 @@ class _OllamaState:
         self.backoff_until = max(self.backoff_until, time.monotonic() + dur)
         return dur
 
-    def note_timeout(self) -> float:
+    def note_timeout(self, priority: str = "interactive") -> float:
         cooldown = get_settings().llm_timeout_cooldown_s
-        self.cooldown_until = max(self.cooldown_until, time.monotonic() + cooldown)
+        lane = "interactive" if priority == "interactive" else "background"
+        self._cooldowns[lane] = max(self._cooldowns.get(lane, 0.0), time.monotonic() + cooldown)
         return cooldown
 
 
@@ -477,7 +520,7 @@ async def _call[R](
                     result = await op()
             except TimeoutError as exc:
                 if not secondary and not be:
-                    hold = _ollama.note_timeout()
+                    hold = _ollama.note_timeout(priority)
                 if deadline.remaining() <= 0:
                     raise LLMError("LLM deadline exceeded") from exc
                 raise
@@ -489,7 +532,7 @@ async def _call[R](
                 raise
             if _is_timeout(exc):
                 if not be:
-                    hold = hold or _ollama.note_timeout()
+                    hold = hold or _ollama.note_timeout(priority)
                     log.warning("llm.timeout_cooldown", hold_s=hold)
             elif _is_rate_limited(exc):
                 dur = _ollama.note_rate_limit(_retry_after_s(exc))
@@ -502,8 +545,10 @@ async def _call[R](
         finally:
             if priority != "best_effort":
                 lim.touch()  # the grace window runs from the END of a chat or task call
-            if hold > 0:
+            if hold > 0 and priority == "interactive":
                 asyncio.get_running_loop().call_later(hold, lim.release, be)  # server still busy
+            elif hold > 0:
+                lim.hold_background(hold, be)  # server still busy, but chat may take the slot back
             else:
                 lim.release(be)
     assert last is not None
@@ -529,7 +574,7 @@ def _text_of(content: Any) -> str:
 
 def _prefer_secondary(tier: Tier, priority: Priority) -> bool:
     """Interactive calls skip a saturated Ollama (cooldown / backoff) when a secondary exists."""
-    return priority == "interactive" and _secondary_ready(tier) and _ollama.unavailable_s() > 0
+    return priority == "interactive" and _secondary_ready(tier) and _ollama.unavailable_s("interactive") > 0
 
 
 async def _invoke_chain(
