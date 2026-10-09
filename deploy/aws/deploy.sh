@@ -6,7 +6,7 @@
 set -euo pipefail
 # shellcheck source=deploy/aws/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-need ssh rsync openssl
+need ssh rsync openssl aws
 state_require
 
 WEBHOOK=1
@@ -88,6 +88,9 @@ set_key TELEGRAM_WEBHOOK_SECRET "$(openssl rand -hex 24)"
 # every sealed grant (rotation goes through NATIVE_TOKEN_KEK_PREVIOUS instead).
 set_key NATIVE_TOKEN_KEK "$(openssl rand -base64 32)"
 
+# the metadata guard must exist before the containers start (idempotent; also repairs a rebuilt box)
+"$AWS_DIR/imds.sh" install
+
 # --- ship code ----------------------------------------------------------------
 log "rsync repo -> $MAVIS_EIP:$MAVIS_REMOTE_DIR"
 rsync_box -az --delete \
@@ -147,6 +150,15 @@ fi
 log "pruning dangling images and old build cache"
 ssh_box "docker image prune -f >/dev/null && docker builder prune -f --keep-storage 1GB >/dev/null"
 compose_remote ps
+
+log "verifying that only api, worker and timer reach the instance metadata service"
+if ! "$AWS_DIR/imds.sh" verify-containers; then
+  if [[ "$(aws_ ec2 describe-instances --instance-ids "${MAVIS_INSTANCE_ID:-}" \
+        --query 'Reservations[0].Instances[0].MetadataOptions.HttpPutResponseHopLimit' --output text 2>/dev/null || echo 1)" != 1 ]]; then
+    "$AWS_DIR/imds.sh" lower-hop-limit
+  fi
+  die "instance metadata verification failed; the hop limit is 1 (containers have no role credentials). Fix imds-guard and re-run."
+fi
 
 if [[ "$WEBHOOK" == 1 ]]; then
   log "telegram webhook:"

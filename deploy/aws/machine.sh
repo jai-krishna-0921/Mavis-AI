@@ -69,7 +69,12 @@ prefix_rule() { printf '{"ID":"%s","Status":"Enabled","Filter":{"Prefix":"%s"},"
 LIFECYCLE="{\"Rules\":[$(tag_rule work-14d work "$MACHINE_WORK_DAYS"),$(tag_rule inbox-60d inbox "$MACHINE_INBOX_DAYS"),$(tag_rule out-60d out "$MACHINE_OUT_DAYS"),$(prefix_rule tmp-1d tmp/ "$MACHINE_TMP_DAYS"),$(prefix_rule e2e-30d e2e/ "$MACHINE_E2E_DAYS"),{\"ID\":\"abort-mpu-1d\",\"Status\":\"Enabled\",\"Filter\":{\"Prefix\":\"\"},\"AbortIncompleteMultipartUpload\":{\"DaysAfterInitiation\":1}}]}"
 run aws_ s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration "$LIFECYCLE"
 
-# --- R4b: custom SANDBOX interpreter, only when the verify script found network in the managed one ---
+# --- R4b: custom SANDBOX interpreter (recommended). The worker refuses to register the machine tools in prod
+# unless a probe from inside a session shows no network (MACHINE_ALLOW_EGRESS=true overrides, not advised).
+# The managed aws.codeinterpreter.v1 may have egress; a custom one with networkMode SANDBOX has none. ---
+if [[ "$CUSTOM_CI" == 0 ]]; then
+  log "note: $CI_ID may allow network access; run with --custom-interpreter and set AGENTCORE_CODE_INTERPRETER_ID"
+fi
 if [[ "$CUSTOM_CI" == 1 ]]; then
   existing="$(aws_ bedrock-agentcore-control list-code-interpreters \
     --query "codeInterpreterSummaries[?name=='mavis_ci_sandbox'].codeInterpreterId" --output text 2>/dev/null || true)"
