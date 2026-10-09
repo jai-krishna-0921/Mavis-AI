@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -31,9 +30,19 @@ class Tokens:
         return {"email": self.email} if self.email else None
 
 
-def error(status: int, reason: str = "", message: str = "boom", *, location: str | None = None,
-          headers: dict | None = None) -> httpx.Response:
-    err: dict[str, Any] = {"code": status, "message": message, "errors": [{"reason": reason, "message": message}]}
+def error(
+    status: int,
+    reason: str = "",
+    message: str = "boom",
+    *,
+    location: str | None = None,
+    headers: dict | None = None,
+) -> httpx.Response:
+    err: dict[str, Any] = {
+        "code": status,
+        "message": message,
+        "errors": [{"reason": reason, "message": message}],
+    }
     if location:
         err["errors"][0]["location"] = location
     return httpx.Response(status, json={"error": err}, headers=headers)
@@ -49,6 +58,7 @@ class FakeGoogle:
 
     def on(self, method: str, pattern: str, response: Any) -> FakeGoogle:
         import re
+
         self.routes.append((method, re.compile(pattern), response))
         return self
 
@@ -82,6 +92,7 @@ class FakeGoogle:
 
     def calls(self, method: str, pattern: str) -> list[httpx.Request]:
         import re
+
         return [r for r in self.requests if r.method == method and re.search(pattern, r.url.path)]
 
 
@@ -89,22 +100,41 @@ def body_of(request: httpx.Request) -> dict:
     return json.loads(request.content)
 
 
-def gmail_message(mid: str, *, thread: str = "t1", sender: str = "Alice <alice@acme.com>",
-                  subject: str = "Hello", text: str = "Body text", labels: tuple[str, ...] = ("INBOX", "UNREAD"),
-                  ts: int = 1_790_000_000_000, extra_headers: tuple[tuple[str, str], ...] = (),
-                  payload: dict | None = None) -> dict:
+def gmail_message(
+    mid: str,
+    *,
+    thread: str = "t1",
+    sender: str = "Alice <alice@acme.com>",
+    subject: str = "Hello",
+    text: str = "Body text",
+    labels: tuple[str, ...] = ("INBOX", "UNREAD"),
+    ts: int = 1_790_000_000_000,
+    extra_headers: tuple[tuple[str, str], ...] = (),
+    payload: dict | None = None,
+) -> dict:
     headers = [
-        {"name": "Authentication-Results", "value": "mx.google.com; dkim=pass header.i=@acme.com header.s=s1;"
-                                                     " dmarc=pass (p=REJECT) header.from=acme.com"},
+        {
+            "name": "Authentication-Results",
+            "value": "mx.google.com; dkim=pass header.i=@acme.com header.s=s1;"
+            " dmarc=pass (p=REJECT) header.from=acme.com",
+        },
         {"name": "Received", "value": "by 2002:a1 with SMTP"},
-        {"name": "From", "value": sender}, {"name": "To", "value": "me@kripya.com"},
-        {"name": "Subject", "value": subject}, {"name": "Date", "value": "Mon, 05 Oct 2026 10:00:00 +0530"},
+        {"name": "From", "value": sender},
+        {"name": "To", "value": "me@kripya.com"},
+        {"name": "Subject", "value": subject},
+        {"name": "Date", "value": "Mon, 05 Oct 2026 10:00:00 +0530"},
         {"name": "Message-ID", "value": f"<{mid}@mail.acme.com>"},
         *({"name": k, "value": v} for k, v in extra_headers),
     ]
     body = payload or part("text/plain", text)
-    return {"id": mid, "threadId": thread, "labelIds": list(labels), "snippet": text[:100],
-            "internalDate": str(ts), "payload": {**body, "headers": headers + body.get("headers", [])}}
+    return {
+        "id": mid,
+        "threadId": thread,
+        "labelIds": list(labels),
+        "snippet": text[:100],
+        "internalDate": str(ts),
+        "payload": {**body, "headers": headers + body.get("headers", [])},
+    }
 
 
 __all__ = ["FakeGoogle", "Tokens", "b64", "body_of", "error", "gmail_message"]
