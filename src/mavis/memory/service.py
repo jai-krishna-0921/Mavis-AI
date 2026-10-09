@@ -18,7 +18,7 @@ from mavis.memory import recall as recall_mod
 from mavis.memory.dates import apply_relative_day
 from mavis.memory.embeddings import Embedder, get_embedder
 from mavis.memory.extractor import extract
-from mavis.memory.graph import GraphStore, make_graph
+from mavis.memory.graph import GraphStore, is_third_party, make_graph
 from mavis.memory.names import is_user
 from mavis.memory.recall import LoopsReader
 from mavis.memory.resolver import resolve
@@ -309,7 +309,8 @@ class MemoryService:
     async def describe_user(self, user_id: int) -> str:
         await self.init()
         card = await profile_repo.get(user_id)
-        facts = [d["statement"] for d in await self.graph.dump(user_id)][-15:]
+        facts = [d["statement"] for d in await self.graph.dump(user_id)
+                 if not is_third_party(d.get("source_ref"))][-15:]
         parts = []
         if rendered := card.render():
             parts.append(rendered)

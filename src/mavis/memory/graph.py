@@ -24,6 +24,39 @@ from mavis.store import db as dbm
 from mavis.store.models import GraphEdge, GraphNode
 
 
+THIRD_PARTY_PREFIX = "tp:"  # source_ref namespace of edges learned from third-party records (mail, Slack)
+
+
+def third_party_ref(ref: str) -> str:
+    """The edge source_ref for a fact learned from a third-party record. Only our own record learning
+    writes it; a user's own words never carry this prefix, so it is the persisted trust marker."""
+    return (THIRD_PARTY_PREFIX + ref)[:200]
+
+
+def is_third_party(source_ref: str | None) -> bool:
+    return bool(source_ref) and str(source_ref).startswith(THIRD_PARTY_PREFIX)
+
+
+class Fact(str):
+    """A recalled edge statement. It is a plain str everywhere; `source_ref` says where it was learned
+    and `third_party` whether recall must hand it to the model as untrusted data."""
+
+    source_ref: str
+
+    def __new__(cls, text: str, source_ref: str = "") -> Fact:
+        obj = super().__new__(cls, text)
+        obj.source_ref = source_ref or ""
+        return obj
+
+    @property
+    def third_party(self) -> bool:
+        return is_third_party(self.source_ref)
+
+    @property
+    def origin(self) -> str:
+        return self.source_ref[len(THIRD_PARTY_PREFIX):] if self.third_party else self.source_ref
+
+
 class GraphStore(Protocol):
     async def init(self) -> None: ...
     async def upsert_entity(self, user_id: int, entity: Entity) -> str: ...
@@ -182,7 +215,7 @@ class SqliteGraphStore:
         candidates = sorted(edges.values(), key=lambda e: e.valid_from, reverse=True)[: limit * 4]
         now = _now()
         ranked = sorted(candidates, key=lambda e: edge_score(e.confidence, e.valid_from, now), reverse=True)
-        return [e.statement for e in ranked[:limit]]
+        return [Fact(e.statement, e.source_ref) for e in ranked[:limit]]
 
     async def entities(self, user_id: int) -> list[Entity]:
         async with dbm.Session() as s:
@@ -200,7 +233,8 @@ class SqliteGraphStore:
             )
             return [
                 {"subject": names.get(e.src_key, e.src_key), "relation": e.rel,
-                 "object": names.get(e.dst_key, e.dst_key), "statement": e.statement}
+                 "object": names.get(e.dst_key, e.dst_key), "statement": e.statement,
+                 "source_ref": e.source_ref or ""}
                 for e in rows
             ]
 
