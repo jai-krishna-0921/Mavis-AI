@@ -41,6 +41,11 @@ MAX_USER_LOOKUPS = 40  # users.info calls one tool call may make (Tier 4: 100 a 
 MAX_CACHE = 5000
 _ID = re.compile(r"^[CGD][A-Z0-9]{8,}$")
 
+# Slack answers some failures with ok:false after it may already have acted.
+_SERVER_CODES = frozenset({"internal_error", "fatal_error", "service_unavailable", "request_timeout"})
+# A failure before the request can have left the machine: any call may repeat.
+NEVER_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
 # Machine error codes, grouped by what the caller should do. Anything unlisted falls to failures.classify.
 _AUTH = frozenset({"invalid_auth", "token_revoked", "account_inactive", "not_authed", "token_expired",
                    "not_allowed_token_type", "missing_scope"})
@@ -61,6 +66,10 @@ class SlackError(Exception):
     def result(self) -> ToolResult:
         if self.kind is FailureKind.AUTH:
             detail = f"Slack unauthorized ({self.code}): the Slack grant needs reconnecting"
+        elif self.kind is FailureKind.UNCONFIRMED:
+            detail = (f"Slack outcome unknown ({self.code}). The message may or may not have been posted, so "
+                      "do NOT repeat it blindly. Tell the user it may have gone through and to check the "
+                      "conversation in Slack before trying again.")
         else:
             detail = f"Slack error {self.code}"
         return ToolResult(ok=False, error=detail, error_kind=self.kind)
@@ -130,9 +139,14 @@ class SlackExecutor:
 
     # --- transport -------------------------------------------------------------------------------
 
-    async def _api(self, user_id: int, method: str, params: dict[str, Any]) -> dict:
-        """One Web API call. Retries once on AUTH (forced token fetch, covers rotation), once after a
-        Retry-After of at most 10 s, and once on a 5xx or transport failure."""
+    async def _api(
+        self, user_id: int, method: str, params: dict[str, Any], *, idempotent: bool = True
+    ) -> dict:
+        """One Web API call. Retries once on AUTH (forced token fetch, covers rotation) and once after a
+        Retry-After of at most 10 s (both rejected before the call ran, so any call may repeat). A connect
+        failure never left the machine, so any call may repeat. A 5xx or a read error may come after Slack
+        acted: only an idempotent call (a read) repeats once; a non-idempotent one (chat.postMessage) ends
+        as UNCONFIRMED so neither the model nor the user assumes it failed."""
         forced = waited = server_retried = False
         form = {k: ("true" if v is True else "false" if v is False else str(v))
                 for k, v in params.items() if v not in (None, "")}
@@ -145,7 +159,9 @@ class SlackExecutor:
                 resp = await self._client.post(
                     API + method, data=form, headers={"Authorization": f"Bearer {token}"}
                 )
-            except httpx.TransportError:
+            except httpx.TransportError as exc:
+                if not (idempotent or isinstance(exc, NEVER_SENT)):
+                    raise SlackError(FailureKind.UNCONFIRMED, "network_error_after_send") from None
                 if server_retried:
                     raise SlackError(FailureKind.UNAVAILABLE, "network_error") from None
                 server_retried = True
@@ -159,6 +175,8 @@ class SlackExecutor:
                 await self._sleep(delay)
                 continue
             if resp.status_code >= 500:
+                if not idempotent:
+                    raise SlackError(FailureKind.UNCONFIRMED, f"http_{resp.status_code}")
                 if server_retried:
                     raise SlackError(FailureKind.UNAVAILABLE, f"http_{resp.status_code}")
                 server_retried = True
@@ -175,6 +193,8 @@ class SlackExecutor:
                 return body
             code = _s(body.get("error")) or "unknown_error"
             kind = kind_for_code(code, resp.status_code if resp.status_code >= 400 else None)
+            if not idempotent and code in _SERVER_CODES:
+                kind = FailureKind.UNCONFIRMED
             if kind is FailureKind.AUTH and code in _REFRESH_CODES and not forced:
                 forced = True
                 continue
@@ -323,7 +343,7 @@ class SlackExecutor:
         channel = await self._resolve_channel(user_id, _s(args.get("channel")))
         body = await self._api(user_id, "chat.postMessage", {
             "channel": channel, "text": text, "thread_ts": _s(args.get("thread_ts")),
-        })
+        }, idempotent=False)
         return {"ok": True, "channel": _s(body.get("channel")) or channel, "ts": _s(body.get("ts"))}
 
 
