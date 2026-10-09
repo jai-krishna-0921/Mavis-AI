@@ -13,9 +13,11 @@ import asyncio
 import html
 import json
 import re
+import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -23,11 +25,14 @@ from zoneinfo import ZoneInfo
 import httpx
 from pydantic import BaseModel, ValidationError
 
+from mavis.config import get_settings
 from mavis.domain.errors import FailureKind
 from mavis.domain.integrations import ToolResult, UserRef
 from mavis.tools.integrations.actions import ACTIONS
+from mavis.tools.integrations.composio_map import input_option
 from mavis.tools.integrations.native import gmail_mime
 from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired, TokenSource
+from mavis.tools.integrations.native.docs_markdown import MAX_MARKDOWN_CHARS, markdown_requests
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 CALENDAR = "https://www.googleapis.com/calendar/v3"
@@ -35,6 +40,13 @@ DRIVE = "https://www.googleapis.com/drive/v3"
 DOCS = "https://docs.googleapis.com/v1/documents"
 SHEETS = "https://sheets.googleapis.com/v4/spreadsheets"
 PEOPLE = "https://people.googleapis.com/v1"
+DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
+TASKS = "https://tasks.googleapis.com/tasks/v1/lists/@default/tasks"  # the user's default list
+MEET = "https://meet.googleapis.com/v2"
+FOLDER_MIME = "application/vnd.google-apps.folder"
+UPLOAD_CAP_BYTES = 5 * 1024 * 1024  # one multipart request; larger artifacts are refused, never truncated
+_MIME = re.compile(r"^[A-Za-z0-9][\w.+-]*/[A-Za-z0-9][\w.+-]*$")
+_A1_ONLY = re.compile(r"^\$?[A-Za-z]{1,3}\$?\d*(?::\$?[A-Za-z]{1,3}\$?\d*)?$")
 
 MAX_JSON_BYTES = 16 * 1024 * 1024
 DOWNLOAD_CAP_BYTES = 1_000_000  # exported or downloaded file text is cut here; larger files are flagged
@@ -91,7 +103,8 @@ UNCONFIRMED_DETAIL = (
     "blindly. Tell the user it may have gone through and to check (for mail, the Sent folder; for a "
     "calendar event, the calendar) before trying again."
 )
-ID_ARGS = ("message_id", "thread_id", "event_id", "file_id", "document_id", "spreadsheet_id")
+ID_ARGS = ("message_id", "thread_id", "event_id", "file_id", "document_id", "spreadsheet_id", "task_id",
+           "conference_record_id")
 
 # Gmail search: operators that name who or what a message is about (a targeted search), and the boxes and
 # categories a listing leaves out unless the query itself names them.
@@ -405,6 +418,17 @@ class GoogleExecutor:
             "drive.meta": self._drive_meta, "drive.permissions": self._drive_permissions,
             "docs.read": self._docs_read, "sheets.find": self._sheets_find, "sheets.read": self._sheets_read,
             "contacts.search": self._contacts_search, "contacts.list": self._contacts_list,
+            # Workspace writes. docs.append, drive.upload, tasks.complete and tasks.update are not here:
+            # workspace_tools composes them from the primitives below (read, then insert_text; stage the
+            # artifact, then upload_file; tasks.get, then tasks.patch), so every risk check runs first.
+            "drive.create_folder": self._drive_create_folder, "drive.move": self._drive_move,
+            "drive.share": self._drive_share, "drive.upload_file": self._drive_upload_file,
+            "docs.create": self._docs_create, "docs.insert_text": self._docs_insert_text,
+            "docs.comment": self._docs_comment, "sheets.create": self._sheets_create,
+            "sheets.append_row": self._sheets_append_row, "sheets.update_range": self._sheets_update_range,
+            "tasks.list": self._tasks_list, "tasks.get": self._tasks_get, "tasks.add": self._tasks_add,
+            "tasks.patch": self._tasks_patch, "tasks.delete": self._tasks_delete,
+            "meet.create": self._meet_create, "meet.transcript": self._meet_transcript,
         }
 
     def handles(self, action: str) -> bool:
@@ -449,10 +473,15 @@ class GoogleExecutor:
     # --- transport ---------------------------------------------------------------------------------
 
     async def _send(
-        self, token: str, method: str, url: str, params: dict | None, body: Any, cap: int
+        self, token: str, method: str, url: str, params: dict | None, body: Any, cap: int,
+        raw: tuple[bytes, str] | None = None,
     ) -> tuple[int, httpx.Headers, bytes, bool]:
+        headers = {"Authorization": f"Bearer {token}"}
+        if raw is not None:  # (bytes, content type): an upload, instead of a JSON body
+            headers["Content-Type"] = raw[1]
         async with self._client.stream(
-            method, url, params=params, json=body, headers={"Authorization": f"Bearer {token}"}
+            method, url, params=params, headers=headers,
+            **({"content": raw[0]} if raw is not None else {"json": body}),
         ) as resp:
             chunks, size, cut = [], 0, False
             async for chunk in resp.aiter_bytes():
@@ -465,7 +494,7 @@ class GoogleExecutor:
 
     async def _raw(
         self, uid: int, method: str, url: str, *, params: dict | None = None, body: Any = None,
-        cap: int = MAX_JSON_BYTES, idempotent: bool | None = None,
+        cap: int = MAX_JSON_BYTES, idempotent: bool | None = None, raw: tuple[bytes, str] | None = None,
     ) -> tuple[httpx.Headers, bytes, bool]:
         """One authorised call with the retry rules. `idempotent` is declared by the call (None: the method's
         own default, true for GET and HEAD only). A 401 refreshes the token once and a rate limit waits once
@@ -479,7 +508,7 @@ class GoogleExecutor:
         refreshed = throttled = backed_off = False
         while True:
             try:
-                status, headers, data, cut = await self._send(token, method, url, params, body, cap)
+                status, headers, data, cut = await self._send(token, method, url, params, body, cap, raw)
             except httpx.TransportError as exc:
                 never_sent = isinstance(exc, NEVER_SENT)
                 if not (never_sent or idempotent):
@@ -541,9 +570,10 @@ class GoogleExecutor:
 
     async def _json(
         self, uid: int, method: str, url: str, *, params: dict | None = None, body: Any = None,
-        idempotent: bool | None = None,
+        idempotent: bool | None = None, raw: tuple[bytes, str] | None = None,
     ) -> Any:
-        _, data, cut = await self._raw(uid, method, url, params=params, body=body, idempotent=idempotent)
+        _, data, cut = await self._raw(uid, method, url, params=params, body=body, idempotent=idempotent,
+                                       raw=raw)
         if cut:
             raise GoogleError(FailureKind.UNKNOWN, "google response larger than the size limit")
         if not data.strip():
@@ -895,3 +925,201 @@ class GoogleExecutor:
             if not token:
                 break
         return {"connections": people}
+
+    # --- Drive, Docs and Sheets writes -----------------------------------------------------------------
+    # idempotent=True only where sending the same request again leaves the same result (a PATCH or PUT to
+    # a fixed value). A create, an append, a share, an upload or a comment makes one more thing each time,
+    # so it is declared False and is never repeated once it may have reached Google.
+
+    async def _drive_create_folder(self, uid: int, a: Any) -> dict:
+        body: dict[str, Any] = {"name": a.name, "mimeType": FOLDER_MIME}
+        if a.parent_id:
+            body["parents"] = [a.parent_id]
+        return await self._json(
+            uid, "POST", f"{DRIVE}/files", idempotent=False, body=body,
+            params={"supportsAllDrives": "true", "fields": WRITE_FILE_FIELDS})
+
+    async def _drive_move(self, uid: int, a: Any) -> dict:
+        remove = a.from_folder_id
+        if not remove:  # a move leaves nothing behind: every current parent goes, except the destination
+            current = await self._json(uid, "GET", f"{DRIVE}/files/{_q(a.file_id)}",
+                                       params={"fields": "parents", "supportsAllDrives": "true"})
+            remove = ",".join(p for p in current.get("parents") or [] if p != a.to_folder_id)
+        params = {"addParents": a.to_folder_id, "supportsAllDrives": "true", "fields": WRITE_FILE_FIELDS}
+        if remove and remove != a.to_folder_id:
+            params["removeParents"] = remove
+        return await self._json(uid, "PATCH", f"{DRIVE}/files/{_q(a.file_id)}", params=params, body={},
+                                idempotent=True)
+
+    async def _drive_share(self, uid: int, a: Any) -> dict:
+        perm = await self._json(
+            uid, "POST", f"{DRIVE}/files/{_q(a.file_id)}/permissions", idempotent=False,
+            params={"sendNotificationEmail": "true", "supportsAllDrives": "true",
+                    "fields": "id,type,role,emailAddress"},
+            body={"type": "user", "role": a.role, "emailAddress": str(a.email)})
+        return {"id": a.file_id, "permissionId": perm.get("id", ""), "role": perm.get("role", a.role),
+                "emailAddress": perm.get("emailAddress", str(a.email))}
+
+    async def _drive_upload_file(self, uid: int, a: Any) -> dict:
+        content = await asyncio.to_thread(_read_artifact, a.path)
+        mime = a.mime if _MIME.match(a.mime or "") else "application/octet-stream"
+        meta: dict[str, Any] = {"name": a.name, "mimeType": mime}
+        if a.folder_id:
+            meta["parents"] = [a.folder_id]
+        boundary = "mavis" + secrets.token_hex(16)
+        body = b"".join((
+            f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".encode(),
+            json.dumps(meta).encode(),
+            f"\r\n--{boundary}\r\nContent-Type: {mime}\r\n\r\n".encode(), content,
+            f"\r\n--{boundary}--".encode()))
+        return await self._json(
+            uid, "POST", DRIVE_UPLOAD, idempotent=False,
+            raw=(body, f"multipart/related; boundary={boundary}"),
+            params={"uploadType": "multipart", "supportsAllDrives": "true", "fields": WRITE_FILE_FIELDS})
+
+    async def _docs_create(self, uid: int, a: Any) -> dict:
+        if len(a.markdown) > MAX_MARKDOWN_CHARS:
+            raise GoogleError(FailureKind.INVALID_ARGUMENT,
+                              f"document text is longer than {MAX_MARKDOWN_CHARS} characters", "markdown")
+        requests = markdown_requests(a.markdown)
+        doc = await self._json(uid, "POST", DOCS, idempotent=False, body={"title": a.title})
+        doc_id = str(doc.get("documentId") or "")
+        if not doc_id:
+            raise GoogleError(FailureKind.UNCONFIRMED, UNCONFIRMED_DETAIL.format(
+                what="google created a document but returned no id"))
+        if requests:
+            try:
+                await self._batch_update(uid, doc_id, requests)
+            except GoogleError as exc:
+                if exc.kind is FailureKind.UNCONFIRMED:  # the text may be in: keep the doc, say which
+                    raise GoogleError(
+                        FailureKind.UNCONFIRMED, f"{exc.detail} (document id {doc_id})") from None
+                await self._discard(uid, doc_id)
+                raise
+        return {"documentId": doc_id, "title": doc.get("title", a.title)}
+
+    async def _discard(self, uid: int, file_id: str) -> None:
+        """Best effort: trash a document whose body could not be written, so no empty one is left behind."""
+        try:
+            await self._json(uid, "PATCH", f"{DRIVE}/files/{_q(file_id)}", body={"trashed": True},
+                             params={"supportsAllDrives": "true", "fields": "id"}, idempotent=True)
+        except (GoogleError, ReauthRequired):
+            pass
+
+    async def _batch_update(self, uid: int, doc_id: str, requests: list[dict]) -> dict:
+        return await self._json(uid, "POST", f"{DOCS}/{_q(doc_id)}:batchUpdate", idempotent=False,
+                                body={"requests": requests})
+
+    async def _docs_insert_text(self, uid: int, a: Any) -> dict:
+        got = await self._batch_update(
+            uid, a.document_id, [{"insertText": {"location": {"index": a.index}, "text": a.text}}])
+        return {"documentId": got.get("documentId", a.document_id)}
+
+    async def _docs_comment(self, uid: int, a: Any) -> dict:
+        return await self._json(
+            uid, "POST", f"{DRIVE}/files/{_q(a.file_id)}/comments", idempotent=False,
+            params={"fields": "id,content,createdTime"}, body={"content": a.content})
+
+    async def _sheets_create(self, uid: int, a: Any) -> dict:
+        made = await self._json(
+            uid, "POST", SHEETS, idempotent=False, body={"properties": {"title": a.title}},
+            params={"fields": "spreadsheetId,spreadsheetUrl,properties.title"})
+        return {"spreadsheetId": made.get("spreadsheetId", ""),
+                "spreadsheetUrl": made.get("spreadsheetUrl", ""),
+                "title": (made.get("properties") or {}).get("title", a.title)}
+
+    async def _sheets_append_row(self, uid: int, a: Any) -> dict:
+        target = a.range.strip() or "Sheet1"
+        if "!" not in target and not target.startswith("'") and not _A1_ONLY.match(target):
+            target = _sheet_ref(target)  # a bare sheet name that needs quoting (spaces, punctuation)
+        return await self._json(
+            uid, "POST", f"{SHEETS}/{_q(a.spreadsheet_id)}/values/{_q(target, allow_slash=True)}:append",
+            idempotent=False,
+            params={"valueInputOption": input_option(a.values), "insertDataOption": "INSERT_ROWS"},
+            body={"majorDimension": "ROWS", "values": [list(a.values)]})
+
+    async def _sheets_update_range(self, uid: int, a: Any) -> dict:
+        target = f"{_sheet_ref(a.sheet_name)}!{a.start_cell.upper()}"
+        rows = [list(r) for r in a.values]
+        return await self._json(
+            uid, "PUT", f"{SHEETS}/{_q(a.spreadsheet_id)}/values/{_q(target, allow_slash=True)}",
+            idempotent=True, params={"valueInputOption": input_option(rows)},
+            body={"majorDimension": "ROWS", "values": rows})
+
+    # --- Tasks (the default list) ----------------------------------------------------------------------
+
+    async def _tasks_list(self, uid: int, a: Any) -> dict:
+        params: dict[str, Any] = {"maxResults": 100, "showCompleted": str(a.show_completed).lower(),
+                                  "showHidden": str(a.show_completed).lower()}
+        if a.due_before is not None:
+            params["dueMax"] = _rfc3339(a.due_before)
+        items, token, _ = await self._pages(uid, TASKS, params, "items", a.max_results, "maxResults")
+        out: dict[str, Any] = {"tasks": items}  # the key workspace_render and attention.workspace read
+        if token:
+            out["nextPageToken"] = token
+        return out
+
+    async def _tasks_get(self, uid: int, a: Any) -> dict:
+        return await self._json(uid, "GET", f"{TASKS}/{_q(a.task_id)}")
+
+    async def _tasks_add(self, uid: int, a: Any) -> dict:
+        body: dict[str, Any] = {"title": a.title, "status": "needsAction"}
+        if a.notes:
+            body["notes"] = a.notes
+        if a.due is not None:
+            body["due"] = _task_due(a.due)
+        return await self._json(uid, "POST", TASKS, idempotent=False, body=body)
+
+    async def _tasks_patch(self, uid: int, a: Any) -> dict:
+        body: dict[str, Any] = {"title": a.title, "status": a.status}
+        if a.status == "needsAction":
+            body["completed"] = None  # reopening: drop the old completion time
+        if a.notes is not None:
+            body["notes"] = a.notes
+        if a.due is not None:
+            body["due"] = _task_due(a.due)
+        return await self._json(uid, "PATCH", f"{TASKS}/{_q(a.task_id)}", body=body, idempotent=True)
+
+    async def _tasks_delete(self, uid: int, a: Any) -> dict:
+        await self._json(uid, "DELETE", f"{TASKS}/{_q(a.task_id)}", idempotent=True)
+        return {"id": a.task_id, "deleted": True}
+
+    # --- Meet --------------------------------------------------------------------------------------
+
+    async def _meet_create(self, uid: int, a: Any) -> dict:
+        return await self._json(uid, "POST", f"{MEET}/spaces", idempotent=False, body={})
+
+    async def _meet_transcript(self, uid: int, a: Any) -> dict:
+        items, _, _ = await self._pages(
+            uid, f"{MEET}/conferenceRecords/{_q(a.conference_record_id)}/transcripts", {"pageSize": 100},
+            "transcripts", 100, "pageSize")
+        return {"transcripts": items}
+
+
+WRITE_FILE_FIELDS = "id,name,mimeType,parents,webViewLink"
+
+
+def _sheet_ref(name: str) -> str:
+    """A sheet name as an A1 prefix: always quoted, a quote inside doubled."""
+    return "'" + name.replace("'", "''") + "'"
+
+
+def _task_due(day: Any) -> str:
+    return f"{day.isoformat()}T00:00:00.000Z"  # Tasks keeps the date only
+
+
+def _read_artifact(raw: str) -> bytes:
+    """The bytes of a file inside ARTIFACTS_DIR, at most UPLOAD_CAP_BYTES. Anything else is refused, so a
+    path from a caller can never read outside the task artifacts (the caller has already checked that the
+    file is this task's own; this is the second lock)."""
+    path = Path(raw).resolve()
+    if not path.is_relative_to(get_settings().artifacts_dir.resolve()):
+        raise GoogleError(FailureKind.INVALID_ARGUMENT, "the file is not a task artifact", "path")
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(UPLOAD_CAP_BYTES + 1)
+    except OSError:
+        raise GoogleError(FailureKind.INVALID_ARGUMENT, "the file is missing", "path") from None
+    if len(data) > UPLOAD_CAP_BYTES:
+        raise GoogleError(FailureKind.INVALID_ARGUMENT, "the file is larger than 5 MB", "path")
+    return data
