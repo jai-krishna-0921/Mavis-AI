@@ -52,7 +52,15 @@ state_require() {
   [[ -f "$STATE_FILE" ]] || die "no $STATE_FILE; run provision.sh first"
   state_load
   [[ -n "${MAVIS_EIP:-}" ]] || die "state.env has no MAVIS_EIP; run provision.sh first"
-  MAVIS_HOST="${MAVIS_EIP//./-}.sslip.io"
+  # MAVIS_DOMAIN (env, or state.env) names the public host, e.g. mavis-ai.duckdns.org; its DNS A record must
+  # point at MAVIS_EIP. Without it the free wildcard name for the IP is used.
+  if [[ -n "${MAVIS_DOMAIN:-}" ]]; then
+    [[ "$MAVIS_DOMAIN" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] \
+      || die "MAVIS_DOMAIN is not a valid host name: $MAVIS_DOMAIN"
+    MAVIS_HOST="$MAVIS_DOMAIN"
+  else
+    MAVIS_HOST="${MAVIS_EIP//./-}.sslip.io"
+  fi
 }
 
 ssh_opts() {

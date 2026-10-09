@@ -19,6 +19,13 @@ for a in "$@"; do
   esac
 done
 [[ -f "$DEMO_ENV" ]] || die "demo env file not found: $DEMO_ENV (set DEMO_ENV=...)"
+# A custom domain must already resolve to the box, or Caddy cannot get a certificate and the Telegram
+# webhook would point at nothing.
+if [[ -n "${MAVIS_DOMAIN:-}" ]]; then
+  resolved="$(getent ahostsv4 "$MAVIS_HOST" | awk 'NR==1{print $1}')"
+  [[ "$resolved" == "$MAVIS_EIP" ]] \
+    || die "$MAVIS_HOST resolves to '${resolved:-nothing}', not $MAVIS_EIP: fix its DNS A record first"
+fi
 
 # --- build the prod .env locally in a private temp file ----------------------
 # An existing .env on the box is the base: its keys are preserved (so generated secrets never rotate)
