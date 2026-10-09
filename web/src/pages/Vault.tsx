@@ -119,7 +119,7 @@ function ItemRow({ item }: { item: VaultItem }) {
           <div className={styles.meta}>
             <span className={ui.tag}>{provenance(item.source)}</span>
             {THIRD_PARTY.has(item.source) && <span className={styles.unconfirmed}>Not confirmed</span>}
-            <span>updated {fmtDate(item.updated_at)}</span>
+            {item.updated_at && <span>updated {fmtDate(item.updated_at)}</span>}
           </div>
         </div>
         {mode === 'view' && (

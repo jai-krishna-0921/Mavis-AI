@@ -6,7 +6,7 @@ Vite, React 19, TypeScript, React Router, TanStack Query, CSS modules. Spec: `do
 
     npm ci
     npm run dev        # http://localhost:5173, API mocked in the browser with MSW
-    VITE_MOCK=0 npm run dev   # no mocks (add a proxy for /api in vite.config.ts)
+    VITE_MOCK=0 npm run dev   # no mocks: /api and /oauth are proxied to a Mavis api on localhost:8000 (DASHBOARD_ENABLED=true)
 
 The mock starts signed in. Use "Log out", then sign in again: the login page polls and the mock approves after three polls.
 

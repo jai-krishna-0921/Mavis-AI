@@ -9,6 +9,7 @@ import styles from './Login.module.css'
 export function Login({ pollIntervalMs }: { pollIntervalMs?: number }) {
   const [params] = useSearchParams()
   const invite = params.get('invite') ?? undefined
+  const problem = params.get('error')
   const me = useMe()
   if (me.data) return <Navigate to="/workspace" replace />
   return (
@@ -16,6 +17,11 @@ export function Login({ pollIntervalMs }: { pollIntervalMs?: number }) {
       <Weave size={44} title="Mavis AI" />
       <h1 className={styles.h1}>Sign in to Mavis AI</h1>
       <p className={ui.lede}>Mavis lives in chat, so you sign in with Telegram.</p>
+      {problem?.startsWith('google_') && (
+        <p className={ui.error} role="alert">
+          {problem === 'google_unavailable' ? 'Google sign in is not available right now.' : 'Google sign in did not work. Try again, or use Telegram.'}
+        </p>
+      )}
       <section className={styles.block} aria-labelledby="tg">
         <h2 id="tg" className={styles.h2}>Telegram</h2>
         <TelegramSignIn invite={invite} pollIntervalMs={pollIntervalMs} />

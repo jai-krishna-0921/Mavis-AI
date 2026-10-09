@@ -72,8 +72,10 @@ export const api = {
     setCsrf(me.csrf)
     return me
   },
-  telegramStart: (invite?: string) =>
-    request<TelegramStart>('/auth/telegram/start', { method: 'POST', body: invite ? { invite } : {} }),
+  telegramStart: (invite?: string, linkToken?: string) =>
+    request<TelegramStart>('/auth/telegram/start', {
+      method: 'POST', body: { ...(invite ? { invite } : {}), ...(linkToken ? { link_token: linkToken } : {}) },
+    }),
   telegramPoll: (nonce: string) =>
     request<PollStatus>(`/auth/telegram/poll${q({ nonce })}`, { silent401: true }),
   logout: (all = false) => request<void>('/auth/logout', { method: 'POST', body: { all } }),

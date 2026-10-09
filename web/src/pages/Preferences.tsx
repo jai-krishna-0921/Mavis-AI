@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, setCsrf } from '../api/client'
-import { usePatchPreferences, usePreferences } from '../api/hooks'
+import { API_BASE, api, setCsrf } from '../api/client'
+import { useMe, usePatchPreferences, usePreferences } from '../api/hooks'
 import type { Preferences as Prefs } from '../api/types'
 import { Modal } from '../components/Modal'
 import ui from '../styles/ui.module.css'
@@ -126,6 +126,27 @@ function PrefsForm({ initial }: { initial: Prefs }) {
   )
 }
 
+const EMAIL_NOTE: Record<string, string> = {
+  confirmed: 'That Google address is now confirmed. You can use it to sign in.',
+  taken: 'That Google address already belongs to another Mavis account.',
+}
+
+function SignInEmail() {
+  const me = useMe()
+  const [params] = useSearchParams()
+  const note = EMAIL_NOTE[params.get('email') ?? '']
+  return (
+    <div className={ui.row}>
+      <div className={ui.rowMain}>
+        <div className={ui.rowTitle}>Google sign in</div>
+        <div className={ui.rowSub}>{me.data?.email ? `Confirmed: ${me.data.email}` : 'No Google address confirmed yet.'}</div>
+        {note && <p className={ui.status} role="status">{note}</p>}
+      </div>
+      <a className={ui.btn} href={`${API_BASE}/auth/google/start?confirm=1`}>{me.data?.email ? 'Confirm another' : 'Confirm with Google'}</a>
+    </div>
+  )
+}
+
 export function Preferences() {
   const prefs = usePreferences()
   const navigate = useNavigate()
@@ -142,6 +163,7 @@ export function Preferences() {
         {prefs.isPending && <p className={ui.status} role="status">Loading</p>}
         {prefs.error && <p className={ui.error} role="alert">{prefs.error.message}</p>}
         {prefs.data && <PrefsForm initial={prefs.data} />}
+        <SignInEmail />
       </section>
 
       <section className={ui.section} aria-labelledby="data">

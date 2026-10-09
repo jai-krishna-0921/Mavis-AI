@@ -40,13 +40,13 @@ export function InviteModal({ onClose }: { onClose: () => void }) {
           <li key={inv.code} className={ui.row} style={{ flexWrap: 'wrap' }}>
             <div className={ui.rowMain}>
               <div className={ui.rowTitle}>{inv.name || 'Unnamed link'}</div>
-              <div className={ui.rowSub}>{inv.link}</div>
+              <div className={ui.rowSub}>{inv.link ?? (inv.hint ? `Link ending in ${inv.hint}` : 'Link made earlier')}</div>
               <div className={ui.rowSub}>
                 {inv.uses} of {inv.max_uses ?? 'unlimited'} uses
               </div>
             </div>
             <div className={ui.rowActions}>
-              <CopyButton text={inv.link} label="Copy link" what={inv.name ? `for ${inv.name}` : inv.code} />
+              {inv.link && <CopyButton text={inv.link} label="Copy link" what={inv.name ? `for ${inv.name}` : inv.code} />}
               <button type="button" className={`${ui.btn} ${ui.btnDanger}`} disabled={revoke.isPending}
                 aria-label={`Revoke link ${inv.name || inv.code}`} onClick={() => revoke.mutate(inv.code)}>
                 Revoke
