@@ -250,12 +250,14 @@ def _pinned_client() -> httpx.AsyncClient:
     )
 
 
-async def _guarded_get(url: str) -> str:
-    """GET with per-hop validation of redirects, a size cap and an overall deadline."""
+async def _fetch_bytes(
+    url: str, max_bytes: int, *, truncate: bool, accept: str
+) -> tuple[bytes, str, str, str]:
+    """GET with per-hop validation of redirects and a byte cap: (body, final url, type, encoding)."""
     async with _pinned_client() as client:
         for _ in range(_MAX_REDIRECTS + 1):
             await assert_public_url(url)
-            headers = {"User-Agent": "Mavis/0.1", "Accept": "text/html,text/plain;q=0.9,*/*;q=0.5"}
+            headers = {"User-Agent": "Mavis/0.1", "Accept": accept}
             async with client.stream("GET", url, headers=headers) as resp:
                 if resp.is_redirect:
                     location = resp.headers.get("location")
@@ -267,10 +269,26 @@ async def _guarded_get(url: str) -> str:
                 body = bytearray()
                 async for chunk in resp.aiter_bytes():
                     body.extend(chunk)
-                    if len(body) >= _MAX_BODY_BYTES:
+                    if len(body) > max_bytes and not truncate:
+                        raise ValueError("too large")
+                    if len(body) >= max_bytes and truncate:
                         break
-                return bytes(body[:_MAX_BODY_BYTES]).decode(resp.encoding or "utf-8", errors="replace")
+                ctype = resp.headers.get("content-type", "").split(";")[0].strip()
+                return bytes(body[:max_bytes]), url, ctype, resp.encoding or "utf-8"
         raise ValueError("too many redirects")
+
+
+async def guarded_get_bytes(url: str, max_bytes: int) -> tuple[bytes, str, str]:
+    """Bytes of a public URL with the SSRF guard on every redirect hop; ValueError past `max_bytes`."""
+    body, final, ctype, _enc = await _fetch_bytes(url, max_bytes, truncate=False, accept="*/*")
+    return body, final, ctype
+
+
+async def _guarded_get(url: str) -> str:
+    """GET as text with per-hop validation of redirects and a size cap (a longer body is cut)."""
+    body, _final, _ctype, encoding = await _fetch_bytes(
+        url, _MAX_BODY_BYTES, truncate=True, accept="text/html,text/plain;q=0.9,*/*;q=0.5")
+    return body.decode(encoding, errors="replace")
 
 
 def html_to_text(html: str) -> str:

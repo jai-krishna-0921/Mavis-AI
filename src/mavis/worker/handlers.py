@@ -16,6 +16,7 @@ from mavis.agents import clear, onboarding
 from mavis.agents.wiring import register as register_phase4
 from mavis.attention.wiring import register_attention
 from mavis.initiative.wiring import wire_initiative
+from mavis.machine.wiring import register_machine
 from mavis.memory import jobs as memory_jobs
 from mavis.tools.integrations.wiring import register_integrations
 from mavis.tools.registry import get_registry
@@ -37,3 +38,4 @@ def register_default_handlers() -> None:
     deletion.register()
     clear.register()
     onboarding.register()
+    register_machine()  # flags off: registers nothing

@@ -88,4 +88,6 @@ docker --version
 docker compose version
 free -m
 REMOTE
+log "installing the instance metadata guard (only api, worker and timer may reach 169.254.169.254)"
+"$AWS_DIR/imds.sh" install
 log "bootstrap done. next: deploy/aws/deploy.sh --no-webhook"

@@ -163,6 +163,25 @@ WEB_RULE = (
 )
 
 
+# Added only when the user may use the machine and start_task is offered (Phase 12). The machine itself is
+# never a chat tool: chat hands the work to a task, whose card shows the progress and whose files are sent
+# to the chat as soon as they exist.
+MACHINE_RULE = (
+    "- You have a private computer for each user, used through start_task. Call start_task (do not answer "
+    "from memory) when they ask you to run or test code, to analyse or summarise a file, CSV or Excel sheet "
+    "they sent, to crunch numbers or make a chart, or to build a slide deck, Word document, PDF or "
+    "spreadsheet. Put what they want and the file names in the goal; files they sent are in their workspace "
+    "inbox (listed in the context when recent). The result files come back in this chat. Tell them you're "
+    "on it; a progress card shows the work."
+)
+
+
+def machine_rule(user_id: int) -> str:
+    from mavis.machine.intake import machine_allowed
+
+    return MACHINE_RULE if machine_allowed(user_id) else ""
+
+
 # Added only when a tool that creates events is offered (hotfix4 H6).
 EVENT_TOOLS = frozenset({"calendar_create_event"})
 DURATION_RULE = (
@@ -671,6 +690,8 @@ async def run_turn(event: Event) -> None:
             system = f"{system}\n\n{TOOL_RULES}"
             if any(t.name == "web_search" for t in tools):
                 system = f"{system}\n{WEB_RULE}"
+            if any(t.name == "start_task" for t in tools) and (rule := machine_rule(user.id)):
+                system = f"{system}\n{rule}"
             if any(t.name in EVENT_TOOLS for t in tools):
                 minutes = get_settings().default_event_minutes
                 system = f"{system}\n{DURATION_RULE.format(minutes=minutes)}"

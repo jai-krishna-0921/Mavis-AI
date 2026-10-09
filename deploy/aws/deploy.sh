@@ -6,7 +6,7 @@
 set -euo pipefail
 # shellcheck source=deploy/aws/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-need ssh rsync openssl
+need ssh rsync openssl aws
 state_require
 
 WEBHOOK=1
@@ -66,7 +66,7 @@ if [[ "$WEBHOOK" == 1 ]]; then set_key TELEGRAM_MODE webhook force; else set_key
 # Owner-supplied keys follow the local env file (a rotated or upgraded key must reach the box);
 # an empty local value never blanks the box. Generated secrets below are preserved instead.
 for k in OLLAMA_API_KEY TAVILY_API_KEY COMPOSIO_API_KEY TELEGRAM_BOT_TOKEN ALLOWED_TELEGRAM_CHAT_IDS \
-         LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY TEST_MIRROR_CHAT_ID \
+         LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY TEST_MIRROR_CHAT_ID MACHINE_LIVE_TOKEN_SECRET E2B_API_KEY \
          GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET SLACK_CLIENT_ID SLACK_CLIENT_SECRET \
          SLACK_SIGNING_SECRET INTEGRATION_PROVIDER DASHBOARD_ENABLED GOOGLE_SIGNIN_ENABLED \
          TELEGRAM_BOT_USERNAME; do
@@ -78,6 +78,8 @@ done
 set_key INTEGRATION_PROVIDER native force
 # Owner decision 2026-10-09: other people join with invite codes (the owner chats stay admitted in every mode)
 set_key ACCESS_MODE invite force
+# Sandbox workspaces live in this bucket (deploy/aws/machine.sh creates it). Not forced: the owner can override.
+set_key WORKSPACE_BUCKET "mavis-machine-276307603629-aps1"
 tz="$(envget "$DEMO_ENV" DEFAULT_TIMEZONE)"
 [[ -z "$tz" ]] || set_key DEFAULT_TIMEZONE "$tz"
 set_key COMPOSIO_WEBHOOK_SECRET ""
@@ -92,6 +94,9 @@ set_key TELEGRAM_WEBHOOK_SECRET "$(openssl rand -hex 24)"
 # Wraps every stored Google/Slack token. Generated once and never overwritten: replacing it would orphan
 # every sealed grant (rotation goes through NATIVE_TOKEN_KEK_PREVIOUS instead).
 set_key NATIVE_TOKEN_KEK "$(openssl rand -base64 32)"
+
+# the metadata guard must exist before the containers start (idempotent; also repairs a rebuilt box)
+"$AWS_DIR/imds.sh" install
 
 # --- ship code ----------------------------------------------------------------
 log "rsync repo -> $MAVIS_EIP:$MAVIS_REMOTE_DIR"
@@ -152,6 +157,15 @@ fi
 log "pruning dangling images and old build cache"
 ssh_box "docker image prune -f >/dev/null && docker builder prune -f --keep-storage 1GB >/dev/null"
 compose_remote ps
+
+log "verifying that only api, worker and timer reach the instance metadata service"
+if ! "$AWS_DIR/imds.sh" verify-containers; then
+  if [[ "$(aws_ ec2 describe-instances --instance-ids "${MAVIS_INSTANCE_ID:-}" \
+        --query 'Reservations[0].Instances[0].MetadataOptions.HttpPutResponseHopLimit' --output text 2>/dev/null || echo 1)" != 1 ]]; then
+    "$AWS_DIR/imds.sh" lower-hop-limit
+  fi
+  die "instance metadata verification failed; the hop limit is 1 (containers have no role credentials). Fix imds-guard and re-run."
+fi
 
 if [[ "$WEBHOOK" == 1 ]]; then
   log "telegram webhook:"

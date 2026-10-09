@@ -70,6 +70,32 @@ x-app-env: &app-env
   TASK_TIMEOUT_MAX_S: ${TASK_TIMEOUT_MAX_S:-1200}
   MACHINE_TASK_TIMEOUT_S: ${MACHINE_TASK_TIMEOUT_S:-900}
   MACHINE_FILE_MAX_MB: ${MACHINE_FILE_MAX_MB:-50}
+  MACHINE_ENABLED: ${MACHINE_ENABLED:-false}
+  MACHINE_BROWSER_ENABLED: ${MACHINE_BROWSER_ENABLED:-false}
+  MACHINE_USERS: ${MACHINE_USERS:-[]}
+  MACHINE_ALLOW_SPEND: ${MACHINE_ALLOW_SPEND:-false}
+  MACHINE_LIVE_TOKEN_SECRET: ${MACHINE_LIVE_TOKEN_SECRET:-}
+  SANDBOX_BACKEND: ${SANDBOX_BACKEND:-auto}
+  BROWSER_BACKEND: ${BROWSER_BACKEND:-auto}
+  AGENTCORE_REGION: ${AGENTCORE_REGION:-ap-south-1}
+  AGENTCORE_CODE_INTERPRETER_ID: ${AGENTCORE_CODE_INTERPRETER_ID:-aws.codeinterpreter.v1}
+  AGENTCORE_BROWSER_ID: ${AGENTCORE_BROWSER_ID:-aws.browser.v1}
+  E2B_API_KEY: ${E2B_API_KEY:-}
+  WORKSPACE_BACKEND: ${WORKSPACE_BACKEND:-auto}
+  WORKSPACE_BUCKET: ${WORKSPACE_BUCKET:-}
+  WORKSPACE_PREFIX: ${WORKSPACE_PREFIX:-ws/}
+  MACHINE_MAX_CONCURRENT: ${MACHINE_MAX_CONCURRENT:-3}
+  MACHINE_USER_DAILY_MINUTES: ${MACHINE_USER_DAILY_MINUTES:-60}
+  MACHINE_USER_MONTHLY_USD: ${MACHINE_USER_MONTHLY_USD:-5}
+  WORKSPACE_QUOTA_MB: ${WORKSPACE_QUOTA_MB:-500}
+  OPERATOR_MAX_STEPS: ${OPERATOR_MAX_STEPS:-30}
+  ANALYST_MAX_STEPS: ${ANALYST_MAX_STEPS:-20}
+  MACHINE_PLATFORM_TAGS: ${MACHINE_PLATFORM_TAGS:-["manylinux2014_x86_64","manylinux_2_17_x86_64","linux_x86_64"]}
+  MACHINE_PYTHON_VERSION: ${MACHINE_PYTHON_VERSION:-3.12}
+  MACHINE_PACKAGE_ALLOW: ${MACHINE_PACKAGE_ALLOW:-[]}
+  PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+  MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-20}
+  BROWSER_DOMAIN_DENY: ${BROWSER_DOMAIN_DENY:-[]}
   ATTENTION_UNDERSTAND_PER_WINDOW: ${ATTENTION_UNDERSTAND_PER_WINDOW:-4}
   ATTENTION_WINDOW_S: ${ATTENTION_WINDOW_S:-120}
   ATTENTION_MAX_ATTEMPTS: ${ATTENTION_MAX_ATTEMPTS:-2}
@@ -86,6 +112,7 @@ x-app-env: &app-env
   ATTENTION_EVENING_TIME: ${ATTENTION_EVENING_TIME:-20:30}
   GOOGLE_WORKSPACE_ENABLED: ${GOOGLE_WORKSPACE_ENABLED:-true}
   WORKSPACE_POLL_MINUTES: ${WORKSPACE_POLL_MINUTES:-30}
+  MACHINE_ALLOW_EGRESS: ${MACHINE_ALLOW_EGRESS:-false}
 
 # The image is built once (on the box) by `migrate`; the other app services reuse the tag.
 x-app: &app
@@ -122,6 +149,8 @@ services:
 
   api:
     <<: *app
+    networks:
+      default: { ipv4_address: 10.89.77.10 }  # fixed: the host firewall lets only these reach 169.254.169.254
     command: ["mavis", "api"]
     mem_limit: 224m
     healthcheck:
@@ -133,8 +162,10 @@ services:
 
   worker:
     <<: *app
+    networks:
+      default: { ipv4_address: 10.89.77.11 }  # fixed: the host firewall lets only these reach 169.254.169.254
     command: ["mavis", "worker"]
-    mem_limit: 640m            # loads the ONNX embedding model (~400 MB resident)
+    mem_limit: 900m            # ONNX embedding model (~400 MB resident) plus the machine runtime (sync, S3, boto3)
     healthcheck:
       # process liveness: PID 1 is tini, so look for the real `mavis worker` command line
       test: ["CMD", "python", "-c", "import os,sys;sys.exit(0 if any(b'mavis\\x00worker' in open(f'/proc/{p}/cmdline','rb').read() for p in os.listdir('/proc') if p.isdigit() and p!=str(os.getpid()) and os.path.exists(f'/proc/{p}/cmdline')) else 1)"]
@@ -144,6 +175,8 @@ services:
 
   timer:
     <<: *app
+    networks:
+      default: { ipv4_address: 10.89.77.12 }  # fixed: the host firewall lets only these reach 169.254.169.254
     command: ["mavis", "timer"]
     mem_limit: 160m
     healthcheck:
@@ -243,6 +276,14 @@ services:
     cap_add: [NET_BIND_SERVICE]
     depends_on:
       api: { condition: service_started }
+
+# Fixed subnet so deploy/aws/imds-guard.sh (DOCKER-USER) can allow the instance metadata service by address:
+# api .10, worker .11, timer .12. Every other container is dropped from 169.254.169.254.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.89.77.0/24
 
 volumes:
   pgdata:
