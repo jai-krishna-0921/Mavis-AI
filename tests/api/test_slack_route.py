@@ -52,7 +52,8 @@ def sign(body: bytes, *, ts=None, secret=SECRET) -> dict:
 async def post(app, payload, headers=None, raw=None):
     body = raw if raw is not None else json.dumps(payload).encode()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
-        return await c.post("/webhooks/slack", content=body, headers=sign(body) if headers is None else headers)
+        sent = sign(body) if headers is None else headers
+        return await c.post("/webhooks/slack", content=body, headers=sent)
 
 
 def callback(event, *, event_id="Ev0001", auth=ME, extra_auth=()):
@@ -73,9 +74,9 @@ def message(**kw):
 
 async def test_url_verification_echoes_challenge(env):
     app, bus, _ = env
-    r = await post(app, {"type": "url_verification", "challenge": "3eZbrw1aBm2rZgRNFdxV2595E9CY3gmdALWMmHkvFXO7tYXAYM8P",
-                         "token": "x"})
-    assert r.status_code == 200 and r.json() == {"challenge": "3eZbrw1aBm2rZgRNFdxV2595E9CY3gmdALWMmHkvFXO7tYXAYM8P"}
+    challenge = "3eZbrw1aBm2rZgRNFdxV2595E9CY3gmdALWMmHkvFXO7tYXAYM8P"
+    r = await post(app, {"type": "url_verification", "challenge": challenge, "token": "x"})
+    assert r.status_code == 200 and r.json() == {"challenge": challenge}
 
 
 async def test_message_publishes_event_that_parses_through_normalize(env):

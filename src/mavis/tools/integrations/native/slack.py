@@ -125,7 +125,8 @@ class SlackExecutor:
         except SlackError as exc:
             log.warning("slack.failed", action=action, code=exc.code, kind=exc.kind.value)
             return exc.result()
-        return ToolResult(ok=False, error=f"unsupported action {action}", error_kind=FailureKind.INVALID_ARGUMENT)
+        return ToolResult(ok=False, error=f"unsupported action {action}",
+                          error_kind=FailureKind.INVALID_ARGUMENT)
 
     # --- transport -------------------------------------------------------------------------------
 
@@ -206,7 +207,8 @@ class SlackExecutor:
             body = await self._api(user_id, "users.info", {"user": slack_user})
             u = body.get("user") or {}
             prof = u.get("profile") or {}
-            name = _s(prof.get("display_name") or u.get("real_name") or prof.get("real_name") or u.get("name"))
+            name = _s(prof.get("display_name") or u.get("real_name") or prof.get("real_name")
+                      or u.get("name"))
             info = {"id": slack_user, "name": name, "email": _s(prof.get("email")),
                     "is_bot": bool(u.get("is_bot"))}
         except SlackError as exc:

@@ -76,7 +76,8 @@ def msg(ts, text, user="U0ALICE01", **kw):
 
 async def test_channels_paginate_filter_and_name_dms():
     pages = [
-        {"ok": True, "channels": [chan("C0000GEN01", "general"), chan("C0000OFF01", "offtopic", is_member=False),
+        {"ok": True, "channels": [chan("C0000GEN01", "general"),
+                                  chan("C0000OFF01", "offtopic", is_member=False),
                                   chan("C0000OLD01", "old", is_archived=True)],
          "response_metadata": {"next_cursor": "dXNlcjpVMDYx"}},
         {"ok": True, "channels": [
@@ -243,7 +244,8 @@ async def test_ratelimited_inside_a_200_body_also_waits_once():
 
 
 async def test_5xx_retries_once_then_unavailable():
-    api = Api(**{"chat.postMessage": [httpx.Response(503), {"ok": True, "channel": "C0000GEN01", "ts": "1.1"}]})
+    ok = {"ok": True, "channel": "C0000GEN01", "ts": "1.1"}
+    api = Api(**{"chat.postMessage": [httpx.Response(503), ok]})
     assert (await api.executor().execute(USER, "slack.send", {"channel": "C0000GEN01", "text": "x"})).ok
     api = Api(**{"chat.postMessage": [httpx.Response(502)]})
     res = await api.executor().execute(USER, "slack.send", {"channel": "C0000GEN01", "text": "x"})

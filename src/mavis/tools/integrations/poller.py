@@ -178,7 +178,7 @@ class Poller:
         return published
 
     async def _poll_slack(self, user_id: int, st: dict) -> int:
-        """Safety net for missed Events API deliveries: per-channel latest-ts cursors, a few channels a tick."""
+        """Safety net for missed Events API deliveries: per-channel latest-ts cursors, a batch a tick."""
         from mavis.tools.integrations.native.slack_events import PollAuthError, poll_messages
 
         cursors = st.get("cursors", {})
@@ -189,7 +189,8 @@ class Poller:
             )
         except PollAuthError:
             raise _AuthError from None
-        await self.state.update(user_id, {"cursors": {**cursors, "slack_ts": ts_by_channel, "slack_offset": offset}})
+        merged = {**cursors, "slack_ts": ts_by_channel, "slack_offset": offset}
+        await self.state.update(user_id, {"cursors": merged})
         return published
 
     async def _poll_calendar(self, user_id: int, st: dict) -> int:
