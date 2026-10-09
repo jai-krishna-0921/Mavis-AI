@@ -38,6 +38,22 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_user_msg_at: Mapped[datetime | None] = mapped_column(default=None)
     last_agent_msg_at: Mapped[datetime | None] = mapped_column(default=None)
+    # --- Phase 11 multi-user -------------------------------------------------
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    tier: Mapped[str] = mapped_column(String(16), default="standard")
+    telegram_user_id: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    locale: Mapped[str | None] = mapped_column(String(16), default=None)
+    currency: Mapped[str | None] = mapped_column(String(3), default=None)
+    country: Mapped[str | None] = mapped_column(String(2), default=None)
+    composio_user_id: Mapped[str | None] = mapped_column(String(64), unique=True, default=None)
+    invite_id: Mapped[int | None] = mapped_column(ForeignKey("invite_codes.id"), default=None)
+    activated_at: Mapped[datetime | None] = mapped_column(default=None)
+    banned_at: Mapped[datetime | None] = mapped_column(default=None)
+    ban_reason: Mapped[str | None] = mapped_column(String(200), default=None)
+    budget_override_usd_day: Mapped[float | None] = mapped_column(Float, default=None)
+    inactive_since: Mapped[datetime | None] = mapped_column(default=None)
+    deleted_at: Mapped[datetime | None] = mapped_column(default=None)
+    is_test: Mapped[bool] = mapped_column(default=False)
 
 
 class Message(Base):
@@ -63,6 +79,8 @@ class OutboxMessage(Base):
     photo_path: Mapped[str | None] = mapped_column(String(1024))
     media: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
     proactive: Mapped[bool] = mapped_column(default=False)
+    priority: Mapped[int] = mapped_column(Integer, default=0, index=True)  # 0 chat, 1 proactive, 2 broadcast
+
     # chat handle of a non-default channel (Slack)
     route: Mapped[str | None] = mapped_column(String(200), default=None)
     dedupe_key: Mapped[str | None] = mapped_column(String(200), unique=True)
@@ -73,6 +91,21 @@ class OutboxMessage(Base):
     provider_message_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     sent_at: Mapped[datetime | None] = mapped_column(default=None)
+
+
+class ChatMessageId(Base):
+    """Telegram message ids seen in a chat (the bot's and the user's), so /clear can delete them within
+    Telegram's 48 hour window. Ids only, no text. Keyed by chat, not user: the bot only ever learns ids."""
+
+    __tablename__ = "chat_message_ids"
+    __table_args__ = (UniqueConstraint("chat_id", "message_id", name="uq_chat_message_ids_chat_msg"),
+                      Index("ix_chat_message_ids_chat_sent", "chat_id", "sent_at"))
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    direction: Mapped[str] = mapped_column(String(8))  # "in" (the user's) | "out" (the bot's)
+    sent_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
 class ProcessedEvent(Base):
@@ -431,6 +464,50 @@ class InitiativeDecisionRow(Base):
     created_at: Mapped[datetime] = mapped_column(index=True)
 
 
+
+class InviteCode(Base):
+    __tablename__ = "invite_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    code_hint: Mapped[str] = mapped_column(String(8))
+    label: Mapped[str] = mapped_column(String(120), default="")
+    tier: Mapped[str] = mapped_column(String(16), default="standard")
+    max_uses: Mapped[int] = mapped_column(Integer, default=1)
+    uses: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime] = mapped_column()
+    revoked_at: Mapped[datetime | None] = mapped_column(default=None)
+    created_by_user_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    default_timezone: Mapped[str | None] = mapped_column(String(64), default=None)
+    default_currency: Mapped[str | None] = mapped_column(String(3), default=None)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class InviteRedemption(Base):
+    __tablename__ = "invite_redemptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    invite_id: Mapped[int] = mapped_column(ForeignKey("invite_codes.id"), index=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    redeemed_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class LlmUsage(Base):
+    __tablename__ = "llm_usage"
+    __table_args__ = (UniqueConstraint("user_id", "day", "provider", "model", "purpose",
+                                       name="uq_llm_usage_user_day_model_purpose"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)  # 0 = system
+    day: Mapped[date] = mapped_column(Date, index=True)  # the user's local date
+    provider: Mapped[str] = mapped_column(String(32))
+    model: Mapped[str] = mapped_column(String(80))
+    purpose: Mapped[str] = mapped_column(String(24))
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    completion_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    cost_micros: Mapped[int] = mapped_column(BigInteger, default=0)
+
 class NativeGrant(Base):
     """One user's OAuth grant to one native provider (google | slack). Tokens are sealed (envelope
     encryption bound to user, provider and column); `account` holds non-secret facts only."""
@@ -464,6 +541,116 @@ class NativeOAuthState(Base):
     provider: Mapped[str] = mapped_column(String(16))
     pending_id: Mapped[int | None] = mapped_column(nullable=True)
     expires_at: Mapped[datetime] = mapped_column(index=True)
+    origin: Mapped[str | None] = mapped_column(String(8), nullable=True)  # "web": started from the dashboard
+    # web: the session that began it
+    session_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class PersonalLayerRow(Base):
+    """The versioned personal layer of one user: a compact, evidence-linked description of who they are."""
+
+    __tablename__ = "personal_layers"
+    __table_args__ = (UniqueConstraint("user_id", "version", name="uq_personal_layers_user_version"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    content: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class LearningSuppression(Base):
+    """Something the user told Mavis to stop learning: `key` is an item id (fact, person, routine...)
+    checked at learn time and when the personal layer is built."""
+
+    __tablename__ = "learning_suppressions"
+    __table_args__ = (UniqueConstraint("user_id", "key", name="uq_learning_suppressions_user_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    key: Mapped[str] = mapped_column(String(240))
+    label: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class PersonalSignal(Base):
+    """Deterministic evidence for the personal layer: one row per interaction with a person (kind
+    'interaction') or per calendar occurrence (kind 'meeting'), written when a record is ingested."""
+
+    __tablename__ = "personal_signals"
+    __table_args__ = (
+        UniqueConstraint("user_id", "kind", "key", "source_ref", name="uq_personal_signals_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    key: Mapped[str] = mapped_column(String(200))
+    source_ref: Mapped[str] = mapped_column(String(200), default="")
+    label: Mapped[str] = mapped_column(String(200), default="")
+    at: Mapped[datetime] = mapped_column()
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class WebSession(Base):
+    """A dashboard sign-in. `id` is the sha256 of the cookie value (the cookie itself is never stored);
+    `csrf_hash` is the sha256 of the CSRF token, which is derived from the cookie value."""
+
+    __tablename__ = "web_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    csrf_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(index=True)
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    user_agent: Mapped[str] = mapped_column(String(200), default="")
+
+
+class WebLoginNonce(Base):
+    """One Telegram link sign-in attempt. The nonce and the pre-session cookie are stored as hashes. The bot
+    binds `user_id`; the browser that holds the pre-session cookie collects it once (`consumed_at`)."""
+
+    __tablename__ = "web_login_nonces"
+
+    nonce_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    pre_hash: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True, default=None)
+    link_email: Mapped[str | None] = mapped_column(String(255), default=None)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(default=None)
+    # What the confirmation message tells the person who is asked to approve (never an id or a secret).
+    code: Mapped[str] = mapped_column(String(4), default="", server_default="")
+    agent_hint: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    place_hint: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    pending_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), default=None)
+
+
+class WebPendingLink(Base):
+    """A Google address waiting to be linked to a Telegram account. The URL carries only the opaque id;
+    the row is usable only from the browser holding the matching cookie, and is spent once approved."""
+
+    __tablename__ = "web_pending_links"
+
+    id_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    pre_hash: Mapped[str] = mapped_column(String(64))
+    email: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(index=True)
+
+
+class UserEmail(Base):
+    """An email address confirmed as belonging to a Mavis user (Google sign-in maps verified emails here)."""
+
+    __tablename__ = "user_emails"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True)
+    source: Mapped[str] = mapped_column(String(24))  # google_grant | google_signin | telegram_link
+    confirmed_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
 class MachineSession(Base):

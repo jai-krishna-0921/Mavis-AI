@@ -14,6 +14,7 @@ from mavis.attention.scheduling import schedule_once
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import NotifyIntent
+from mavis.domain.jitter import user_offset
 from mavis.domain.policy import Capability
 from mavis.domain.wakeups import WakeupKind
 from mavis.initiative.routines import BriefItem
@@ -106,7 +107,7 @@ class EveningWrap:
         if not s.attention_evening_enabled:
             return
         user = await users.get(user_id)
-        at = next_evening(timeutil.now(), user.timezone, s.attention_evening_time)
+        at = next_evening(timeutil.now(), user.timezone, s.attention_evening_time) + user_offset(user_id)
         await schedule_once(self._wakeups, user_id, WakeupKind.SYSTEM_EVENING_WRAP, EVENING_REASON, at)
 
     async def run(self, user_id: int, reason: str = "") -> None:
@@ -220,7 +221,7 @@ class Retention:
 
     async def ensure(self, user_id: int) -> None:
         user = await users.get(user_id)
-        at = next_local(timeutil.now(), user.timezone, RETENTION_TIME)
+        at = next_local(timeutil.now(), user.timezone, RETENTION_TIME) + user_offset(user_id)
         await schedule_once(
             self._wakeups, user_id, WakeupKind.SYSTEM_ATTENTION_RETENTION, RETENTION_REASON, at
         )

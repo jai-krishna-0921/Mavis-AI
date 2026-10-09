@@ -552,28 +552,29 @@ class ConnectFlow:
                         [[Button(label="Upgrade Google", data=f"{START_PREFIX}{GOOGLE_ANCHOR.value}")]])
         return True
 
-    async def disconnect(self, user_id: int, capability: Capability) -> None:
+    async def disconnect(self, user_id: int, capability: Capability, *, forget: bool = True) -> bool:
+        """True when the connection is gone. `forget=False` keeps what was learned from it."""
         name = display_name(capability)
         try:
             await self.provider.disconnect(UserRef(user_id=user_id), capability.value)
         except NoSuchConnection:
             if not (workspace_enabled() and is_google(capability)):
                 await self.send(user_id, f"There's no {name} connection to remove.")
-                return
+                return False
             try:
                 removed = await self._disconnect_legacy_accounts(user_id)
             except IntegrationError as exc:
                 log.warning("connect.disconnect_failed", capability="legacy", error=str(exc))
                 await self.send(user_id, f"I couldn't disconnect {name} just now. "
                                          "Mind trying again in a bit?")
-                return
+                return False
             if not removed:
                 await self.send(user_id, f"There's no {name} connection to remove.")
-                return
+                return False
         except IntegrationError as exc:
             log.warning("connect.disconnect_failed", capability=capability.value, error=str(exc))
             await self.send(user_id, f"I couldn't disconnect {name} just now. Mind trying again in a bit?")
-            return
+            return False
         self.cache.invalidate(user_id)
         dropped = [c.value for c in (GOOGLE_CAPABILITIES if is_google(capability) else (capability,))]
         st = await self.state.get(user_id)
@@ -583,9 +584,10 @@ class ConnectFlow:
             await self.state.update(user_id, {"synced": synced})
         if polling != st.get("polling", {}):
             await self.state.update(user_id, {"polling": polling})
-        forgotten = await self._forget_learned(user_id, capability)
+        forgotten = await self._forget_learned(user_id, capability) if forget else 0
         await self.send(user_id, f"Disconnected {name}. I can't see it anymore."
                         + (" I also removed what I had learned from it." if forgotten else ""))
+        return True
 
     async def _forget_learned(self, user_id: int, capability: Capability) -> int:
         """Forget is the default: what was learned from mail or Slack records goes with the connection."""

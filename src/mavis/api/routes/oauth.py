@@ -1,6 +1,7 @@
 """Where Google and Slack send the browser back after consent (native connectors).
 
-The state is signed, single use and bound to the user, so this public endpoint needs no other auth. After a
+The state is signed, single use and bound to the user (and, when the dashboard started it, to that
+session), so this public endpoint needs no other auth. After a
 sign-in the same CONNECTION_CHECK job as /connect/callback runs, so the user gets the usual "connected"
 message and the first sync starts the way it does for every other connection. Vendor error text is never
 shown or sent to the user.
@@ -11,8 +12,8 @@ from __future__ import annotations
 import html
 
 import structlog
-from fastapi import APIRouter, Depends
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from mavis.bus import get_bus
 from mavis.bus.base import EventBus
@@ -25,6 +26,7 @@ from mavis.tools.integrations import get_connection_cache, get_provider
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.oauth import OAuthError
+from mavis.web import sessions
 
 router = APIRouter()
 log = structlog.get_logger()
@@ -47,6 +49,15 @@ _USER_TEXT = {
     "account_taken": "That {name} account is already connected to another Mavis user, so I skipped it.",
     "not_configured": "{name} sign-in is not set up on my side yet.",
 }
+
+
+WEB_ORIGIN = "web"
+
+
+def _back_to_dashboard(error: str | None, *, connected: str | None = None) -> RedirectResponse:
+    """A connect started from the dashboard returns there: the workspace page shows the outcome."""
+    query = f"?error={error}" if error else f"?connected={connected}"
+    return RedirectResponse(f"/workspace{query}", status_code=303)
 
 
 def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
@@ -100,7 +111,8 @@ async def _remember_identity(user_id: int, provider: NativeProvider, account: di
 
 @router.get("/oauth/{provider}/callback", response_class=HTMLResponse)
 async def oauth_callback(
-    provider: str, code: str | None = None, state: str | None = None, error: str | None = None,
+    provider: str, request: Request, code: str | None = None, state: str | None = None,
+    error: str | None = None,
     bus: EventBus = Depends(get_bus), integrations: IntegrationProvider = Depends(get_provider),
 ) -> HTMLResponse:
     oauth = getattr(integrations, "oauth", None)
@@ -111,29 +123,46 @@ async def oauth_callback(
     if native is None or oauth is None:
         return _page("Not found", "This sign-in link is not valid.", 404)
     name = _NAMES[native]
+    # A consent started from the dashboard is bound to that browser session. The cookie is optional here: a
+    # link started from Telegram has no session to match.
+    active = await sessions.lookup(request.cookies.get(sessions.COOKIE))
+    session_hash = active.session_id if active is not None else None
 
     if error or not code or not state:
         # Denied, or a malformed return. We learn whose it was only from a valid state; never echo `error`.
+        origin = None
         if state:
             try:
-                user_id, _ = await oauth.deny(state, native)
+                user_id, _, origin = await oauth.deny_with_origin(state, native, session_hash)
             except OAuthError:
                 user_id = None
             if user_id is not None:
                 await _tell(user_id, _USER_TEXT["denied"].format(name=name))
+        if origin == WEB_ORIGIN:
+            return _back_to_dashboard(f"{native.value}_denied")
         return _page("Not connected", f"{name} was not connected. You can close this tab.", 400)
 
     try:
-        done = await oauth.complete(state, code, native)
+        done = await oauth.complete(state, code, native, session_hash)
     except OAuthError as exc:
+        if exc.kind == "session_mismatch":
+            log.info("oauth.session_mismatch", provider=provider)  # nothing saved, and nobody is messaged
+            return _page("Continue from the dashboard", (
+                f"This {name} sign-in was started in a different browser session, so nothing was connected. "
+                "Open the Mavis dashboard in the browser where you are signed in, and connect again "
+                "from there."), 400)
         if exc.user_id is not None and exc.kind in _USER_TEXT:
             await _tell(exc.user_id, _USER_TEXT[exc.kind].format(name=name))
         log.info("oauth.callback_failed", provider=provider, kind=exc.kind)
+        if exc.origin == WEB_ORIGIN:
+            return _back_to_dashboard(f"{native.value}_{exc.kind}")
         return _page("Not connected", f"{name} could not be connected. You can close this tab "
                                       "and try again from Telegram.", 400)
 
     get_connection_cache().invalidate(done.user_id)
     await _remember_identity(done.user_id, native, done.account)
+    # A granted Google address is not a sign-in identity: anyone can be handed a consent link. An address
+    # becomes one only through a Google sign-in by the signed-in user, or the approved Telegram link.
     if done.pending_id is not None:
         now = timeutil.now()
         await bus.enqueue(Job(
@@ -145,6 +174,8 @@ async def oauth_callback(
     outside = _external(native, done.account)
     await _tell(done.user_id, f"{name} is connected: {outside}. If that is not yours, tell me to "
                               f"disconnect {name} and I will remove it.")
+    if done.origin == WEB_ORIGIN:
+        return _back_to_dashboard(None, connected=native.value)
     who = await _mavis_name(done.user_id)
     return _page("Connected", (
         f"{outside} is now linked to the Mavis account of {who}. You can close this tab and head back to "

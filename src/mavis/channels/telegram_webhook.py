@@ -46,6 +46,29 @@ async def set_webhook() -> Any:
     })
 
 
+# The "/" menu every user sees (owner-only commands stay unlisted). Each entry must be a command the bot
+# handles; tests/channels/test_bot_commands.py checks that against the handlers.
+BOT_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("start", "Start or restart Mavis"),
+    ("settings", "Your preferences"),
+    ("clear", "Clear this chat or start fresh"),
+    ("connect", "Connect Google or Slack"),
+    ("connections", "See connected accounts"),
+    ("disconnect", "Disconnect an account"),
+    ("mute", "Stop learning from a sender or channel"),
+    ("unmute", "Learn from a sender or channel again"),
+    ("channel", "Where Mavis messages you: Telegram, Slack or both"),
+    ("delete_me", "Delete your account and data"),
+)
+
+
+async def set_commands() -> Any:
+    """Publish BOT_COMMANDS as the bot's command menu (idempotent; Telegram replaces the list)."""
+    return await _call("setMyCommands", {
+        "commands": [{"command": c, "description": d} for c, d in BOT_COMMANDS],
+    })
+
+
 async def delete_webhook() -> Any:
     return await _call("deleteWebhook", {"drop_pending_updates": False})
 

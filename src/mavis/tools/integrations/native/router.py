@@ -228,8 +228,8 @@ class NativeRouter:
     async def subscribe(self, user: UserRef, trigger: str, config: dict) -> str:
         return await self.fallback.subscribe(user, trigger, config)
 
-    def parse_webhook(self, headers: dict[str, str], body: bytes) -> list[Event]:
-        return self.fallback.parse_webhook(headers, body)
+    async def parse_webhook(self, headers: dict[str, str], body: bytes) -> list[Event]:
+        return await self.fallback.parse_webhook(headers, body)
 
     def __getattr__(self, name: str):
         # Composio-only extras (retire_legacy_triggers, configured, ...) keep working through the router.

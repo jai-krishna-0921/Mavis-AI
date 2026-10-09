@@ -21,7 +21,7 @@ async def integrations_webhook(
 ) -> dict[str, int]:
     body = await request.body()  # never logged
     try:
-        events = provider.parse_webhook(dict(request.headers), body)
+        events = await provider.parse_webhook(dict(request.headers), body)
     except WebhookVerificationError:
         raise HTTPException(status_code=401, detail="invalid signature") from None
     except IntegrationError:

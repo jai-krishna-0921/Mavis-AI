@@ -78,8 +78,11 @@ class FirstSync:
         tz_of: Callable[[int], Awaitable[str]],
         clock: Callable[[], datetime] = timeutil.now,
         connectors: Any = None,
+        meetings: Callable[[int, list[dict], str], Awaitable[None]] | None = None,
+        after_sync: Callable[[int], Awaitable[None]] | None = None,
     ) -> None:
         self.connectors = connectors  # attention.connector_ingest.ConnectorIngest: records into the graph
+        self.meetings, self.after_sync = meetings, after_sync  # personal layer: calendar occurrences, rebuild
         self.provider, self.memory, self.loops, self.bus = provider, memory, loops, bus
         self.tz_of, self.clock = tz_of, clock
 
@@ -93,6 +96,11 @@ class FirstSync:
         # Tasks, Drive and Contacts: registered by attention (EXTRA_HANDLERS); Docs, Sheets, Meet: nothing
         handler = handlers.get(capability) or EXTRA_HANDLERS.get(capability)
         noticed = (await handler(user_id))[:3] if handler is not None else []
+        if self.after_sync is not None:  # the personal layer is built once the learning jobs had time to land
+            try:
+                await self.after_sync(user_id)
+            except Exception:  # noqa: BLE001 - never fail a first sync over the profile
+                pass
         await self.bus.publish(
             Event(
                 id=f"first_sync:{user_id}:{capability.value}",
@@ -205,6 +213,8 @@ class FirstSync:
             )
         await self._learn_batches(user_id, "Upcoming calendar:", lines, f"first_sync:{user_id}:calendar",
                                  CALENDAR_LEARN_JOBS)
+        if self.meetings is not None:
+            await self.meetings(user_id, events, str(tz))
         noticed: list[str] = []
         timed = sorted(((to_datetime(e["start"]), e) for e in events if e["start"]), key=lambda t: t[0])
         if timed:

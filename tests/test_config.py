@@ -19,7 +19,7 @@ def test_defaults(settings) -> None:
 
 
 def test_allowed_chat_ids_parse_json(settings, monkeypatch) -> None:
-    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", "[111, 222]")
+    monkeypatch.setenv("OWNER_TELEGRAM_CHAT_IDS", "[111, 222]")
     get_settings.cache_clear()
     assert get_settings().allowed_telegram_chat_ids == [111, 222]
 

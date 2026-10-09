@@ -27,7 +27,6 @@ TEST_ENV = {
     "TELEGRAM_BOT_TOKEN": "",
     "TELEGRAM_WEBHOOK_SECRET": "",
     "TELEGRAM_MODE": "polling",
-    "ALLOWED_TELEGRAM_CHAT_IDS": "[]",
     "OLLAMA_API_KEY": "test-key",
     "COMPOSIO_API_KEY": "",
     "TAVILY_API_KEY": "",
@@ -36,8 +35,24 @@ TEST_ENV = {
     "ATTENTION_STRICT_ERRORS": "true",
     "GOOGLE_WORKSPACE_ENABLED": "false",  # spec 7: off in tests unless a test opts in (workspace_on)
     "DEMO_TIME_SCALE": "1.0",
+    "FANOUT_JITTER_S": "0",  # exact wakeup times in tests; the jitter tests pass a span
+    "ACCESS_MODE": "allowlist",  # Phase 11: invite gate off unless a test opts in (invite_mode)
+    "WORKER_SCHEDULER": "legacy",
+    "LLM_LIMITER": "local",
+    "LANGFUSE_ENABLED": "false",
+    "OWNER_TELEGRAM_CHAT_IDS": "[]",
     "PRESENCE_REACTION": "\N{EYES}",  # production default is off; presence tests opt in via this
 }
+
+
+@pytest.fixture(autouse=True)
+def _reset_provider_identity_cache():
+    """Composio id lookups are cached for minutes; tests reuse user ids with different rows."""
+    from mavis.tools.integrations import identity
+
+    identity.clear_cache()
+    yield
+    identity.clear_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -93,6 +108,40 @@ def workspace_on(settings, monkeypatch):
     get_settings.cache_clear()
     yield get_settings()
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_inbound_limiter():
+    from mavis.access.inbound import set_inbound_limiter
+
+    set_inbound_limiter(None)
+    yield
+    set_inbound_limiter(None)
+
+
+@pytest.fixture
+def invite_mode(settings, monkeypatch):
+    """ACCESS_MODE=invite for one test: strangers are gated by invite codes."""
+    from mavis.config import get_settings
+
+    monkeypatch.setenv("ACCESS_MODE", "invite")
+    get_settings.cache_clear()
+    yield get_settings()
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+async def fake_redis(settings, monkeypatch):
+    """A Lua-capable fakeredis installed as the process Redis client (get_redis())."""
+    import fakeredis
+
+    from mavis import bus as bus_mod
+
+    client = fakeredis.FakeAsyncRedis(server=fakeredis.FakeServer(), decode_responses=True)
+    monkeypatch.setattr(bus_mod, "_redis", client, raising=False)
+    monkeypatch.setattr(bus_mod, "get_redis", lambda: client)
+    yield client
+    await client.aclose()
 
 
 @pytest.fixture

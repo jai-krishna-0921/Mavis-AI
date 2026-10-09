@@ -193,6 +193,10 @@ async def run_task(task_id: int) -> None:
                 and await tasks.running_count(task.user_id) >= get_settings().task_max_concurrency):
             log.info("task.deferred_concurrency", task_id=task_id)
             return
+        if (task.kind != TaskKind.APPROVAL
+                and await tasks.running_count_all() >= get_settings().task_global_concurrency):
+            log.info("task.deferred_global", task_id=task_id)  # a finishing task kicks the next user's
+            return
         if not await tasks.claim(task_id, TaskStatus.QUEUED, TaskStatus.RUNNING):
             return
     await _drive(task_id, task.user_id, initial_state(task))
@@ -372,3 +376,11 @@ async def _kick_next_queued(user_id: int) -> None:
     nxt = await tasks.next_queued(user_id)
     if nxt is not None and await tasks.running_count(user_id) < get_settings().task_max_concurrency:
         await enqueue_run(nxt.id, user_id)
+    # a slot freed in the global cap: let one other waiting user start (oldest queued first)
+    if await tasks.running_count_all() < get_settings().task_global_concurrency:
+        for other in await tasks.users_with_queued():
+            if other != user_id and await tasks.running_count(other) < get_settings().task_max_concurrency:
+                waiting = await tasks.next_queued(other)
+                if waiting is not None:
+                    await enqueue_run(waiting.id, other)
+                    break

@@ -35,7 +35,7 @@ verified email as a second key.
   unknown email gets "Link your Telegram first" with the Telegram flow (and invite) on the same page, after which the
   email is confirmed on that user. Never create a user from Google alone (Mavis lives in chat).
 - **Sessions.** Server-side session rows (`web_sessions`: id hash, user_id, created, last_seen, expires 30 days, ip,
-  user agent), cookie `mavis_session` HttpOnly, Secure, SameSite=Lax, path `/`. Mutating requests require header
+  user agent), cookie `__Host-mavis_session` HttpOnly, Secure, SameSite=Lax, path `/`. Mutating requests require header
   `X-Mavis-CSRF` matching a per-session token returned by `GET /api/v1/me`. Logout deletes the row. "Log out
   everywhere" deletes all rows for the user. Sessions die when the user is deleted or banned.
 

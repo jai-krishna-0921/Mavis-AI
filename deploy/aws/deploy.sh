@@ -61,13 +61,16 @@ if [[ "$WEBHOOK" == 1 ]]; then set_key TELEGRAM_MODE webhook force; else set_key
 for k in OLLAMA_API_KEY TAVILY_API_KEY COMPOSIO_API_KEY TELEGRAM_BOT_TOKEN ALLOWED_TELEGRAM_CHAT_IDS \
          LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY TEST_MIRROR_CHAT_ID MACHINE_LIVE_TOKEN_SECRET E2B_API_KEY \
          GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET SLACK_CLIENT_ID SLACK_CLIENT_SECRET \
-         SLACK_SIGNING_SECRET INTEGRATION_PROVIDER; do
+         SLACK_SIGNING_SECRET INTEGRATION_PROVIDER DASHBOARD_ENABLED GOOGLE_SIGNIN_ENABLED \
+         TELEGRAM_BOT_USERNAME; do
   v="$(envget "$DEMO_ENV" "$k")"
   if [[ -n "$v" ]]; then set_key "$k" "$v" force; else set_key "$k" ""; fi
 done
 # Google and Slack run in house. The router still falls back to Composio for a user with no native grant,
 # so this is safe to force; it must not depend on what the local env file happens to say.
 set_key INTEGRATION_PROVIDER native force
+# Owner decision 2026-10-09: other people join with invite codes (the owner chats stay admitted in every mode)
+set_key ACCESS_MODE invite force
 # Sandbox workspaces live in this bucket (deploy/aws/machine.sh creates it). Not forced: the owner can override.
 set_key WORKSPACE_BUCKET "mavis-machine-276307603629-aps1"
 tz="$(envget "$DEMO_ENV" DEFAULT_TIMEZONE)"

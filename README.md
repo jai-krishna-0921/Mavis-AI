@@ -129,7 +129,7 @@ docs/superpowers/
 
 One small box runs everything in a single docker compose stack: Postgres, Redis, Qdrant, Neo4j, the Mavis image as three services (`api`, `worker`, `timer`) and Caddy for HTTPS. Target: one `t4g.small` (ARM64, 2 GB RAM plus a 2 GB swapfile) in `ap-south-1`, Ubuntu 24.04, 20 GB gp3, one Elastic IP, about 17 USD a month on demand.
 
-HTTPS needs no domain: Caddy gets a Let's Encrypt certificate for `<elastic-ip-with-dashes>.sslip.io`, for example `13-233-10-5.sslip.io`. Telegram runs in webhook mode at `https://<host>/telegram/webhook`. Caddy proxies only `/telegram/webhook`, `/webhooks/*`, `/connect/callback` and `/healthz`; everything else is a 404.
+HTTPS needs no domain: Caddy gets a Let's Encrypt certificate for `<elastic-ip-with-dashes>.sslip.io`, for example `13-233-10-5.sslip.io`. Telegram runs in webhook mode at `https://<host>/telegram/webhook`. Caddy proxies `/api/*`, `/oauth/*`, `/telegram/webhook`, `/webhooks/*`, `/connect/callback` and `/healthz` to the api and serves the web app (when built) for everything else.
 
 Prerequisites: the AWS CLI with a `cashfree` profile (override with `AWS_PROFILE`, `AWS_REGION`), `ssh`, `rsync`, `openssl`, `docker` and `uv` locally. The scripts live in `deploy/aws/` and share state through `deploy/aws/state.env` (resource ids only, gitignored).
 
@@ -145,6 +145,14 @@ deploy/aws/webhook.sh set            # switch Telegram to the webhook
 Later redeploys are just `deploy/aws/deploy.sh`. It reuses the `.env` already on the box: existing keys (generated secrets and any you added by hand) are kept and only missing ones are added, except `ENV`, `PUBLIC_BASE_URL`, `DOMAIN` and `TELEGRAM_MODE`, which follow the run. An ssh failure aborts the deploy rather than regenerating secrets.
 
 The prod `.env` is built by `deploy.sh` from the demo `.env` keys (`OLLAMA_API_KEY`, `TAVILY_API_KEY`, `COMPOSIO_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_CHAT_IDS`) plus generated secrets (`TELEGRAM_WEBHOOK_SECRET`, database passwords) and the in-stack URLs; the template is `deploy/.env.prod.example`. It is copied to `/opt/mavis/.env` with mode 600. `ENV=prod` makes the allowlist mandatory: the api refuses to start without `ALLOWED_TELEGRAM_CHAT_IDS`. `COMPOSIO_WEBHOOK_SECRET` stays empty, which keeps Composio on polling. The Composio connect redirect lands on `https://<host>/connect/callback`, served by the `api` service.
+
+### Web dashboard
+
+Off by default. Set `DASHBOARD_ENABLED=true` (and `TELEGRAM_BOT_USERNAME`, which the sign-in deep links need) in the box `.env`, then redeploy with `deploy/aws/deploy.sh`. The Caddy image builds the React app from `web/` and serves it at `/`; `/api/*` (the dashboard API, mounted at `/api/v1`) and `/oauth/*` are proxied to the `api` service. While the flag is off the API answers 404 for every `/api/v1` path.
+
+Sign in is a Telegram link (always on) and Google (`GOOGLE_SIGNIN_ENABLED=true`). Google sign in reuses `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` and asks only for `openid email profile`. In Google Cloud, open the same OAuth client and add a second Authorised redirect URI next to the connector one: `https://<host>/api/v1/auth/google/callback`. Google never creates a Mavis user: an address is matched to a user who connected that Google account or confirmed it in Preferences.
+
+Migration `0019_web_sessions` adds `web_sessions`, `web_login_nonces`, `user_emails` and `native_oauth_states.origin`; `mavis migrate` applies it.
 
 ### Telegram: webhook or polling, never both
 

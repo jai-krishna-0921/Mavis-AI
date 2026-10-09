@@ -35,7 +35,7 @@ def test_register_integrations_wires_everything():
     assert hooks.ENRICHERS == [triage.enrich]
     assert hooks.DECISION_POLICIES == [triage.apply_policy]
     assert sorted(s.name for s in routines.brief_sources()) == ["calendar", "inbox"]
-    assert runner._startup_hooks == [wiring.heal_all_poll_chains]
+    assert runner._startup_hooks == [wiring.heal_all_poll_chains, wiring.check_provider_key]
     assert routines._morning_hooks == [wiring.heal_poll_chains]
 
 

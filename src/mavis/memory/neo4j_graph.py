@@ -13,11 +13,14 @@ from typing import Any
 
 from mavis.domain import timeutil
 from mavis.domain.memory import SINGLE_VALUED_RELS, Entity, Relation
-from mavis.memory.graph import THIRD_PARTY_PREFIX, Fact, edge_score, is_third_party
+from mavis.memory.graph import SELF_AUTHORED_PREFIX, THIRD_PARTY_PREFIX, Fact, edge_score, source_rank
 from mavis.memory.names import USER_KEY, is_user, node_key, normalize_name, sanitize_label, sanitize_rel
 
 _DEDUPE = "reduce(acc = [], a IN coalesce(n.{f}, []) + ${p} | CASE WHEN a IN acc THEN acc ELSE acc + a END)"
 
+Q_USER_INDEX = "CREATE INDEX entity_user IF NOT EXISTS FOR (n:Entity) ON (n.user_id)"
+Q_COUNT_USER = "MATCH (n:Entity {user_id:$u}) RETURN count(n) AS c"
+Q_DELETE_USER = ("MATCH (n:Entity {user_id:$u}) CALL (n) { DETACH DELETE n } IN TRANSACTIONS OF 500 ROWS")
 Q_INDEX = "CREATE INDEX entity_user_key IF NOT EXISTS FOR (n:Entity) ON (n.user_id, n.key)"
 Q_ENSURE_USER = (
     "MERGE (n:Entity:User {user_id:$u, key:$key}) "
@@ -48,6 +51,14 @@ Q_FORGET_NODES = (
 Q_FORGET_SOURCE = (
     "MATCH (:Entity {user_id:$u})-[r]->(:Entity) WHERE r.source_ref STARTS WITH $p "
     "WITH collect(r) AS rs FOREACH (x IN rs | DELETE x) RETURN size(rs) AS c"
+)
+Q_FORGET_FACT = (
+    "MATCH (a:Entity {user_id:$u, key:$src})-[r]->(b:Entity {user_id:$u, key:$dst}) WHERE type(r) = $rel "
+    "WITH collect(r) AS rs FOREACH (x IN rs | DELETE x) RETURN size(rs) AS c"
+)
+Q_FORGET_ENTITY = (
+    "MATCH (n:Entity {user_id:$u, key:$key}) WHERE n.label <> 'User' "
+    "OPTIONAL MATCH (n)-[r]-() WITH n, count(r) AS c DETACH DELETE n RETURN c"
 )
 Q_DROP_ORPHANS = (
     "MATCH (n:Entity {user_id:$u}) WHERE n.label <> 'User' AND NOT (n)--() DETACH DELETE n"
@@ -137,6 +148,7 @@ def q_neighborhood(hops: int) -> str:
     return (
         "MATCH (s:Entity {user_id:$u}) WHERE s.key IN $keys "
         f"MATCH p=(s)-[*1..{h}]-(:Entity) WHERE all(r IN relationships(p) WHERE r.valid_to IS NULL) "
+        "AND all(n IN nodes(p) WHERE n.user_id = $u) "
         "UNWIND relationships(p) AS r WITH DISTINCT r "
         "RETURN r.statement AS st, r.confidence AS conf, r.valid_from AS vf, "
         "coalesce(r.source_ref, '') AS src "
@@ -199,6 +211,7 @@ class Neo4jGraphStore:
 
     async def init(self) -> None:
         await self._run(Q_INDEX)
+        await self._run(Q_USER_INDEX)
 
     async def _key_for(self, user_id: int, name: str) -> str:
         if is_user(name):
@@ -232,13 +245,15 @@ class Neo4jGraphStore:
         when = (timeutil.ensure_utc(at) if at else timeutil.now()).isoformat()
         params = dict(u=user_id, src=src, dst=dst, statement=rel.statement, confidence=rel.confidence,
                       source_ref=source_ref, at=when)
-        if is_third_party(source_ref):
-            # A record from mail or Slack never rewrites or ends an edge the user's own words created.
+        if source_rank(source_ref) < 2:
+            # A record from mail or Slack never rewrites or ends an edge the user's own words created, and a
+            # third-party record never rewrites what the user's own records say.
+            rank = source_rank(source_ref)
             current = await self._run(q_current_edges_from(r), u=user_id, src=src)
             same = [e for e in current if e["dst"] == dst]
-            if same and not any(is_third_party(e["src"]) for e in same):
+            if same and not any(source_rank(e["src"]) <= rank for e in same):
                 return
-            if not same and r in SINGLE_VALUED_RELS and any(not is_third_party(e["src"]) for e in current):
+            if not same and r in SINGLE_VALUED_RELS and any(source_rank(e["src"]) > rank for e in current):
                 return
         rows = await self._run(q_update_current_edge(r), **params)
         if not rows or rows[0]["c"] == 0:
@@ -280,10 +295,43 @@ class Neo4jGraphStore:
         nodes = await self._run(Q_FORGET_NODES, u=user_id, n=needle.strip())
         return int((edges[0]["c"] if edges else 0) + (nodes[0]["c"] if nodes else 0))
 
+    async def delete_user(self, user_id: int) -> int:
+        """Remove the user's whole graph in batches (account deletion). Returns the number of nodes."""
+        rows = await self._run(Q_COUNT_USER, u=user_id)
+        await self._run(Q_DELETE_USER, u=user_id)  # auto-commit: CALL IN TRANSACTIONS cannot run in a tx
+        return int(rows[0]["c"]) if rows else 0
+
     async def forget_source(self, user_id: int, prefix: str) -> int:
         if not prefix.strip():
             return 0
-        rows = await self._run(Q_FORGET_SOURCE, u=user_id, p=THIRD_PARTY_PREFIX + prefix)
+        removed = 0
+        for ns in (THIRD_PARTY_PREFIX, SELF_AUTHORED_PREFIX):
+            rows = await self._run(Q_FORGET_SOURCE, u=user_id, p=ns + prefix)
+            removed += int(rows[0]["c"]) if rows else 0
+        await self._run(Q_DROP_ORPHANS, u=user_id)
+        return removed
+
+    async def forget_fact(self, user_id: int, subject: str, rel: str, obj: str) -> int:
+        async def find(name: str) -> str | None:
+            if is_user(name):
+                return USER_KEY
+            rows_ = await self._run(Q_FIND_KEY, u=user_id, norm=normalize_name(name))
+            return rows_[0]["key"] if rows_ else None
+
+        src, dst = await find(subject), await find(obj)
+        if src is None or dst is None:
+            return 0
+        rows = await self._run(Q_FORGET_FACT, u=user_id, src=src, dst=dst, rel=sanitize_rel(rel))
+        await self._run(Q_DROP_ORPHANS, u=user_id)
+        return int(rows[0]["c"]) if rows else 0
+
+    async def forget_entity(self, user_id: int, name: str) -> int:
+        if is_user(name):
+            return 0
+        found = await self._run(Q_FIND_KEY, u=user_id, norm=normalize_name(name))
+        if not found:
+            return 0
+        rows = await self._run(Q_FORGET_ENTITY, u=user_id, key=found[0]["key"])
         await self._run(Q_DROP_ORPHANS, u=user_id)
         return int(rows[0]["c"]) if rows else 0
 

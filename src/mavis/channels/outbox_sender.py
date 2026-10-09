@@ -10,6 +10,8 @@ import structlog
 from mavis.channels import get_channel, routing
 from mavis.channels.base import Channel, ChannelRateLimited
 from mavis.channels.pacing import get_pacer
+from mavis.config import get_settings
+from mavis.store import artifacts
 from mavis.store.db import utcnow
 from mavis.store.models import OutboxMessage
 from mavis.store.repo import outbox, users
@@ -51,6 +53,9 @@ class OutboxSender:
         except ChannelRateLimited as exc:
             await outbox.mark_retry(row.id, "rate limited", now + timedelta(seconds=exc.retry_after),
                                     count_attempt=False)
+        except PermissionError as exc:  # a file outside the user's artifacts: retrying cannot fix it
+            log.warning("outbox.document_refused", outbox_id=row.id, user_id=row.user_id)
+            await outbox.mark_failed(row.id, repr(exc)[:500])
         except Exception as exc:  # noqa: BLE001
             attempts = row.attempts + 1
             log.warning("outbox.delivery_failed", outbox_id=row.id, attempt=attempts, error=repr(exc))
@@ -70,6 +75,9 @@ class OutboxSender:
                                            private=bool(msg.buttons))
         if not chats:
             raise RuntimeError(f"user {row.user_id} has no chat id")
+        legacy_ok = user.telegram_chat_id in get_settings().owner_telegram_chat_ids
+        for path in [*msg.media, *filter(None, [msg.photo_path, msg.document_path])]:
+            artifacts.guard(row.user_id, path, legacy_ok=legacy_ok)  # another user's file is never sent
         ids: list[int] = []
         delivered = False
         for chat in chats:

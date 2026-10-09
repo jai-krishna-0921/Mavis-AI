@@ -16,6 +16,7 @@ from mavis.initiative.filters import FilterResult
 from mavis.initiative.subjects import event_subject
 from mavis.initiative.untrusted import wrap_untrusted
 from mavis.llm import models as llm
+from mavis.memory import personal_layer
 from mavis.policy.pings import PingPolicy
 from mavis.store.repo import messages
 
@@ -104,17 +105,19 @@ class Reasoner:
         loops = "\n".join(_loop_line(lp, user.timezone, now) for lp in result.matched_loops) or "- none"
         recalled = await self._memory.recall(user.id, result.summary)
         recall = recalled.render()
+        layer = await personal_layer.prompt_block(user.id)  # who they are and who matters to them (bounded)
         rows = await messages.recent(user.id, 10)
         history = _fmt_history(rows, now, user.timezone)
         # what this run actually read: any third-party-derived input taints what it writes
         tainted = (event.trust is Trust.UNTRUSTED or any(not lp.trusted for lp in result.matched_loops)
-                   or recalled.untrusted or any(tainted_event_id(r.event_id) for r in rows))
+                   or recalled.untrusted or layer.has_unconfirmed
+                   or any(tainted_event_id(r.event_id) for r in rows))
         subject = event_subject(event)
         about = f"; subject_kind {subject.kind.value}, subject_id {subject.id}" if subject else ""
         prompt = (
             f"## Signal ({event.type.value}, id {event.id}{about})\n{signal}\n\n"
             f"## Related open loops\n{loops}\n\n"
-            f"{recall}\n\n## Recent conversation\n{history}"
+            f"{recall}\n\n{layer.text + chr(10) * 2 if layer.text else ''}## Recent conversation\n{history}"
         )
         if result.extra:
             prompt += f"\n\n## Mavis signals (computed, trusted)\n{result.extra}"

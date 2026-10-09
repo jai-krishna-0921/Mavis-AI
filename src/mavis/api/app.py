@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import Depends, FastAPI
 
+from mavis.api.dashboard import create_dashboard_app
 from mavis.api.ratelimit import webhook_rate_limit
 from mavis.api.routes import connect, health, integrations, oauth, slack, telegram
 from mavis.bus import get_bus
@@ -22,14 +23,28 @@ from mavis.tools.integrations.wiring import register_integrations
 log = structlog.get_logger(__name__)
 
 
+MIN_WEBHOOK_SECRET_CHARS = 32
+
+
+def check_webhook_secret(s) -> None:
+    """A short secret is guessable: warn everywhere, refuse to start in prod."""
+    n = len(s.telegram_webhook_secret)
+    if 0 < n < MIN_WEBHOOK_SECRET_CHARS:
+        log.warning("telegram.webhook_secret_too_short", length=n, minimum=MIN_WEBHOOK_SECRET_CHARS)
+        if s.env == "prod":
+            raise RuntimeError(f"TELEGRAM_WEBHOOK_SECRET must be at least {MIN_WEBHOOK_SECRET_CHARS} "
+                               "characters in prod")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     s = get_settings()
     if s.telegram_mode == "webhook" and not s.telegram_webhook_secret:
         raise RuntimeError("TELEGRAM_WEBHOOK_SECRET is required in webhook mode")
-    if s.env == "prod" and not s.allowed_telegram_chat_ids:
-        raise RuntimeError("ALLOWED_TELEGRAM_CHAT_IDS is required when ENV=prod")
+    check_webhook_secret(s)
+    if s.env == "prod" and not s.owner_telegram_chat_ids:
+        raise RuntimeError("OWNER_TELEGRAM_CHAT_IDS is required when ENV=prod")
     if s.live_test_enabled and active_test_chat(s) is None:
         log.error("live_test.disabled_at_startup")  # misconfigured: the reason is logged, path stays off
     if s.is_sqlite:
@@ -42,6 +57,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             log.info("telegram.webhook_set", path=telegram_webhook.WEBHOOK_PATH)
         except Exception as exc:  # noqa: BLE001 - the api must still boot; /readyz and logs surface it
             log.error("telegram.webhook_failed", error=str(exc))
+    if s.telegram_bot_token and s.env == "prod":
+        try:
+            await telegram_webhook.set_commands()
+        except Exception as exc:  # noqa: BLE001 - the menu is cosmetic; the api must still boot
+            log.warning("telegram.commands_failed", error=str(exc))
     try:
         yield
     finally:
@@ -57,9 +77,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(title="Mavis", lifespan=lifespan)
     app.include_router(health.router)
-    app.include_router(telegram.router, dependencies=[Depends(webhook_rate_limit)])
+    # The Telegram route is authenticated by its secret header and all traffic shares Telegram's IPs, so it is
+    # not behind the per-IP limiter (spec 9.1); intake applies a per-chat bucket instead.
+    app.include_router(telegram.router)
     app.include_router(connect.router)
     app.include_router(oauth.router)
     app.include_router(integrations.router, dependencies=[Depends(webhook_rate_limit)])
     app.include_router(slack.router)  # signature-verified; Slack bursts from shared IPs exceed the IP limit
+    # The dashboard API is always mounted and answers 404 itself while DASHBOARD_ENABLED is off.
+    app.mount("/api/v1", create_dashboard_app())
     return app

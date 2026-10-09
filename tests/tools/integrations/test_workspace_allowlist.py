@@ -77,7 +77,7 @@ async def test_file_id_in_the_goal_is_allowed(google, user):
 async def test_files_the_task_or_its_parent_created_are_allowed(google, user):
     parent = await tasks.create(user.id, goal="make a budget sheet")
     child = await tasks.create(user.id, goal="fill it in", parent_id=parent)
-    workspace_guard.record_created(parent, ["sheet-made-by-parent"])
+    await workspace_guard.record_created(parent, ["sheet-made-by-parent"])
     args = a.SheetAppendArgs(spreadsheet_id="sheet-made-by-parent", values=["x"])
     assert (await run_prepare("sheets.append_row", args, child, user.id)).refusal is None
 
@@ -117,7 +117,7 @@ async def test_untainted_task_is_not_restricted(google, user):
 
 async def test_restart_forgets_created_files_and_fails_closed(google, user):
     tid = await tasks.create(user.id, goal="make a budget sheet")
-    workspace_guard.record_created(tid, ["sheet-new"])
+    await workspace_guard.record_created(tid, ["sheet-new"])
     workspace_guard._created.clear()  # what a worker restart does
     named(google, "Untitled spreadsheet")
     args = a.SheetAppendArgs(spreadsheet_id="sheet-new", values=["x"])
@@ -214,14 +214,17 @@ async def test_an_approved_create_is_recorded_for_the_task_that_asked(workspace_
     aid = await approvals.create(user.id, tid, tool, args, "preview", utcnow() + timedelta(hours=1))
     await registry.execute_approved(aid)  # the approval gate runs it with no task context of its own
     [made] = reply.values()
-    assert workspace_guard.created_by(tid) == {made}
+    assert await workspace_guard.created_by(tid) == {made}
     target = a.SheetAppendArgs(spreadsheet_id=made, values=["x"])
     assert (await run_prepare("sheets.append_row", target, tid, user.id)).refusal is None
 
 
 async def test_an_approved_upload_is_recorded_for_the_task_that_asked(workspace_on, google, user, settings):
     tid = await tasks.create(user.id, goal="make the Q3 deck", tainted=True)
-    path = settings.artifacts_dir / "deck.pptx"
+    from mavis.store import artifacts
+
+    artifacts.user_dir(user.id).mkdir(parents=True, exist_ok=True)
+    path = artifacts.user_dir(user.id) / "deck.pptx"
     path.write_bytes(b"PK")
     artifact = await tasks.add_artifact(tid, user.id, "pptx", str(path), "application/x-pptx", title="Q3")
     google.results["drive.upload_file"] = ToolResult(ok=True, data={"id": "upload-approved"})
@@ -230,7 +233,7 @@ async def test_an_approved_upload_is_recorded_for_the_task_that_asked(workspace_
     aid = await approvals.create(user.id, tid, "drive_upload", {"artifact_id": artifact, "folder_id": ""},
                                  "preview", utcnow() + timedelta(hours=1))
     await registry.execute_approved(aid)
-    assert workspace_guard.created_by(tid) == {"upload-approved"}
+    assert await workspace_guard.created_by(tid) == {"upload-approved"}
     out = await run_prepare("drive.share", share("upload-approved"), tid, user.id)
     assert out.refusal is None
 
@@ -322,7 +325,7 @@ async def test_tainted_move_into_a_private_named_or_created_folder_is_allowed(go
     perms(google, MINE)
     assert (await run_prepare("drive.move", move(FOLDER), tid, user.id)).refusal is None
     perms(google, SHARED)  # from here on the folder is shared, so only the id rules can allow it
-    workspace_guard.record_created(tid, ["folder-made-here"])
+    await workspace_guard.record_created(tid, ["folder-made-here"])
     assert (await run_prepare("drive.move", move("folder-made-here"), tid, user.id)).refusal is None
     named_tid = await tasks.create(user.id, goal=f"move {DECK} into {FOLDER}")
     assert (await run_prepare("drive.move", move(FOLDER), named_tid, user.id)).refusal is None
@@ -418,7 +421,7 @@ async def test_tainted_upload_or_folder_needs_an_allowed_destination(google, use
     assert (await run_prepare(action, build(FOLDER), tid, user.id)).refusal is None
     assert (await run_prepare(action, build(""), tid, user.id)).refusal is None
     perms(google, SHARED)
-    workspace_guard.record_created(tid, ["folder-made-here"])
+    await workspace_guard.record_created(tid, ["folder-made-here"])
     assert (await run_prepare(action, build("folder-made-here"), tid, user.id)).refusal is None
 
 

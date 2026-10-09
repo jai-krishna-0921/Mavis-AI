@@ -9,9 +9,9 @@ if TYPE_CHECKING:
 
 
 def load_builtin_tools(registry: ToolRegistry) -> None:
-    from mavis.tools import assistant, chat_tools, web
+    from mavis.tools import assistant, chat_tools, preferences, web
 
-    for tool in (*assistant.TOOLS, *web.TOOLS, *chat_tools.current_tools()):
+    for tool in (*assistant.TOOLS, *web.TOOLS, *chat_tools.current_tools(), *preferences.TOOLS):
         registry.register(tool)
 
     from mavis.tools.integrations.tools import register_integration_tools

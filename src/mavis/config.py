@@ -6,12 +6,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore",
+                                      populate_by_name=True)
 
     # --- identity -------------------------------------------------------------
     agent_name: str = "Mavis"  # the agent persona; "Mavis" is the project/package name
@@ -29,6 +30,10 @@ class Settings(BaseSettings):
     model_smart_fallbacks: list[str] = ["kimi-k3", "deepseek-v4.1-flash"]
     # process-wide cap on in-flight LLM calls (Ollama Cloud free tier 429s on concurrent requests)
     llm_max_concurrency: int = 3
+    # USD per million tokens (in, out). Unknown models use the default (the smart price: an upper bound).
+    llm_prices: dict[str, tuple[float, float]] = {
+        "deepseek-v4.1-flash": (0.30, 1.20), "glm-5.3": (1.40, 4.40)}
+    llm_price_default: tuple[float, float] = (1.40, 4.40)
     llm_timeout_fast_s: float = 30.0
     llm_timeout_smart_s: float = 60.0
     # after a client-side timeout the request still runs server-side and holds the account's slot
@@ -48,7 +53,15 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
     telegram_mode: Literal["polling", "webhook"] = "polling"
-    allowed_telegram_chat_ids: list[int] = Field(default_factory=list)
+    telegram_bot_username: str = ""  # for invite deep links: https://t.me/<username>?start=...
+    # Owner chats (admin commands, alerts). OWNER_TELEGRAM_CHAT_IDS; the old ALLOWED_TELEGRAM_CHAT_IDS
+    # name is read as an alias for one release (contract D). In ACCESS_MODE=allowlist this is still the
+    # allowlist; in invite mode it only marks the owner.
+    owner_telegram_chat_ids: list[int] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("OWNER_TELEGRAM_CHAT_IDS", "ALLOWED_TELEGRAM_CHAT_IDS",
+                                      "owner_telegram_chat_ids"),
+    )
     # The live E2E harness's own chat: admitted beside the allowlist, and every send to it goes to a log
     # sink (data_dir/e2e/test_sink.jsonl), never to Telegram, so tests never write into a real user's chat.
     # Off unless enabled, and the id must be synthetic (below -10**15) and not allowlisted
@@ -66,6 +79,62 @@ class Settings(BaseSettings):
     bus_claim_idle_ms: int = 900_000  # redeliver an unacked message after this idle time (> longest handler)
     worker_concurrency: int = 4  # consumer loops per stream per worker process
 
+    # --- multi-user access (Phase 11, spec 2026-10-08 sections 4, 7, 8) ------
+    # allowlist: today's behaviour (owner chats only). shadow: allowlist enforced, the invite gate only
+    # logs what it would do. invite: the invite gate decides.
+    access_mode: Literal["allowlist", "shadow", "invite"] = "allowlist"
+    worker_scheduler: Literal["legacy", "mailbox"] = "legacy"
+    llm_limiter: Literal["local", "redis"] = "local"
+    # shared limiter (owner decision: Ollama Pro = 3 concurrent calls across all processes)
+    llm_global_slots: int = 3
+    llm_bg_max_slots: int = 1  # background calls at once (best_effort follows llm.policy, not this)
+    llm_user_max_slots: int = 2  # per user while someone else waits
+    llm_overflow_wait_s: float = 8.0  # interactive calls overflow to the secondary provider past this wait
+    llm_bg_overflow_after_s: float = 60.0  # background overflows only after a long primary backoff
+    invite_max_active: int = 20  # unexpired, unrevoked codes at once
+    invite_max_uses: int = 25  # per code
+    invite_default_days: int = 14
+    # Invite links people make themselves from the dashboard: open links allowed per tier (the owner has no
+    # cap) and uses per link.
+    invite_cap_standard: int = 3
+    invite_cap_trusted: int = 10
+    invite_web_uses: int = 5
+    invite_fail_limit_per_hour: int = 5  # failed code attempts per chat
+    invite_fail_alert_per_hour: int = 50  # failed attempts across all chats before the owner is alerted
+    pending_reply_every_h: float = 24.0
+    pending_retention_days: int = 14
+    inbound_rate_per_min: float = 120.0  # active users: far above any human, albums and forwards fit
+    inbound_burst: int = 60
+    inbound_pending_rate_per_min: float = 5.0
+    inbound_pending_burst: int = 3
+    # /clear (agents.clear): at most this many asks per user per hour, and how far down from the newest known
+    # message id the delete sweep reaches for messages Mavis never noted (ids are sequential per chat).
+    clear_max_per_hour: int = 4
+    clear_fallback_span: int = 300
+
+    privacy_url: str = ""  # linked by /privacy and the bot description (Telegram requires it)
+
+    # --- scheduler (spec 7) ----------------------------------------------------
+    chat_executors: int = 6
+    bg_executors: int = 3
+    coalesce_window_s: float = 3.0
+    coalesce_max_messages: int = 5
+    coalesce_max_chars: int = 2000
+    mailbox_lease_ms: int = 120_000
+    mailbox_cap: int = 200
+    task_global_concurrency: int = 3
+    fanout_jitter_s: int = 600
+    stream_maxlen: int = 20_000
+    db_pool_size: int = 10
+    db_max_overflow: int = 10
+
+    # --- budgets (spec 9.3), USD per user per local day ------------------------
+    budget_enforced: bool = True
+    budget_soft_usd: dict[str, float] = {"standard": 0.30, "trusted": 1.00}
+    budget_hard_usd: dict[str, float] = {"standard": 0.60, "trusted": 2.00}
+    budget_runaway_factor: float = 1.5
+    llm_monthly_ceiling_usd: float = 60.0  # Ollama Pro credits; 70% alerts the owner, 90% soft-caps standard
+
     # --- storage --------------------------------------------------------------
     data_dir: Path = Path("data")
     database_url: str = ""  # empty => sqlite in data_dir; prod: postgresql+psycopg://...
@@ -80,6 +149,7 @@ class Settings(BaseSettings):
     # --- integrations ---------------------------------------------------------
     composio_api_key: str = ""
     composio_webhook_secret: str = ""
+    composio_shared_key_ok: bool = False  # a non-prod stack may share the prod key
     composio_base_url: str = "https://backend.composio.dev/api/v3"
     composio_timeout_s: float = 30.0
     integration_polling: bool = False
@@ -93,6 +163,12 @@ class Settings(BaseSettings):
     slack_signing_secret: str = ""
     native_token_kek: str = ""  # 32 random bytes, base64: wraps the data key of every sealed grant token
     native_token_kek_previous: str = ""  # comma list of retired KEKs, kept only to unwrap during rotation
+    # --- web dashboard (spec 2026-10-09): /api/v1 answers 404 unless DASHBOARD_ENABLED ----------------------
+    dashboard_enabled: bool = False
+    # Google sign-in reuses GOOGLE_OAUTH_CLIENT_ID/SECRET; the redirect URI
+    # <PUBLIC_BASE_URL>/api/v1/auth/google/callback must be added to that OAuth client in Google Cloud.
+    google_signin_enabled: bool = False
+    dashboard_session_days: int = 30
     sync_gmail_days: int = 14
     sync_slack_days: int = 7
     sync_calendar_back_days: int = 7
@@ -222,7 +298,8 @@ class Settings(BaseSettings):
     attention_max_attempts: int = 2  # LLM attempts per email before the heuristic fallback
     attention_currency: str = "INR"  # the user's currency, used when an email states none
     # cold start: with no history, a debit at or above this amount (per currency) is notable
-    attention_large_amounts: dict[str, float] = {"INR": 10000.0, "USD": 150.0, "EUR": 150.0, "GBP": 120.0}
+    attention_large_amounts: dict[str, float] = {
+        "INR": 10000.0, "USD": 150.0, "EUR": 150.0, "GBP": 120.0, "JPY": 20000.0, "SGD": 200.0, "AED": 550.0}
     attention_ask_threshold: float = 0.6
     attention_notify_threshold: float = 0.7
     attention_brief_threshold: float = 0.35
@@ -238,6 +315,11 @@ class Settings(BaseSettings):
     # --- admin ----------------------------------------------------------------
     admin_user: str = "admin"
     admin_password: str = ""
+
+    @property
+    def allowed_telegram_chat_ids(self) -> list[int]:
+        """Read-only alias of owner_telegram_chat_ids (kept one release for older readers)."""
+        return self.owner_telegram_chat_ids
 
     @property
     def db_url(self) -> str:

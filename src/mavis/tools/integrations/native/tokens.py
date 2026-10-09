@@ -23,11 +23,12 @@ import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
+from mavis.access import admission
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.errors import IntegrationError
 from mavis.store import db as dbm
-from mavis.store.models import NativeGrant
+from mavis.store.models import NativeGrant, User
 from mavis.tools.integrations.native import crypto
 from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired
 from mavis.tools.integrations.native.http import TOKEN_BYTES, ResponseTooLarge, send_capped
@@ -74,6 +75,10 @@ def _expiry(resp: dict, now: datetime) -> datetime | None:
     except (TypeError, ValueError):
         ttl = None
     return now + timedelta(seconds=ttl) if ttl else None
+
+
+class UserNotAdmitted(Exception):
+    """The Mavis user is banned, deleting or deleted: no grant may be created for them."""
 
 
 class AccountTaken(Exception):
@@ -139,9 +144,14 @@ class NativeTokenStore:
         if not (team_id and slack_user_id and key):
             return None
         async with dbm.Session() as s:
-            return await s.scalar(select(NativeGrant.user_id).where(
+            uid = await s.scalar(select(NativeGrant.user_id).where(
                 NativeGrant.provider == NativeProvider.SLACK.value, NativeGrant.account_key == key,
                 NativeGrant.status == ACTIVE))
+            # One choke point for every Slack inbound path (chat, third-party records, buttons): a user the
+            # access rules refuse (banned, pending under invite mode, deleting, deleted) is simply unknown.
+            if uid is None or not admission.admitted(await s.get(User, uid)):
+                return None
+            return uid
 
     # --- the workspace bot (Slack chat as Mavis) ----------------------------------------------------------
 
@@ -198,6 +208,11 @@ class NativeTokenStore:
         sealed_refresh = crypto.seal_text(refresh_token, _ctx(user_id, provider, "refresh_token"))
         try:
             async with dbm.Session() as s:
+                # Lock the user row: account deletion flips the status before it erases grants, so a save
+                # that wins the lock is erased by the deletion, and one that loses sees the new status.
+                owner = await s.scalar(select(User).where(User.id == user_id).with_for_update())
+                if not admission.admitted(owner):
+                    raise UserNotAdmitted
                 if key is not None:
                     await s.execute(delete(NativeGrant).where(
                         NativeGrant.provider == provider.value, NativeGrant.account_key == key,

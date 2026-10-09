@@ -17,7 +17,7 @@ def upd(chat_id: int, update_id: int = 1) -> dict:
 @pytest.fixture
 async def client(db, bus, monkeypatch):
     monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "shh")
-    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", "[111]")
+    monkeypatch.setenv("OWNER_TELEGRAM_CHAT_IDS", "[111]")
     monkeypatch.setenv("ENV", "prod")
     get_settings.cache_clear()
     monkeypatch.setattr(ratelimit, "_limiter", None)
@@ -52,19 +52,15 @@ async def test_rate_limiter_counts_per_key() -> None:
     assert await rl.hit("5.6.7.8") is True
 
 
-async def test_webhook_returns_429_when_limited(client, monkeypatch) -> None:
+async def test_integrations_webhook_returns_429_when_limited(client, monkeypatch) -> None:
     monkeypatch.setattr(ratelimit, "_limiter", ratelimit.RateLimiter(limit=1, window_s=60))
-    assert (await client.post("/telegram/webhook", json=upd(111, 1), headers=H)).status_code == 200
-    assert (await client.post("/telegram/webhook", json=upd(111, 2), headers=H)).status_code == 429
+    first = await client.post("/webhooks/integrations", json={})
+    assert first.status_code != 429
+    assert (await client.post("/webhooks/integrations", json={})).status_code == 429
 
 
-async def test_prod_requires_allowlist(monkeypatch) -> None:
-    monkeypatch.setenv("ENV", "prod")
-    monkeypatch.setenv("ALLOWED_TELEGRAM_CHAT_IDS", "[]")
-    get_settings.cache_clear()
-    from mavis.api.app import lifespan
-
-    with pytest.raises(RuntimeError, match="ALLOWED_TELEGRAM_CHAT_IDS"):
-        async with lifespan(create_app()):
-            pass
-    get_settings.cache_clear()
+async def test_telegram_webhook_is_not_behind_the_per_ip_limiter(client, monkeypatch) -> None:
+    """Spec 9.1: all Telegram traffic shares Telegram's IPs, so the per-chat bucket is used instead."""
+    monkeypatch.setattr(ratelimit, "_limiter", ratelimit.RateLimiter(limit=1, window_s=60))
+    for n in (1, 2, 3):
+        assert (await client.post("/telegram/webhook", json=upd(111, n), headers=H)).status_code == 200

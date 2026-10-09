@@ -24,6 +24,8 @@ class EventType(StrEnum):
     TASK_PROGRESS = "task_progress"
     LOOP_CREATED = "loop_created"
     LOOP_UPDATED = "loop_updated"
+    RATE_LIMITED = "rate_limited"  # Phase 11: api dropped a chat's update over its inbound bucket
+    CHAT_MEMBER = "chat_member"  # Phase 11: my_chat_member (bot added to a group, blocked, unblocked)
 
 
 class Trust(StrEnum):
@@ -60,6 +62,7 @@ class JobKind(StrEnum):
     CONNECTION_CHECK = "connection_check"  # P5
     FIRST_SYNC = "first_sync"       # P5
     POLL_PROVIDER = "poll_provider"  # P5
+    DELETE_USER = "delete_user"      # Phase 11: erase one user from every store
 
 
 class Job(BaseModel):

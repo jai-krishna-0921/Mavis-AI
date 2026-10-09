@@ -27,6 +27,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import delete
 
+from mavis.access import admission
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.store import db as dbm
@@ -38,6 +39,7 @@ from mavis.tools.integrations.native.tokens import (
     SLACK_TOKEN_URL,
     AccountTaken,
     NativeTokenStore,
+    UserNotAdmitted,
 )
 
 STATE_TTL_S = 600
@@ -77,16 +79,17 @@ SLACK_BOT_SCOPES = (
 )
 
 _ERRORS = {"bad_state", "expired_state", "replayed_state", "denied", "exchange_failed", "not_configured",
-           "wrong_provider", "account_taken"}
+           "wrong_provider", "account_taken", "not_allowed", "session_mismatch"}
 
 
 class OAuthError(Exception):
     """kind is one of a fixed set; the message never carries vendor text."""
 
-    def __init__(self, kind: str, *, user_id: int | None = None, pending_id: int | None = None) -> None:
+    def __init__(self, kind: str, *, user_id: int | None = None, pending_id: int | None = None,
+                 origin: str | None = None) -> None:
         assert kind in _ERRORS
         super().__init__(kind)
-        self.kind, self.user_id, self.pending_id = kind, user_id, pending_id
+        self.kind, self.user_id, self.pending_id, self.origin = kind, user_id, pending_id, origin
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,7 @@ class Completed:
     provider: NativeProvider
     pending_id: int | None
     account: dict
+    origin: str | None = None  # "web" when the consent was started from the dashboard
 
 
 def _b64(b: bytes) -> str:
@@ -182,16 +186,22 @@ class NativeOAuth:
     # --- starting ------------------------------------------------------------------------------------
 
     async def authorize_url(self, user_id: int, provider: NativeProvider,
-                            pending_id: int | None = None) -> str:
+                            pending_id: int | None = None, *, origin: str | None = None,
+                            session_hash: str | None = None) -> str:
+        """`session_hash` binds a dashboard-started consent to the session that began it: the callback must
+        present the same session, so a forwarded link cannot attach someone else's account."""
         if not configured(provider):
             raise OAuthError("not_configured")
+        if not await admission.admitted_id(user_id):
+            raise OAuthError("not_allowed")  # a banned, pending or deleted user gets no consent link
         nonce = secrets.token_urlsafe(16)
         verifier = secrets.token_urlsafe(48)
         now = timeutil.now()
         async with dbm.Session() as s:
             await s.execute(delete(NativeOAuthState).where(NativeOAuthState.expires_at < now))
             s.add(NativeOAuthState(nonce=nonce, user_id=user_id, provider=provider.value,
-                                   pending_id=pending_id, expires_at=now + timedelta(seconds=STATE_TTL_S)))
+                                   pending_id=pending_id, origin=origin, session_hash=session_hash,
+                                   expires_at=now + timedelta(seconds=STATE_TTL_S)))
             await s.commit()
         state = sign_state(user_id, provider.value, verifier, nonce=nonce)
         st = get_settings()
@@ -210,33 +220,55 @@ class NativeOAuth:
 
     # --- finishing -----------------------------------------------------------------------------------
 
-    async def _consume(self, st: StatePayload, provider: NativeProvider) -> int | None:
-        """Delete the nonce row (single use); returns the pending id stored with it."""
+    async def _consume(self, st: StatePayload, provider: NativeProvider
+                       ) -> tuple[int | None, str | None, str | None]:
+        """Delete the nonce row (single use); returns the pending id, the origin and the bound session."""
         async with dbm.Session() as s:
             row = await s.get(NativeOAuthState, st.nonce)
             if (row is None or row.user_id != st.user_id or row.provider != st.provider
                     or timeutil.ensure_utc(row.expires_at) <= timeutil.now()):
                 raise OAuthError("replayed_state", user_id=st.user_id)
-            pending = row.pending_id
+            pending, origin, bound = row.pending_id, row.origin, row.session_hash
             res = await s.execute(delete(NativeOAuthState).where(NativeOAuthState.nonce == st.nonce))
             await s.commit()
         if not res.rowcount:  # lost a race with a concurrent callback
             raise OAuthError("replayed_state", user_id=st.user_id)
-        return pending
+        return pending, origin, bound
 
-    async def _state(self, state: str, provider: NativeProvider) -> tuple[StatePayload, int | None]:
+    async def _state(self, state: str, provider: NativeProvider, session_hash: str | None = None
+                     ) -> tuple[StatePayload, int | None, str | None]:
         st = verify_state(state)
         if st.provider != provider.value:
             raise OAuthError("wrong_provider")
-        return st, await self._consume(st, provider)
+        # the state is spent whoever it belonged to
+        pending, origin, bound = await self._consume(st, provider)
+        if bound is not None and not (session_hash and hmac.compare_digest(bound, session_hash)):
+            raise OAuthError("session_mismatch", user_id=st.user_id, origin=origin)
+        if not await admission.admitted_id(st.user_id):
+            raise OAuthError("not_allowed")  # silent: a banned or deleted user is not messaged
+        return st, pending, origin
 
     async def deny(self, state: str, provider: NativeProvider) -> tuple[int, int | None]:
         """The user (or the vendor) refused: spend the state and say whose it was."""
-        st, pending = await self._state(state, provider)
-        return st.user_id, pending
+        user_id, pending, _ = await self.deny_with_origin(state, provider)
+        return user_id, pending
 
-    async def complete(self, state: str, code: str, provider: NativeProvider) -> Completed:
-        st, pending = await self._state(state, provider)
+    async def deny_with_origin(self, state: str, provider: NativeProvider, session_hash: str | None = None
+                               ) -> tuple[int, int | None, str | None]:
+        st, pending, origin = await self._state(state, provider, session_hash)
+        return st.user_id, pending, origin
+
+    async def complete(self, state: str, code: str, provider: NativeProvider,
+                       session_hash: str | None = None) -> Completed:
+        st, pending, origin = await self._state(state, provider, session_hash)
+        try:
+            return await self._complete(st, pending, code, provider, origin)
+        except OAuthError as exc:
+            exc.origin = origin
+            raise
+
+    async def _complete(self, st: StatePayload, pending: int | None, code: str, provider: NativeProvider,
+                        origin: str | None) -> Completed:
         bot = None
         try:
             if provider is NativeProvider.GOOGLE:
@@ -256,9 +288,15 @@ class NativeOAuth:
                                    refresh_token=refresh, expires_at=expires)
         except AccountTaken:  # the check above can lose a race; the database constraint cannot
             raise OAuthError("account_taken", user_id=st.user_id, pending_id=pending) from None
+        except UserNotAdmitted:  # banned or deleted while the consent screen was open
+            raise OAuthError("not_allowed") from None
         if bot is not None:
-            await self._save_bot(st.user_id, bot)
-        return Completed(st.user_id, provider, pending, account)
+            try:
+                await self._save_bot(st.user_id, bot)
+            except UserNotAdmitted:
+                await self.tokens.delete(st.user_id, provider)
+                raise OAuthError("not_allowed") from None
+        return Completed(st.user_id, provider, pending, account, origin)
 
     async def _post(self, url: str, **kw) -> dict:
         try:
