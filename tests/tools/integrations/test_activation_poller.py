@@ -47,7 +47,7 @@ async def test_activation_unpollable_capability_never_polls(provider, state, rec
     provider.fail_subscribe = True
     act = Activator(provider=provider, state=state, schedule=rec.schedule, polling_forced=False,
                     clock=lambda: NOW)
-    assert await act.on_active(1, Capability.SLACK) is False
+    assert await act.on_active(1, Capability.NOTION) is False
     assert rec.scheduled == []
 
 

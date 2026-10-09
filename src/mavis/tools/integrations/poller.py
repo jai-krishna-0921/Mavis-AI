@@ -30,7 +30,7 @@ POLL_KIND = "system_poll"
 # the webhook fallback chain above, so they have their own kind (reasons "tasks" and "drive").
 WORKSPACE_POLL_KIND = WakeupKind.SYSTEM_WORKSPACE_POLL.value
 POLL_INTERVAL = timedelta(minutes=2)
-POLLABLE = frozenset({Capability.GMAIL, Capability.CALENDAR})
+POLLABLE = frozenset({Capability.GMAIL, Capability.CALENDAR, Capability.SLACK})
 INITIAL_LOOKBACK = timedelta(minutes=10)
 
 
@@ -129,6 +129,8 @@ class Poller:
         try:
             if capability is Capability.GMAIL:
                 return await self._poll_gmail(user_id, st)
+            if capability is Capability.SLACK:
+                return await self._poll_slack(user_id, st)
             return await self._poll_calendar(user_id, st)
         except _AuthError:
             reschedule = not await self._auth_failed(user_id, st, capability)
@@ -173,6 +175,21 @@ class Poller:
             if await self.bus.publish(event):
                 published += 1
         await self._set_cursor(user_id, st, "gmail_after", newest)
+        return published
+
+    async def _poll_slack(self, user_id: int, st: dict) -> int:
+        """Safety net for missed Events API deliveries: per-channel latest-ts cursors, a few channels a tick."""
+        from mavis.tools.integrations.native.slack_events import PollAuthError, poll_messages
+
+        cursors = st.get("cursors", {})
+        try:
+            published, ts_by_channel, offset = await poll_messages(
+                self.provider, self.bus, user_id, dict(cursors.get("slack_ts") or {}),
+                int(cursors.get("slack_offset") or 0), now=self.clock(),
+            )
+        except PollAuthError:
+            raise _AuthError from None
+        await self.state.update(user_id, {"cursors": {**cursors, "slack_ts": ts_by_channel, "slack_offset": offset}})
         return published
 
     async def _poll_calendar(self, user_id: int, st: dict) -> int:
