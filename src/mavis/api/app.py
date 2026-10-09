@@ -9,7 +9,7 @@ import structlog
 from fastapi import Depends, FastAPI
 
 from mavis.api.ratelimit import webhook_rate_limit
-from mavis.api.routes import connect, health, integrations, oauth, telegram
+from mavis.api.routes import connect, health, integrations, oauth, slack, telegram
 from mavis.bus import get_bus
 from mavis.channels import telegram_webhook
 from mavis.channels.test_sink import active_test_chat
@@ -61,4 +61,5 @@ def create_app() -> FastAPI:
     app.include_router(connect.router)
     app.include_router(oauth.router)
     app.include_router(integrations.router, dependencies=[Depends(webhook_rate_limit)])
+    app.include_router(slack.router)  # signature-verified; Slack bursts from shared IPs exceed the IP limit
     return app
