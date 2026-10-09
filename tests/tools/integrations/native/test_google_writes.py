@@ -403,10 +403,13 @@ async def test_meet_transcripts_list_for_a_conference_record():
     assert parse_qs(fake.requests[0].url.query.decode())["pageSize"] == ["100"]
 
 
-async def test_meet_transcript_for_an_unknown_record_is_not_found():
+async def test_meet_transcript_for_a_record_google_will_not_show_says_so_plainly():
+    """No transcripts (a personal account, transcription off, or an id that is not ours) is an answer."""
     fake = FakeGoogle().on("GET", r"/transcripts$", error(404, "notFound", "no such record"))
     res, _ = await run(fake, "meet.transcript", {"conference_record_id": "zzz"})
-    assert res.error_kind is FailureKind.NOT_FOUND and res.error_field == "conference_record_id"
+    assert res.ok and res.data == {"transcripts": [], "available": False}
+    text = wr.render_transcripts(res.data)
+    assert "No transcript is available" in text and "meet_recent" in text
 
 
 # --- scope missing from Google itself, and retry rules for every non-idempotent write -------------------

@@ -33,6 +33,7 @@ from mavis.tools.integrations.composio_map import input_option
 from mavis.tools.integrations.native import gmail_mime
 from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired, TokenSource
 from mavis.tools.integrations.native.docs_markdown import MAX_MARKDOWN_CHARS, markdown_requests
+from mavis.tools.integrations.native.slides_outline import parse_outline, slide_requests
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 CALENDAR = "https://www.googleapis.com/calendar/v3"
@@ -43,6 +44,8 @@ PEOPLE = "https://people.googleapis.com/v1"
 DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
 TASKS = "https://tasks.googleapis.com/tasks/v1/lists/@default/tasks"  # the user's default list
 MEET = "https://meet.googleapis.com/v2"
+SLIDES = "https://slides.googleapis.com/v1/presentations"
+FORMS = "https://forms.googleapis.com/v1/forms"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 UPLOAD_CAP_BYTES = 5 * 1024 * 1024  # one multipart request; larger artifacts are refused, never truncated
 _MIME = re.compile(r"^[A-Za-z0-9][\w.+-]*/[A-Za-z0-9][\w.+-]*$")
@@ -104,7 +107,11 @@ UNCONFIRMED_DETAIL = (
     "calendar event, the calendar) before trying again."
 )
 ID_ARGS = ("message_id", "thread_id", "event_id", "file_id", "document_id", "spreadsheet_id", "task_id",
-           "conference_record_id")
+           "conference_record_id", "calendar_id", "presentation_id", "form_id", "message_ids", "thread_ids")
+MAX_TRANSCRIPT_ENTRIES = 400
+MAX_FORM_RESPONSES_PAGES = 5
+MAX_MEET_PARTICIPANTS = 30
+SYSTEM_LABEL_LOCKED = frozenset({"TRASH", "DRAFT", "SENT"})  # trash has its own, approved, action
 
 # Gmail search: operators that name who or what a message is about (a targeted search), and the boxes and
 # categories a listing leaves out unless the query itself names them.
@@ -405,7 +412,7 @@ class GoogleExecutor:
         *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._tokens, self._client, self._sleep = tokens, client, sleep
-        self._warmed: set[int] = set()
+        self._warmed: set[tuple[int, str]] = set()
         self._handlers: dict[str, Callable[[int, Any], Awaitable[Any]]] = {
             "mail.search": self._mail_search, "mail.read": self._mail_read, "mail.thread": self._mail_thread,
             "mail.draft": self._mail_draft, "mail.send": self._mail_send, "mail.reply": self._mail_reply,
@@ -429,6 +436,15 @@ class GoogleExecutor:
             "tasks.list": self._tasks_list, "tasks.get": self._tasks_get, "tasks.add": self._tasks_add,
             "tasks.patch": self._tasks_patch, "tasks.delete": self._tasks_delete,
             "meet.create": self._meet_create, "meet.transcript": self._meet_transcript,
+            "meet.recent": self._meet_recent,
+            "mail.archive": self._mail_archive, "mail.mark_read": self._mail_mark_read,
+            "mail.mark_unread": self._mail_mark_unread, "mail.label": self._mail_label,
+            "mail.trash": self._mail_trash, "mail.untrash": self._mail_untrash,
+            "calendar.calendars": self._calendar_calendars, "calendar.get": self._calendar_get,
+            "calendar.delete_event": self._calendar_delete, "calendar.respond": self._calendar_respond,
+            "contacts.create": self._contacts_create, "contacts.update": self._contacts_update,
+            "slides.read": self._slides_read, "slides.create": self._slides_create,
+            "forms.read": self._forms_read, "forms.responses": self._forms_responses,
         }
 
     def handles(self, action: str) -> bool:
@@ -448,7 +464,9 @@ class GoogleExecutor:
                               error_kind=FailureKind.INVALID_ARGUMENT, error_field=locs[0] if locs else None)
         for name in ID_ARGS:  # an id becomes a URL path segment: refuse one that could address something else
             value = getattr(parsed, name, None)
-            if isinstance(value, str) and _bad_segment(value):
+            bad = (any(_bad_segment(v) for v in value) if isinstance(value, list)
+                   else isinstance(value, str) and _bad_segment(value))
+            if bad:
                 return ToolResult(ok=False, error=f"invalid arguments for {action}: {name}",
                                   error_kind=FailureKind.INVALID_ARGUMENT, error_field=name)
         try:
@@ -702,11 +720,103 @@ class GoogleExecutor:
         except ValueError as exc:
             raise GoogleError(FailureKind.INVALID_ARGUMENT, f"message not valid: {exc}") from None
 
+    # --- Gmail organising (gmail.modify) -------------------------------------------------------------
+    # Label changes and trash/untrash set a state, so repeating one after an unknown outcome is safe
+    # (idempotent=True). Creating a label is not (a repeat conflicts), so it is declared False.
+
+    async def _labels(self, uid: int) -> list[dict]:
+        got = await self._json(uid, "GET", f"{GMAIL}/labels")
+        return [x for x in got.get("labels") or [] if isinstance(x, dict)]
+
+    async def _label_ids(self, uid: int, names: list[str], *, create: bool) -> list[str]:
+        """Label ids for names (or ids). A name that does not exist is created when `create`, else refused."""
+        if not names:
+            return []
+        known = await self._labels(uid)
+        by_key = {str(x.get("name", "")).casefold(): str(x["id"]) for x in known if x.get("id")}
+        by_key.update({str(x["id"]).casefold(): str(x["id"]) for x in known if x.get("id")})
+        out: list[str] = []
+        for name in names:
+            found = by_key.get(name.strip().casefold())
+            if found is None and create:
+                made = await self._json(uid, "POST", f"{GMAIL}/labels", idempotent=False, body={
+                    "name": name.strip(), "labelListVisibility": "labelShow",
+                    "messageListVisibility": "show"})
+                found = str(made.get("id") or "")
+            if not found:
+                raise GoogleError(FailureKind.INVALID_ARGUMENT, f"there is no Gmail label named {name!r}",
+                                  "remove" if not create else "add")
+            out.append(found)
+        return list(dict.fromkeys(out))
+
+    async def _modify_mail(
+        self, uid: int, a: Any, verb: str, add: list[str], remove: list[str]
+    ) -> dict:
+        """Add and remove label ids on a.message_ids (one batchModify per 1000) and a.thread_ids (one
+        threads.modify each, a few at a time)."""
+        body = {"addLabelIds": add, "removeLabelIds": remove}
+        if a.message_ids:
+            await self._json(uid, "POST", f"{GMAIL}/messages/batchModify", idempotent=True,
+                             body={"ids": list(a.message_ids), **body})
+        await self._each(a.thread_ids, lambda t: self._json(
+            uid, "POST", f"{GMAIL}/threads/{_q(t)}/modify", idempotent=True, body=body))
+        return {"verb": verb, "messages": len(a.message_ids), "threads": len(a.thread_ids),
+                "added": add, "removed": remove}
+
+    @staticmethod
+    async def _each(items: list[str], call: Callable[[str], Awaitable[Any]]) -> None:
+        gate = asyncio.Semaphore(FETCH_CONCURRENCY)
+
+        async def one(item: str) -> None:
+            async with gate:
+                await call(item)
+
+        results = await asyncio.gather(*(one(i) for i in items), return_exceptions=True)
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
+
+    async def _mail_archive(self, uid: int, a: Any) -> dict:
+        return await self._modify_mail(uid, a, "Archived", [], ["INBOX"])
+
+    async def _mail_mark_read(self, uid: int, a: Any) -> dict:
+        return await self._modify_mail(uid, a, "Marked as read", [], ["UNREAD"])
+
+    async def _mail_mark_unread(self, uid: int, a: Any) -> dict:
+        return await self._modify_mail(uid, a, "Marked as unread", ["UNREAD"], [])
+
+    async def _mail_label(self, uid: int, a: Any) -> dict:
+        if a.lists_labels:
+            labels = await self._labels(uid)
+            return {"labels": [{"id": x.get("id", ""), "name": x.get("name", ""), "type": x.get("type", "")}
+                               for x in labels]}
+        if any(n.strip().upper() in SYSTEM_LABEL_LOCKED for n in a.add):
+            raise GoogleError(FailureKind.INVALID_ARGUMENT,
+                              "TRASH, DRAFT and SENT cannot be added as labels; use mail_trash to delete",
+                              "add")
+        add = await self._label_ids(uid, a.add, create=True)
+        remove = await self._label_ids(uid, a.remove, create=False)
+        return await self._modify_mail(uid, a, "Updated labels on", add, remove)
+
+    async def _mail_trash(self, uid: int, a: Any) -> dict:
+        return await self._trash(uid, a, "trash", "Moved to Trash")
+
+    async def _mail_untrash(self, uid: int, a: Any) -> dict:
+        return await self._trash(uid, a, "untrash", "Restored from Trash")
+
+    async def _trash(self, uid: int, a: Any, step: str, verb: str) -> dict:
+        await self._each(a.message_ids, lambda m: self._json(
+            uid, "POST", f"{GMAIL}/messages/{_q(m)}/{step}", idempotent=True))
+        await self._each(a.thread_ids, lambda t: self._json(
+            uid, "POST", f"{GMAIL}/threads/{_q(t)}/{step}", idempotent=True))
+        return {"verb": verb, "messages": len(a.message_ids), "threads": len(a.thread_ids),
+                "added": [], "removed": []}
+
     # --- Calendar ----------------------------------------------------------------------------------
 
-    async def _events(self, uid: int, params: dict, limit: int) -> dict:
+    async def _events(self, uid: int, params: dict, limit: int, calendar_id: str = "primary") -> dict:
         items, token, page = await self._pages(
-            uid, f"{CALENDAR}/calendars/primary/events",
+            uid, f"{CALENDAR}/calendars/{_q(calendar_id)}/events",
             {"singleEvents": "true", "orderBy": "startTime", "maxResults": 250, **params}, "items",
             limit, "maxResults")
         out: dict[str, Any] = {"items": items, "timeZone": page.get("timeZone", "")}
@@ -719,14 +829,14 @@ class GoogleExecutor:
         if a.updated_min is not None:
             params["updatedMin"] = _rfc3339(a.updated_min)
             params["showDeleted"] = "true"  # a cancelled event is a change the poller must see
-        return await self._events(uid, params, a.max_results)
+        return await self._events(uid, params, a.max_results, a.calendar_id)
 
     async def _calendar_find(self, uid: int, a: Any) -> dict:
         now = datetime.now(UTC)
         return await self._events(uid, {
             "q": a.query, "timeMin": _rfc3339(now - FIND_WINDOW_BACK),
             "timeMax": _rfc3339(now + FIND_WINDOW_AHEAD),
-        }, 25)
+        }, 25, a.calendar_id)
 
     async def _calendar_free_slots(self, uid: int, a: Any) -> dict:
         start, end = a.time_min, a.time_max
@@ -790,6 +900,45 @@ class GoogleExecutor:
         params = {"sendUpdates": "all"} if a.attendees else None
         # setting the same fields twice is harmless, but a repeat would notify the attendees twice
         return await self._json(uid, "PATCH", url, params=params, body=body, idempotent=params is None)
+
+    async def _calendar_calendars(self, uid: int, a: Any) -> dict:
+        items, token, _ = await self._pages(
+            uid, f"{CALENDAR}/users/me/calendarList",
+            {"maxResults": 250, "minAccessRole": "freeBusyReader"}, "items", 250, "maxResults")
+        out: dict[str, Any] = {"calendars": items}
+        if token:
+            out["nextPageToken"] = token
+        return out
+
+    async def _calendar_get(self, uid: int, a: Any) -> dict:
+        return await self._json(
+            uid, "GET", f"{CALENDAR}/calendars/{_q(a.calendar_id)}/events/{_q(a.event_id)}")
+
+    async def _calendar_delete(self, uid: int, a: Any) -> dict:
+        # Google's own default for a delete is to tell nobody; guests are told only when the user agreed.
+        # Deleting what is already deleted changes nothing and notifies nobody twice, so a repeat is safe.
+        await self._json(
+            uid, "DELETE", f"{CALENDAR}/calendars/{_q(a.calendar_id)}/events/{_q(a.event_id)}",
+            params={"sendUpdates": "all" if a.notify_guests else "none"}, idempotent=True)
+        return {"id": a.event_id, "deleted": True, "guestsNotified": a.notify_guests}
+
+    async def _calendar_respond(self, uid: int, a: Any) -> dict:
+        url = f"{CALENDAR}/calendars/{_q(a.calendar_id)}/events/{_q(a.event_id)}"
+        event = await self._json(uid, "GET", url)
+        guests = [g for g in event.get("attendees") or [] if isinstance(g, dict)]
+        me = next((g for g in guests if g.get("self")), None)
+        if me is None:
+            raise GoogleError(FailureKind.INVALID_ARGUMENT,
+                              "the user is not a guest on this event, so there is no invite to answer",
+                              "event_id")
+        me["responseStatus"] = a.response
+        if a.comment:
+            me["comment"] = a.comment
+        # The organiser is told (sendUpdates=all), so a repeat after an unknown outcome could tell them twice.
+        done = await self._json(uid, "PATCH", url, params={"sendUpdates": "all"},
+                                body={"attendees": guests}, idempotent=False)
+        return {"id": done.get("id", a.event_id), "summary": done.get("summary", event.get("summary", "")),
+                "responseStatus": a.response}
 
     # --- Drive, Docs, Sheets -----------------------------------------------------------------------
 
@@ -904,14 +1053,96 @@ class GoogleExecutor:
 
     # --- People ------------------------------------------------------------------------------------
 
+    async def _warm(self, uid: int, kind: str, url: str, params: dict) -> None:
+        """Google: the first search call of each kind must be an empty-query warm-up."""
+        if (uid, kind) not in self._warmed:
+            await self._json(uid, "GET", url, params={"query": "", **params})
+            self._warmed.add((uid, kind))
+
     async def _contacts_search(self, uid: int, a: Any) -> dict:
-        if uid not in self._warmed:  # Google: the first searchContacts call must be an empty-query warm-up
-            await self._json(uid, "GET", f"{PEOPLE}/people:searchContacts",
-                             params={"query": "", "readMask": "names"})
-            self._warmed.add(uid)
-        got = await self._json(uid, "GET", f"{PEOPLE}/people:searchContacts", params={
+        """Saved contacts first (errors here are real), then people the user has emailed (other contacts)
+        and the Workspace directory. The last two are best effort: a grant without their scope, a personal
+        account with no directory, or a Google error there is not a failure, it just adds nothing, and the
+        reply names what was not searched."""
+        saved_url = f"{PEOPLE}/people:searchContacts"
+        await self._warm(uid, "contacts", saved_url, {"readMask": "names"})
+        got = await self._json(uid, "GET", saved_url, params={
             "query": a.query, "pageSize": a.max_results, "readMask": PERSON_FIELDS})
-        return {"results": got.get("results") or []}
+        results = [{**r, "source": "contacts"} for r in got.get("results") or [] if isinstance(r, dict)]
+        skipped: list[str] = []
+
+        async def other() -> list[dict]:
+            url = f"{PEOPLE}/otherContacts:search"
+            await self._warm(uid, "other", url, {"readMask": "names"})
+            page = await self._json(uid, "GET", url, params={
+                "query": a.query, "pageSize": min(a.max_results, 30), "readMask": PERSON_FIELDS})
+            return [{**r, "source": "other"} for r in page.get("results") or [] if isinstance(r, dict)]
+
+        async def directory() -> list[dict]:
+            page = await self._json(uid, "GET", f"{PEOPLE}/people:searchDirectoryPeople", params={
+                "query": a.query, "pageSize": min(a.max_results, 500), "readMask": PERSON_FIELDS,
+                "sources": ["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE", "DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT"]})
+            return [{"person": p, "source": "directory"} for p in page.get("people") or []
+                    if isinstance(p, dict)]
+
+        for name, fetch in (("other contacts", other), ("company directory", directory)):
+            try:
+                results += await fetch()
+            except GoogleError:
+                skipped.append(name)
+        seen: set[str] = set()
+        unique = []
+        for r in results:  # the same person can be in several sources: keep the first, richest, hit
+            person = r.get("person") if isinstance(r.get("person"), dict) else {}
+            emails = [str(e.get("value", "")).lower() for e in person.get("emailAddresses") or []
+                      if isinstance(e, dict) and e.get("value")]
+            key = emails[0] if emails else str(person.get("resourceName") or id(r))
+            if key not in seen:
+                seen.add(key)
+                unique.append(r)
+        out: dict[str, Any] = {"results": unique[: a.max_results * 2]}
+        if skipped:
+            out["not_searched"] = skipped
+        return out
+
+    @staticmethod
+    def _person_body(a: Any) -> dict[str, Any]:
+        """People API fields from our arguments (only the ones that were given)."""
+        body: dict[str, Any] = {}
+        name = getattr(a, "name", None)
+        if name:
+            given, _, family = name.strip().rpartition(" ")
+            body["names"] = [{"givenName": given, "familyName": family} if given else {"givenName": family}]
+        if getattr(a, "emails", None) is not None:
+            body["emailAddresses"] = [{"value": e} for e in a.emails]
+        if getattr(a, "phones", None) is not None:
+            body["phoneNumbers"] = [{"value": p} for p in a.phones]
+        company, title = getattr(a, "organization", None), getattr(a, "job_title", None)
+        if company or title:
+            body["organizations"] = [{k: v for k, v in (("name", company), ("title", title)) if v}]
+        elif company == "" or title == "":
+            body["organizations"] = []
+        return body
+
+    async def _contacts_create(self, uid: int, a: Any) -> dict:
+        made = await self._json(uid, "POST", f"{PEOPLE}/people:createContact", idempotent=False,
+                                params={"personFields": PERSON_FIELDS}, body=self._person_body(a))
+        return {"resourceName": made.get("resourceName", ""), "id": made.get("resourceName", ""),
+                "person": made}
+
+    async def _contacts_update(self, uid: int, a: Any) -> dict:
+        url = f"{PEOPLE}/{a.resource_name}"
+        current = await self._json(uid, "GET", url, params={"personFields": "metadata," + PERSON_FIELDS})
+        body = self._person_body(a)
+        fields = {"names": "names", "emailAddresses": "emailAddresses", "phoneNumbers": "phoneNumbers",
+                  "organizations": "organizations"}
+        mask = ",".join(fields[k] for k in body)
+        # the etag from the read makes Google refuse the write if the contact changed in between
+        body["etag"] = current.get("etag", "")
+        done = await self._json(uid, "PATCH", f"{url}:updateContact", idempotent=True, body=body,
+                                params={"updatePersonFields": mask, "personFields": PERSON_FIELDS})
+        return {"resourceName": done.get("resourceName", a.resource_name),
+                "id": done.get("resourceName", a.resource_name), "person": done}
 
     async def _contacts_list(self, uid: int, a: Any) -> dict:
         people, token = [], None
@@ -1084,18 +1315,136 @@ class GoogleExecutor:
         await self._json(uid, "DELETE", f"{TASKS}/{_q(a.task_id)}", idempotent=True)
         return {"id": a.task_id, "deleted": True}
 
+    # --- Slides and Forms ----------------------------------------------------------------------------
+
+    async def _slides_read(self, uid: int, a: Any) -> dict:
+        return await self._json(
+            uid, "GET", f"{SLIDES}/{_q(a.presentation_id)}",
+            params={"fields": "presentationId,title,slides(objectId,pageElements(shape(text),table))"})
+
+    async def _slides_create(self, uid: int, a: Any) -> dict:
+        slides = await asyncio.to_thread(parse_outline, a.outline)
+        deck = await self._json(uid, "POST", SLIDES, idempotent=False, body={"title": a.title})
+        deck_id = str(deck.get("presentationId") or "")
+        if not deck_id:
+            raise GoogleError(FailureKind.UNCONFIRMED, UNCONFIRMED_DETAIL.format(
+                what="google created a presentation but returned no id"))
+        if slides:
+            requests = slide_requests(slides)
+            # a new deck starts with one blank slide: it goes once the outline's slides are in
+            requests += [{"deleteObject": {"objectId": str(sl["objectId"])}}
+                         for sl in deck.get("slides") or [] if isinstance(sl, dict) and sl.get("objectId")]
+            try:
+                await self._json(uid, "POST", f"{SLIDES}/{_q(deck_id)}:batchUpdate", idempotent=False,
+                                 body={"requests": requests})
+            except GoogleError as exc:
+                if exc.kind is FailureKind.UNCONFIRMED:
+                    raise GoogleError(
+                        FailureKind.UNCONFIRMED, f"{exc.detail} (presentation id {deck_id})") from None
+                await self._discard(uid, deck_id)
+                raise
+        return {"presentationId": deck_id, "title": deck.get("title", a.title), "slides": len(slides),
+                "url": f"https://docs.google.com/presentation/d/{deck_id}/edit"}
+
+    async def _forms_read(self, uid: int, a: Any) -> dict:
+        return await self._json(uid, "GET", f"{FORMS}/{_q(a.form_id)}")
+
+    async def _forms_responses(self, uid: int, a: Any) -> dict:
+        form = await self._json(uid, "GET", f"{FORMS}/{_q(a.form_id)}")
+        responses: list[dict] = []
+        token: str | None = None
+        for _ in range(MAX_FORM_RESPONSES_PAGES):
+            page = await self._json(uid, "GET", f"{FORMS}/{_q(a.form_id)}/responses", params={
+                "pageSize": min(a.max_responses - len(responses), 500),
+                **({"pageToken": token} if token else {})})
+            responses += [r for r in page.get("responses") or [] if isinstance(r, dict)]
+            token = page.get("nextPageToken")
+            if len(responses) >= a.max_responses or not token:
+                break
+        return {"form": form, "responses": responses[: a.max_responses],
+                "more": bool(token) or len(responses) > a.max_responses}
+
     # --- Meet --------------------------------------------------------------------------------------
 
     async def _meet_create(self, uid: int, a: Any) -> dict:
         return await self._json(uid, "POST", f"{MEET}/spaces", idempotent=False, body={})
 
+    async def _participants(self, uid: int, record: str) -> dict[str, str]:
+        """participant resource name -> display name, for one conference record."""
+        got = await self._json(uid, "GET", f"{MEET}/conferenceRecords/{_q(record)}/participants",
+                               params={"pageSize": MAX_MEET_PARTICIPANTS})
+        out: dict[str, str] = {}
+        for p in got.get("participants") or []:
+            if not isinstance(p, dict):
+                continue
+            who = p.get("signedinUser") or p.get("anonymousUser") or p.get("phoneUser") or {}
+            out[str(p.get("name", ""))] = str(who.get("displayName") or "Guest")
+        return out
+
+    async def _meet_recent(self, uid: int, a: Any) -> dict:
+        since = datetime.now(UTC) - timedelta(days=a.days)
+        try:
+            records, _, _ = await self._pages(
+                uid, f"{MEET}/conferenceRecords",
+                {"filter": f'start_time>="{since.strftime("%Y-%m-%dT%H:%M:%SZ")}"', "pageSize": 100},
+                "conferenceRecords", 100, "pageSize")
+        except GoogleError as exc:
+            if exc.kind is not FailureKind.NOT_FOUND:  # no access to any record: nothing to list
+                raise
+            records = []
+        records.sort(key=lambda r: str(r.get("startTime", "")), reverse=True)
+        records = records[: a.max_results]
+        gate = asyncio.Semaphore(FETCH_CONCURRENCY)
+
+        async def who(rec: dict) -> list[str]:
+            async with gate:
+                try:
+                    people = await self._participants(uid, str(rec["name"]).split("/")[-1])
+                    return sorted(set(people.values()))
+                except GoogleError:
+                    return []  # the list is useful without names
+
+        names = await asyncio.gather(*(who(r) for r in records))
+        return {"conferences": [
+            {"conferenceRecordId": str(r.get("name", "")).split("/")[-1], "startTime": r.get("startTime", ""),
+             "endTime": r.get("endTime", ""), "participants": n}
+            for r, n in zip(records, names, strict=True)]}
+
     async def _meet_transcript(self, uid: int, a: Any) -> dict:
-        items, _, _ = await self._pages(
-            uid, f"{MEET}/conferenceRecords/{_q(a.conference_record_id)}/transcripts", {"pageSize": 100},
-            "transcripts", 100, "pageSize")
-        return {"transcripts": items}
+        """The transcripts of one conference and their spoken text. A call with no transcript (every call of
+        a personal account, or one where transcription was off) is a normal answer, not an error."""
+        record = _q(a.conference_record_id)
+        try:
+            items, _, _ = await self._pages(
+                uid, f"{MEET}/conferenceRecords/{record}/transcripts", {"pageSize": 100},
+                "transcripts", 100, "pageSize")
+        except GoogleError as exc:
+            if exc.kind is not FailureKind.NOT_FOUND:
+                raise
+            return {"transcripts": [], "available": False}
+        try:
+            speakers = await self._participants(uid, a.conference_record_id) if items else {}
+        except GoogleError:
+            speakers = {}
+        out = []
+        for t in items:
+            entries: list[dict] = []
+            if _TRANSCRIPT_NAME.match(str(t.get("name", ""))):
+                try:
+                    raw, _, _ = await self._pages(
+                        uid, f"{MEET}/{t['name']}/entries", {"pageSize": 100},
+                        "transcriptEntries", MAX_TRANSCRIPT_ENTRIES, "pageSize")
+                except GoogleError as exc:
+                    if exc.kind not in (FailureKind.NOT_FOUND, FailureKind.INVALID_ARGUMENT):
+                        raise
+                    raw = []
+                entries = [{"speaker": speakers.get(str(e.get("participant", "")), "Participant"),
+                            "text": e.get("text", ""), "startTime": e.get("startTime", "")} for e in raw]
+            out.append({**t, "entries": entries})
+        return {"transcripts": out, "available": bool(out)}
 
 
+_TRANSCRIPT_NAME = re.compile(r"^conferenceRecords/[\w-]+/transcripts/[\w-]+$")
 WRITE_FILE_FIELDS = "id,name,mimeType,parents,webViewLink"
 
 

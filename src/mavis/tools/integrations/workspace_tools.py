@@ -314,7 +314,8 @@ def creating(
     return fn
 
 
-CREATES = ("drive.create_folder", "docs.create", "sheets.create", "tasks.add")
+CREATES = ("drive.create_folder", "docs.create", "sheets.create", "tasks.add", "slides.create",
+           "contacts.create")
 CUSTOM_FNS: dict[str, CustomFn] = {
     "drive.read": _drive_read, "drive.upload": _drive_upload, "docs.append": _docs_append,
     "drive.share": _drive_share, "drive.move": _drive_move,

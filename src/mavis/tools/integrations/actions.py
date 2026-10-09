@@ -63,7 +63,7 @@ CAPABILITY_PURPOSE: dict[Capability, str] = {
     Capability.SLACK: "work with your Slack",
     Capability.NOTION: "work with your Notion pages",
     Capability.DRIVE: "find and work with your Drive files",
-    Capability.DOCS: "read and write your Google Docs",
+    Capability.DOCS: "read and write your Google Docs, Slides and Forms",
     Capability.SHEETS: "work with your Google Sheets",
     Capability.TASKS: "manage your to-do list in Google Tasks",
     Capability.CONTACTS: "look up your contacts",
@@ -129,7 +129,12 @@ class MailReplyArgs(ToolArgs):
     body: str
 
 
+CALENDAR_ID_HELP = ("Calendar id from calendar_calendars (a shared or secondary calendar); "
+                    "'primary' is the user's own calendar")
+
+
 class CalendarListArgs(LocalTimes):
+    calendar_id: str = Field(default="primary", description=CALENDAR_ID_HELP)
     time_min: datetime = Field(description=wall_clock("Window start"))
     time_max: datetime = Field(description=wall_clock("Window end"))
     max_results: int = Field(default=20, ge=1, le=100)
@@ -140,6 +145,7 @@ class CalendarListArgs(LocalTimes):
 
 class CalendarFindArgs(ToolArgs):
     query: str
+    calendar_id: str = Field(default="primary", description=CALENDAR_ID_HELP)
 
 
 class CalendarSlotsArgs(LocalTimes):
@@ -292,7 +298,8 @@ class ContactsSearchArgs(ToolArgs):
 
 
 class MeetTranscriptArgs(ToolArgs):
-    conference_record_id: str = Field(min_length=1, description="Conference record id, e.g. 'abc-123'")
+    conference_record_id: str = Field(
+        min_length=1, description="Conference record id from meet_recent, e.g. 'abc-123'")
 
 
 class FolderCreateArgs(ToolArgs):
@@ -401,6 +408,134 @@ class SheetUpdateArgs(ToolArgs):
     sheet_name: str = Field(min_length=1)
     start_cell: str = Field(pattern=r"^[A-Za-z]{1,3}[1-9][0-9]{0,6}$", description="Top-left cell, e.g. 'B2'")
     values: list[list[CellValue]] = Field(min_length=1, max_length=200, description="Rows of cells")
+
+
+# --- Full Workspace read and write: mail triage, calendars, contacts, Slides, Forms, Meet ---------------
+
+MAX_MAIL_IDS = 50
+
+
+class MailIdsArgs(ToolArgs):
+    """Which mail an organising action touches: messages (from mail_search) and/or whole threads."""
+
+    message_ids: list[str] = Field(default_factory=list, max_length=MAX_MAIL_IDS,
+                                   description="Message ids from mail_search or mail_read")
+    thread_ids: list[str] = Field(default_factory=list, max_length=MAX_MAIL_IDS,
+                                  description="Thread ids, to act on every message in a conversation")
+
+    @model_validator(mode="after")
+    def _some_mail(self) -> MailIdsArgs:
+        if not self.message_ids and not self.thread_ids:
+            raise ValueError("give at least one message_id or thread_id (find them with mail_search)")
+        return self
+
+
+class MailLabelArgs(ToolArgs):
+    """Add or remove labels on mail; with no ids and no labels it lists the user's labels."""
+
+    message_ids: list[str] = Field(default_factory=list, max_length=MAX_MAIL_IDS)
+    thread_ids: list[str] = Field(default_factory=list, max_length=MAX_MAIL_IDS)
+    add: list[str] = Field(default_factory=list, max_length=10,
+                           description="Label names to add (created when they do not exist), or STARRED, "
+                                       "IMPORTANT")
+    remove: list[str] = Field(default_factory=list, max_length=10, description="Label names to remove")
+
+    @model_validator(mode="after")
+    def _consistent(self) -> MailLabelArgs:
+        has_mail = bool(self.message_ids or self.thread_ids)
+        changes = bool(self.add or self.remove)
+        if changes and not has_mail:
+            raise ValueError("give the message_ids or thread_ids to label (find them with mail_search)")
+        if has_mail and not changes:
+            raise ValueError("say which labels to add or remove; leave everything empty to list labels")
+        return self
+
+    @property
+    def lists_labels(self) -> bool:
+        return not (self.message_ids or self.thread_ids or self.add or self.remove)
+
+
+class CalendarsArgs(ToolArgs):
+    pass
+
+
+class CalendarGetArgs(ToolArgs):
+    event_id: str = Field(min_length=1)
+    calendar_id: str = Field(default="primary", description=CALENDAR_ID_HELP)
+
+
+class CalendarDeleteArgs(ToolArgs):
+    event_id: str = Field(min_length=1, description="Event id from calendar_list or calendar_find")
+    calendar_id: str = Field(default="primary", description=CALENDAR_ID_HELP)
+    notify_guests: bool = Field(
+        default=False, description="True only when the user said to tell the guests it is cancelled")
+
+
+class CalendarRespondArgs(ToolArgs):
+    event_id: str = Field(min_length=1, description="Event id of the invite, from calendar_list")
+    response: Literal["accepted", "declined", "tentative"]
+    calendar_id: str = Field(default="primary", description=CALENDAR_ID_HELP)
+    comment: str = Field(default="", max_length=500, description="Optional note the organiser sees")
+
+
+PERSON_NAME = r"^people/[A-Za-z0-9_-]+$"
+
+
+class ContactCreateArgs(ToolArgs):
+    name: str = Field(min_length=1, max_length=200)
+    emails: list[Email] = Field(default_factory=list, max_length=5)
+    phones: list[str] = Field(default_factory=list, max_length=5)
+    organization: str = Field(default="", max_length=200)
+    job_title: str = Field(default="", max_length=200)
+
+    @model_validator(mode="after")
+    def _something_to_keep(self) -> ContactCreateArgs:
+        if not (self.emails or self.phones):
+            raise ValueError("a contact needs at least an email or a phone number")
+        return self
+
+
+class ContactUpdateArgs(ToolArgs):
+    """Only the fields that change; a list given here replaces that field's current values."""
+
+    resource_name: str = Field(pattern=PERSON_NAME, description="'people/c123' from contacts_search")
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    emails: list[Email] | None = None
+    phones: list[str] | None = None
+    organization: str | None = Field(default=None, max_length=200)
+    job_title: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def _changes(self) -> ContactUpdateArgs:
+        if all(getattr(self, f) is None for f in ("name", "emails", "phones", "organization", "job_title")):
+            raise ValueError("say what to change: name, emails, phones, organization or job_title")
+        return self
+
+
+class SlidesReadArgs(ToolArgs):
+    presentation_id: str = Field(min_length=1, description="Slides file id (from drive_search)")
+
+
+class SlidesCreateArgs(ToolArgs):
+    title: str = Field(min_length=1, max_length=200)
+    outline: str = Field(
+        default="", max_length=30000,
+        description="Markdown outline: each '# ' or '## ' heading starts a slide (its title); the lines "
+                    "under it are that slide's body")
+
+
+class FormArgs(ToolArgs):
+    form_id: str = Field(min_length=1, description="Google Form id (from drive_search)")
+
+
+class FormResponsesArgs(ToolArgs):
+    form_id: str = Field(min_length=1)
+    max_responses: int = Field(default=100, ge=1, le=500)
+
+
+class MeetRecentArgs(ToolArgs):
+    days: int = Field(default=14, ge=1, le=90, description="How far back to look")
+    max_results: int = Field(default=10, ge=1, le=25)
 
 
 # --- helpers --------------------------------------------------------------------------------------
@@ -549,6 +684,70 @@ def _preview_meet(args: NoArgs, tz: str) -> str:
     return "📹 New Google Meet link"
 
 
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}" + ("" if n == 1 else "s")
+
+
+def _mail_scope(args: MailIdsArgs | MailLabelArgs) -> str:
+    parts = []
+    if args.message_ids:
+        parts.append(_count(len(args.message_ids), "email"))
+    if args.thread_ids:
+        parts.append(_count(len(args.thread_ids), "conversation"))
+    return " and ".join(parts)
+
+
+def _preview_trash(args: MailIdsArgs, tz: str) -> str:
+    return f"🗑️ Move {_mail_scope(args)} to Trash (Gmail empties Trash after 30 days)"
+
+
+def _preview_untrash(args: MailIdsArgs, tz: str) -> str:
+    return f"♻️ Restore {_mail_scope(args)} from Trash"
+
+
+def _preview_label(args: MailLabelArgs, tz: str) -> str:
+    lines = [f"🏷️ Labels on {_mail_scope(args)}"]
+    if args.add:
+        lines.append(f"Add: {', '.join(args.add)}")
+    if args.remove:
+        lines.append(f"Remove: {', '.join(args.remove)}")
+    return "\n".join(lines)
+
+
+def _label_risk(args: BaseModel) -> RiskClass:
+    """Listing labels reads; changing them writes."""
+    return RiskClass.READ if getattr(args, "lists_labels", False) else RiskClass.WRITE_SELF
+
+
+def _preview_delete_event(args: CalendarDeleteArgs, tz: str) -> str:
+    who = "Guests are told it is cancelled." if args.notify_guests else "Guests are not notified."
+    return f"🗑️ Delete calendar event {args.event_id}\n{who}"
+
+
+def _preview_respond(args: CalendarRespondArgs, tz: str) -> str:
+    word = {"accepted": "Accept", "declined": "Decline", "tentative": "Reply maybe to"}[args.response]
+    note = f"\nNote: {args.comment}" if args.comment else ""
+    return f"📅 {word} invite {args.event_id}. The organiser is told.{note}"
+
+
+def _preview_contact(args: ContactCreateArgs, tz: str) -> str:
+    bits = [*args.emails, *args.phones, args.organization]
+    return f"👤 New contact: {args.name}\n{' | '.join(b for b in bits if b)}"
+
+
+def _preview_contact_update(args: ContactUpdateArgs, tz: str) -> str:
+    lines = [f"👤 Update contact {args.resource_name}"]
+    for label, value in (("Name", args.name), ("Emails", args.emails), ("Phones", args.phones),
+                         ("Company", args.organization), ("Title", args.job_title)):
+        if value is not None:
+            lines.append(f"{label}: {', '.join(value) if isinstance(value, list) else value}")
+    return "\n".join(lines)
+
+
+def _preview_slides(args: SlidesCreateArgs, tz: str) -> str:
+    return f"🖼️ New Google Slides deck: {args.title}\n{args.outline[:400]}"
+
+
 # --- catalog --------------------------------------------------------------------------------------
 
 
@@ -578,8 +777,9 @@ def _a(*names: str) -> frozenset[str]:
 
 _SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("mail.search", Capability.GMAIL,
-               "Search or find emails in the user's Gmail. Returns message ids, senders, subjects, dates and "
-               "short previews.",
+               "Search or find emails in the user's Gmail. Returns message ids, thread ids, senders, "
+               "subjects, dates and short previews. Use it first to get the ids that archive, mark read, "
+               "label or trash need.",
                MailSearchArgs, RiskClass.READ, _a("inbox", "conversation"), priority=58),
     ActionSpec("mail.read", Capability.GMAIL,
                "Read one email in full by message id (from mail_search): headers and body text, for what "
@@ -595,9 +795,12 @@ _SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("mail.reply", Capability.GMAIL,
                "Reply on an existing thread. The user is asked to approve first.",
                MailReplyArgs, RiskClass.OUTWARD, _a("inbox", "conversation"), preview=_preview_reply),
-    ActionSpec("calendar.list", Capability.CALENDAR, "List calendar events in a time window.",
+    ActionSpec("calendar.list", Capability.CALENDAR,
+               "List calendar events in a time window, on the user's own calendar or another calendar "
+               "(calendar_id from calendar_calendars). Event ids here are for deleting or answering invites.",
                CalendarListArgs, RiskClass.READ, _a("calendar", "conversation"), priority=56),
-    ActionSpec("calendar.find", Capability.CALENDAR, "Find calendar events matching text.",
+    ActionSpec("calendar.find", Capability.CALENDAR,
+               "Find calendar events matching text, on the user's own or another calendar.",
                CalendarFindArgs, RiskClass.READ, _a("calendar", "conversation")),
     ActionSpec("calendar.free_slots", Capability.CALENDAR, "Find free time between two times.",
                CalendarSlotsArgs, RiskClass.READ, _a("calendar", "conversation")),
@@ -613,6 +816,48 @@ _SPECS: tuple[ActionSpec, ...] = (
                risk_fn=_update_risk, preview=_preview_update,
                # identity: the event plus every changed field, which is all of its arguments
                target=("event_id",), action_time="start"),
+
+    # Mail organising (gmail.modify). Archive, read state and labels are reversible and touch only the
+    # user's own mailbox: WRITE_SELF. Trash is DESTRUCTIVE (the user approves first); restoring is not.
+    ActionSpec("mail.archive", Capability.GMAIL,
+               "Archive emails: take them out of the inbox without deleting them (they stay searchable). "
+               "Pass message_ids or thread_ids from mail_search. Use for 'archive this', 'clear these "
+               "from my inbox'.",
+               MailIdsArgs, RiskClass.WRITE_SELF, _a("inbox", "conversation")),
+    ActionSpec("mail.mark_read", Capability.GMAIL,
+               "Mark emails as read (clears unread). Pass message_ids or thread_ids from mail_search.",
+               MailIdsArgs, RiskClass.WRITE_SELF, _a("inbox", "conversation")),
+    ActionSpec("mail.mark_unread", Capability.GMAIL,
+               "Mark emails as unread so they stand out again. Pass message_ids or thread_ids from "
+               "mail_search.",
+               MailIdsArgs, RiskClass.WRITE_SELF, _a("inbox", "conversation")),
+    ActionSpec("mail.label", Capability.GMAIL,
+               "Label or tag emails: add or remove labels by name (an unknown name makes the label; STARRED "
+               "and IMPORTANT work too) on message_ids or thread_ids. With no ids and no labels it lists "
+               "the user's labels.",
+               MailLabelArgs, RiskClass.WRITE_SELF, _a("inbox", "conversation"), risk_fn=_label_risk,
+               preview=_preview_label),
+    ActionSpec("mail.trash", Capability.GMAIL,
+               "Delete emails by putting them in Trash (emptied after 30 days). The user approves "
+               "first. Pass message_ids or thread_ids from mail_search.",
+               MailIdsArgs, RiskClass.DESTRUCTIVE, _a("inbox", "conversation"), preview=_preview_trash),
+    ActionSpec("mail.untrash", Capability.GMAIL,
+               "Restore emails from Trash back to the mailbox (undo a delete). Pass their ids.",
+               MailIdsArgs, RiskClass.WRITE_SELF, _a("inbox", "conversation"), preview=_preview_untrash),
+    ActionSpec("calendar.calendars", Capability.CALENDAR,
+               "List every calendar the user can see: their own plus shared, team, subscribed and holiday "
+               "calendars, with ids and access levels (use an id as calendar_id elsewhere).",
+               CalendarsArgs, RiskClass.READ, _a("calendar", "conversation")),
+    ActionSpec("calendar.delete_event", Capability.CALENDAR,
+               "Delete or cancel a calendar event by event id (from calendar_list or calendar_find). The "
+               "user approves first. Set notify_guests only when they said to tell the guests.",
+               CalendarDeleteArgs, RiskClass.DESTRUCTIVE, _a("calendar", "conversation"),
+               preview=_preview_delete_event, target=("event_id",)),
+    ActionSpec("calendar.respond", Capability.CALENDAR,
+               "Reply to a calendar invite: accept, decline or say maybe (tentative). The organiser is "
+               "told, so the user approves first.",
+               CalendarRespondArgs, RiskClass.OUTWARD, _a("calendar", "conversation"),
+               preview=_preview_respond, target=("event_id",)),
     ActionSpec("slack.channels", Capability.SLACK, "List Slack channels.",
                SlackChannelsArgs, RiskClass.READ, _a("comms")),
     ActionSpec("slack.history", Capability.SLACK, "Recent messages in a Slack channel.",
@@ -656,12 +901,30 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
                "for what is due today.",
                TasksListArgs, RiskClass.READ, _CHAT, priority=57),
     ActionSpec("contacts.search", Capability.CONTACTS,
-               "Look up a person in the user's Google Contacts: name to email address and phone number.",
+               "Look up a person: name to email address and phone number. Searches the user's Google "
+               "Contacts, people they have emailed before, and the company directory when the account "
+               "has one. Saved contacts show the id contacts_update needs.",
                ContactsSearchArgs, RiskClass.READ, _CHAT),
     ActionSpec("meet.transcript", Capability.MEET,
-               "List the transcripts of a Google Meet conference; each transcript is a Google Doc to read "
-               "with docs_read.",
+               "Read what was said in a Google Meet call: the transcript text by speaker, plus the "
+               "transcript Doc. Needs a conference_record_id from meet_recent. Says plainly when the call "
+               "has no transcript (personal Google accounts and calls without transcription have none).",
                MeetTranscriptArgs, RiskClass.READ, _CHAT),
+    ActionSpec("meet.recent", Capability.MEET,
+               "List recent Google Meet calls: when they ran, who joined, and the conference_record_id "
+               "meet_transcript needs. Use for 'my last meeting', 'what was said on the call'.",
+               MeetRecentArgs, RiskClass.READ, _CHAT),
+    ActionSpec("slides.read", Capability.DOCS,
+               "Read a Google Slides presentation: the text on each slide, in order. Use for 'what's in "
+               "my slides', 'summarise this deck'. Needs the presentation id (from drive_search).",
+               SlidesReadArgs, RiskClass.READ, _CHAT),
+    ActionSpec("forms.read", Capability.DOCS,
+               "Read a Google Form: its title and questions (with their choices).",
+               FormArgs, RiskClass.READ, _CHAT),
+    ActionSpec("forms.responses", Capability.DOCS,
+               "Summarise the answers people gave to a Google Form (survey, sign-up): how many, how each "
+               "choice question split, and sample text answers. Capped.",
+               FormResponsesArgs, RiskClass.READ, _CHAT),
     # writes: every Google WRITE_SELF needs approval after untrusted output in the run (spec 4.3)
     ActionSpec("drive.create_folder", Capability.DRIVE, "Create a folder in the user's Google Drive.",
                FolderCreateArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_folder, taint_approve=True),
@@ -702,6 +965,18 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("sheets.update_range", Capability.SHEETS,
                "Write cells into a Google Sheet starting at a cell, overwriting what is there.",
                SheetUpdateArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_cells, taint_approve=True),
+    ActionSpec("slides.create", Capability.DOCS,
+               "Make or build a Google Slides deck (presentation, slideshow) from a title and a Markdown "
+               "outline: each heading is a slide title, the lines under it the slide's body.",
+               SlidesCreateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_slides, taint_approve=True),
+    ActionSpec("contacts.create", Capability.CONTACTS,
+               "Save a new person in the user's Google Contacts (name plus an email or phone).",
+               ContactCreateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_contact, taint_approve=True),
+    ActionSpec("contacts.update", Capability.CONTACTS,
+               "Change a saved Google Contact: name, emails, phones, company or title (id from "
+               "contacts_search). A list you give replaces the old one.",
+               ContactUpdateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_contact_update,
+               taint_approve=True),
     ActionSpec("meet.create", Capability.MEET, "Create a standalone Google Meet link.",
                NoArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_meet, taint_approve=True),
     # internal: file metadata and permissions (risk escalation, allowlist), downloads, task lookup, profile
@@ -717,6 +992,8 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
                RiskClass.WRITE_SELF, _INTERNAL),
     ActionSpec("tasks.patch", Capability.TASKS, "Write a task's title, status, notes and due date.",
                TaskPatchArgs, RiskClass.WRITE_SELF, _INTERNAL),
+    ActionSpec("calendar.get", Capability.CALENDAR, "One calendar event by id.", CalendarGetArgs,
+               RiskClass.READ, _INTERNAL),
     ActionSpec("mail.profile", Capability.GMAIL, "The user's own email address.", NoArgs, RiskClass.READ,
                _INTERNAL),
     ActionSpec("contacts.list", Capability.CONTACTS, "The user's contacts (emails only).", NoArgs,

@@ -27,7 +27,11 @@ Slack settings above are missing.
 
 ### Google Cloud (once)
 
-New project, enable the Gmail, Calendar, Drive, Docs, Sheets, Tasks, Meet and People APIs. OAuth consent
+New project, enable the Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Tasks, Meet and People APIs.
+Add these scopes to the consent screen (the same list Mavis asks for): `gmail.modify gmail.send gmail.compose
+calendar drive documents spreadsheets presentations forms.body.readonly forms.responses.readonly tasks contacts
+contacts.other.readonly directory.readonly meetings.space.created meetings.space.readonly` (plus `openid email
+profile`). People who connected before get a Reconnect Google button the first time they use something new. OAuth consent
 screen: External, published to production (not Testing, or Gmail tokens die after 7 days). Create an OAuth
 client of type Web application with the redirect URI above. The app stays unverified, so Google shows every
 new person a warning screen and caps the project at 100 people ever.

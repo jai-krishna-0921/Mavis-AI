@@ -508,20 +508,22 @@ async def test_contacts_search_warms_up_once_then_searches_and_renders():
     ex, _ = fake.executor()
     res = await ex.execute(USER, "contacts.search", {"query": "priya", "max_results": 5})
     again = await ex.execute(USER, "contacts.search", {"query": "nair"})
-    queries = [r.url.params["query"] for r in fake.requests]
+    saved = [r for r in fake.requests if r.url.path.endswith("people:searchContacts")]
+    queries = [r.url.params["query"] for r in saved]
     assert queries == ["", "priya", "nair"]  # one warm-up, first, per user
-    assert fake.requests[1].url.params["pageSize"] == "5"
+    assert saved[1].url.params["pageSize"] == "5"
     assert "Priya Nair | email: priya@x.com | phone: +91 99999" in wr.render_contacts(res.data)
     assert again.ok
     other = await ex.execute(UserRef(user_id=6), "contacts.search", {"query": "priya"})
-    assert other.ok and [r.url.params["query"] for r in fake.requests[3:]] == ["", "priya"]
+    later = [r for r in fake.requests if r.url.path.endswith("people:searchContacts")][3:]
+    assert other.ok and [r.url.params["query"] for r in later] == ["", "priya"]
 
 
 async def test_contacts_search_no_match_is_empty():
     fake = FakeGoogle().on("GET", SEARCH, httpx.Response(200, json={}))
     ex, _ = fake.executor()
     res = await ex.execute(USER, "contacts.search", {"query": "zzz"})
-    assert res.ok and res.data == {"results": []} and "No contacts" in wr.render_contacts(res.data)
+    assert res.ok and res.data["results"] == [] and "No contacts" in wr.render_contacts(res.data)
 
 
 async def test_contacts_list_follows_pages_under_connections():

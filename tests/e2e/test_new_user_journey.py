@@ -116,12 +116,13 @@ class Journey:
         c = client or self.http()
         return await c.get(f"/oauth/{provider}/callback", params=params)
 
-    async def connect_google(self, chat: int, email: str, *, untick: tuple[str, ...] = (), status: int = 200):
+    async def connect_google(self, chat: int, email: str, *, untick: tuple[str, ...] = (),
+                             earlier: tuple[str, ...] = (), status: int = 200):
         """/connect google: the link the bot sends, the consent screen, the browser callback, then the worker
         does the rest (connection check, announcement, first sync). Returns (link, callback response)."""
         await self.tg.say(chat, "/connect google")
         url = self.tg.link_in(chat, "https://accounts.google.com/")
-        params = self.cloud.google_consent(url, email, untick=untick)
+        params = self.cloud.google_consent(url, email, untick=untick, earlier=earlier)
         r = await self.callback("google", params)
         assert r.status_code == status, r.text
         await self.settle()
@@ -767,10 +768,16 @@ async def test_unticked_boxes_are_recorded_as_granted_and_the_router_obeys_them(
     link, _ = await j.owner_invite()
     await j.onboard(6701, "Priya", link)
     j.google_account("priya@kripya.com", PRIYA_MAIL)
-    # she keeps mail read and calendar, and unticks sending mail, Drive, Docs, Sheets and the rest
-    untick = ("gmail.send", "gmail.compose", "drive", "documents", "spreadsheets", "tasks",
-              "meetings.space.created", "meetings.space.readonly", "contacts.readonly")
-    url, r = await j.connect_google(6701, "priya@kripya.com", untick=untick)
+    # An earlier Mavis asked for mail read and calendar events only, and she allowed them. This time she
+    # unticks every new box (sending mail, Drive, Docs, Sheets and the rest): Google still reports the
+    # earlier grant (include_granted_scopes), so mail read and calendar keep working and nothing else does.
+    untick = ("gmail.modify", "gmail.send", "gmail.compose", "calendar", "drive", "documents", "spreadsheets",
+            "presentations", "forms.body.readonly", "forms.responses.readonly", "tasks", "contacts",
+            "contacts.other.readonly", "directory.readonly", "meetings.space.created",
+            "meetings.space.readonly")
+    earlier = ("https://www.googleapis.com/auth/gmail.readonly",
+               "https://www.googleapis.com/auth/calendar.events")
+    url, r = await j.connect_google(6701, "priya@kripya.com", untick=untick, earlier=earlier)
     grant = await j.grant_of(6701, NativeProvider.GOOGLE)
     assert grant.status == "ACTIVE"
     assert set(grant.scopes) == {"openid", "email", "profile", "https://www.googleapis.com/auth/gmail.readonly",
@@ -840,8 +847,10 @@ async def test_a_consent_with_every_service_unticked_is_not_called_connected(j):
     link, _ = await j.owner_invite()
     await j.onboard(6801, "Priya", link)
     j.google_account("priya@kripya.com", PRIYA_MAIL)
-    everything = ("gmail.readonly", "gmail.send", "gmail.compose", "calendar.events", "drive", "documents",
-                  "spreadsheets", "tasks", "meetings.space.created", "meetings.space.readonly", "contacts.readonly")
+    everything = ("gmail.modify", "gmail.send", "gmail.compose", "calendar", "drive", "documents", "spreadsheets",
+            "presentations", "forms.body.readonly", "forms.responses.readonly", "tasks", "contacts",
+            "contacts.other.readonly", "directory.readonly", "meetings.space.created",
+            "meetings.space.readonly")
     await j.connect_google(6801, "priya@kripya.com", untick=everything, status=400)
     texts = j.tg.texts(6801)
     assert not any(t.startswith("Connected") or t.startswith("Google is connected") for t in texts)

@@ -38,15 +38,22 @@ def _any(*names: str) -> frozenset[str]:
 _MAIL_READ = _any("gmail.readonly", "gmail.modify", _MAIL_ALL)
 _MAIL_SEND = _any("gmail.send", "gmail.compose", "gmail.modify", _MAIL_ALL)
 _MAIL_DRAFT = _any("gmail.compose", "gmail.modify", _MAIL_ALL)
+_MAIL_MODIFY = _any("gmail.modify", _MAIL_ALL)  # archive, mark read, label, trash
 _CAL_READ = _any("calendar.readonly", "calendar.events.readonly", "calendar.events", "calendar")
 _CAL_FREEBUSY = _any("calendar.freebusy", "calendar.readonly", "calendar.events.readonly",
                      "calendar.events", "calendar")
 _CAL_WRITE = _any("calendar.events", "calendar")
+_CAL_LIST = _any("calendar.readonly", "calendar", "calendar.calendarlist.readonly", "calendar.calendarlist")
 _DRIVE_READ = _any("drive.readonly", "drive")
 _DRIVE_META = _any("drive.readonly", "drive.metadata.readonly", "drive.metadata", "drive")
 _DOCS_READ = _any("documents.readonly", "documents", "drive.readonly", "drive")
 _SHEETS_READ = _any("spreadsheets.readonly", "spreadsheets", "drive.readonly", "drive")
 _CONTACTS_READ = _any("contacts.readonly", "contacts")
+_CONTACTS_WRITE = _any("contacts")
+_SLIDES_READ = _any("presentations.readonly", "presentations", "drive.readonly", "drive")
+_SLIDES_WRITE = _any("presentations", "drive")
+_FORMS_BODY = _any("forms.body.readonly", "forms.body", "drive.readonly", "drive")
+_FORMS_RESPONSES = _any("forms.responses.readonly", "drive.readonly", "drive")
 # Writes. drive.file is deliberately absent: it only reaches files this app created, and these actions work
 # on the user's existing files (comment, share, move, append, update cells), so the full drive scope counts.
 _DRIVE_WRITE = _any("drive")
@@ -77,7 +84,16 @@ ACTION_SCOPES: dict[str, tuple[frozenset[str], ...]] = {
     "sheets.update_range": (_SHEETS_WRITE,),
     "tasks.list": (_TASKS_READ,), "tasks.get": (_TASKS_READ,), "tasks.add": (_TASKS_WRITE,),
     "tasks.patch": (_TASKS_WRITE,), "tasks.delete": (_TASKS_WRITE,),
-    "meet.create": (_MEET_CREATE,), "meet.transcript": (_MEET_READ,),
+    "meet.create": (_MEET_CREATE,), "meet.transcript": (_MEET_READ,), "meet.recent": (_MEET_READ,),
+    "mail.archive": (_MAIL_MODIFY,), "mail.mark_read": (_MAIL_MODIFY,), "mail.mark_unread": (_MAIL_MODIFY,),
+    "mail.label": (_MAIL_MODIFY,), "mail.trash": (_MAIL_MODIFY,), "mail.untrash": (_MAIL_MODIFY,),
+    # The calendar list needs a calendar-list scope; an event delete or an RSVP is an events call, so a
+    # grant made with calendar.events keeps working for them.
+    "calendar.calendars": (_CAL_LIST,), "calendar.get": (_CAL_READ,), "calendar.delete_event": (_CAL_WRITE,),
+    "calendar.respond": (_CAL_WRITE,),
+    "contacts.create": (_CONTACTS_WRITE,), "contacts.update": (_CONTACTS_WRITE,),
+    "slides.read": (_SLIDES_READ,), "slides.create": (_SLIDES_WRITE,),
+    "forms.read": (_FORMS_BODY,), "forms.responses": (_FORMS_BODY, _FORMS_RESPONSES),
 }
 _GOOGLE_CAPABILITIES = frozenset(ACTIONS[a].capability for a in ACTION_SCOPES)
 _GOOGLE_TOOLKITS = frozenset({"google", "googlesuper", *(c.value for c in GOOGLE_CAPABILITIES)})
@@ -91,6 +107,10 @@ GOOGLE_FEATURES: tuple[tuple[str, str], ...] = (
     ("browse Drive", "drive.search"), ("change Drive files", "drive.move"), ("read Docs", "docs.read"),
     ("read Sheets", "sheets.read"), ("see Tasks", "tasks.list"), ("see Contacts", "contacts.search"),
     ("make Meet links", "meet.create"),
+    ("organise mail (archive, label, trash)", "mail.archive"),
+    ("list all your calendars", "calendar.calendars"),
+    ("delete calendar events", "calendar.delete_event"), ("edit Contacts", "contacts.create"),
+    ("read and make Slides", "slides.create"), ("read Forms", "forms.responses"),
 )
 
 

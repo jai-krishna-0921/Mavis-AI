@@ -29,12 +29,19 @@ generic connectors framework, multi-user, revenue intelligence) is parked until 
    production does not. Unverified means a one-time "Google hasn't verified this app" screen (Advanced, then
    continue) and a lifetime cap of 100 users. Verification (restricted Gmail scopes need a security assessment) is
    a later task.
-   Scopes: `openid email profile gmail.readonly gmail.send gmail.compose calendar.events drive documents
-   spreadsheets tasks meetings.space.created meetings.space.readonly contacts.readonly`. `drive` (full) replaces
-   `drive.readonly`: commenting on, sharing, moving and appending to the user's existing files needs it
-   (`drive.file` only reaches files the app made), and it covers every read. A grant made before the Workspace
-   write scopes existed keeps working for reads; a write it lacks the scope for answers permission-missing with a
-   reconnect offer and never reaches Google. Request `access_type=offline`, `prompt=consent`, `include_granted_scopes=true`, PKCE S256.
+   Scopes (full Workspace read and write): `openid email profile gmail.modify gmail.send gmail.compose calendar
+   drive documents spreadsheets presentations forms.body.readonly forms.responses.readonly tasks contacts
+   contacts.other.readonly directory.readonly meetings.space.created meetings.space.readonly`. Broader scopes
+   cover the narrower ones, so those are not asked for: `gmail.modify` reads, archives, labels and trashes mail,
+   `calendar` covers events and the calendar list, `drive` covers every Drive read and edit (and Slides and
+   Forms reads), `contacts` covers contacts read. `contacts.other.readonly` and `directory.readonly` let
+   contact search also cover people the user has emailed and the Workspace directory; a personal account or a
+   grant without them simply searches saved contacts. Router entries (`ACTION_SCOPES`) list any-of groups, so a
+   grant made with the earlier narrower scopes (`gmail.readonly`, `calendar.events`, `contacts.readonly`) keeps
+   every action it covered; only the new actions (mail triage, the calendar list, contact edits, Slides, Forms)
+   answer permission-missing with a reconnect offer and never reach Google. `drive` (full) is needed because
+   commenting on, sharing, moving and appending to the user's existing files cannot work with `drive.file`
+   (it only reaches files the app made). Request `access_type=offline`, `prompt=consent`, `include_granted_scopes=true`, PKCE S256.
 3. **Slack app is an internal, single-workspace app** (not distributed): internal customer-built apps keep Tier 3
    limits for `conversations.history/replies`; distributed non-Marketplace apps are capped at 1 request a minute
    and 15 messages. User token (`xoxp`) so Mavis reads what the user can read and posts as the user.

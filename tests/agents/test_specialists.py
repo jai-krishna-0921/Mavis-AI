@@ -47,18 +47,25 @@ def test_tool_sets_per_specialist():
         return {n for n, s in ACTIONS.items() if agent in s.agents}
 
     assert agent_actions("inbox") == {"mail.search", "mail.read", "mail.thread", "mail.draft",
-                                      "mail.send", "mail.reply"}
+                                      "mail.send", "mail.reply", "mail.archive", "mail.mark_read",
+                                      "mail.mark_unread", "mail.label", "mail.trash", "mail.untrash"}
     assert agent_actions("calendar") == {"calendar.list", "calendar.find", "calendar.free_slots",
-                                         "calendar.create_event", "calendar.update_event"}
+                                         "calendar.create_event", "calendar.update_event",
+                                         "calendar.calendars", "calendar.delete_event",
+                                         "calendar.respond"}
     assert agent_actions("knowledge") == {"notion.search", "notion.read", "notion.create_page"}
     assert agent_actions("conversation") == {
         "mail.search", "mail.read", "mail.draft", "mail.send", "mail.reply",
         "calendar.list", "calendar.find", "calendar.free_slots", "calendar.create_event",
         # Google Workspace reads (spec 2026-10-03 section 4.4); registered only when the flag is on
         "drive.search", "drive.list_recent", "drive.read", "docs.read", "sheets.find", "sheets.read",
-        "tasks.list", "contacts.search", "meet.transcript",
-        # and the three chat writes (spec 4.3)
-        "docs.create", "tasks.add", "tasks.complete",
+        "tasks.list", "contacts.search", "meet.transcript", "meet.recent",
+        "slides.read", "forms.read", "forms.responses",
+        # and the self-only chat writes (spec 4.3)
+        "docs.create", "tasks.add", "tasks.complete", "slides.create", "contacts.create", "contacts.update",
+        # mail organising and calendar housekeeping; trash and delete wait for the user's OK
+        "mail.archive", "mail.mark_read", "mail.mark_unread", "mail.label", "mail.trash", "mail.untrash",
+        "calendar.calendars", "calendar.delete_event", "calendar.respond",
     }
 
 

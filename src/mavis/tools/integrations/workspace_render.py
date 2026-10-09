@@ -20,7 +20,7 @@ CELL_CHARS = 80
 MAX_ROWS, MAX_COLS = 50, 20
 # Keys a create action may return its new id under (Drive file, Doc, Sheet, task). Shared with
 # workspace_guard.created_ids, so an id that is rendered is also recorded for the allowlist.
-ID_KEYS = ("id", "document_id", "documentId", "spreadsheet_id", "spreadsheetId")
+ID_KEYS = ("id", "document_id", "documentId", "spreadsheet_id", "spreadsheetId", "presentationId")
 _BLANKS = re.compile(r"\n\s*\n\s*\n+")
 KINDS = {
     "application/vnd.google-apps.document": "Doc",
@@ -193,31 +193,182 @@ def render_tasks(data: Any) -> str:
     return "\n".join(lines)
 
 
+NO_TRANSCRIPT = ("No transcript is available for that meeting. Google only records transcripts for "
+                 "Workspace accounts that turned transcription on for the call; personal Google accounts "
+                 "have none. (If the id did not come from meet_recent, check it.)")
+MAX_TRANSCRIPT_LINES = 200
+
+
 def render_contacts(data: Any) -> str:
     results = extract_list(data, "response_data.results", "results", "data.response_data.results")
-    people = [r.get("person") for r in results if isinstance(r.get("person"), dict)]
-    if not people:
-        return "No contacts matched."
+    rows = [(r.get("person"), str(r.get("source") or "contacts")) for r in results
+            if isinstance(r.get("person"), dict)]
+    if not rows:
+        skipped = pick(data, "not_searched", default=[]) if isinstance(data, dict) else []
+        tail = f" (not searched: {', '.join(map(str, skipped))})" if skipped else ""
+        return "No contacts matched." + tail
     lines = []
-    for p in people:
+    for p, source in rows:
         names = [n for n in p.get("names") or [] if isinstance(n, dict)]
         name = one_line((names[0].get("displayName") if names else "") or "(no name)", 80)
         emails = ", ".join(str(e.get("value")) for e in p.get("emailAddresses") or [] if e.get("value"))
         phones = ", ".join(str(n.get("value")) for n in p.get("phoneNumbers") or [] if n.get("value"))
-        lines.append(f"- {name} | email: {emails or 'none'} | phone: {phones or 'none'}")
+        where = {"other": " | from your email history", "directory": " | company directory"}.get(source, "")
+        rid = f" | id: {p['resourceName']}" if source == "contacts" and p.get("resourceName") else ""
+        lines.append(f"- {name} | email: {emails or 'none'} | phone: {phones or 'none'}{where}{rid}")
     return "\n".join(lines)
 
 
 def render_transcripts(data: Any) -> str:
     items = extract_list(data, "response_data.transcripts", "transcripts", "data.response_data.transcripts")
     if not items:
-        return "No transcripts for that meeting."
+        return NO_TRANSCRIPT
     lines = []
     for t in items:
         doc = pick(t, "docsDestination.document", default="")
-        lines.append(f"- transcript {one_line(t.get('name', ''), 80)} | state: {t.get('state', 'unknown')} | "
-                     f"document_id={doc}")
+        link = f" | transcript Doc: document_id={doc} (docs_read)" if doc else ""
+        state = t.get("state", "unknown")
+        lines.append(f"- transcript {one_line(t.get('name', ''), 80)} | state: {state}{link}")
+        entries = [e for e in t.get("entries") or [] if isinstance(e, dict) and e.get("text")]
+        for e in entries[:MAX_TRANSCRIPT_LINES]:
+            lines.append(f"  {one_line(e.get('speaker') or 'Participant', 40)}: {one_line(e['text'], 400)}")
+        if len(entries) > MAX_TRANSCRIPT_LINES:
+            lines.append(f"  ...{len(entries) - MAX_TRANSCRIPT_LINES} more lines; the Doc has the rest")
+        if not entries:
+            lines.append("  (no spoken text yet; it may still be processing)")
+    return clip_body("\n".join(lines))
+
+
+def render_meet_recent(data: Any) -> str:
+    calls = extract_list(data, "conferences", "data.conferences")
+    if not calls:
+        return "No Google Meet calls found in that period."
+    lines = [f"{len(calls)} call(s). Use the conference_record_id with meet_transcript."]
+    for c in calls:
+        who = ", ".join(one_line(p, 40) for p in (c.get("participants") or [])[:10]) or "unknown"
+        began, ended = str(c.get("startTime") or "unknown")[:16], str(c.get("endTime") or "ongoing")[:16]
+        lines.append(f"- conference_record_id={c.get('conferenceRecordId', '')} | started: {began} | "
+                     f"ended: {ended} | with: {who}")
     return "\n".join(lines)
+
+
+def render_calendars(data: Any) -> str:
+    cals = extract_list(data, "calendars", "data.calendars", "items")
+    if not cals:
+        return "No calendars found."
+    lines = [f"{len(cals)} calendar(s). Use the calendar_id with calendar_list or calendar_find."]
+    for c in cals:
+        mine = " (primary)" if c.get("primary") else ""
+        name = one_line(c.get("summaryOverride") or c.get("summary") or "(untitled)")
+        lines.append(f"- calendar_id={c.get('id', '')} | {name}{mine} | "
+                     f"access: {c.get('accessRole', 'unknown')} | tz: {c.get('timeZone', '')}")
+    return "\n".join(lines)
+
+
+def _runs(elements: Any) -> str:
+    """The text of Slides textElements (text runs only)."""
+    return "".join(t["textRun"]["content"] for t in elements or []
+                   if isinstance(t, dict) and isinstance(t.get("textRun"), dict)
+                   and isinstance(t["textRun"].get("content"), str))
+
+
+def _slide_text(slide: dict) -> str:
+    parts: list[str] = []
+    for el in slide.get("pageElements") or []:
+        if not isinstance(el, dict):
+            continue
+        parts.append(_runs(pick(el, "shape.text.textElements", default=[])))
+        for row in pick(el, "table.tableRows", default=[]) or []:
+            cells = [_runs(pick(c, "text.textElements", default=[])).strip()
+                     for c in row.get("tableCells") or []]
+            parts.append(" | ".join(cells) + "\n")
+    return "\n".join(p for p in parts if p.strip()).strip()
+
+
+def render_slides(data: Any) -> str:
+    deck = data if isinstance(data, dict) else {}
+    slides = [s for s in deck.get("slides") or [] if isinstance(s, dict)]
+    title = one_line(deck.get("title") or "(untitled)")
+    out = [f"presentation_id={deck.get('presentationId', '')} | {title} | {len(slides)} slide(s)"]
+    for n, slide in enumerate(slides, 1):
+        out.append(f"--- Slide {n} ---\n{_slide_text(slide) or '(no text)'}")
+    return clip_body("\n".join(out))
+
+
+def _question_titles(form: dict) -> dict[str, str]:
+    titles: dict[str, str] = {}
+    for item in form.get("items") or []:
+        q = pick(item, "questionItem.question", default=None) if isinstance(item, dict) else None
+        if isinstance(q, dict) and q.get("questionId"):
+            titles[str(q["questionId"])] = one_line(item.get("title") or "(untitled question)")
+        for sub in pick(item, "questionGroupItem.questions", default=[]) or []:
+            if isinstance(sub, dict) and sub.get("questionId"):
+                titles[str(sub["questionId"])] = one_line(item.get("title") or "") + " / " + one_line(
+                    pick(sub, "rowQuestion.title", default="") or "")
+    return titles
+
+
+def render_form(data: Any) -> str:
+    form = data if isinstance(data, dict) else {}
+    info = form.get("info") if isinstance(form.get("info"), dict) else {}
+    lines = [f"form_id={form.get('formId', '')} | {one_line(info.get('title') or '(untitled)')}"]
+    if info.get("description"):
+        lines.append(one_line(info["description"], 300))
+    n = 0
+    for item in form.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        q = pick(item, "questionItem.question", default=None)
+        if not isinstance(q, dict):
+            continue
+        n += 1
+        kind = next((k for k in ("choiceQuestion", "textQuestion", "scaleQuestion", "dateQuestion",
+                                 "timeQuestion", "fileUploadQuestion", "rowQuestion") if k in q), "question")
+        extra = ""
+        if kind == "choiceQuestion":
+            raw = pick(q, "choiceQuestion.options", default=[]) or []
+            opts = [one_line(o.get("value", ""), 60) for o in raw if isinstance(o, dict)]
+            extra = " | options: " + ", ".join(opts[:20])
+        req = " (required)" if q.get("required") else ""
+        label = one_line(item.get("title") or "(untitled)")
+        lines.append(f"{n}. {label}{req} | {kind.replace('Question', '')}{extra}")
+    return clip_body("\n".join(lines))
+
+
+MAX_SAMPLE_ANSWERS = 5
+MAX_CHOICE_ROWS = 15
+
+
+def render_form_responses(data: Any) -> str:
+    data = data if isinstance(data, dict) else {}
+    form = data.get("form") if isinstance(data.get("form"), dict) else {}
+    responses = [r for r in data.get("responses") or [] if isinstance(r, dict)]
+    info = form.get("info") if isinstance(form.get("info"), dict) else {}
+    title = one_line(info.get("title") or "(untitled)")
+    more = " (more exist; this is the newest batch Google returned)" if data.get("more") else ""
+    if not responses:
+        return f"form_id={form.get('formId', '')} | {title}\nNo responses yet."
+    titles = _question_titles(form)
+    per_q: dict[str, list[str]] = {}
+    for r in responses:
+        for qid, ans in (r.get("answers") or {}).items():
+            for a in pick(ans, "textAnswers.answers", default=[]) or []:
+                if isinstance(a, dict) and a.get("value") not in (None, ""):
+                    per_q.setdefault(str(qid), []).append(str(a["value"]))
+    lines = [f"form_id={form.get('formId', '')} | {title} | {len(responses)} response(s){more}"]
+    for qid, values in per_q.items():
+        counts: dict[str, int] = {}
+        for v in values:
+            counts[v] = counts.get(v, 0) + 1
+        label = titles.get(qid, qid)
+        if len(counts) <= MAX_CHOICE_ROWS and len(counts) < len(values):  # repeated answers: a tally
+            ranked = sorted(counts.items(), key=lambda x: -x[1])
+            tally = "; ".join(f"{one_line(v, 60)}: {c}" for v, c in ranked)
+            lines.append(f"- {label} ({len(values)} answers) | {tally}")
+        else:
+            sample = " / ".join(one_line(v, 120) for v in values[:MAX_SAMPLE_ANSWERS])
+            lines.append(f"- {label} ({len(values)} answers) | e.g. {sample}")
+    return clip_body("\n".join(lines))
 
 
 def render_created(data: Any) -> str:
@@ -249,6 +400,16 @@ RENDERERS = {
     "tasks.list": render_tasks,
     "contacts.search": render_contacts,
     "meet.transcript": render_transcripts,
+    "meet.recent": render_meet_recent,
+    "calendar.calendars": render_calendars,
+    "slides.read": render_slides,
+    "forms.read": render_form,
+    "forms.responses": render_form_responses,
+    "slides.create": render_created,
+    "calendar.delete_event": render_created,
+    "calendar.respond": render_created,
+    "contacts.create": render_created,
+    "contacts.update": render_created,
     "docs.comment": render_created,
     "tasks.delete": render_created,
     "meet.create": render_meet,

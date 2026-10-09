@@ -13,6 +13,7 @@ from mavis.tools.integrations.composio_map import (
     COMPOSIO_ACTIONS,
     COMPOSIO_TRIGGERS,
     MAVIS_TRIGGERS,
+    NATIVE_ONLY_ACTIONS,
     toolkit_of_slug,
 )
 
@@ -22,7 +23,9 @@ def test_every_action_is_mapped():
     from mavis.tools.integrations.workspace_tools import CUSTOM_FNS
 
     assert set(COMPOSIO_ACTIONS) <= set(ACTIONS)
-    assert set(ACTIONS) - set(COMPOSIO_ACTIONS) <= set(CUSTOM_FNS)
+    # the full-scope actions are native-only on purpose; every other action is mapped or composed
+    assert set(ACTIONS) - set(COMPOSIO_ACTIONS) - NATIVE_ONLY_ACTIONS <= set(CUSTOM_FNS)
+    assert NATIVE_ONLY_ACTIONS <= set(ACTIONS) and not NATIVE_ONLY_ACTIONS & set(COMPOSIO_ACTIONS)
 
 
 def test_slug_toolkit_matches_action_capability():
