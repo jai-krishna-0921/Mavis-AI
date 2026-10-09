@@ -187,7 +187,6 @@ async def start_command(event: Event, user: User, args: list[str]) -> str:
 
 def register() -> None:
     from mavis.access.commands import register_user_command
-
     from mavis.timers.system import register_system_wakeup
     from mavis.worker.gates import register_event_gate
 

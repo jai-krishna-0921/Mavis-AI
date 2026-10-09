@@ -29,7 +29,13 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from mavis.config import get_settings
-from mavis.domain.errors import ActionFailed, ApprovalRequired, ConnectionRequired, FailureKind, NeedsUserDetail
+from mavis.domain.errors import (
+    ActionFailed,
+    ApprovalRequired,
+    ConnectionRequired,
+    FailureKind,
+    NeedsUserDetail,
+)
 from mavis.domain.localtime import has_datetimes, localize_args
 from mavis.domain.policy import Capability, RiskClass
 from mavis.domain.results import ToolOutput
@@ -610,7 +616,8 @@ class ToolRegistry:
                 try:
                     await self.permission_missing(user_id, tool.requires)
                 except Exception as offer_exc:  # noqa: BLE001 - the offer is a courtesy
-                    log.warning("tool.permission_offer_failed", tool=tool.name, error=type(offer_exc).__name__)
+                    log.warning("tool.permission_offer_failed", tool=tool.name,
+                                error=type(offer_exc).__name__)
             if audited:
                 await audit.record(
                     user_id, actor=actor, action=tool.name, detail={**detail, "outcome": "error"}

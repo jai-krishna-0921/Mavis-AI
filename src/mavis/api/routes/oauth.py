@@ -55,8 +55,9 @@ _USER_TEXT = {
 
 
 WEB_ORIGIN = "web"
-_NOTHING_ALLOWED = ("You signed in with {account} but did not allow any Google service, so nothing is connected. "
-                    "Send /connect google to try again and leave every box ticked.")
+_NOTHING_ALLOWED = (
+    "You signed in with {account} but did not allow any Google service, so nothing is connected. "
+    "Send /connect google to try again and leave every box ticked.")
 
 
 def _capability(provider: NativeProvider) -> Capability:

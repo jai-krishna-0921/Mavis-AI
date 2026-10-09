@@ -13,8 +13,7 @@ import asyncio
 import json
 import re
 from contextlib import suppress
-from datetime import timedelta
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs, parse_qsl, urlsplit
 
 import httpx

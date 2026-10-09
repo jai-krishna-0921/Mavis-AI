@@ -21,9 +21,8 @@ from mavis.channels.fake import FakeChannel
 from mavis.channels.outbox_sender import OutboxSender
 from mavis.domain import timeutil
 from mavis.domain.decisions import ComposedMessage, InitiativeDecision
-from mavis.memory.personal_layer import LayerDraft
 from mavis.domain.memory import Entity, Extraction, Relation
-from mavis.tools.integrations.native.oauth import GOOGLE_SCOPES, SLACK_BOT_SCOPES, SLACK_USER_SCOPES
+from mavis.memory.personal_layer import LayerDraft
 from tests.fakes.llm import FakeLLM
 from tests.tools.integrations.native.gfake import gmail_message
 

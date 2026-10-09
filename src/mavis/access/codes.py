@@ -46,7 +46,8 @@ def normalize(text: str) -> str | None:
     return s
 
 
-_EMBEDDED = re.compile(r"(?<![A-Za-z0-9])MAV[-\s_]?([0-9A-Za-z]{5})[-\s_]?([0-9A-Za-z]{5})(?![A-Za-z0-9])", re.IGNORECASE)
+_EMBEDDED = re.compile(
+    r"(?<![A-Za-z0-9])MAV[-\s_]?([0-9A-Za-z]{5})[-\s_]?([0-9A-Za-z]{5})(?![A-Za-z0-9])", re.IGNORECASE)
 
 
 def find_code(text: str) -> str | None:
