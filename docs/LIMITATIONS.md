@@ -58,7 +58,7 @@ What Mavis can and cannot do today, what it costs, and what would lift each limi
 | Item | Limit today | Notes |
 |---|---|---|
 | Hosting | One EC2 t4g.medium (2 vCPU, 4 GB) in ap-south-1 | No redundancy: if the box is down, Mavis is down. Fine for tens of users. |
-| Address | `13-233-241-141.sslip.io` | A free wildcard DNS name. A real domain is better long term and may be required if Google rejects this redirect address. |
+| Address | `mavis-0de9f18d.sslip.io` | A free wildcard DNS name. A real domain is better long term and may be required if Google rejects this redirect address. |
 
 ## 7. Telegram
 
