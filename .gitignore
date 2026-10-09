@@ -16,3 +16,9 @@ __pycache__/
 instinct_screenshots/
 !src/mavis/access/data/
 .playwright-mcp/
+# local agent tooling and skills (not product code)
+.agents/
+.hermes/
+.claude/
+skills/
+skills-lock.json
