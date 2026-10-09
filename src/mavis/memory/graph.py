@@ -23,7 +23,6 @@ from mavis.memory.names import USER_KEY, is_user, node_key, normalize_name, sani
 from mavis.store import db as dbm
 from mavis.store.models import GraphEdge, GraphNode
 
-
 THIRD_PARTY_PREFIX = "tp:"  # source_ref namespace of edges learned from third-party records (mail, Slack)
 
 
