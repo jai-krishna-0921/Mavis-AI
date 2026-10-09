@@ -89,4 +89,5 @@ def test_the_reverse_proxy_serves_the_oauth_callback_and_the_slack_webhook():
 def test_deploy_forces_the_native_provider_after_copying_local_values():
     text = (ROOT / "deploy" / "aws" / "deploy.sh").read_text()
     assert "set_key INTEGRATION_PROVIDER native force" in text
-    assert text.index("set_key INTEGRATION_PROVIDER native force") > text.index("SLACK_SIGNING_SECRET INTEGRATION_PROVIDER")
+    forced = text.index("set_key INTEGRATION_PROVIDER native force")
+    assert forced > text.index("SLACK_SIGNING_SECRET INTEGRATION_PROVIDER")

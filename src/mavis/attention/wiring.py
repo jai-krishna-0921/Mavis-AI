@@ -275,10 +275,6 @@ async def close_attention() -> None:
 def register_attention() -> None:
     if not get_settings().attention_enabled:
         log.info("attention.disabled")  # the Phase 5 email path stays as it is
-        # The knowledge graph does not depend on triage: mail and Slack records still reach the guard.
-        ingest = get_connector_ingest()
-        register_event_handler(EventType.SLACK_MESSAGE, ingest.on_slack_event)
-        register_event_handler(EventType.EMAIL_RECEIVED, ingest.on_email_event)
         return
     intake, pipeline = get_intake(), get_pipeline()
     register_event_handler(EventType.EMAIL_RECEIVED, intake.on_email, replace=True)

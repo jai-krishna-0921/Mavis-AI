@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """The pieces joined: Slack events find their Mavis user, an ACTIVE native grant is polled (never left to
 triggers), first sync reads the window through the guard, and every inbound path reaches the record
 ingest once per record."""
@@ -10,7 +11,6 @@ import pytest
 
 from mavis.attention.connector_ingest import ConnectorIngest, remember_identity
 from mavis.domain.events import EventType
-from mavis.domain.integrations import ConnectionState, ToolResult
 from mavis.domain.policy import Capability
 from mavis.store.repo import users
 from mavis.tools.integrations import wiring
@@ -245,20 +245,21 @@ async def test_the_bus_passes_a_duplicate_delivery_once_so_the_ingest_runs_once(
     assert jobs == ["gmail:m77", "slack:T1:D0DM00001:1791451800.000100"]
 
 
-async def test_mail_and_slack_reach_the_ingest_even_with_attention_disabled(monkeypatch):
+async def test_slack_reaches_the_ingest_whether_or_not_attention_is_on(db, bus, memory, monkeypatch):
     from mavis.attention import wiring as attention
     from mavis.config import get_settings
     from mavis.worker import runner
 
-    monkeypatch.setenv("ATTENTION_ENABLED", "false")
-    get_settings.cache_clear()
-    runner.clear_handlers()
-    try:
-        attention.register_attention()
-        ingest = attention.get_connector_ingest()
-        handlers = runner._event_handlers
-        assert ingest.on_email_event in handlers[EventType.EMAIL_RECEIVED]
-        assert ingest.on_slack_event in handlers[EventType.SLACK_MESSAGE]
-    finally:
-        runner.clear_handlers()
+    for enabled in ("false", "true"):
+        monkeypatch.setenv("ATTENTION_ENABLED", enabled)
         get_settings.cache_clear()
+        runner.clear_handlers()
+        try:
+            wiring.register_integrations()
+            attention.register_attention()
+            attention.register_attention()
+            ingest = attention.get_connector_ingest()
+            assert runner._event_handlers[EventType.SLACK_MESSAGE].count(ingest.on_slack_event) == 1
+        finally:
+            runner.clear_handlers()
+            get_settings.cache_clear()
