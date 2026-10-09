@@ -115,6 +115,7 @@ async def extract(
     now: datetime | None = None,
     trust: Trust = Trust.USER,
     source: str = "",
+    guidance: str = "",
 ) -> Extraction:
     if not text.strip():
         return Extraction()
@@ -128,6 +129,8 @@ async def extract(
         labels=", ".join(NODE_LABELS),
         rels=", ".join(REL_TYPES),
     )
+    if guidance:
+        system = f"{system}\n{guidance}"
     body = wrap_untrusted(text, source or "unknown") if trust is Trust.UNTRUSTED else text
     try:
         raw = await llm.structured(Extraction, system, body, llm.Tier.FAST, priority="best_effort")

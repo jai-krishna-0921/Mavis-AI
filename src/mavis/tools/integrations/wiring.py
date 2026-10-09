@@ -202,11 +202,12 @@ def get_poller() -> Poller:
 
 @lru_cache
 def get_first_sync() -> FirstSync:
+    # Phase 4 / later: loops stay unused, third-party content never creates loops.
+    from mavis.attention.wiring import get_connector_ingest  # lazy: attention is wired after integrations
     from mavis.loops.service import LoopService
 
-    # Phase 4 / later: loops stay unused, third-party content never creates loops.
     return FirstSync(provider=get_provider(), memory=JobLearner(), loops=LoopService(get_bus()),
-                     bus=_LazyBus(), tz_of=user_timezone)
+                     bus=_LazyBus(), tz_of=user_timezone, connectors=get_connector_ingest())
 
 
 @lru_cache
