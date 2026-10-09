@@ -33,6 +33,7 @@ class GraphStore(Protocol):
     async def entities(self, user_id: int) -> list[Entity]: ...
     async def dump(self, user_id: int) -> list[dict]: ...
     async def forget(self, user_id: int, needle: str) -> int: ...
+    async def delete_user(self, user_id: int) -> int: ...
     async def merge_entities(self, user_id: int, keep: str, drop: str, label: str) -> None: ...
 
 
@@ -226,6 +227,14 @@ class SqliteGraphStore:
             )
             if node_keys:
                 await s.execute(delete(GraphNode).where(GraphNode.user_id == user_id, GraphNode.key.in_(node_keys)))
+            await s.commit()
+            return res.rowcount or 0
+
+    async def delete_user(self, user_id: int) -> int:
+        """Remove the user's whole graph (account deletion). Returns the number of nodes removed."""
+        async with dbm.Session() as s:
+            await s.execute(delete(GraphEdge).where(GraphEdge.user_id == user_id))
+            res = await s.execute(delete(GraphNode).where(GraphNode.user_id == user_id))
             await s.commit()
             return res.rowcount or 0
 

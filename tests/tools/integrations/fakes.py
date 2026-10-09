@@ -50,6 +50,11 @@ class FakeProvider:
         self.disconnected.append((user.user_id, toolkit))
         self.states.get(user.user_id, {}).pop(toolkit, None)
 
+    async def disconnect_all(self, user: UserRef) -> int:
+        removed = list(self.states.pop(user.user_id, {}))
+        self.disconnected.extend((user.user_id, t) for t in removed)
+        return len(removed)
+
     async def execute(self, user: UserRef, action: str, args: dict) -> ToolResult:
         self.executed.append((user.user_id, action, args))
         return self.results.get(action, ToolResult(ok=True, data={"ok": action}))

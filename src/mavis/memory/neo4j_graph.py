@@ -19,6 +19,8 @@ from mavis.memory.names import USER_KEY, is_user, node_key, normalize_name, sani
 _DEDUPE = "reduce(acc = [], a IN coalesce(n.{f}, []) + ${p} | CASE WHEN a IN acc THEN acc ELSE acc + a END)"
 
 Q_USER_INDEX = "CREATE INDEX entity_user IF NOT EXISTS FOR (n:Entity) ON (n.user_id)"
+Q_COUNT_USER = "MATCH (n:Entity {user_id:$u}) RETURN count(n) AS c"
+Q_DELETE_USER = ("MATCH (n:Entity {user_id:$u}) CALL (n) { DETACH DELETE n } IN TRANSACTIONS OF 500 ROWS")
 Q_INDEX = "CREATE INDEX entity_user_key IF NOT EXISTS FOR (n:Entity) ON (n.user_id, n.key)"
 Q_ENSURE_USER = (
     "MERGE (n:Entity:User {user_id:$u, key:$key}) "
@@ -257,6 +259,12 @@ class Neo4jGraphStore:
         edges = await self._run(Q_FORGET_EDGES, u=user_id, n=needle.strip())
         nodes = await self._run(Q_FORGET_NODES, u=user_id, n=needle.strip())
         return int((edges[0]["c"] if edges else 0) + (nodes[0]["c"] if nodes else 0))
+
+    async def delete_user(self, user_id: int) -> int:
+        """Remove the user's whole graph in batches (account deletion). Returns the number of nodes."""
+        rows = await self._run(Q_COUNT_USER, u=user_id)
+        await self._run(Q_DELETE_USER, u=user_id)  # auto-commit: CALL IN TRANSACTIONS cannot run in a tx
+        return int(rows[0]["c"]) if rows else 0
 
     async def merge_entities(self, user_id: int, keep: str, drop: str, label: str) -> None:
         lab = sanitize_label(label)
