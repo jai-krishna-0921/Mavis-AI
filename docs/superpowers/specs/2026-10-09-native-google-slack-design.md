@@ -63,6 +63,25 @@ generic connectors framework, multi-user, revenue intelligence) is parked until 
    Gmail send builds RFC 5322 with `email.message.EmailMessage`, base64url `raw`; replies set `threadId`,
    `In-Reply-To`, `References` and a `Re:` subject.
 
+8. **Retries, scopes and queries** (security review). A request repeats only when that cannot do it twice:
+   idempotent calls (declared per call, GET by default) on a 5xx or read error; any call on a 401 or 429 or when it
+   never left the machine (connect error, pool timeout). A 5xx or read error on a send, reply, draft or event
+   create is terminal and reported as "may or may not have happened". Token refresh and the single-use code
+   exchange are never repeated after the request was sent. Each natively handled Google action has an entry in
+   `ACTION_SCOPES` (any-of groups); a grant missing one never reaches Google and answers "permission not granted,
+   reconnect" unless an ACTIVE Composio account can do it. Drive `q` is rebuilt from an allowlisted grammar with
+   escaped literals (anything else is a plain `fullText` search); Gmail queries must balance quotes and brackets,
+   and OR or brace queries are wrapped so the spam and trash exclusions always apply. One vendor account maps to
+   one Mavis user by a database constraint on `(provider, account_key)`.
+9. **Residual risk: OAuth login CSRF.** The consent URL carries a signed state bound to a Mavis user. If that URL
+   is forwarded to someone else who consents, their Google or Slack account is linked to the sender's Mavis user.
+   Mitigations: the state expires in 10 minutes and is single use; the callback page names the Mavis account being
+   linked (Telegram display name) and the outside account, and the Telegram confirmation names the outside account
+   (email or Slack workspace), so either side sees a wrong link and can disconnect. Not closed: Google's own
+   consent screen cannot show the Mavis name, and the linked person need not notice before the link exists. A
+   stricter fix (a browser cookie or a one-time code typed back in Telegram) is a later change if the product opens
+   beyond a small trusted group.
+
 ## Modules
 
 ```

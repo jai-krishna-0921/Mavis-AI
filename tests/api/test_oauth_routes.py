@@ -41,7 +41,7 @@ async def test_google_success_enqueues_the_connection_check(web, oauth, vendor):
     google_vendor(vendor)
     state = query(await oauth.authorize_url(5, G, 12))["state"]
     r = await c.get("/oauth/google/callback", params={"code": "c", "state": state})
-    assert r.status_code == 200 and "Google is connected" in r.text
+    assert r.status_code == 200 and "me@kripya.com is now linked" in r.text
     [job] = bus.jobs
     assert job.kind is JobKind.CONNECTION_CHECK and job.user_id == 5 and job.payload == {"pending_id": 12}
 
@@ -52,7 +52,8 @@ async def test_slack_success_without_a_pending_tells_the_user(web, oauth, vendor
     state = query(await oauth.authorize_url(5, S))["state"]
     r = await c.get("/oauth/slack/callback", params={"code": "c", "state": state})
     assert r.status_code == 200 and bus.jobs == []
-    assert await outbox() == ["Slack is connected."]
+    [text] = await outbox()
+    assert text.startswith("Slack is connected") and "Kripya" in text
 
 
 async def test_denied_says_so_plainly_and_echoes_nothing(web, oauth):
@@ -106,3 +107,66 @@ async def test_unknown_provider_and_composio_mode_are_404(web, tokens):
 async def test_no_em_or_en_dashes_in_user_text():
     for text in oauth_route._USER_TEXT.values():
         assert "—" not in text and "–" not in text
+
+
+async def named_user(name):
+    from mavis.store.repo import users
+
+    u, _ = await users.get_or_create_by_chat(777, name)
+    return u
+
+
+async def test_the_success_page_names_the_mavis_account_and_the_google_account(web, oauth, vendor, db):
+    c, _ = web
+    google_vendor(vendor, email="victim@kripya.com")
+    u = await named_user("Priya <b>Nair</b>")
+    state = query(await oauth.authorize_url(u.id, G))["state"]
+    r = await c.get("/oauth/google/callback", params={"code": "c", "state": state})
+    assert r.status_code == 200
+    assert "victim@kripya.com" in r.text and "Priya &lt;b&gt;Nair&lt;/b&gt;" in r.text
+    assert "<b>" not in r.text  # the display name is escaped, it is the other person's text
+    assert "not you" in r.text  # tells a mistaken consenter what to do
+
+
+async def test_the_telegram_confirmation_names_the_google_account(web, oauth, vendor, db):
+    c, _ = web
+    google_vendor(vendor, email="me@kripya.com")
+    u = await named_user("Priya")
+    state = query(await oauth.authorize_url(u.id, G, 4))["state"]  # even with a pending connect
+    await c.get("/oauth/google/callback", params={"code": "c", "state": state})
+    [text] = await outbox()
+    assert "me@kripya.com" in text and "—" not in text and "–" not in text
+
+
+async def test_the_slack_page_and_confirmation_name_the_workspace(web, oauth, vendor, db):
+    c, _ = web
+    slack_vendor(vendor)
+    u = await named_user("Priya")
+    state = query(await oauth.authorize_url(u.id, S))["state"]
+    r = await c.get("/oauth/slack/callback", params={"code": "c", "state": state})
+    assert "Kripya" in r.text and "Priya" in r.text
+    [text] = await outbox()
+    assert "Kripya" in text
+
+
+async def test_a_user_without_a_name_is_still_identified(web, oauth, vendor, db):
+    c, _ = web
+    google_vendor(vendor)
+    state = query(await oauth.authorize_url(5, G))["state"]  # no such user row
+    r = await c.get("/oauth/google/callback", params={"code": "c", "state": state})
+    assert r.status_code == 200 and "Mavis account" in r.text
+
+
+async def test_a_consent_link_dies_after_ten_minutes_and_after_one_use(oauth, vendor, db):
+    import time
+
+    from mavis.store.models import NativeOAuthState
+    from mavis.tools.integrations.native.oauth import STATE_TTL_S, verify_state
+
+    assert STATE_TTL_S <= 600
+    state = query(await oauth.authorize_url(5, G))["state"]
+    assert verify_state(state).exp - time.time() <= 600
+    async with dbm.Session() as s:
+        [row] = await s.scalars(select(NativeOAuthState))
+    from mavis.domain import timeutil
+    assert (timeutil.ensure_utc(row.expires_at) - timeutil.now()).total_seconds() <= 600
