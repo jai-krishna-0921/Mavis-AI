@@ -162,6 +162,15 @@ class SqliteGraphStore:
                 )
             )
             same = [e for e in current if e.dst_key == dst]
+            if is_third_party(source_ref):
+                # Third-party text (a record from mail or Slack) never overwrites or ends what the user
+                # said or the system learned from the user: those edges keep their statement, source and
+                # validity. A conflicting single-valued fact from a record is not recorded at all.
+                if same and not is_third_party(same[0].source_ref):
+                    return
+                if not same and r in SINGLE_VALUED_RELS and any(
+                        not is_third_party(e.source_ref) for e in current):
+                    return
             if same:
                 edge = same[0]
                 edge.statement = rel.statement

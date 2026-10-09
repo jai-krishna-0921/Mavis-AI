@@ -13,7 +13,7 @@ from typing import Any
 
 from mavis.domain import timeutil
 from mavis.domain.memory import SINGLE_VALUED_RELS, Entity, Relation
-from mavis.memory.graph import Fact, edge_score
+from mavis.memory.graph import Fact, edge_score, is_third_party
 from mavis.memory.names import USER_KEY, is_user, node_key, normalize_name, sanitize_label, sanitize_rel
 
 _DEDUPE = "reduce(acc = [], a IN coalesce(n.{f}, []) + ${p} | CASE WHEN a IN acc THEN acc ELSE acc + a END)"
@@ -92,6 +92,15 @@ def q_newer_single_valued(rel: str) -> str:
         f"MATCH (a:Entity {{user_id:$u, key:$src}})-[r:{r}]->(b:Entity) "
         "WHERE r.valid_to IS NULL AND b.key <> $dst AND r.valid_from > datetime($at) "
         "RETURN min(r.valid_from) AS vf"
+    )
+
+
+def q_current_edges_from(rel: str) -> str:
+    """Current edges of this relation out of `src`: where they go and what they were learned from."""
+    r = sanitize_rel(rel)
+    return (
+        f"MATCH (a:Entity {{user_id:$u, key:$src}})-[r:{r}]->(b:Entity) WHERE r.valid_to IS NULL "
+        "RETURN b.key AS dst, coalesce(r.source_ref, '') AS src"
     )
 
 
@@ -216,6 +225,14 @@ class Neo4jGraphStore:
         when = (timeutil.ensure_utc(at) if at else timeutil.now()).isoformat()
         params = dict(u=user_id, src=src, dst=dst, statement=rel.statement, confidence=rel.confidence,
                       source_ref=source_ref, at=when)
+        if is_third_party(source_ref):
+            # A record from mail or Slack never rewrites or ends an edge the user's own words created.
+            current = await self._run(q_current_edges_from(r), u=user_id, src=src)
+            same = [e for e in current if e["dst"] == dst]
+            if same and not any(is_third_party(e["src"]) for e in same):
+                return
+            if not same and r in SINGLE_VALUED_RELS and any(not is_third_party(e["src"]) for e in current):
+                return
         rows = await self._run(q_update_current_edge(r), **params)
         if not rows or rows[0]["c"] == 0:
             to = None
