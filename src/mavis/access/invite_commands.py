@@ -7,13 +7,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from mavis.access import UserTier
 from mavis.access.codes import InviteError, deep_link_param, display
 from mavis.access.commands import parse_kv, register_owner_command
+from mavis.channels.telegram_links import telegram_link
 from mavis.config import get_settings
 from mavis.domain.events import Event
 from mavis.store.db import utcnow
 from mavis.store.models import User
 from mavis.store.repo import invites, users
 
-BOT_LINK = "https://t.me/{bot}?start={param}"
 HELP = ("Use: /invite new [uses=1] [days=14] [tier=standard] [tz=Area/City] [cur=INR] [label], "
         "/invite list, /invite revoke <hint>, /invite users <id>")
 
@@ -49,7 +49,7 @@ async def _new(user: User, args: list[str]) -> str:
     except InviteError:
         return (f"I can't make that one: at most {s.invite_max_active} open codes and "
                 f"{s.invite_max_uses} uses per code.")
-    link = BOT_LINK.format(bot=s.telegram_bot_username or "Mavis247_bot", param=deep_link_param(plain))
+    link = telegram_link(s.telegram_bot_username or "Mavis247_bot", deep_link_param(plain))
     return (f"Invite {display(plain)} ({row.max_uses} use{'s' if row.max_uses != 1 else ''}, "
             f"expires {row.expires_at:%d %b}).\n{link}\nThis is the only time I show the full code.")
 

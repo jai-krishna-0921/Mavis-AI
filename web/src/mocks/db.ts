@@ -41,7 +41,7 @@ export function createDb() {
   const me: Me = {
     user_id: 'u_123', name: 'Jai Krishna', timezone: 'Asia/Kolkata', currency: 'INR',
     channels: {
-      telegram: { connected: true, label: '@jaikrishna', open_url: 'https://t.me/Mavis247_bot' },
+      telegram: { connected: true, label: '@jaikrishna', open_url: 'https://telegram.me/Mavis247_bot' },
       slack: { connected: true, label: 'Zento Labs workspace' },
     },
     email: 'jai@example.com', csrf: 'csrf-mock-token', invites_left: 3,

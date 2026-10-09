@@ -53,7 +53,9 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
     telegram_mode: Literal["polling", "webhook"] = "polling"
-    telegram_bot_username: str = ""  # for invite deep links: https://t.me/<username>?start=...
+    telegram_bot_username: str = ""  # for invite and sign-in deep links (channels/telegram_links.py)
+    # telegram.me: the official t.me alias, reachable where t.me is DNS-blocked
+    telegram_link_base: str = "https://telegram.me"
     # Owner chats (admin commands, alerts). OWNER_TELEGRAM_CHAT_IDS; the old ALLOWED_TELEGRAM_CHAT_IDS
     # name is read as an alias for one release (contract D). In ACCESS_MODE=allowlist this is still the
     # allowlist; in invite mode it only marks the owner.

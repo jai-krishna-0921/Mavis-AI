@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Response
 
+from mavis.channels.telegram_links import telegram_link
 from mavis.config import get_settings
 from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.oauth import configured
@@ -18,7 +19,7 @@ async def public_config(response: Response) -> dict:
     response.headers["Cache-Control"] = "no-store"
     return {
         "bot_username": bot or None,
-        "bot_url": f"https://t.me/{bot}" if bot else None,
+        "bot_url": telegram_link(bot),
         "slack_enabled": configured(NativeProvider.SLACK),
         "google_signin_enabled": bool(s.google_signin_enabled),
     }

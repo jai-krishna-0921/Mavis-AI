@@ -1,6 +1,6 @@
 """Telegram link sign-in. The browser asks for a nonce (bound to it by an HttpOnly pre-session cookie), the
-person opens https://t.me/<bot>?start=login_<nonce>[_<invite>] and the bot asks them to confirm (what is
-asking, and a code that the browser also shows). Only the Approve button binds the nonce to their user,
+person opens https://telegram.me/<bot>?start=login_<nonce>[_<invite>] and the bot asks them to confirm (what
+is asking, and a code that the browser also shows). Only the Approve button binds the nonce to their user,
 and the browser's poll turns the bound nonce into a session exactly once.
 
 The start payload is limited to 64 characters of [A-Za-z0-9_-]: "login_" + 32 hex + "_" + "MAV" + 10 = 52."""
@@ -17,6 +17,7 @@ from sqlalchemy import delete, update
 
 from mavis.access import admission
 from mavis.access.codes import deep_link_param, normalize
+from mavis.channels.telegram_links import telegram_link
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.events import Event
@@ -57,7 +58,7 @@ def parse_start(text: str) -> StartLogin | None:
 def deep_link(nonce: str, invite: str | None = None) -> str:
     tail = f"_{deep_link_param(invite)}" if invite else ""
     bot = get_settings().telegram_bot_username or "Mavis247_bot"
-    return f"https://t.me/{bot}?start=login_{nonce}{tail}"
+    return telegram_link(bot, f"login_{nonce}{tail}")
 
 
 def describe_agent(user_agent: str) -> str:

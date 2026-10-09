@@ -53,7 +53,7 @@ async def test_me_hands_out_the_csrf_token_and_mutations_need_it(app):
     async with c:
         me = (await c.get(f"{API}/me")).json()
         assert me["user_id"] == "1" and me["csrf"] == csrf["X-Mavis-CSRF"]
-        assert me["channels"]["telegram"]["open_url"] == "https://t.me/MavisTestBot"
+        assert me["channels"]["telegram"]["open_url"] == "https://telegram.me/MavisTestBot"
         assert (await c.patch(f"{API}/preferences", json={"name": "Priya"})).status_code == 403
         assert (await c.patch(f"{API}/preferences", json={"name": "Priya"},
                               headers={"X-Mavis-CSRF": "wrong"})).status_code == 403
@@ -178,7 +178,7 @@ async def test_telegram_sign_in_end_to_end(app):
     async with new_client(app) as c:
         started = await start_login(c)
         nonce = started["nonce"]
-        assert started["deep_link"] == f"https://t.me/MavisTestBot?start=login_{nonce}"
+        assert started["deep_link"] == f"https://telegram.me/MavisTestBot?start=login_{nonce}"
         assert len(deep_payload := started["deep_link"].split("start=")[1]) <= 64 and deep_payload
         assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json() == {"status": "pending"}
         assert len(started["code"]) == 4 and started["code"].isdigit()
@@ -599,7 +599,7 @@ async def test_public_config_needs_no_session_and_reflects_settings(app):
     async with new_client(app) as c:
         r = await c.get(f"{API}/config")
         assert r.status_code == 200
-        assert r.json() == {"bot_username": "MavisTestBot", "bot_url": "https://t.me/MavisTestBot",
+        assert r.json() == {"bot_username": "MavisTestBot", "bot_url": "https://telegram.me/MavisTestBot",
                             "slack_enabled": True, "google_signin_enabled": True}
 
 
