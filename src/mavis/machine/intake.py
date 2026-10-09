@@ -15,6 +15,7 @@ from mavis.channels import get_channel
 from mavis.config import get_settings
 from mavis.domain.events import Event
 from mavis.domain.messages import Outbound
+from mavis.machine.errors import QuotaExceeded
 from mavis.machine.paths import safe_name
 from mavis.machine.ports import Provenance
 from mavis.store.db import utcnow
@@ -70,7 +71,13 @@ async def on_user_message(event: Event) -> None:
         return
     if len(data) > limit:
         return
-    await rt.store.put(event.user_id, f"inbox/{name}", data, provenance=Provenance.USER_UPLOAD)
+    try:
+        await rt.store.put(event.user_id, f"inbox/{name}", data, provenance=Provenance.USER_UPLOAD)
+    except QuotaExceeded as exc:  # storage is full or the file is over the limit: say so plainly
+        await outbox.enqueue_now(
+            Outbound(user_id=event.user_id, text=exc.user_text, dedupe_key=f"intake:{event.id}:quota")
+        )
+        return
     log.info("machine.intake", user_id=event.user_id, size=len(data))
 
 

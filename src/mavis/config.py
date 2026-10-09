@@ -264,7 +264,12 @@ class Settings(BaseSettings):
     machine_assumed_active_fraction: float = 1.0
     machine_stdout_max_chars: int = 8000
     pip_index_url: str = "https://pypi.org/simple"
-    machine_package_allow: list[str] = []
+    # empty means this default list; "*" alone opens every package (not recommended)
+    machine_package_allow: list[str] = [
+        "pandas", "numpy", "matplotlib", "openpyxl", "xlsxwriter", "python-docx", "python-pptx", "fpdf2",
+        "pypdf", "scipy", "seaborn", "plotly", "tabulate",
+    ]
+    machine_allow_egress: bool = False  # prod: only with an explicit yes when the interpreter has network
     machine_platform_tags: list[str] = ["manylinux2014_x86_64", "manylinux_2_17_x86_64", "linux_x86_64"]
     machine_python_version: str = "3.12"
     browser_domain_deny: list[str] = []
@@ -315,6 +320,11 @@ class Settings(BaseSettings):
     # --- admin ----------------------------------------------------------------
     admin_user: str = "admin"
     admin_password: str = ""
+
+    @property
+    def file_max_bytes(self) -> int:
+        """The one size limit for a workspace file: what Telegram can carry and the machine can take back."""
+        return min(self.machine_file_max_mb, self.agentcore_write_max_mb) * 1024 * 1024
 
     @property
     def allowed_telegram_chat_ids(self) -> list[int]:

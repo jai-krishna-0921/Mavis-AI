@@ -230,6 +230,13 @@ To turn it on in production:
 4. Redeploy. `MACHINE_BROWSER_ENABLED` stays false until the browser slice ships.
 5. Check it live: `MAVIS_LIVE_AGENTCORE=1 AWS_PROFILE=<profile> AWS_REGION=ap-south-1 uv run pytest tests/machine/test_live_tools.py` (costs a few cents).
 
+Safety controls (all on by default):
+
+- **Network isolation.** Run `deploy/aws/machine.sh --apply --custom-interpreter` (dry run without `--apply`) to create the `mavis_ci_sandbox` code interpreter with network mode SANDBOX, then set `AGENTCORE_CODE_INTERPRETER_ID` to its id. In prod the worker probes the interpreter once at startup and registers the machine tools only when it has no network. If egress is possible the tools stay off and the log says why. `MACHINE_ALLOW_EGRESS=true` is the explicit, not advised, override.
+- **Instance metadata (IMDS).** Containers reach the `mavis-ec2` role credentials only if the instance hop limit is 2, so a DOCKER-USER iptables rule (`deploy/aws/imds-guard.sh`, persisted by the `mavis-imds-guard` systemd unit that `bootstrap.sh` and `deploy.sh` install through `deploy/aws/imds.sh install`) drops 169.254.169.254 from every container except api, worker and timer, which have fixed addresses on the compose network (`10.89.77.10` to `.12`). `iam-role.sh --apply` raises the hop limit to 2 only after `imds.sh verify-rule` passes, then runs `imds.sh verify-containers` (the token endpoint must fail from postgres and redis and work from the worker) and sets the limit back to 1 if that fails. `deploy.sh` repeats the check after every deploy. All scripts print their plan without `--apply` or `--dry-run`; `imds.sh install --dry-run` shows the exact iptables rules.
+- **Files.** One size limit, the smaller of `MACHINE_FILE_MAX_MB` and `AGENTCORE_WRITE_MAX_MB`, applies to every stored file. Larger files are refused with a plain message, and an older file over the limit stays in the user's files but is not copied into the machine. Objects the bucket lifecycle has expired are marked deleted in the file list when noticed.
+- **Packages.** `MACHINE_PACKAGE_ALLOW` defaults to pandas, numpy, matplotlib, openpyxl, xlsxwriter, python-docx, python-pptx, fpdf2, pypdf, scipy, seaborn, plotly and tabulate (an empty value means this list, `*` allows everything). Cached wheels are re-hashed on every use.
+
 Roll back by setting `MACHINE_ENABLED=false` and restarting the worker. Slack does not forward files to the machine yet; Telegram documents and photos do.
 
 ## Documentation

@@ -24,7 +24,6 @@ from mavis.tools.registry import (
     TaintPolicy,
     ToolContext,
     ToolRegistry,
-    current_run,
     current_task_id,
     host_of,
 )
@@ -56,6 +55,8 @@ def _guarded(fn):
             return ToolOutput(user_text=exc.user_text)
         except MachineBusy as exc:
             return ToolOutput(model_note=f"The machine is busy: {exc}. Try once more later, or wrap up.")
+        except FileNotFoundError as exc:
+            return ToolOutput(model_note=f"{exc} no longer exists (it expired or was deleted).")
         except SandboxPathError as exc:
             return ToolOutput(model_note=f"Bad path: {exc}. Use a relative path like out/chart.png.")
         except ActionFailed as exc:
@@ -226,9 +227,8 @@ class WriteArgs(BaseModel):
 @_guarded
 async def files_write(user_id: int, args: WriteArgs) -> ToolOutput:
     rt, task_id = _ctx()
-    run = current_run.get()
-    prov = Provenance.GENERATED_TAINTED if (run is not None and run.tainted) else Provenance.GENERATED_CLEAN
-    await rt.write_in(user_id, task_id, guard(args.path), args.content.encode(), provenance=prov)
+    await rt.write_in(user_id, task_id, guard(args.path), args.content.encode(),
+                      provenance=rt.provenance_for(task_id))
     return ToolOutput(model_note=f"wrote {guard(args.path)} ({_size(len(args.content.encode()))})")
 
 
@@ -273,7 +273,7 @@ async def files_send(user_id: int, args: SendArgs) -> ToolOutput:
     meta = await rt.store.meta(user_id, guard(args.path))
     if meta is None:
         return ToolOutput(model_note=f"{args.path} does not exist")
-    data = await rt.store.get(user_id, meta.path)
+    data = await rt.read_stored(user_id, meta.path)
     name = safe_name(Path(meta.path).name)
     aid = await rt.add_artifact(user_id, task_id, name, data, title=f"{name} ({_size(len(data))})")
     await rt.deliver(user_id, task_id, aid)
