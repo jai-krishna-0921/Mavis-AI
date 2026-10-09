@@ -13,7 +13,7 @@ from typing import Any
 
 from mavis.domain import timeutil
 from mavis.domain.memory import SINGLE_VALUED_RELS, Entity, Relation
-from mavis.memory.graph import edge_score
+from mavis.memory.graph import Fact, edge_score
 from mavis.memory.names import USER_KEY, is_user, node_key, normalize_name, sanitize_label, sanitize_rel
 
 _DEDUPE = "reduce(acc = [], a IN coalesce(n.{f}, []) + ${p} | CASE WHEN a IN acc THEN acc ELSE acc + a END)"
@@ -34,8 +34,8 @@ Q_ENTITIES = (
 )
 Q_DUMP = (
     "MATCH (a:Entity {user_id:$u})-[r]->(b:Entity {user_id:$u}) WHERE r.valid_to IS NULL "
-    "RETURN a.name AS subject, type(r) AS relation, b.name AS object, r.statement AS statement "
-    "ORDER BY r.valid_from"
+    "RETURN a.name AS subject, type(r) AS relation, b.name AS object, r.statement AS statement, "
+    "coalesce(r.source_ref, '') AS source_ref ORDER BY r.valid_from"
 )
 Q_FORGET_EDGES = (
     "MATCH (:Entity {user_id:$u})-[r]->() WHERE toLower(r.statement) CONTAINS toLower($n) "
@@ -122,7 +122,8 @@ def q_neighborhood(hops: int) -> str:
         "MATCH (s:Entity {user_id:$u}) WHERE s.key IN $keys "
         f"MATCH p=(s)-[*1..{h}]-(:Entity) WHERE all(r IN relationships(p) WHERE r.valid_to IS NULL) "
         "UNWIND relationships(p) AS r WITH DISTINCT r "
-        "RETURN r.statement AS st, r.confidence AS conf, r.valid_from AS vf "
+        "RETURN r.statement AS st, r.confidence AS conf, r.valid_from AS vf, "
+        "coalesce(r.source_ref, '') AS src "
         "ORDER BY r.valid_from DESC LIMIT $limit"
     )
 
@@ -143,7 +144,7 @@ def rank_candidates(rows: list[dict], limit: int, now: datetime | None = None) -
         key=lambda r: edge_score(float(r.get("conf") or 0.0), _to_dt(r.get("vf")), now),
         reverse=True,
     )
-    return [r["st"] for r in scored[:limit]]
+    return [Fact(r["st"], r.get("src") or "") for r in scored[:limit]]
 
 
 def plan_dedupe(edges: list[dict]) -> list[str]:

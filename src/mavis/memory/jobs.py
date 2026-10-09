@@ -85,8 +85,30 @@ def learn_lock(user_id: int):
     return lock(f"learn:{user_id}")
 
 
+async def _handle_record(job: Job) -> None:
+    """A Gmail or Slack record (memory.records): learned on its own, per user, never batched with other
+    texts, so its facts keep the record they came from. The same record twice is a no-op."""
+    from mavis.memory import records
+
+    p = job.payload
+    source_ref = str(p.get("source_ref", ""))
+    marker = records.record_marker(job.user_id, source_ref)
+    async with learn_lock(job.user_id):
+        if await events.seen(marker):
+            return
+        try:
+            await records.learn_record(get_memory(), job.user_id, p)
+        except LLMError as exc:
+            await _defer_learn(job, p, exc)
+            return
+        await events.record(marker)
+
+
 async def handle_learn(job: Job) -> None:
     p = job.payload
+    if p.get("record"):
+        await _handle_record(job)
+        return
     source_ref = str(p.get("source_ref", ""))
     marker = f"learn:{source_ref}"
     if (due := _not_before(p)) is not None and due > timeutil.now():
@@ -122,7 +144,8 @@ async def _coalesce(user_id: int, p: dict) -> tuple[dict, list[int]]:
     from mavis.store.repo import users as users_repo  # lazy: the job layer starts before the store is used
 
     def group(x: dict) -> tuple:
-        return (x.get("trust", Trust.USER.value), bool(x.get("conversation", True)), bool(x.get("tainted")))
+        return (x.get("trust", Trust.USER.value), bool(x.get("conversation", True)), bool(x.get("tainted")),
+                bool(x.get("record")))
 
     waiting = await wakeups_repo.list_pending(user_id, WakeupKind.SYSTEM_LEARN)
     parked = [(w.id, w.payload["learn"]) for w in waiting
