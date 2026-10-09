@@ -61,6 +61,9 @@ markers = ["slow: performance tests (deselect with -m 'not slow')", "inline_retr
 testpaths = ["tests"]
 pythonpath = ["."]
 filterwarnings = ["ignore::DeprecationWarning:telegram.*"]
+# each full run writes ~2 GB of tmp_path data to a RAM-backed /tmp: keep only failing tests' dirs, one run
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"
 
 [tool.ruff]
 line-length = 110
