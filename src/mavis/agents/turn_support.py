@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from mavis.agents import clarify, context_hooks
 from mavis.bus import get_bus
 from mavis.domain import timeutil
-from mavis.domain.events import Event, Job, JobKind, Trust
+from mavis.domain.events import Event, Job, JobKind
 from mavis.domain.messages import TAINT_SUFFIX, Role, tainted_event_id
 from mavis.domain.timefmt import message_stamp, stamped
 from mavis.initiative import wiring
@@ -226,8 +226,15 @@ async def enqueue_learn(
     user_id: int, event: Event, text: str, previous_reply: str | None, original: str | None = None,
     *, tainted: bool = False,
 ) -> None:
-    """`tainted`: the turn or the included previous reply saw untrusted tool output: learn as untrusted."""
-    trust = Trust.UNTRUSTED.value if tainted else event.trust.value
+    """`tainted`: the turn or the included previous reply saw untrusted tool output.
+
+    A LEARN text holds only the user's own lines plus the fenced previous reply (context, never a source),
+    so third-party output cannot reach it: the user's words keep the event's trust (a tainted turn used to
+    downgrade them, which kept "I'm Arjun" and "my sister Priya lives in Pune" out of the graph and the
+    profile). What taint changes is the grounding: with `tainted` every item must be named in the user's
+    own words, whether or not a reply is included as context. An event that is itself untrusted (an email)
+    stays untrusted."""
+    trust = event.trust.value
     convo = learn_text(text, previous_reply, original)
     # A short head start for the reply's own follow-up calls. Nothing depends on it: the limiter queues
     # LEARN behind chat work and the job layer retries until it succeeds.
@@ -235,6 +242,6 @@ async def enqueue_learn(
     await get_bus().enqueue(Job(
         id=f"learn:{event.id}", user_id=user_id, kind=JobKind.LEARN,
         payload={"text": convo, "source_ref": event.id, "trust": trust, "conversation": True,
-                 "not_before": not_before.isoformat(),
+                 "tainted": bool(tainted), "not_before": not_before.isoformat(),
                  "anchor_at": timeutil.ensure_utc(event.occurred_at).isoformat()},
     ))

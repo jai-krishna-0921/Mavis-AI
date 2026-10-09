@@ -18,12 +18,13 @@ from mavis.memory import recall as recall_mod
 from mavis.memory.dates import apply_relative_day
 from mavis.memory.embeddings import Embedder, get_embedder
 from mavis.memory.extractor import extract
-from mavis.memory.graph import GraphStore, make_graph
+from mavis.memory.graph import GraphStore, is_third_party, make_graph
 from mavis.memory.names import is_user
 from mavis.memory.recall import LoopsReader
 from mavis.memory.resolver import resolve
 from mavis.memory.spotter import SpotterCache
 from mavis.memory.vector import QdrantVectorStore, VectorStore
+from mavis.store.repo import events as events_repo
 from mavis.store.repo import loops as loops_repo
 from mavis.store.repo import profile as profile_repo
 from mavis.store.repo import users
@@ -83,7 +84,7 @@ def assistant_context_of(text: str) -> str:
     return _split_learn_text(text)[1]
 
 
-_WORD = re.compile(r"[a-z0-9]+")
+_WORD = re.compile(r"[^\W_]+")  # any letters or digits: names are not only ASCII
 _GROUNDING_STEM = 4  # "claims" grounds "claim", "renewal" grounds "renew"
 
 
@@ -118,22 +119,64 @@ def _words_match(tokens: list[str], said: str) -> bool:
 
 def _named(name: str, said: str) -> bool:
     """The user's words name this entity: the user themself, the full name, or one of its name words
-    ("Ravi" names "Ravi Menon")."""
-    if is_user(name) or (name.strip() and name.strip().casefold() in said.casefold()):
+    ("Ravi" names "Ravi Menon"). Whole words only: "Ravi" is not named by "ravine" or "Ravishankar"."""
+    if is_user(name):
         return True
-    return _words_match([w for w in _WORD.findall(name.casefold()) if len(w) >= 3], said)
+    words = _WORD.findall(said.casefold())
+    parts = _WORD.findall(name.casefold())
+    if not parts:
+        return False
+    n = len(parts)
+    if any(words[i:i + n] == parts for i in range(len(words) - n + 1)):
+        return True
+    return any(len(p) >= 2 and p in words for p in parts)
 
 
-def grounded_in_user(x: Extraction, said: str, context: str | None = None) -> Extraction:
+# Words that say whose fact it is, not what it is: never evidence that the user said the content.
+_PERSPECTIVE = frozenset(
+    "user users user's i me my mine myself we us our you your yours he him his she her hers they them their "
+    "is are was were be been am has have had does did s".split()
+)
+
+
+def _supported(content: str, said: str, skip: set[str]) -> bool:
+    """Strict grounding of stored content: more than half of its content words (not perspective words,
+    not the words in `skip`: the subject's name and the user's own name) appear in the user's own words,
+    exactly or by stem. A single shared word does not launder a sentence the user never said."""
+    tokens = [t for t in loops_repo.title_tokens(content) if t not in _PERSPECTIVE and t not in skip]
+    if not tokens:
+        return False
+    hit = sum(1 for t in tokens if _words_match([t], said))
+    return hit * 2 > len(tokens)
+
+
+def _name_words(*names: str) -> set[str]:
+    return {w for n in names for w in _WORD.findall(n.casefold())}
+
+
+def grounded_in_user(
+    x: Extraction, said: str, context: str | None = None, *, strict: bool = False,
+    own_names: tuple[str, ...] = (),
+) -> Extraction:
     """Keep only what the user's own words support (T3, I5); `context` is the assistant's previous reply
     (see _grounded for how it decides the leading word). Anything lifted from the assistant context
     is dropped: loops and events, entities the user never named, relations whose every non-user side
-    the user did not name, and profile updates whose value the user did not say."""
+    the user did not name, and profile updates whose value the user did not say.
+
+    `strict` (the turn read third-party output): naming is not support. A stored relation (its statement
+    and object) and a profile value must also be said by the user in substance (_supported), so a reply
+    that carries an email's claim about "Alice" cannot be learned because the user said "thanks Alice"."""
     loops = [lp for lp in x.loops if _grounded(lp.title, lp.entities, said, context)]
     events = [ev for ev in x.events if _grounded(ev.title, ev.with_people, said, context)]
     entities = [e for e in x.entities if _named(e.name, said)]
     relations = [r for r in x.relations if _named(r.subject, said) and _named(r.object, said)]
-    profile = [u for u in x.profile_updates if _words_match(loops_repo.title_tokens(u.value), said)]
+    me = _name_words(*own_names)
+    if strict:
+        relations = [r for r in relations
+                     if _supported(f"{r.statement} {r.object}", said, _name_words(r.subject) | me)]
+        profile = [u for u in x.profile_updates if _supported(u.value, said, me)]
+    else:
+        profile = [u for u in x.profile_updates if _words_match(loops_repo.title_tokens(u.value), said)]
     dropped = {"loops": len(x.loops) - len(loops), "events": len(x.events) - len(events),
                "entities": len(x.entities) - len(entities), "relations": len(x.relations) - len(relations),
                "profile_updates": len(x.profile_updates) - len(profile)}
@@ -233,11 +276,13 @@ class MemoryService:
 
     async def learn(
         self, user_id: int, text: str, source_ref: str = "", trust: Trust = Trust.USER,
-        conversation: bool = True, anchor_at: datetime | None = None,
+        conversation: bool = True, anchor_at: datetime | None = None, strict: bool = False,
     ) -> Extraction:
         """Extract and persist. LLMError from extraction propagates; the LEARN job drops it (best effort).
 
         `trust` and `conversation` are the origin's provenance; hooks receive them unchanged.
+        `strict`: the turn saw third-party output, so every item must be named in the user's own words (the
+        same grounding as when an assistant reply is included), even when no reply is.
         `anchor_at` is when the text was written (the turn, the email): relative times in it ("7 PM",
         "tomorrow") resolve against that, not against when this job happens to run.
 
@@ -259,8 +304,10 @@ class MemoryService:
         # The assistant's own words are never a memory source (only fenced context for the extractor):
         # what is stored is the user's side of a chat turn, whatever its trust.
         own_words = said if conversation else text
-        if conversation and said != text.strip():  # an assistant reply was included as context (T3)
-            extraction = grounded_in_user(extraction, said, context)
+        # a reply was included as context (T3), or the turn read third-party output (strict)
+        if conversation and (strict or said != text.strip()):
+            extraction = grounded_in_user(extraction, said, context, strict=strict,
+                                          own_names=tuple(n for n in (user.name, card.name) if n))
 
         resolution = await resolve(extraction, await self.graph.entities(user_id), self.embedder)
         trusted = trust is Trust.USER
@@ -309,13 +356,24 @@ class MemoryService:
     async def describe_user(self, user_id: int) -> str:
         await self.init()
         card = await profile_repo.get(user_id)
-        facts = [d["statement"] for d in await self.graph.dump(user_id)][-15:]
+        facts = [d["statement"] for d in await self.graph.dump(user_id)
+                 if not is_third_party(d.get("source_ref"))][-15:]
         parts = []
         if rendered := card.render():
             parts.append(rendered)
         if facts:
             parts.append("Things I've picked up:\n" + "\n".join(f"- {f}" for f in facts))
         return "\n\n".join(parts) or "I don't know much about you yet."
+
+    async def forget_source(self, user_id: int, prefix: str) -> int:
+        """Everything learned from one connected source ("gmail:", "slack:"): its graph facts, its signal
+        vectors and the processed markers, so a later reconnect learns the records again."""
+        await self.init()
+        removed = await self.graph.forget_source(user_id, prefix)
+        removed += await self.vector.forget_source(user_id, prefix)
+        await events_repo.forget_prefix(f"learn:{user_id}:{prefix}")
+        self.invalidate(user_id)
+        return removed
 
     async def forget(self, user_id: int, needle: str) -> int:
         if not needle.strip():

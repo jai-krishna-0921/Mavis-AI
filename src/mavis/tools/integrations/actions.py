@@ -186,11 +186,15 @@ class SlackChannelsArgs(ToolArgs):
 class SlackHistoryArgs(ToolArgs):
     channel: str = Field(description="Channel id or name")
     limit: int = Field(default=20, ge=1, le=100)
+    thread_ts: str = Field(default="", description="Read the replies of the thread that starts at this ts")
+    oldest: str = Field(default="", description="Only messages after this Slack ts")
+    cursor: str = Field(default="", description="next_cursor from the previous page")
 
 
 class SlackSendArgs(ToolArgs):
     channel: str
     text: str
+    thread_ts: str = Field(default="", description="Reply inside the thread that starts at this ts")
 
 
 class NotionSearchArgs(ToolArgs):

@@ -15,6 +15,10 @@ PASSTHROUGH: set[str] = {
     "PROGRESS_CARD_ENABLED", "PROGRESS_CARD_AFTER_S", "PROGRESS_EDIT_MIN_INTERVAL_S",
     "PROGRESS_MAX_SCREENSHOTS", "TELEGRAM_GLOBAL_SEND_RATE", "TEST_MIRROR_CHAT_ID",
     "TASK_TIMEOUT_MAX_S", "MACHINE_TASK_TIMEOUT_S", "MACHINE_FILE_MAX_MB",
+    # Native Google and Slack connectors (spec 2026-10-09)
+    "INTEGRATION_PROVIDER", "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "SLACK_CLIENT_ID",
+    "SLACK_CLIENT_SECRET", "SLACK_SIGNING_SECRET", "NATIVE_TOKEN_KEK", "NATIVE_TOKEN_KEK_PREVIOUS",
+    "SYNC_GMAIL_DAYS", "SYNC_SLACK_DAYS", "SYNC_CALENDAR_BACK_DAYS", "SYNC_CALENDAR_AHEAD_DAYS",
 }
 
 
@@ -73,3 +77,17 @@ def test_sink_file_lives_in_the_shared_volume():
 def test_verify_machine_runs_in_the_worker_that_writes_the_sink():
     text = (ROOT / "deploy/aws/deploy.sh").read_text()
     assert "exec -T worker python -m scripts.machine_demo" in text
+
+
+def test_the_reverse_proxy_serves_the_oauth_callback_and_the_slack_webhook():
+    caddy = (ROOT / "Caddyfile").read_text()
+    public = next(ln for ln in caddy.splitlines() if "@public path" in ln).split()
+    assert "/oauth/*" in public and "/webhooks/*" in public
+    assert "/telegram/webhook" in public and "/connect/callback" in public
+
+
+def test_deploy_forces_the_native_provider_after_copying_local_values():
+    text = (ROOT / "deploy" / "aws" / "deploy.sh").read_text()
+    assert "set_key INTEGRATION_PROVIDER native force" in text
+    forced = text.index("set_key INTEGRATION_PROVIDER native force")
+    assert forced > text.index("SLACK_SIGNING_SECRET INTEGRATION_PROVIDER")

@@ -80,6 +80,9 @@ class OutboxMessage(Base):
     media: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
     proactive: Mapped[bool] = mapped_column(default=False)
     priority: Mapped[int] = mapped_column(Integer, default=0, index=True)  # 0 chat, 1 proactive, 2 broadcast
+
+    # chat handle of a non-default channel (Slack)
+    route: Mapped[str | None] = mapped_column(String(200), default=None)
     dedupe_key: Mapped[str | None] = mapped_column(String(200), unique=True)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     attempts: Mapped[int] = mapped_column(default=0)
@@ -489,3 +492,37 @@ class LlmUsage(Base):
     prompt_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
     completion_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
     cost_micros: Mapped[int] = mapped_column(BigInteger, default=0)
+
+class NativeGrant(Base):
+    """One user's OAuth grant to one native provider (google | slack). Tokens are sealed (envelope
+    encryption bound to user, provider and column); `account` holds non-secret facts only."""
+
+    __tablename__ = "native_grants"
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_native_grants_user_provider"),
+        UniqueConstraint("provider", "account_key", name="uq_native_grants_provider_account"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(16))
+    account: Mapped[dict] = mapped_column(JSON, default=dict)
+    account_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    access_token: Mapped[str] = mapped_column(Text)
+    refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="ACTIVE")
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class NativeOAuthState(Base):
+    """A consent redirect we issued. Deleting the row is what consumes the state (single use)."""
+
+    __tablename__ = "native_oauth_states"
+
+    nonce: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(16))
+    pending_id: Mapped[int | None] = mapped_column(nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(index=True)

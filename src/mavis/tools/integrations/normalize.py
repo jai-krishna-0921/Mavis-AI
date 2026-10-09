@@ -11,7 +11,7 @@ from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, Trust
 
 SNIPPET_LIMIT = 1000
-HEADER_KEYS = frozenset({"list-unsubscribe", "from", "to", "subject"})
+HEADER_KEYS = frozenset({"list-unsubscribe", "from", "to", "cc", "subject", "precedence", "auto-submitted"})
 
 
 _AUTH_PASS = re.compile(r"\b(?:dmarc|dkim)\s*=\s*pass\b", re.I)
@@ -152,6 +152,13 @@ def normalize_calendar_event(d: dict) -> dict[str, Any]:
 def normalize_slack(d: dict) -> dict[str, Any]:
     out = {
         "channel": str(pick(d, "channel", "channel_id", "event.channel", default="")),
+        "team": str(pick(d, "team", "team_id", "event.team", "user_team", default="")),
+        "subtype": str(pick(d, "subtype", "event.subtype", default="")),
+        "bot_id": str(pick(d, "bot_id", "event.bot_id", "bot_profile.id", default="")),
+        "user_name": str(pick(d, "user_profile.real_name", "user_profile.display_name", "user_name",
+                              "event.user_profile.real_name", default="")),
+        "user_email": str(pick(d, "user_profile.email", "user_email", "event.user_profile.email",
+                               default="")),
         "ts": str(pick(d, "ts", "event.ts", "message_ts", default="")),
         "user": str(pick(d, "user", "user_id", "event.user", default="")),
         "text": str(pick(d, "text", "event.text", default=""))[:SNIPPET_LIMIT],

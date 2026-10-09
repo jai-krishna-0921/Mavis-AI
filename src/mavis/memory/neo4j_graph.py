@@ -13,7 +13,7 @@ from typing import Any
 
 from mavis.domain import timeutil
 from mavis.domain.memory import SINGLE_VALUED_RELS, Entity, Relation
-from mavis.memory.graph import edge_score
+from mavis.memory.graph import THIRD_PARTY_PREFIX, Fact, edge_score, is_third_party
 from mavis.memory.names import USER_KEY, is_user, node_key, normalize_name, sanitize_label, sanitize_rel
 
 _DEDUPE = "reduce(acc = [], a IN coalesce(n.{f}, []) + ${p} | CASE WHEN a IN acc THEN acc ELSE acc + a END)"
@@ -37,8 +37,8 @@ Q_ENTITIES = (
 )
 Q_DUMP = (
     "MATCH (a:Entity {user_id:$u})-[r]->(b:Entity {user_id:$u}) WHERE r.valid_to IS NULL "
-    "RETURN a.name AS subject, type(r) AS relation, b.name AS object, r.statement AS statement "
-    "ORDER BY r.valid_from"
+    "RETURN a.name AS subject, type(r) AS relation, b.name AS object, r.statement AS statement, "
+    "coalesce(r.source_ref, '') AS source_ref ORDER BY r.valid_from"
 )
 Q_FORGET_EDGES = (
     "MATCH (:Entity {user_id:$u})-[r]->() WHERE toLower(r.statement) CONTAINS toLower($n) "
@@ -47,6 +47,13 @@ Q_FORGET_EDGES = (
 Q_FORGET_NODES = (
     "MATCH (n:Entity {user_id:$u}) WHERE n.label <> 'User' AND toLower(n.name) CONTAINS toLower($n) "
     "OPTIONAL MATCH (n)-[r]-() WITH n, count(r) AS c DETACH DELETE n RETURN coalesce(sum(c), 0) AS c"
+)
+Q_FORGET_SOURCE = (
+    "MATCH (:Entity {user_id:$u})-[r]->(:Entity) WHERE r.source_ref STARTS WITH $p "
+    "WITH collect(r) AS rs FOREACH (x IN rs | DELETE x) RETURN size(rs) AS c"
+)
+Q_DROP_ORPHANS = (
+    "MATCH (n:Entity {user_id:$u}) WHERE n.label <> 'User' AND NOT (n)--() DETACH DELETE n"
 )
 Q_DROP_EDGES = (
     "MATCH (d:Entity {user_id:$u, key:$drop})-[r]-(o:Entity) "
@@ -98,6 +105,15 @@ def q_newer_single_valued(rel: str) -> str:
     )
 
 
+def q_current_edges_from(rel: str) -> str:
+    """Current edges of this relation out of `src`: where they go and what they were learned from."""
+    r = sanitize_rel(rel)
+    return (
+        f"MATCH (a:Entity {{user_id:$u, key:$src}})-[r:{r}]->(b:Entity) WHERE r.valid_to IS NULL "
+        "RETURN b.key AS dst, coalesce(r.source_ref, '') AS src"
+    )
+
+
 def q_update_current_edge(rel: str) -> str:
     r = sanitize_rel(rel)
     return (
@@ -126,7 +142,8 @@ def q_neighborhood(hops: int) -> str:
         f"MATCH p=(s)-[*1..{h}]-(:Entity) WHERE all(r IN relationships(p) WHERE r.valid_to IS NULL) "
         "AND all(n IN nodes(p) WHERE n.user_id = $u) "
         "UNWIND relationships(p) AS r WITH DISTINCT r "
-        "RETURN r.statement AS st, r.confidence AS conf, r.valid_from AS vf "
+        "RETURN r.statement AS st, r.confidence AS conf, r.valid_from AS vf, "
+        "coalesce(r.source_ref, '') AS src "
         "ORDER BY r.valid_from DESC LIMIT $limit"
     )
 
@@ -147,7 +164,7 @@ def rank_candidates(rows: list[dict], limit: int, now: datetime | None = None) -
         key=lambda r: edge_score(float(r.get("conf") or 0.0), _to_dt(r.get("vf")), now),
         reverse=True,
     )
-    return [r["st"] for r in scored[:limit]]
+    return [Fact(r["st"], r.get("src") or "") for r in scored[:limit]]
 
 
 def plan_dedupe(edges: list[dict]) -> list[str]:
@@ -220,6 +237,14 @@ class Neo4jGraphStore:
         when = (timeutil.ensure_utc(at) if at else timeutil.now()).isoformat()
         params = dict(u=user_id, src=src, dst=dst, statement=rel.statement, confidence=rel.confidence,
                       source_ref=source_ref, at=when)
+        if is_third_party(source_ref):
+            # A record from mail or Slack never rewrites or ends an edge the user's own words created.
+            current = await self._run(q_current_edges_from(r), u=user_id, src=src)
+            same = [e for e in current if e["dst"] == dst]
+            if same and not any(is_third_party(e["src"]) for e in same):
+                return
+            if not same and r in SINGLE_VALUED_RELS and any(not is_third_party(e["src"]) for e in current):
+                return
         rows = await self._run(q_update_current_edge(r), **params)
         if not rows or rows[0]["c"] == 0:
             to = None
@@ -264,6 +289,13 @@ class Neo4jGraphStore:
         """Remove the user's whole graph in batches (account deletion). Returns the number of nodes."""
         rows = await self._run(Q_COUNT_USER, u=user_id)
         await self._run(Q_DELETE_USER, u=user_id)  # auto-commit: CALL IN TRANSACTIONS cannot run in a tx
+        return int(rows[0]["c"]) if rows else 0
+
+    async def forget_source(self, user_id: int, prefix: str) -> int:
+        if not prefix.strip():
+            return 0
+        rows = await self._run(Q_FORGET_SOURCE, u=user_id, p=THIRD_PARTY_PREFIX + prefix)
+        await self._run(Q_DROP_ORPHANS, u=user_id)
         return int(rows[0]["c"]) if rows else 0
 
     async def merge_entities(self, user_id: int, keep: str, drop: str, label: str) -> None:

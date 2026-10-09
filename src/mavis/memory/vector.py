@@ -53,6 +53,7 @@ class VectorStore(Protocol):
         self, user_id: int, query: str, k: int = 6, min_score: float = 0.35
     ) -> list[tuple[str, str, datetime | None]]: ...
     async def forget(self, user_id: int, needle: str) -> int: ...
+    async def forget_source(self, user_id: int, prefix: str) -> int: ...
     async def count(self, user_id: int) -> int: ...
     async def delete_user(self, user_id: int) -> int: ...
 
@@ -213,6 +214,16 @@ class QdrantVectorStore:
             await self._client.delete(COLLECTION, points_selector=models.FilterSelector(
                 filter=_user_filter(user_id)))
         return n
+
+    async def forget_source(self, user_id: int, prefix: str) -> int:
+        """Delete the points learned from records whose source_ref starts with `prefix`."""
+        if not prefix.strip():
+            return 0
+        ids = [p.id for p in await self._scroll_user(user_id)
+               if str((p.payload or {}).get("source_ref", "")).startswith(prefix)]
+        if ids:
+            await self._client.delete(COLLECTION, points_selector=models.PointIdsList(points=ids))
+        return len(ids)
 
     async def count(self, user_id: int) -> int:
         res = await self._client.count(COLLECTION, count_filter=_user_filter(user_id), exact=True)

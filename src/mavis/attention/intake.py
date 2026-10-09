@@ -94,12 +94,16 @@ class Intake:
         forward: Forward,
         provider: IntegrationProvider | None = None,
         on_backlog_empty: OnEmpty | None = None,
+        connectors: Any = None,
     ) -> None:
+        self._connectors = connectors  # attention.connector_ingest.ConnectorIngest: mail into the graph
         self._pipeline, self._loops, self._wakeups, self._thresholds = pipeline, loops, wakeups, thresholds
         self._forward, self._provider, self._on_backlog_empty = forward, provider, on_backlog_empty
 
     async def on_email(self, event: Event) -> None:
         p = event.payload
+        if self._connectors is not None:
+            await self._connectors.email(event.user_id, p)  # never raises; bulk and own mail stay out
         labels = set(p.get("labels") or [])
         if p.get("from_me") or "SENT" in labels or not p.get("message_id"):
             return

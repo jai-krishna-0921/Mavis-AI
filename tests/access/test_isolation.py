@@ -152,3 +152,194 @@ async def test_staged_files_land_in_the_users_directory(db, settings, tmp_path):
     out = artifacts.stage(7, src, task_id=3, name="r.html")
     assert out == artifacts.user_dir(7, 3) / "r.html" and out.read_text() == "<p>hi</p>"
     assert artifacts.guard(7, out) == out.resolve()
+
+
+# --- native Google and Slack grants (spec 6.1 extended to the connectors) -----------------------------------
+
+from datetime import timedelta  # noqa: E402
+
+from cryptography.exceptions import InvalidTag  # noqa: E402
+from sqlalchemy import update  # noqa: E402
+
+from mavis.domain import timeutil  # noqa: E402
+from mavis.domain.integrations import ToolResult, UserRef  # noqa: E402
+from mavis.store import db as dbm  # noqa: E402
+from mavis.store.models import NativeGrant  # noqa: E402
+from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired  # noqa: E402
+from mavis.tools.integrations.native.oauth import OAuthError, sign_state  # noqa: E402
+from mavis.tools.integrations.native.router import NativeRouter  # noqa: E402
+from mavis.tools.integrations.native.tokens import AccountTaken, NativeTokenStore  # noqa: E402
+from tests.tools.integrations.native.conftest import *  # noqa: E402, F403 - fixtures
+from tests.tools.integrations.native.test_oauth import query  # noqa: E402
+
+G, S = NativeProvider.GOOGLE, NativeProvider.SLACK
+SECRET_A = "ya29.secret-of-user-a"
+
+
+@pytest.fixture
+async def duo(db, native_env, client):
+    """Users A and B (both active), A with a Google and a Slack grant plus the workspace bot, B with none."""
+    a, _ = await users.get_or_create_by_chat(8201, "Priya")
+    b, _ = await users.get_or_create_by_chat(8202, "Tomas")
+    for u in (a, b):
+        await users.update(u.id, status="active")
+    tokens = NativeTokenStore(client)
+    await tokens.save(a.id, G, account={"email": "priya@x.com", "scopes": ["gmail.readonly"]},
+                      access_token=SECRET_A, refresh_token="r-a",
+                      expires_at=timeutil.now() + timedelta(hours=1))
+    await tokens.save(a.id, S, account={"team_id": "T1", "user_id": "UA", "scopes": []},
+                      access_token="xoxp-a", refresh_token=None, expires_at=None)
+    await tokens.save(a.id, NativeProvider.SLACK_BOT, account={"team_id": "T1", "user_id": "UA", "dm": "DA"},
+                      access_token="xoxb-a", refresh_token=None, expires_at=None)
+    return a.id, b.id, tokens
+
+
+async def test_user_b_never_reads_a_grant_or_token_of_user_a(duo):
+    a, b, tokens = duo
+    assert await tokens.grants(b) == [] and await tokens.grant(b, G) is None
+    assert await tokens.account(b, G) is None
+    with pytest.raises(ReauthRequired):
+        await tokens.access_token(b, G)
+    assert await tokens.access_token(a, G) == SECRET_A
+    assert await tokens.reveal(b, G) is None
+
+
+async def test_b_cannot_claim_a_vendor_account(duo):
+    a, b, tokens = duo
+    with pytest.raises(AccountTaken):
+        await tokens.save(b, G, account={"email": "Priya@X.com", "scopes": []}, access_token="b",
+                          refresh_token=None, expires_at=None)
+    with pytest.raises(AccountTaken):
+        await tokens.save(b, S, account={"team_id": "T1", "user_id": "UA", "scopes": []}, access_token="b",
+                          refresh_token=None, expires_at=None)
+    assert await tokens.grants(b) == []
+
+
+async def test_a_sealed_token_copied_into_another_users_row_does_not_open(duo):
+    """Envelope encryption is bound to user, provider and column: a row copied between users is noise."""
+    a, b, tokens = duo
+    async with dbm.Session() as s:
+        stolen = await s.scalar(select_grant(a, G))
+    await tokens.save(b, G, account={"email": "tomas@x.com", "scopes": []}, access_token="own",
+                      refresh_token=None, expires_at=timeutil.now() + timedelta(hours=1))
+    async with dbm.Session() as s:
+        await s.execute(update(NativeGrant).where(NativeGrant.user_id == b, NativeGrant.provider == G.value)
+                        .values(access_token=stolen.access_token))
+        await s.commit()
+    with pytest.raises(InvalidTag):
+        await tokens.access_token(b, G)
+    assert await tokens.access_token(a, G) == SECRET_A
+
+
+def select_grant(uid, provider):
+    from sqlalchemy import select
+
+    return select(NativeGrant).where(NativeGrant.user_id == uid, NativeGrant.provider == provider.value)
+
+
+class _Exec:
+    provider = G
+
+    def __init__(self):
+        self.calls: list[int] = []
+
+    def handles(self, action):
+        return action == "mail.search"
+
+    async def execute(self, user, action, args):
+        self.calls.append(user.user_id)
+        return ToolResult(ok=True, data={"native": True})
+
+
+async def test_router_never_runs_user_a_grant_for_user_b(duo, client):
+    from tests.tools.integrations.fakes import FakeProvider
+
+    a, b, tokens = duo
+    fallback, ex = FakeProvider(), _Exec()
+    router = NativeRouter(fallback, tokens, NativeOAuthFor(tokens, client), [ex], client)
+    a_scopes = {"https://www.googleapis.com/auth/gmail.readonly"}
+    async with dbm.Session() as s:
+        await s.execute(update(NativeGrant).where(NativeGrant.user_id == a, NativeGrant.provider == G.value)
+                        .values(account={"email": "priya@x.com", "scopes": sorted(a_scopes)}))
+        await s.commit()
+    assert (await router.execute(UserRef(user_id=a), "mail.search", {})).data == {"native": True}
+    await router.execute(UserRef(user_id=b), "mail.search", {})
+    assert ex.calls == [a] and [e[0] for e in fallback.executed] == [b]  # B went to its own Composio identity
+    states = await router.status(UserRef(user_id=b))
+    assert "gmail" not in {k for k, v in states.items() if v.name == "ACTIVE"}
+
+
+async def test_disconnecting_b_leaves_a_connected(duo, client):
+    from tests.tools.integrations.fakes import FakeProvider
+
+    a, b, tokens = duo
+    router = NativeRouter(FakeProvider(), tokens, NativeOAuthFor(tokens, client), [], client)
+    await router.disconnect(UserRef(user_id=b), "slack")
+    await router.disconnect(UserRef(user_id=b), "gmail")
+    assert {g.provider for g in await tokens.grants(a)} == {G, S, NativeProvider.SLACK_BOT}
+
+
+async def test_a_consent_started_by_a_cannot_be_finished_as_b(duo, client, vendor):
+    a, b, tokens = duo
+    oauth_ = NativeOAuthFor(tokens, client)
+    url = await oauth_.authorize_url(a, G)
+    nonce_state = query(url)["state"]
+    from mavis.tools.integrations.native.oauth import verify_state
+
+    st = verify_state(nonce_state)
+    from sqlalchemy import select
+
+    from mavis.store.models import NativeOAuthState
+
+    async with dbm.Session() as s:
+        nonce = await s.scalar(select(NativeOAuthState.nonce).where(NativeOAuthState.user_id == a))
+    forged = sign_state(b, G.value, st.verifier, nonce=nonce)  # B's identity on A's single-use nonce
+    with pytest.raises(OAuthError) as err:
+        await oauth_.complete(forged, "code", G)
+    assert err.value.kind == "replayed_state" and await tokens.grant(b, G) is None
+    assert vendor.requests == []  # the vendor was never reached
+
+
+def NativeOAuthFor(tokens, client):  # noqa: N802
+    from mavis.tools.integrations.native.oauth import NativeOAuth
+
+    return NativeOAuth(tokens, client)
+
+
+async def test_slack_identity_maps_to_exactly_one_user_and_one_workspace(duo):
+    a, b, tokens = duo
+    assert await tokens.user_for_slack("T1", "UA") == a
+    assert await tokens.user_for_slack("T2", "UA") is None  # same Slack user id in another workspace
+    assert await tokens.user_for_slack("T1", "UB") is None
+    assert await tokens.bot_dm_owner("T1", "DA") == a and await tokens.bot_dm_owner("T1", "DB") is None
+    await tokens.save(b, S, account={"team_id": "T1", "user_id": "UB", "scopes": []}, access_token="xoxp-b",
+                      refresh_token=None, expires_at=None)
+    assert await tokens.user_for_slack("T1", "UB") == b and await tokens.user_for_slack("T1", "UA") == a
+
+
+async def test_slack_inbound_events_carry_the_senders_own_user_id(duo, monkeypatch):
+    from mavis.channels import routing, slack_inbound
+    from mavis.tools.integrations.native import slack_events
+    from tests.channels.slack_fakes import SlackFake, callback, dm_message
+    from tests.tools.integrations.fakes import FakeBus
+
+    a, b, tokens = duo
+    await tokens.save(b, S, account={"team_id": "T1", "user_id": "UB", "scopes": []}, access_token="xoxp-b",
+                      refresh_token=None, expires_at=None)
+    slack_inbound._told.clear()
+    monkeypatch.setattr(slack_events, "_dedupe", slack_events.EventDedupe())
+    routing.set_slack_channel(SlackFake())
+    try:
+        bus = FakeBus()
+        for n, slack_user in enumerate(("UA", "UB", "UX")):
+            payload = callback(dm_message("hello", user=slack_user, ts=f"17600002{n}0.000100"),
+                               event_id=f"EvI{n}", user_auth=slack_user)
+            payload["team_id"] = "T1"
+            for auth in payload["authorizations"]:
+                auth["team_id"] = "T1"
+            await slack_events.handle_callback(payload, tokens, bus)
+        assert sorted(e.user_id for e in bus.events) == sorted([a, b])  # the stranger produced nothing
+        by_text = {e.user_id: e.payload["text"] for e in bus.events}
+        assert by_text == {a: "hello", b: "hello"}
+    finally:
+        routing.set_slack_channel(None)

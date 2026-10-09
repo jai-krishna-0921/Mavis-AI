@@ -18,7 +18,16 @@ from langgraph.types import Command
 
 from mavis import bus
 from mavis.agents import cancellation, checkpointing, interrupts
-from mavis.agents.orchestrator_graph import build_orchestrator, card_wanted, initial_state
+from mavis.agents.orchestrator_graph import (
+    EXPIRED_LEAD,
+    PARTIAL_LEAD,
+    build_orchestrator,
+    card_wanted,
+    complete_task,
+    initial_state,
+    partial_messages,
+    publish_completed,
+)
 from mavis.agents.task_clock import TaskClock, current_clock
 from mavis.agents.task_dispatch import enqueue_run
 from mavis.channels.formatting import verbatim
@@ -91,9 +100,79 @@ async def recover_tasks(user_id: int | None = None, *, restarted_at: datetime | 
                   else "that task stalled and was stopped")
         await _fail(stale.id, stale.user_id, reason)
         failed += 1
+    failed += await _expire_waiting(user_id, now)
     for uid in await tasks.users_with_queued(user_id):
         await _kick_next_queued(uid)
     return failed
+
+
+async def _expire_waiting(user_id: int | None, now: datetime) -> int:
+    """A task waiting on the user (a connection or an approval) longer than `task_await_ttl_s` ends: what it
+    gathered is delivered as PARTIAL, or it fails with a plain reason when it gathered nothing. Returns the
+    number ended."""
+    cutoff = now - timedelta(seconds=get_settings().task_await_ttl_s)
+    ended = 0
+    for waiting in await tasks.awaiting_started_before(cutoff, user_id):
+        log.warning("task.await_expired", task_id=waiting.id)
+        if await _end_unfinished(waiting.id, waiting.user_id, "it waited too long on a connection or your OK",
+                                 lead=EXPIRED_LEAD):
+            ended += 1
+    return ended
+
+
+async def _saved_state(task_id: int) -> dict | None:
+    """The graph's last checkpointed state (finished step outputs included), or None."""
+    try:
+        async with checkpointing.open_checkpointer() as saver:
+            graph = build_orchestrator().compile(checkpointer=saver)
+            snap = await graph.aget_state({"configurable": {"thread_id": f"task:{task_id}"}})
+        return dict(snap.values) if snap is not None and snap.values else None
+    except Exception:  # noqa: BLE001 - salvage is best effort; the task must still reach a final state
+        log.warning("task.saved_state_unreadable", task_id=task_id)
+        return None
+
+
+async def _end_unfinished(task_id: int, user_id: int, reason: str, *, lead: str = PARTIAL_LEAD) -> bool:
+    """End a task that cannot go on, without losing finished work: PARTIAL with the finished steps' output
+    (a finished summary step is the answer) or, with nothing to show, FAILED with `reason`.
+    True when this call ended it."""
+    row = await tasks.get(task_id)
+    if row is None or row.status not in (TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL):
+        return False
+    state = await _saved_state(task_id)
+    messages = partial_messages(state, lead) if state else []
+    if not messages:
+        await _fail(task_id, user_id, reason)
+        return True
+    try:
+        ended = await complete_task(state, messages, TaskStatus.PARTIAL,
+                                    "it ran out of time, so this covers only what I finished")
+    except Exception:  # noqa: BLE001 - never let delivery trouble leave the task without a final state
+        log.exception("task.salvage_failed", task_id=task_id)
+        after = await tasks.get(task_id)
+        if after is not None and after.status in _LIVE:
+            await _fail(task_id, user_id, reason)  # the claim never happened: fail it plainly
+            return True
+        if after is None or after.status != TaskStatus.PARTIAL:
+            return False  # cancelled or finished meanwhile: not ours to report
+        # Our claim went through and the delivery broke: _fail would no-op on a terminal task. Deliver the
+        # outcome again (the event id dedupes) or, failing that, say it directly, and close the approvals.
+        await _redeliver(task_id, user_id, state, messages)
+        await _close_approvals(task_id, user_id)
+        return True
+    if ended:
+        await _close_approvals(task_id, user_id)
+    return ended
+
+
+async def _redeliver(task_id: int, user_id: int, state: dict, messages: list[str]) -> None:
+    try:
+        await publish_completed(task_id, user_id, messages, list(dict.fromkeys(state.get("artifacts", []))),
+                                TaskStatus.PARTIAL)
+    except Exception:  # noqa: BLE001
+        log.exception("task.redelivery_failed", task_id=task_id)
+        with contextlib.suppress(Exception):
+            await approval_flow.say(user_id, "\n\n".join(messages), dedupe_key=f"task:{task_id}:completed")
 
 
 async def recover_tasks_on_start() -> None:
@@ -157,13 +236,13 @@ async def _drive(task_id: int, user_id: int, graph_input: Any) -> None:
                 current_clock.reset(clock_token)
     except TimeoutError:
         if limit.expired():
-            await _fail(task_id, user_id, "that took longer than I allow for one task")
+            await _end_unfinished(task_id, user_id, "that took longer than I allow for one task")
         else:  # a timeout inside a tool or HTTP call, not the task wall clock
             log.exception("task.inner_timeout", task_id=task_id)
             await _fail(task_id, user_id, "something I depend on timed out")
     except Exception:  # noqa: BLE001 - the task row must always reach a final state
         log.exception("task.crashed", task_id=task_id)
-        await _fail(task_id, user_id, "something broke on my side")
+        await _end_unfinished(task_id, user_id, "something broke on my side")
     finally:
         progress.cancel()
         with contextlib.suppress(asyncio.CancelledError):

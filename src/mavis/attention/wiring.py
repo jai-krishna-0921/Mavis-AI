@@ -120,7 +120,31 @@ def get_intake() -> Intake:
         forward=_forward,
         provider=get_provider(),
         on_backlog_empty=get_first_look().maybe_send,
+        connectors=get_connector_ingest(),
     )
+
+
+@lru_cache
+def get_connector_ingest():
+    from mavis.attention.connector_ingest import ConnectorIngest
+
+    return ConnectorIngest(directory=slack_directory)
+
+
+async def slack_directory(user_id: int, team: str, ids: frozenset[str]) -> dict[str, dict[str, str]]:
+    """Display names for Slack ids via the native Slack executor's cached users.info."""
+    from mavis.tools.integrations import get_provider
+    from mavis.tools.integrations.native.base import NativeProvider
+
+    executor = getattr(get_provider(), "executors", {}).get(NativeProvider.SLACK)
+    if executor is None:
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for sid in sorted(ids)[:10]:
+        info = await executor.user_info(user_id, team, sid)
+        if info and not info.get("is_bot"):
+            out[sid] = {"name": info.get("name", ""), "email": info.get("email", "")}
+    return out
 
 
 @lru_cache
@@ -160,6 +184,7 @@ def get_workspace() -> WorkspaceIntake:
 
 
 ATTENTION_GETTERS = (
+    get_connector_ingest,
     get_index,
     get_thresholds,
     get_baselines,
@@ -260,6 +285,7 @@ def register_attention() -> None:
         return
     intake, pipeline = get_intake(), get_pipeline()
     register_event_handler(EventType.EMAIL_RECEIVED, intake.on_email, replace=True)
+    register_event_handler(EventType.SLACK_MESSAGE, get_connector_ingest().on_slack_event)
     register_event_handler(EventType.TASK_COMPLETED, intake.on_task_completed)
     # the one shared dispatcher (deduped: register_integrations already registered this same function)
     register_event_handler(EventType.BUTTON_PRESSED, dispatch_button)

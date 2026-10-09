@@ -176,7 +176,8 @@ async def landed(user_id: int) -> dict[str, str]:
         return {}
 
 
-async def apply(user_id: int, chat_id: int, message_id: int, candidate: str | None, event_id: str) -> str:
+async def apply(user_id: int, chat_id: int | str, message_id: int, candidate: str | None,
+                event_id: str) -> str:
     """Land the mood reaction on the message of `event_id` (or clear the "seen" one). Returns what landed
     ("" for nothing). Settles once per event: a retried turn keeps the first outcome. Never raises."""
     try:

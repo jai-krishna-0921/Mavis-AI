@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from sqlalchemy import select
 
 from mavis.domain.memory import Entity, Relation
@@ -160,3 +161,27 @@ async def test_retrying_the_same_older_fact_twice_is_idempotent(graph):
     assert len(await _rows("LOCATED_IN")) == 2 + 1 - 1  # Delhi current, Pune history, no repeat rows
     assert {d["object"] for d in await graph.dump(1)} >= {"Delhi"}
     assert [r.valid_to is None for r in await _rows("LOCATED_IN")].count(True) == 1
+
+
+async def test_a_third_party_write_never_overwrites_a_user_edge(graph):
+    await graph.upsert_entity(1, Entity(name="Meera", label="Person"))
+    await graph.upsert_relation(1, rel("User", "FRIEND_OF", "Meera", "Meera is the user's friend."), "turn:9")
+    await graph.upsert_relation(1, rel("User", "FRIEND_OF", "Meera", "Meera is a vendor contact."), "tp:gmail:m1")
+    [edge] = [d for d in await graph.dump(1) if d["object"] == "Meera"]
+    assert edge["statement"] == "Meera is the user's friend." and edge["source_ref"] == "turn:9"
+
+
+async def test_a_third_party_single_valued_fact_never_ends_a_user_fact(graph):
+    await graph.upsert_relation(1, rel("Jawahar", "WORKS_AT", "Siemens", "Jawahar works at Siemens."), "turn:3")
+    await graph.upsert_relation(1, rel("Jawahar", "WORKS_AT", "Acme", "Jawahar joined Acme."), "tp:gmail:m2")
+    dump = await graph.dump(1)
+    assert [d["statement"] for d in dump if d["relation"] == "WORKS_AT"] == ["Jawahar works at Siemens."]
+
+
+async def test_third_party_edges_still_update_each_other_and_the_user_may_overwrite_them(graph):
+    await graph.upsert_relation(1, rel("Jawahar", "WORKS_AT", "Siemens", "Jawahar works at Siemens."), "tp:gmail:m1")
+    await graph.upsert_relation(1, rel("Jawahar", "WORKS_AT", "Acme", "Jawahar joined Acme."), "tp:gmail:m2")
+    assert [d["object"] for d in await graph.dump(1) if d["relation"] == "WORKS_AT"] == ["Acme"]
+    await graph.upsert_relation(1, rel("Jawahar", "WORKS_AT", "Acme", "Jawahar works at Acme, he told me."), "turn:5")
+    [edge] = [d for d in await graph.dump(1) if d["relation"] == "WORKS_AT"]
+    assert edge["source_ref"] == "turn:5"

@@ -32,8 +32,20 @@ class Activator:
         self._fanout: set[int] = set()
         self._google_subscribe_failed: set[int] = set()
 
+    async def _native(self, user_id: int, capability: Capability) -> bool:
+        """An ACTIVE native grant serves this capability: there are no push triggers for it, polling is the
+        inbound path (Slack's poll is the safety net behind the Events API)."""
+        check = getattr(self.provider, "uses_native", None)
+        if check is None or capability not in POLLABLE:
+            return False
+        try:
+            return bool(await check(user_id, capability))
+        except Exception as exc:  # noqa: BLE001 - unknown: fall back to the trigger/poll rules below
+            log.warning("activation.native_check_failed", error=type(exc).__name__)
+            return False
+
     async def on_active(self, user_id: int, capability: Capability) -> bool:
-        subscribed = not self.polling_forced
+        subscribed = not self.polling_forced and not await self._native(user_id, capability)
         if subscribed:
             # Workspace triggers (share, comment, task) only feed the attention layer, so they need it on.
             workspace = workspace_enabled() and get_settings().attention_enabled

@@ -203,7 +203,7 @@ async def test_learn_job_hands_its_anchor_to_memory(user, monkeypatch, clock):
 
     class Mem:
         async def learn(self, user_id, text, source_ref="", trust=Trust.USER, conversation=True,
-                        anchor_at=None):
+                        anchor_at=None, **_):
             got["anchor_at"] = anchor_at
 
     async def noop(uid):
