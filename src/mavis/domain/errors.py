@@ -15,6 +15,8 @@ class FailureKind(StrEnum):
     NOT_FOUND = "not_found"
     RATE_LIMITED = "rate_limited"
     UNAVAILABLE = "unavailable"
+    UNCONFIRMED = "unconfirmed"  # sent, no answer: it may have happened
+    PERMISSION_MISSING = "permission_missing"  # the user's grant lacks the permission this action needs
     UNKNOWN = "unknown"
 
 
@@ -24,6 +26,10 @@ _FAILURE_TEXT: dict[FailureKind, str] = {
     FailureKind.NOT_FOUND: "{service} could not find it{field}",
     FailureKind.RATE_LIMITED: "{service} is busy right now, try again in a few minutes",
     FailureKind.UNAVAILABLE: "{service} is unreachable right now",
+    FailureKind.UNCONFIRMED: "{service} did not confirm whether that went through, so it may or may not "
+                             "have happened. Check there before trying again",
+    FailureKind.PERMISSION_MISSING: "{service} was not given permission for that. Reconnect it and allow "
+                                    "the extra access",
     FailureKind.UNKNOWN: "{service} reported an error",
 }
 

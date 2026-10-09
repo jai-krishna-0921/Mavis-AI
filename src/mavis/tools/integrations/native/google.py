@@ -82,6 +82,15 @@ VENDOR_FIELDS = {
     "summary": "summary", "description": "description", "start": "start", "end": "duration_minutes",
     "mimetype": "mime_type", "range": "range", "query": "query",
 }
+# Retry safety. A method that only reads is idempotent; any other call must declare idempotent=True to be
+# repeated after a 5xx or a read error. A failure before the request can have left the machine is always safe.
+SAFE_METHODS = frozenset({"GET", "HEAD"})
+NEVER_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+UNCONFIRMED_DETAIL = (
+    "google outcome unknown: {what}. The request may or may not have been processed, so do NOT repeat it "
+    "blindly. Tell the user it may have gone through and to check (for mail, the Sent folder; for a "
+    "calendar event, the calendar) before trying again."
+)
 ID_ARGS = ("message_id", "thread_id", "event_id", "file_id", "document_id", "spreadsheet_id")
 
 # Gmail search: operators that name who or what a message is about (a targeted search), and the boxes and
@@ -261,17 +270,33 @@ class GoogleExecutor:
 
     async def _raw(
         self, uid: int, method: str, url: str, *, params: dict | None = None, body: Any = None,
-        cap: int = MAX_JSON_BYTES,
+        cap: int = MAX_JSON_BYTES, idempotent: bool | None = None,
     ) -> tuple[httpx.Headers, bytes, bool]:
-        """One authorised call with the retry rules: a 401 refreshes the token once, a rate limit waits once
-        (Retry-After up to MAX_RETRY_WAIT_S), a 5xx or network error backs off once."""
+        """One authorised call with the retry rules. `idempotent` is declared by the call (None: the method's
+        own default, true for GET and HEAD only). A 401 refreshes the token once and a rate limit waits once
+        (the request was rejected before it ran, so any call may repeat). A connect failure or a pool timeout
+        means the request never left, so any call may repeat. A 5xx or a read or write error may come after
+        Google acted: only an idempotent call repeats, and a non-idempotent one ends as UNCONFIRMED (the
+        caller and the user are told it may have gone through)."""
+        if idempotent is None:
+            idempotent = method.upper() in SAFE_METHODS
         token = await self._tokens.access_token(uid, NativeProvider.GOOGLE)
         refreshed = throttled = backed_off = False
         while True:
             try:
                 status, headers, data, cut = await self._send(token, method, url, params, body, cap)
             except httpx.TransportError as exc:
-                status, headers, data, cut = 503, httpx.Headers(), str(exc).encode(), False
+                never_sent = isinstance(exc, NEVER_SENT)
+                if not (never_sent or idempotent):
+                    raise GoogleError(FailureKind.UNCONFIRMED, UNCONFIRMED_DETAIL.format(
+                        what=f"the connection failed after the request was sent ({type(exc).__name__})")
+                    ) from None
+                if backed_off:
+                    raise GoogleError(FailureKind.UNAVAILABLE,
+                                      f"google unreachable ({type(exc).__name__})") from None
+                backed_off = True
+                await self._sleep(SERVER_BACKOFF_S)
+                continue
             if status < 300:
                 return headers, data, cut
             reason, message, field = _error_info(data)
@@ -292,6 +317,8 @@ class GoogleExecutor:
                 await self._sleep(wait)
                 continue
             if status >= 500:
+                if not idempotent:
+                    raise GoogleError(FailureKind.UNCONFIRMED, UNCONFIRMED_DETAIL.format(what=detail))
                 if backed_off:
                     raise GoogleError(FailureKind.UNAVAILABLE, detail)
                 backed_off = True
@@ -318,9 +345,10 @@ class GoogleExecutor:
         return GoogleError(FailureKind.UNKNOWN, detail)
 
     async def _json(
-        self, uid: int, method: str, url: str, *, params: dict | None = None, body: Any = None
+        self, uid: int, method: str, url: str, *, params: dict | None = None, body: Any = None,
+        idempotent: bool | None = None,
     ) -> Any:
-        _, data, cut = await self._raw(uid, method, url, params=params, body=body)
+        _, data, cut = await self._raw(uid, method, url, params=params, body=body, idempotent=idempotent)
         if cut:
             raise GoogleError(FailureKind.UNKNOWN, "google response larger than the size limit")
         if not data.strip():
@@ -477,7 +505,8 @@ class GoogleExecutor:
 
     async def _calendar_free_slots(self, uid: int, a: Any) -> dict:
         start, end = a.time_min, a.time_max
-        fb = await self._json(uid, "POST", f"{CALENDAR}/freeBusy", body={
+        # a POST that only reads, so it declares itself repeatable
+        fb = await self._json(uid, "POST", f"{CALENDAR}/freeBusy", idempotent=True, body={
             "timeMin": _rfc3339(start), "timeMax": _rfc3339(end), "items": [{"id": "primary"}]})
         calendars = fb.get("calendars") or {}
         busy_raw = ((calendars.get("primary") or next(iter(calendars.values()), {})) or {}).get("busy") or []
@@ -534,7 +563,8 @@ class GoogleExecutor:
             }
             body["attendees"] = [existing.get(e.lower(), {"email": e}) for e in a.attendees]
         params = {"sendUpdates": "all"} if a.attendees else None
-        return await self._json(uid, "PATCH", url, params=params, body=body)
+        # setting the same fields twice is harmless, but a repeat would notify the attendees twice
+        return await self._json(uid, "PATCH", url, params=params, body=body, idempotent=params is None)
 
     # --- Drive, Docs, Sheets -----------------------------------------------------------------------
 
