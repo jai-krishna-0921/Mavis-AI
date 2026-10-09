@@ -92,6 +92,8 @@ async def test_grants_are_per_user(parts, tokens):
 
 async def test_unticked_scopes_route_that_capability_to_composio(parts, tokens):
     fallback, g, s, router = parts
+    fallback.set_state(1, Capability.CALENDAR, ConnectionState.ACTIVE)
+    fallback.set_state(1, Capability.DRIVE, ConnectionState.ACTIVE)
     await grant(tokens, G, ["openid", "https://www.googleapis.com/auth/gmail.readonly"])
     await router.execute(U, "mail.search", {})
     await router.execute(U, "calendar.list", {})

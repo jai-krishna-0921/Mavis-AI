@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 
 from mavis.config import get_settings
-from mavis.domain.errors import IntegrationError, NoSuchConnection
+from mavis.domain.errors import FailureKind, IntegrationError, NoSuchConnection
 from mavis.domain.events import Event
 from mavis.domain.integrations import ConnectionState, Toolkit, ToolResult, UserRef
 from mavis.domain.policy import Capability
@@ -27,16 +27,42 @@ from mavis.tools.integrations.native.http import make_client
 from mavis.tools.integrations.native.oauth import NativeOAuth
 from mavis.tools.integrations.native.tokens import ACTIVE, REVOKED, Grant, NativeTokenStore
 
-# Google OAuth scope prefixes that cover each capability. A capability without an entry (Tasks, Meet) is
-# never native; it stays on Composio.
-_GOOGLE_SCOPE_FOR: dict[Capability, tuple[str, ...]] = {
-    Capability.GMAIL: ("https://www.googleapis.com/auth/gmail.",),
-    Capability.CALENDAR: ("https://www.googleapis.com/auth/calendar",),
-    Capability.DRIVE: ("https://www.googleapis.com/auth/drive",),
-    Capability.DOCS: ("https://www.googleapis.com/auth/drive",),
-    Capability.SHEETS: ("https://www.googleapis.com/auth/drive",),
-    Capability.CONTACTS: ("https://www.googleapis.com/auth/contacts",),
+_AUTH = "https://www.googleapis.com/auth/"
+_MAIL_ALL = "https://mail.google.com/"
+
+
+def _any(*names: str) -> frozenset[str]:
+    return frozenset(n if n.startswith("https://") else _AUTH + n for n in names)
+
+
+_MAIL_READ = _any("gmail.readonly", "gmail.modify", _MAIL_ALL)
+_MAIL_SEND = _any("gmail.send", "gmail.compose", "gmail.modify", _MAIL_ALL)
+_MAIL_DRAFT = _any("gmail.compose", "gmail.modify", _MAIL_ALL)
+_CAL_READ = _any("calendar.readonly", "calendar.events.readonly", "calendar.events", "calendar")
+_CAL_FREEBUSY = _any("calendar.freebusy", "calendar.readonly", "calendar.events.readonly",
+                     "calendar.events", "calendar")
+_CAL_WRITE = _any("calendar.events", "calendar")
+_DRIVE_READ = _any("drive.readonly", "drive")
+_DRIVE_META = _any("drive.readonly", "drive.metadata.readonly", "drive.metadata", "drive")
+_DOCS_READ = _any("documents.readonly", "documents", "drive.readonly", "drive")
+_SHEETS_READ = _any("spreadsheets.readonly", "spreadsheets", "drive.readonly", "drive")
+_CONTACTS_READ = _any("contacts.readonly", "contacts")
+
+# What each natively handled Google action needs: a tuple of any-of groups, and every group must be met
+# (a reply reads the thread and then sends). An action with no entry is never run natively. Google lets a
+# user untick scopes on the consent screen, so the grant's scopes, not what we asked for, decide.
+ACTION_SCOPES: dict[str, tuple[frozenset[str], ...]] = {
+    "mail.search": (_MAIL_READ,), "mail.read": (_MAIL_READ,), "mail.thread": (_MAIL_READ,),
+    "mail.profile": (_MAIL_READ,),
+    "mail.send": (_MAIL_SEND,), "mail.draft": (_MAIL_DRAFT,), "mail.reply": (_MAIL_READ, _MAIL_SEND),
+    "calendar.list": (_CAL_READ,), "calendar.find": (_CAL_READ,), "calendar.free_slots": (_CAL_FREEBUSY,),
+    "calendar.create_event": (_CAL_WRITE,), "calendar.update_event": (_CAL_WRITE,),
+    "drive.search": (_DRIVE_META,), "drive.list_recent": (_DRIVE_META,), "drive.meta": (_DRIVE_META,),
+    "drive.permissions": (_DRIVE_META,), "drive.read": (_DRIVE_READ,), "drive.download": (_DRIVE_READ,),
+    "docs.read": (_DOCS_READ,), "sheets.find": (_DRIVE_META,), "sheets.read": (_SHEETS_READ,),
+    "contacts.search": (_CONTACTS_READ,), "contacts.list": (_CONTACTS_READ,),
 }
+_GOOGLE_CAPABILITIES = frozenset(ACTIONS[a].capability for a in ACTION_SCOPES)
 _GOOGLE_TOOLKITS = frozenset({"google", "googlesuper", *(c.value for c in GOOGLE_CAPABILITIES)})
 _SLACK_TOOLKITS = frozenset({"slack"})
 
@@ -49,13 +75,17 @@ def provider_of(capability: Capability) -> NativeProvider | None:
     return None
 
 
+def allows(grant: Grant, action: str) -> bool:
+    """Do this Google grant's scopes cover everything the action needs?"""
+    groups = ACTION_SCOPES.get(action)
+    return bool(groups) and all(grant.scopes & group for group in groups)
+
+
 def covers(grant: Grant, capability: Capability) -> bool:
-    """Does this grant authorise the capability? Slack: any ACTIVE grant. Google: a granted scope must
-    match (Google lets users untick scopes on the consent screen)."""
+    """Can this grant do at least one thing in the capability? Slack: any ACTIVE grant."""
     if grant.provider is NativeProvider.SLACK:
         return capability is Capability.SLACK
-    prefixes = _GOOGLE_SCOPE_FOR.get(capability)
-    return bool(prefixes) and any(s.startswith(p) for s in grant.scopes for p in prefixes)
+    return any(ACTIONS[a].capability is capability and allows(grant, a) for a in ACTION_SCOPES)
 
 
 class NativeRouter:
@@ -88,9 +118,31 @@ class NativeRouter:
             executor = self.executors[provider]
             if executor.handles(action):
                 grant = await self._active_grant(user.user_id, provider)
-                if grant is not None and covers(grant, spec.capability):
-                    return await executor.execute(user, action, args)
+                if grant is not None:
+                    if self._permitted(grant, action, spec.capability):
+                        return await executor.execute(user, action, args)
+                    # The grant exists but lacks what this action needs: Google is not called. A legacy
+                    # Composio account for the service may still do it; otherwise say what is missing.
+                    if await self._composio_active(user, spec.capability):
+                        return await self.fallback.execute(user, action, args)
+                    return ToolResult(
+                        ok=False, error_kind=FailureKind.PERMISSION_MISSING,
+                        error=f"the connected {provider.value} account was not granted the permission "
+                              f"{action} needs; the user must reconnect and allow it")
         return await self.fallback.execute(user, action, args)
+
+    @staticmethod
+    def _permitted(grant: Grant, action: str, capability: Capability) -> bool:
+        if grant.provider is NativeProvider.SLACK:
+            return covers(grant, capability)
+        return allows(grant, action)
+
+    async def _composio_active(self, user: UserRef, capability: Capability) -> bool:
+        try:
+            states = await self.fallback.status(user)
+        except IntegrationError:
+            return False
+        return states.get(capability.value) is ConnectionState.ACTIVE
 
     # --- connection state ----------------------------------------------------------------------------
 
@@ -106,7 +158,7 @@ class NativeRouter:
             if not self._ready(grant.provider):
                 continue
             google = grant.provider is NativeProvider.GOOGLE
-            for cap in (_GOOGLE_SCOPE_FOR if google else (Capability.SLACK,)):
+            for cap in (_GOOGLE_CAPABILITIES if google else (Capability.SLACK,)):
                 if grant.status == ACTIVE and covers(grant, cap):
                     states[cap.value] = ConnectionState.ACTIVE
                 elif grant.status == REVOKED and states.get(cap.value) is not ConnectionState.ACTIVE:
