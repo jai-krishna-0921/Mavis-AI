@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import Depends, FastAPI
 
+from mavis.api.dashboard import create_dashboard_app
 from mavis.api.ratelimit import webhook_rate_limit
 from mavis.api.routes import connect, health, integrations, oauth, slack, telegram
 from mavis.bus import get_bus
@@ -78,4 +79,6 @@ def create_app() -> FastAPI:
     app.include_router(oauth.router)
     app.include_router(integrations.router, dependencies=[Depends(webhook_rate_limit)])
     app.include_router(slack.router)  # signature-verified; Slack bursts from shared IPs exceed the IP limit
+    # The dashboard API is always mounted and answers 404 itself while DASHBOARD_ENABLED is off.
+    app.mount("/api/v1", create_dashboard_app())
     return app

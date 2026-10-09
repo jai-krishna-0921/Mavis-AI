@@ -12,7 +12,7 @@ import html
 
 import structlog
 from fastapi import APIRouter, Depends
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from mavis.bus import get_bus
 from mavis.bus.base import EventBus
@@ -25,6 +25,7 @@ from mavis.tools.integrations import get_connection_cache, get_provider
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.oauth import OAuthError
+from mavis.web import emails
 
 router = APIRouter()
 log = structlog.get_logger()
@@ -47,6 +48,15 @@ _USER_TEXT = {
     "account_taken": "That {name} account is already connected to another Mavis user, so I skipped it.",
     "not_configured": "{name} sign-in is not set up on my side yet.",
 }
+
+
+WEB_ORIGIN = "web"
+
+
+def _back_to_dashboard(error: str | None, *, connected: str | None = None) -> RedirectResponse:
+    """A connect started from the dashboard returns there: the workspace page shows the outcome."""
+    query = f"?error={error}" if error else f"?connected={connected}"
+    return RedirectResponse(f"/workspace{query}", status_code=303)
 
 
 def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
@@ -114,13 +124,16 @@ async def oauth_callback(
 
     if error or not code or not state:
         # Denied, or a malformed return. We learn whose it was only from a valid state; never echo `error`.
+        origin = None
         if state:
             try:
-                user_id, _ = await oauth.deny(state, native)
+                user_id, _, origin = await oauth.deny_with_origin(state, native)
             except OAuthError:
                 user_id = None
             if user_id is not None:
                 await _tell(user_id, _USER_TEXT["denied"].format(name=name))
+        if origin == WEB_ORIGIN:
+            return _back_to_dashboard(f"{native.value}_denied")
         return _page("Not connected", f"{name} was not connected. You can close this tab.", 400)
 
     try:
@@ -129,11 +142,15 @@ async def oauth_callback(
         if exc.user_id is not None and exc.kind in _USER_TEXT:
             await _tell(exc.user_id, _USER_TEXT[exc.kind].format(name=name))
         log.info("oauth.callback_failed", provider=provider, kind=exc.kind)
+        if exc.origin == WEB_ORIGIN:
+            return _back_to_dashboard(f"{native.value}_{exc.kind}")
         return _page("Not connected", f"{name} could not be connected. You can close this tab "
                                       "and try again from Telegram.", 400)
 
     get_connection_cache().invalidate(done.user_id)
     await _remember_identity(done.user_id, native, done.account)
+    if native is NativeProvider.GOOGLE:  # an address they proved they own: usable for web sign-in
+        await emails.confirm(done.user_id, str(done.account.get("email") or ""), "google_grant")
     if done.pending_id is not None:
         now = timeutil.now()
         await bus.enqueue(Job(
@@ -145,6 +162,8 @@ async def oauth_callback(
     outside = _external(native, done.account)
     await _tell(done.user_id, f"{name} is connected: {outside}. If that is not yours, tell me to "
                               f"disconnect {name} and I will remove it.")
+    if done.origin == WEB_ORIGIN:
+        return _back_to_dashboard(None, connected=native.value)
     who = await _mavis_name(done.user_id)
     return _page("Connected", (
         f"{outside} is now linked to the Mavis account of {who}. You can close this tab and head back to "

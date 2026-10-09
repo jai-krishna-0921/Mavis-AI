@@ -19,6 +19,7 @@ from mavis.initiative.wiring import wire_initiative
 from mavis.memory import jobs as memory_jobs
 from mavis.tools.integrations.wiring import register_integrations
 from mavis.tools.registry import get_registry
+from mavis.web import login_gate
 
 
 def register_default_handlers() -> None:
@@ -30,6 +31,7 @@ def register_default_handlers() -> None:
     register_attention()  # last: replaces EMAIL_RECEIVED, appends to TASK_COMPLETED
     register_access_gate()  # before any handler runs: strangers never reach routing
     register_command_gate()
+    login_gate.register()
     invite_commands.register()
     budgets.register()
     deletion.register()

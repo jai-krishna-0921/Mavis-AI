@@ -46,6 +46,28 @@ async def list_active(now: datetime | None = None) -> list[InviteCode]:
         return list(rows)
 
 
+async def list_by_creator(user_id: int, now: datetime | None = None) -> list[InviteCode]:
+    """The open codes this user minted (the web dashboard lists these, never anyone else's)."""
+    async with Session() as s:
+        rows = await s.scalars(select(InviteCode).where(_active(now or utcnow()),
+                                                        InviteCode.created_by_user_id == user_id)
+                               .order_by(InviteCode.id))
+        return list(rows)
+
+
+async def revoke_own(user_id: int, invite_id: int) -> InviteCode | None:
+    """Revoke an open code only when `user_id` minted it; None for anyone else's or an unknown id."""
+    async with Session() as s:
+        row = await s.scalar(select(InviteCode).where(
+            InviteCode.id == invite_id, InviteCode.created_by_user_id == user_id,
+            InviteCode.revoked_at.is_(None)))
+        if row is None:
+            return None
+        row.revoked_at = utcnow()
+        await s.commit()
+        return row
+
+
 async def revoke(hint_or_id: str) -> InviteCode | None:
     key = hint_or_id.strip().upper()
     async with Session() as s:

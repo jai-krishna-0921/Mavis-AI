@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
+from mavis.access import web_prefs
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.messages import Role
@@ -98,10 +99,11 @@ class PingPolicy:
             if await self._seen(user.id, _day_key(key, local)):
                 return PolicyVerdict(allow=False, reason="duplicate")
         urgent = urgency >= URGENT  # urgent bypasses quiet hours only, never the daily budget (spec 8.4)
-        if not urgent and in_quiet_hours(local.hour, s.quiet_start, s.quiet_end) and not await self._awake(
+        quiet_start, quiet_end = web_prefs.quiet_hours(user)  # the user's own hours, else the default
+        if not urgent and in_quiet_hours(local.hour, quiet_start, quiet_end) and not await self._awake(
             user.id, now, s.quiet_awake_window_min
         ):
-            defer = next_quiet_end(local, s.quiet_end).astimezone(UTC)
+            defer = next_quiet_end(local, quiet_end).astimezone(UTC)
             return PolicyVerdict(allow=False, defer_until=defer, reason="quiet hours")
         if reminder:
             return PolicyVerdict(allow=True, reason="user reminder")

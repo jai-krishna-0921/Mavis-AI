@@ -46,6 +46,9 @@ async def confirm(user_id: int, data: str) -> bool:
 
 async def request_deletion(user_id: int, *, by_owner: bool = False) -> None:
     await users.update(user_id, status="deleting")  # the gate now drops every event for this user
+    from mavis.web import sessions
+
+    await sessions.delete_all(user_id)  # and no browser stays signed in
     await audit.record(user_id, actor="owner" if by_owner else "user", action="user.delete_requested",
                        detail={})
     await bus.get_bus().enqueue(Job(id=f"delete:{user_id}", user_id=user_id, kind=JobKind.DELETE_USER))

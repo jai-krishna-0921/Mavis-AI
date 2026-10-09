@@ -128,7 +128,10 @@ async def _pending(user: User, event: Event) -> bool:
     now = event.occurred_at
     if event.type is not EventType.USER_MESSAGE:
         return False
-    code = _code_in(str(event.payload.get("text", "")))
+    from mavis.web import logins
+
+    login = logins.parse_start(str(event.payload.get("text", "")))  # /start login_<nonce>[_<invite>]
+    code = login.invite if login is not None else _code_in(str(event.payload.get("text", "")))
     if code is None:
         await _say_once(user.id, INVITE_ONLY_TEXT, "invite_only", s.pending_reply_every_h * 3600, event)
         return False
@@ -143,6 +146,8 @@ async def _pending(user: User, event: Event) -> bool:
         return False
     await users.modify_nested(user.id, _STATE_KEY, lambda cur: {**cur, "activation_event": event.id})
     await activate(user.id, invite, now)
+    if login is not None:
+        await logins.complete(user.id, login, event.id)  # the same link that admitted them signs them in
     return False  # the redemption message itself is not a chat turn; onboarding takes it from here
 
 
@@ -201,6 +206,10 @@ async def access_gate(event: Event) -> bool:
             return False
         if (event.type is EventType.USER_MESSAGE
                 and (user.state or {}).get(_STATE_KEY, {}).get("activation_event") == event.id):
+            from mavis.web import logins
+
+            if (login := logins.parse_start(str(event.payload.get("text", "")))) is not None:
+                await logins.complete(user.id, login, event.id)  # a retry after a crash before binding
             return False  # a retry of the very message that redeemed the code is not a chat turn
         return True
     if event.source == routing.SLACK_SOURCE:
