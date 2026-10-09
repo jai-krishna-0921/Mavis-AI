@@ -11,6 +11,7 @@ from mavis.store.db import Base, Session
 
 # Children before parents. The meta-test fails when a table with user_id is missing here.
 USER_TABLES: tuple[str, ...] = (
+    "machine_sessions", "compute_usage", "workspace_files", "user_quotas",
     "web_sessions", "web_login_nonces", "user_emails",
     "personal_layers", "learning_suppressions", "personal_signals",
     "invite_redemptions", "native_oauth_states", "native_grants", "artifacts", "task_cards",
@@ -18,8 +19,7 @@ USER_TABLES: tuple[str, ...] = (
     "wakeups",
     "ping_log", "loops", "connections_pending", "attention_prefs", "attention_money_baselines",
     "attention_senders", "attention_observations", "policy_rules", "outbox", "messages", "llm_usage",
-    "graph_edges", "graph_nodes", "profile_cards", "conversation_summaries",
-    "personal_layers", "learning_suppressions", "personal_signals", "audit_log",
+    "graph_edges", "graph_nodes", "profile_cards", "conversation_summaries", "audit_log",
 )
 # Tables that carry user_id but must outlive the user row: none. audit_log rows for the user are deleted
 # and one fresh row with counts only is written after the cascade.
