@@ -337,6 +337,11 @@ def register_integrations(registry: ToolRegistry | None = None) -> None:
     from mavis.tools.integrations.native import slack_events
 
     slack_events.set_user_lookup(NativeSlackLookup())  # Events API deliveries -> the Mavis user
+    # Slack records reach the guard and the graph whether or not attention triage is on (the same bound
+    # method registered by register_attention is deduped). Mail records go through Intake.on_email.
+    from mavis.attention.wiring import get_connector_ingest  # lazy: attention is wired after integrations
+
+    register_event_handler(EventType.SLACK_MESSAGE, get_connector_ingest().on_slack_event)
     flow = get_connect_flow()
     # A task that needs an account pauses on a connect interrupt; ConnectFlow sends the link and
     # resumes the task (RESUME_TASK) once the account is active, declined or failed.

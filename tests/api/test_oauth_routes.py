@@ -193,7 +193,7 @@ async def test_a_slack_connect_teaches_the_users_slack_id_and_workspace(web, oau
     assert ident["slack_ids"] == ["U1"] and ident["team"] == "T1"
 
 
-async def test_a_failure_teaching_the_identity_does_not_undo_the_connection(web, oauth, vendor, user, monkeypatch):
+async def test_a_failure_teaching_the_identity_keeps_the_connection(web, oauth, vendor, user, monkeypatch):
     from mavis.attention import connector_ingest
 
     async def boom(*a, **k):
