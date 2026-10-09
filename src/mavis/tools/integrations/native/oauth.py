@@ -280,7 +280,8 @@ class NativeOAuth:
             raise OAuthError(exc.kind, user_id=st.user_id, pending_id=pending) from None
         key, value = (("email", account.get("email")) if provider is NativeProvider.GOOGLE
                       else ("user_id", account.get("user_id")))
-        owner = await self.tokens.owner_of(provider, key, value) if value else None
+        team = None if provider is NativeProvider.GOOGLE else str(account.get("team_id") or "")
+        owner = await self.tokens.owner_of(provider, key, value, team) if value else None
         if owner is not None and owner != st.user_id:
             raise OAuthError("account_taken", user_id=st.user_id, pending_id=pending)
         try:

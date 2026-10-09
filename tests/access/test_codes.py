@@ -35,3 +35,21 @@ def test_display_hash_hint_and_deep_link():
     assert codes.deep_link_param(c) == "MAV7K3QZ9XW2B"
     assert codes.code_hash(c) == codes.code_hash(codes.normalize("mav-7k3qz-9xw2b"))
     assert len(codes.code_hash(c)) == 64
+
+
+@pytest.mark.parametrize("sentence", [
+    "Hi, my invite is MAV-7K3QZ-9XW2B thanks!",
+    "here you go: mav 7k3qz 9xw2b",
+    "code:MAV7K3QZ9XW2B.",
+    "Hello Mavis\nMAV-7K3QZ-9XW2B\nSent from my phone",
+])
+def test_a_code_with_the_prefix_is_found_inside_a_sentence(sentence):
+    """People paste the code with a greeting around it; only the MAV prefixed shape counts."""
+    assert codes.find_code(sentence) == "7K3QZ9XW2B"
+    assert codes.looks_like_code(sentence)
+
+
+@pytest.mark.parametrize("text", ["hello there", "my number is 7K3QZ9XW2B", "MAV is a nice name", "MAV-123",
+                                  "the MAVERICK7K3QZ9XW2B brand", ""])
+def test_ordinary_text_is_not_mistaken_for_a_code(text):
+    assert codes.find_code(text) is None

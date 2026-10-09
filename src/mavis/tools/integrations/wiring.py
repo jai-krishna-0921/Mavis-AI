@@ -115,6 +115,10 @@ async def google_activated(user_id: int) -> None:
             await get_workspace().ensure_chains(user_id, later=True)
 
 
+async def offer_more_access(user_id: int, capability: Capability) -> object:
+    return await get_connect_flow().offer_more_access(user_id, capability)
+
+
 async def connection_checks_pending(user_id: int, pending_id: int) -> bool:
     from mavis.timers.service import WakeupService
 
@@ -354,6 +358,7 @@ def register_integrations(registry: ToolRegistry | None = None) -> None:
         registry.capability_check = capability_check
         registry.capability_reason = capability_reason
         registry.available = tool_available
+        registry.permission_missing = offer_more_access
     from mavis.tools.integrations.native import slack_events
 
     slack_events.set_user_lookup(NativeSlackLookup())  # Events API deliveries -> the Mavis user

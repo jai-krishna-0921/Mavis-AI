@@ -84,6 +84,22 @@ _GOOGLE_TOOLKITS = frozenset({"google", "googlesuper", *(c.value for c in GOOGLE
 _SLACK_TOOLKITS = frozenset({"slack"})
 
 
+# What a person can still do, in the words used when they left some boxes unticked on Google's consent screen.
+GOOGLE_FEATURES: tuple[tuple[str, str], ...] = (
+    ("read your mail", "mail.search"), ("send mail", "mail.send"),
+    ("see your calendar", "calendar.list"), ("add calendar events", "calendar.create_event"),
+    ("browse Drive", "drive.search"), ("change Drive files", "drive.move"), ("read Docs", "docs.read"),
+    ("read Sheets", "sheets.read"), ("see Tasks", "tasks.list"), ("see Contacts", "contacts.search"),
+    ("make Meet links", "meet.create"),
+)
+
+
+def google_features(grant: Grant) -> tuple[list[str], list[str]]:
+    """(what this grant lets Mavis do, what it does not), by the grant's own scopes."""
+    can = [label for label, action in GOOGLE_FEATURES if allows(grant, action)]
+    return can, [label for label, _ in GOOGLE_FEATURES if label not in can]
+
+
 def provider_of(capability: Capability) -> NativeProvider | None:
     if capability in GOOGLE_CAPABILITIES:
         return NativeProvider.GOOGLE
@@ -119,6 +135,22 @@ class NativeRouter:
         if aclose is not None:
             await aclose()
 
+    @property
+    def configured(self) -> bool:
+        """Can this Mavis connect anything? Native sign-in set up for either vendor counts on its own: a
+        native-only deployment (no Composio key) is fully configured. Otherwise ask the fallback."""
+        if any(self._ready(p) for p in self.executors):
+            return True
+        return bool(getattr(self.fallback, "configured", True))
+
+    def can_connect(self, capability: Capability) -> bool:
+        """Is there anything that can connect this service? Google and Slack are ours when their native
+        sign-in is set up; everything else (Notion) needs the fallback provider."""
+        native = provider_of(capability)
+        if native is not None and self._ready(native):
+            return True
+        return bool(getattr(self.fallback, "configured", True))
+
     # --- routing -------------------------------------------------------------------------------------
 
     def _ready(self, provider: NativeProvider | None) -> bool:
@@ -147,6 +179,17 @@ class NativeRouter:
                         error=f"the connected {provider.value} account was not granted the permission "
                               f"{action} needs; the user must reconnect and allow it")
         return await self.fallback.execute(user, action, args)
+
+    async def google_access(self, user_id: int) -> tuple[list[str], list[str]] | None:
+        """What the user's native Google grant allows and does not, or None when they have no active one."""
+        if not self._ready(NativeProvider.GOOGLE):
+            return None
+        grant = await self._active_grant(user_id, NativeProvider.GOOGLE)
+        return None if grant is None else google_features(grant)
+
+    async def slack_chat_ready(self, user_id: int) -> bool:
+        """Can this user talk to Mavis in a Slack DM? True when the workspace bot is installed for them."""
+        return await self.tokens.account(user_id, NativeProvider.SLACK_BOT) is not None
 
     async def uses_native(self, user_id: int, capability: Capability) -> bool:
         """Does an ACTIVE native grant serve this capability for the user? Triggers never exist for it

@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from datetime import timedelta
 
 import pytest
@@ -569,3 +570,26 @@ async def test_a_failing_forget_does_not_undo_the_disconnect(db, provider, cache
     flow.forget_source = boom
     await flow.disconnect(1, Capability.SLACK)
     assert provider.disconnected == [(1, "slack")] and "Disconnected Slack" in rec.sent[-1].text
+
+
+async def test_more_access_offer_has_a_reconnect_button_and_is_sent_once_a_day(
+    db, provider, cache, fake_bus, rec, state
+):
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    assert await flow.offer_more_access(1, Capability.GMAIL) is True
+    msg = rec.sent[-1]
+    assert msg.text.startswith("That needs more access to your Gmail than you allowed.")
+    assert msg.buttons[0][0].label == "Reconnect Gmail" and msg.buttons[0][0].url
+    assert await flow.offer_more_access(1, Capability.GMAIL) is False  # not again today
+    assert len(rec.sent) == 1
+    assert await flow.offer_more_access(2, Capability.GMAIL) is True  # someone else is a different story
+    assert await connections.open_for(1, Capability.GMAIL) == []  # no pending: nothing "connects" until they sign in
+
+
+async def test_menu_and_status_list_only_what_the_provider_can_connect(db, provider, cache, fake_bus, rec, state):
+    provider.can_connect = lambda c: c is not Capability.NOTION
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    await flow.offer_menu(1)
+    labels = [b.label for row in rec.sent[-1].buttons for b in row]
+    assert labels and not any("Notion" in label for label in labels)
+    assert "Notion" not in await flow.status_text(1)

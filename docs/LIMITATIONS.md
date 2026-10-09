@@ -29,7 +29,7 @@ What Mavis can and cannot do today, what it costs, and what would lift each limi
 | Item | Limit today | Notes |
 |---|---|---|
 | API cost | Free | Internal app. |
-| Workspaces | Your workspace only | Everyone in it can connect their own Slack. Other companies' workspaces cannot. |
+| Workspaces | Your workspace by default | Everyone in it can connect their own Slack. People in other workspaces can connect once the app is distributed (see the next row). Accounts are keyed by workspace and user, so workspaces never mix. |
 | Lift it | Distribute the app | Distributed apps outside the Slack Marketplace are capped at 1 history call per minute and 15 messages, so in practice that needs Marketplace approval. |
 | Chat with Mavis in Slack | Being built today | DM or @mention Mavis; approvals and progress as Slack buttons. |
 | First sync | Last 7 days, up to 200 messages per channel, 2000 total | DMs first. Thread replies are not backfilled. |
@@ -39,8 +39,8 @@ What Mavis can and cannot do today, what it costs, and what would lift each limi
 
 | Item | Limit today | Notes |
 |---|---|---|
-| Access | Only allowlisted Telegram chats | Adding a person is a config change and a redeploy. |
-| Invite codes | Built, not merged | On the parked multi-user branch. About half a day to merge and deploy. |
+| Access | Invite only (`ACCESS_MODE=invite`) | The owner makes codes with `/invite` or on the dashboard. See `docs/ONBOARDING.md`. |
+| Invite codes | Live | 25 uses per code, 20 open codes at once, members hold 3 links each (10 if trusted). |
 
 ## 5. The machine (code and browser for the agent)
 

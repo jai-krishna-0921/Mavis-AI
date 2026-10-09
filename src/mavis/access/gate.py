@@ -9,7 +9,7 @@ import structlog
 
 from mavis import bus
 from mavis.access import UserStatus, UserTier, budgets
-from mavis.access.codes import normalize
+from mavis.access.codes import find_code, normalize
 from mavis.channels import get_channel, routing
 from mavis.channels.test_sink import is_test_chat
 from mavis.config import get_settings
@@ -40,7 +40,7 @@ def _code_in(text: str) -> str | None:
     t = (text or "").strip()
     if t.startswith("/start"):
         t = t[len("/start"):].strip()
-    return normalize(t)
+    return normalize(t) or find_code(t)
 
 
 def _parse(ts: object) -> datetime | None:
