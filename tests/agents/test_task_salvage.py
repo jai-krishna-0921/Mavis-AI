@@ -226,3 +226,49 @@ def test_bubbles_cap_keeps_the_limit_and_names_the_cut():
     out = og._bubbles(text)
     assert len(out) == 3 and out[-1].endswith(og.CUT_NOTE)
     assert og._bubbles("short") == ["short"]
+
+
+# --- a delivery that breaks after the terminal claim still reaches the user and closes approvals ----------
+
+
+async def _salvage_with_broken_publish(user, fake_llm, rec_bus, monkeypatch, fails):
+    from datetime import timedelta
+
+    from mavis.domain import timeutil
+    from mavis.store.repo import approvals
+
+    monkeypatch.setattr(og, "run_step_agent", _step_returning({"s1": "raw", "s2": "FINAL ANSWER"}))
+
+    async def _boom(state):
+        raise RuntimeError("critic down")
+
+    monkeypatch.setattr(og, "critic", _boom)
+    real = rec_bus.publish
+    left = {"n": fails}
+
+    async def flaky(event):
+        if left["n"] > 0:
+            left["n"] -= 1
+            raise ConnectionError("bus down")
+        return await real(event)
+
+    monkeypatch.setattr(rec_bus, "publish", flaky)
+    fake_llm.push_structured(TWO)
+    tid = await tasks.create(user.id, goal="g")
+    aid = await approvals.create(user.id, tid, "send_note", {"text": "x"}, "Send note: x",
+                                 timeutil.now() + timedelta(hours=48))
+    await orchestrator.run_task(tid)
+    return tid, aid
+
+
+@pytest.mark.parametrize("fails", [1, 99])
+async def test_delivery_failing_after_the_claim_still_tells_the_user_and_closes_approvals(
+    user, fake_llm, rec_bus, sent, memory_checkpointer, monkeypatch, fails
+):
+    from mavis.store.repo import approvals
+
+    tid, aid = await _salvage_with_broken_publish(user, fake_llm, rec_bus, monkeypatch, fails)
+    assert (await tasks.get(tid)).status == TaskStatus.PARTIAL
+    told = "".join(m.text for m in sent) + "".join("".join(e.payload["messages"]) for e in _delivered(rec_bus))
+    assert "FINAL ANSWER" in told
+    assert (await approvals.get(aid)).status != "pending"

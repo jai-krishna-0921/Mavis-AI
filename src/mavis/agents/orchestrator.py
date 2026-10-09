@@ -26,6 +26,7 @@ from mavis.agents.orchestrator_graph import (
     complete_task,
     initial_state,
     partial_messages,
+    publish_completed,
 )
 from mavis.agents.task_clock import TaskClock, current_clock
 from mavis.agents.task_dispatch import enqueue_run
@@ -148,11 +149,30 @@ async def _end_unfinished(task_id: int, user_id: int, reason: str, *, lead: str 
                                     "it ran out of time, so this covers only what I finished")
     except Exception:  # noqa: BLE001 - never let delivery trouble leave the task without a final state
         log.exception("task.salvage_failed", task_id=task_id)
-        await _fail(task_id, user_id, reason)
+        after = await tasks.get(task_id)
+        if after is not None and after.status in _LIVE:
+            await _fail(task_id, user_id, reason)  # the claim never happened: fail it plainly
+            return True
+        if after is None or after.status != TaskStatus.PARTIAL:
+            return False  # cancelled or finished meanwhile: not ours to report
+        # Our claim went through and the delivery broke: _fail would no-op on a terminal task. Deliver the
+        # outcome again (the event id dedupes) or, failing that, say it directly, and close the approvals.
+        await _redeliver(task_id, user_id, state, messages)
+        await _close_approvals(task_id, user_id)
         return True
     if ended:
         await _close_approvals(task_id, user_id)
     return ended
+
+
+async def _redeliver(task_id: int, user_id: int, state: dict, messages: list[str]) -> None:
+    try:
+        await publish_completed(task_id, user_id, messages, list(dict.fromkeys(state.get("artifacts", []))),
+                                TaskStatus.PARTIAL)
+    except Exception:  # noqa: BLE001
+        log.exception("task.redelivery_failed", task_id=task_id)
+        with contextlib.suppress(Exception):
+            await approval_flow.say(user_id, "\n\n".join(messages), dedupe_key=f"task:{task_id}:completed")
 
 
 async def recover_tasks_on_start() -> None:
