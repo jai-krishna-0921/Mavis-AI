@@ -49,9 +49,21 @@ def _get_limiter() -> RateLimiter:
     return _limiter
 
 
-async def webhook_rate_limit(request: Request) -> None:
+def client_ip(request: Request) -> str:
     """The api is only reachable through Caddy in prod, so X-Forwarded-For is trustworthy there."""
     fwd = request.headers.get("x-forwarded-for", "")
-    ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
-    if not await _get_limiter().hit(ip):
+    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
+
+
+async def webhook_rate_limit(request: Request) -> None:
+    if not await _get_limiter().hit(client_ip(request)):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "rate limited")
+
+
+_buckets: dict[tuple[str, int, int], RateLimiter] = {}
+
+
+async def hit(bucket: str, key: str, limit: int, window_s: int = WINDOW_S) -> bool:
+    """True if `key` is within `limit` hits per `window_s` in the named bucket (own counters per bucket)."""
+    limiter = _buckets.setdefault((bucket, limit, window_s), RateLimiter(limit, window_s))
+    return await limiter.hit(f"{bucket}:{key}")

@@ -32,6 +32,7 @@ import structlog
 from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
+from mavis.access import web_prefs
 from mavis.agents import claims, clarify, commands, persona, reactions, register
 from mavis.agents.react import ReactResult, _text_of, react_loop
 from mavis.agents.task_dispatch import enqueue_run
@@ -629,7 +630,7 @@ async def run_turn(event: Event) -> None:
             user, now, context=context, connections=connections, known_name=name,
             ask_name=persona.should_ask_name(name, history, now, user.timezone),
             prior_turns=max(len(recent) - 1, 0),  # the current message is already in history
-            register_line=register.prompt_line(their_register),
+            register_line="" if web_prefs.register_opt_out(user) else register.prompt_line(their_register),
         )
         tools = chat_tools(user.id, query=f"{text}\n{previous or ''}",
                            focus=await focus_tools(user.id, history), connect=commands.wants_connect(text))

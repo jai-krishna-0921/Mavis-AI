@@ -526,6 +526,7 @@ class NativeOAuthState(Base):
     provider: Mapped[str] = mapped_column(String(16))
     pending_id: Mapped[int | None] = mapped_column(nullable=True)
     expires_at: Mapped[datetime] = mapped_column(index=True)
+    origin: Mapped[str | None] = mapped_column(String(8), nullable=True)  # "web": started from the dashboard
 
 
 class PersonalLayerRow(Base):
@@ -572,3 +573,46 @@ class PersonalSignal(Base):
     label: Mapped[str] = mapped_column(String(200), default="")
     at: Mapped[datetime] = mapped_column()
     meta: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class WebSession(Base):
+    """A dashboard sign-in. `id` is the sha256 of the cookie value (the cookie itself is never stored);
+    `csrf_hash` is the sha256 of the CSRF token, which is derived from the cookie value."""
+
+    __tablename__ = "web_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    csrf_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(index=True)
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    user_agent: Mapped[str] = mapped_column(String(200), default="")
+
+
+class WebLoginNonce(Base):
+    """One Telegram link sign-in attempt. The nonce and the pre-session cookie are stored as hashes. The bot
+    binds `user_id`; the browser that holds the pre-session cookie collects it once (`consumed_at`)."""
+
+    __tablename__ = "web_login_nonces"
+
+    nonce_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    pre_hash: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True, default=None)
+    link_email: Mapped[str | None] = mapped_column(String(255), default=None)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(default=None)
+
+
+class UserEmail(Base):
+    """An email address confirmed as belonging to a Mavis user (Google sign-in maps verified emails here)."""
+
+    __tablename__ = "user_emails"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True)
+    source: Mapped[str] = mapped_column(String(24))  # google_grant | google_signin | telegram_link
+    confirmed_at: Mapped[datetime] = mapped_column(default=utcnow)

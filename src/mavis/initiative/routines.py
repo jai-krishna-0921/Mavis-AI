@@ -11,6 +11,7 @@ from typing import Any, Protocol
 import structlog
 from sqlalchemy import func, select
 
+from mavis.access import web_prefs
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.decisions import NotifyIntent
@@ -253,6 +254,8 @@ class Routines:
         return candidate.astimezone(UTC)
 
     async def learned_checkin_time(self, user, weekend: bool) -> time:
+        if (chosen := web_prefs.morning_time(user)) is not None:
+            return _parse_hhmm(chosen)  # what the user set beats what Mavis learned
         default = _parse_hhmm(get_settings().morning_checkin_time)
         since = timeutil.now() - timedelta(days=7)
         async with Session() as s:

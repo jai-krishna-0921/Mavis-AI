@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     invite_max_active: int = 20  # unexpired, unrevoked codes at once
     invite_max_uses: int = 25  # per code
     invite_default_days: int = 14
+    # Invite links people make themselves from the dashboard: open links allowed per tier (the owner has no
+    # cap) and uses per link.
+    invite_cap_standard: int = 3
+    invite_cap_trusted: int = 10
+    invite_web_uses: int = 5
     invite_fail_limit_per_hour: int = 5  # failed code attempts per chat
     invite_fail_alert_per_hour: int = 50  # failed attempts across all chats before the owner is alerted
     pending_reply_every_h: float = 24.0
@@ -154,6 +159,12 @@ class Settings(BaseSettings):
     slack_signing_secret: str = ""
     native_token_kek: str = ""  # 32 random bytes, base64: wraps the data key of every sealed grant token
     native_token_kek_previous: str = ""  # comma list of retired KEKs, kept only to unwrap during rotation
+    # --- web dashboard (spec 2026-10-09): /api/v1 answers 404 unless DASHBOARD_ENABLED ----------------------
+    dashboard_enabled: bool = False
+    # Google sign-in reuses GOOGLE_OAUTH_CLIENT_ID/SECRET; the redirect URI
+    # <PUBLIC_BASE_URL>/api/v1/auth/google/callback must be added to that OAuth client in Google Cloud.
+    google_signin_enabled: bool = False
+    dashboard_session_days: int = 30
     sync_gmail_days: int = 14
     sync_slack_days: int = 7
     sync_calendar_back_days: int = 7
