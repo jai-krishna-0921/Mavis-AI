@@ -118,22 +118,64 @@ def _words_match(tokens: list[str], said: str) -> bool:
 
 def _named(name: str, said: str) -> bool:
     """The user's words name this entity: the user themself, the full name, or one of its name words
-    ("Ravi" names "Ravi Menon")."""
-    if is_user(name) or (name.strip() and name.strip().casefold() in said.casefold()):
+    ("Ravi" names "Ravi Menon"). Whole words only: "Ravi" is not named by "ravine" or "Ravishankar"."""
+    if is_user(name):
         return True
-    return _words_match([w for w in _WORD.findall(name.casefold()) if len(w) >= 3], said)
+    words = _WORD.findall(said.casefold())
+    parts = _WORD.findall(name.casefold())
+    if not parts:
+        return False
+    n = len(parts)
+    if any(words[i:i + n] == parts for i in range(len(words) - n + 1)):
+        return True
+    return any(len(p) >= 2 and p in words for p in parts)
 
 
-def grounded_in_user(x: Extraction, said: str, context: str | None = None) -> Extraction:
+# Words that say whose fact it is, not what it is: never evidence that the user said the content.
+_PERSPECTIVE = frozenset(
+    "user users user's i me my mine myself we us our you your yours he him his she her hers they them their "
+    "is are was were be been am has have had does did s".split()
+)
+
+
+def _supported(content: str, said: str, skip: set[str]) -> bool:
+    """Strict grounding of stored content: more than half of its content words (not perspective words,
+    not the words in `skip`: the subject's name and the user's own name) appear in the user's own words,
+    exactly or by stem. A single shared word does not launder a sentence the user never said."""
+    tokens = [t for t in loops_repo.title_tokens(content) if t not in _PERSPECTIVE and t not in skip]
+    if not tokens:
+        return False
+    hit = sum(1 for t in tokens if _words_match([t], said))
+    return hit * 2 > len(tokens)
+
+
+def _name_words(*names: str) -> set[str]:
+    return {w for n in names for w in _WORD.findall(n.casefold())}
+
+
+def grounded_in_user(
+    x: Extraction, said: str, context: str | None = None, *, strict: bool = False,
+    own_names: tuple[str, ...] = (),
+) -> Extraction:
     """Keep only what the user's own words support (T3, I5); `context` is the assistant's previous reply
     (see _grounded for how it decides the leading word). Anything lifted from the assistant context
     is dropped: loops and events, entities the user never named, relations whose every non-user side
-    the user did not name, and profile updates whose value the user did not say."""
+    the user did not name, and profile updates whose value the user did not say.
+
+    `strict` (the turn read third-party output): naming is not support. A stored relation (its statement
+    and object) and a profile value must also be said by the user in substance (_supported), so a reply
+    that carries an email's claim about "Alice" cannot be learned because the user said "thanks Alice"."""
     loops = [lp for lp in x.loops if _grounded(lp.title, lp.entities, said, context)]
     events = [ev for ev in x.events if _grounded(ev.title, ev.with_people, said, context)]
     entities = [e for e in x.entities if _named(e.name, said)]
     relations = [r for r in x.relations if _named(r.subject, said) and _named(r.object, said)]
-    profile = [u for u in x.profile_updates if _words_match(loops_repo.title_tokens(u.value), said)]
+    me = _name_words(*own_names)
+    if strict:
+        relations = [r for r in relations
+                     if _supported(f"{r.statement} {r.object}", said, _name_words(r.subject) | me)]
+        profile = [u for u in x.profile_updates if _supported(u.value, said, me)]
+    else:
+        profile = [u for u in x.profile_updates if _words_match(loops_repo.title_tokens(u.value), said)]
     dropped = {"loops": len(x.loops) - len(loops), "events": len(x.events) - len(events),
                "entities": len(x.entities) - len(entities), "relations": len(x.relations) - len(relations),
                "profile_updates": len(x.profile_updates) - len(profile)}
@@ -263,7 +305,8 @@ class MemoryService:
         own_words = said if conversation else text
         # a reply was included as context (T3), or the turn read third-party output (strict)
         if conversation and (strict or said != text.strip()):
-            extraction = grounded_in_user(extraction, said, context)
+            extraction = grounded_in_user(extraction, said, context, strict=strict,
+                                          own_names=tuple(n for n in (user.name, card.name) if n))
 
         resolution = await resolve(extraction, await self.graph.entities(user_id), self.embedder)
         trusted = trust is Trust.USER
