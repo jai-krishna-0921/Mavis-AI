@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, parse_qsl, urlsplit
 import httpx
 import pytest
 
+from mavis.access.codes import InviteError
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.store.repo import invites, users
@@ -262,11 +263,7 @@ async def test_invite_caps_are_explained_in_plain_words(j):
     s = get_settings()
     over = await j.tg.say(OWNER_CHAT, f"/invite new uses={s.invite_max_uses + 1}", "Owner")
     assert "at most" in over[-1].text and str(s.invite_max_uses) in over[-1].text
-    for _ in range(s.invite_max_active):
-        await invites.mint(created_by=None)
-    full = await j.tg.say(OWNER_CHAT, "/invite new", "Owner")
-    assert "at most" in full[-1].text and "open codes" in full[-1].text
-    # a dashboard user is capped per person and told what to do about it
+    # a member can hand out only a few links of their own, and is told what to do about it
     u, _ = await users.get_or_create_by_chat(5301, "Capped")
     await users.update(u.id, status="active")
     from mavis.web import sessions
@@ -275,8 +272,30 @@ async def test_invite_caps_are_explained_in_plain_words(j):
     c = j.http()
     c.cookies.set(sessions.COOKIE, token)
     h = {"X-Mavis-CSRF": sessions.csrf_for(token)}
+    for _ in range(s.invite_cap_standard):
+        assert (await c.post("/api/v1/invites", json={}, headers=h)).status_code == 201
     r = await c.post("/api/v1/invites", json={}, headers=h)
-    assert r.status_code == 409 and "invite" in r.json()["message"].lower()
+    assert r.status_code == 409
+    assert r.json()["message"] == "You have used all your invite links. Revoke one to make another."
+    first = (await c.get("/api/v1/invites", headers=h)).json()[0]["code"]
+    assert (await c.delete(f"/api/v1/invites/{first}", headers=h)).status_code == 204
+    assert (await c.post("/api/v1/invites", json={}, headers=h)).status_code == 201
+    # and the owner is told when the whole system has too many open codes
+    with suppress(InviteError):
+        for _ in range(s.invite_max_active):
+            await invites.mint(created_by=None)
+    full = await j.tg.say(OWNER_CHAT, "/invite new", "Owner")
+    assert "at most" in full[-1].text and "open codes" in full[-1].text
+
+
+async def test_owner_lists_codes_and_sees_who_joined(j):
+    link, _ = await j.owner_invite("uses=2 Aiko and Ben")
+    await j.join(5401, "Aiko", link)
+    listed = (await j.tg.say(OWNER_CHAT, "/invite list", "Owner"))[-1].text
+    assert "Aiko and Ben" in listed and "1/2" in listed
+    row = (await invites.list_active())[0]
+    who = (await j.tg.say(OWNER_CHAT, f"/invite users {row.id}", "Owner"))[-1].text
+    assert who.startswith("Aiko (#")
 
 
 # --- 2. first message ---------------------------------------------------------------------------------
@@ -351,6 +370,11 @@ async def test_connect_google_from_telegram_end_to_end(j, memory):
     assert any(t.startswith("Google is connected: priya@kripya.com") for t in after)
     assert any(t.startswith("Connected") for t in after)
     assert not any("Connected" in t or "Google is connected" in t for t in j.tg.texts(6102))
+
+    status = (await j.tg.say(6101, "/connections"))[-1].text
+    assert status == "\u2705 Google Workspace: connected\n\u26aa Slack: not connected"  # no dead-end Notion row
+    menu = await j.tg.say(6101, "/connect")
+    assert [b.label for b in j.tg.buttons(6101)] == ["Connect Slack"] and menu[-1].text == "Which one should I hook up?"
 
     # first sync read only recent mail, with the junk categories excluded
     assert any("newer_than:14d" in q for q in j.cloud.gmail_queries)
@@ -730,7 +754,7 @@ async def test_revoked_google_token_asks_for_a_reconnect_and_reconnecting_heals_
 # --- 7. an unverified-app consent with boxes unticked --------------------------------------------------
 
 
-async def test_unticked_boxes_are_recorded_as_granted_and_the_router_obeys_them(j):
+async def test_unticked_boxes_are_recorded_as_granted_and_the_router_obeys_them(j, clock):
     from langchain_core.messages import AIMessage
 
     from mavis.domain.integrations import UserRef
@@ -749,6 +773,19 @@ async def test_unticked_boxes_are_recorded_as_granted_and_the_router_obeys_them(
     assert set(grant.scopes) == {"openid", "email", "profile", "https://www.googleapis.com/auth/gmail.readonly",
                                  "https://www.googleapis.com/auth/calendar.events"}
     texts = j.tg.texts(6701)
+    # hours later the background polls run: they touch only what was allowed and never nag about the rest
+    from mavis.initiative.wiring import current
+
+    seen = len(j.cloud.requests)
+    n_texts = len(texts)
+    for _ in range(4):
+        clock.advance(minutes=40)
+        await current().timer.tick()
+        await j.settle()
+    polled = {r.url.host for r in j.cloud.requests[seen:]}
+    assert polled <= {"gmail.googleapis.com", "www.googleapis.com", "oauth2.googleapis.com"}  # no Tasks or People calls
+    assert not [r for r in j.cloud.requests[seen:] if r.url.host == "www.googleapis.com" and "/drive/" in r.url.path]
+    assert len(j.tg.texts(6701)) == n_texts
     done = next(t for t in texts if t.startswith("Connected"))
     # the confirmation says what works and what was left out, and how to add it, in plain words
     can, left_out = done.split("Not allowed on Google's screen:")
@@ -864,3 +901,52 @@ async def test_slack_users_from_other_workspaces_map_by_workspace_and_strangers_
                            event_id="Ev402", auth_user="U0SAME0001", bot="B0BRAVO001")
     await post_slack(j, again)
     assert len([s for s in j.slack_channel.sent if "I don't know you yet" in s.text]) == 1
+
+
+async def test_chat_after_the_token_was_revoked_offers_the_reconnect_link(j, clock):
+    from langchain_core.messages import AIMessage
+
+    link, _ = await j.owner_invite()
+    await j.onboard(7101, "Priya", link)
+    j.google_account("priya@kripya.com", PRIYA_MAIL)
+    await j.connect_google(7101, "priya@kripya.com")
+    j.cloud.revoked_refresh.add("1//refresh-priya@kripya.com")
+    clock.advance(hours=2)
+    j.llm.push_ai(AIMessage(content="", tool_calls=[{"name": "mail_search", "id": "c1", "args": {"query": "contract"}}]))
+    out = await j.tg.say(7101, "find the contract mail from Priya", "Priya")
+    reply = out[-1].text
+    assert "reconnect" in reply.lower() or "expired" in reply.lower()
+    assert [b.url for b in j.tg.buttons(7101) if b.url and b.url.startswith("https://accounts.google.com/")]
+    assert not DASHES.search(reply)
+
+
+async def test_a_google_account_that_belongs_to_someone_else_is_skipped_politely(j):
+    from mavis.tools.integrations.native.base import NativeProvider
+
+    link, _ = await j.owner_invite("uses=2")
+    await j.onboard(7201, "Priya", link)
+    await j.onboard(7202, "Mara", link)
+    j.google_account("priya@kripya.com", PRIYA_MAIL)
+    await j.connect_google(7201, "priya@kripya.com")
+    await j.connect_google(7202, "priya@kripya.com", status=400)  # Mara signs in with Priya's address
+    assert "That Google account is already connected to another Mavis user, so I skipped it." in j.tg.texts(7202)
+    assert await j.grant_of(7202, NativeProvider.GOOGLE) is None
+    assert (await j.grant_of(7201, NativeProvider.GOOGLE)).account["email"] == "priya@kripya.com"
+    assert not any("Mara" in t for t in j.tg.texts(7201))
+
+
+async def test_cancelling_on_the_consent_screen_connects_nothing_and_says_so(j):
+    from mavis.tools.integrations.native.base import NativeProvider
+
+    link, _ = await j.owner_invite()
+    await j.onboard(7301, "Priya", link)
+    for what, provider in (("google", NativeProvider.GOOGLE), ("slack", NativeProvider.SLACK)):
+        url = await start_connect(j, 7301, what)
+        state = parse_qs(urlsplit(url).query)["state"][0]
+        r = await j.callback(what, {"error": "access_denied", "state": state})
+        assert r.status_code == 400
+        await j.settle()
+        assert await j.grant_of(7301, provider) is None
+    texts = j.tg.texts(7301)
+    assert "Google sign-in was cancelled, so nothing was connected. Tell me when you want to try again." in texts
+    assert "Slack sign-in was cancelled, so nothing was connected. Tell me when you want to try again." in texts

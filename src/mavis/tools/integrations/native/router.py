@@ -143,6 +143,14 @@ class NativeRouter:
             return True
         return bool(getattr(self.fallback, "configured", True))
 
+    def can_connect(self, capability: Capability) -> bool:
+        """Is there anything that can connect this service? Google and Slack are ours when their native
+        sign-in is set up; everything else (Notion) needs the fallback provider."""
+        native = provider_of(capability)
+        if native is not None and self._ready(native):
+            return True
+        return bool(getattr(self.fallback, "configured", True))
+
     # --- routing -------------------------------------------------------------------------------------
 
     def _ready(self, provider: NativeProvider | None) -> bool:

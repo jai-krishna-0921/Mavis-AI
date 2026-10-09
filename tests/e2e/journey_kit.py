@@ -242,8 +242,11 @@ class Cloud:
                 return denied
             rest = path.removeprefix("/gmail/v1/users/me")
             if rest == "/messages" and request.method == "GET":
-                self.gmail_queries.append(request.url.params.get("q", ""))
-                return httpx.Response(200, json={"messages": [{"id": m["id"], "threadId": m["threadId"]} for m in acct.mail]})
+                q = request.url.params.get("q", "")
+                self.gmail_queries.append(q)
+                after = re.search(r"after:(\d+)", q)  # the poller asks only for what is newer than its cursor
+                fresh = [m for m in acct.mail if not after or int(m["internalDate"]) / 1000 > int(after.group(1))]
+                return httpx.Response(200, json={"messages": [{"id": m["id"], "threadId": m["threadId"]} for m in fresh]})
             if rest.startswith("/messages/") and request.method == "GET":
                 mid = rest.rsplit("/", 1)[-1]
                 found = next((m for m in acct.mail if m["id"] == mid), None)
