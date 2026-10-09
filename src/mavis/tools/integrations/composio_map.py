@@ -201,6 +201,16 @@ def input_option(values: list[Any]) -> str:
     return "RAW" if formula else "USER_ENTERED"
 
 
+# Full-scope Workspace actions that only the native Google executor serves (no Composio slug is mapped).
+# Their router entries (native/router.ACTION_SCOPES) are what let them run; for a Composio-only account the
+# provider answers "unknown action".
+NATIVE_ONLY_ACTIONS: frozenset[str] = frozenset({
+    "mail.archive", "mail.mark_read", "mail.mark_unread", "mail.label", "mail.trash", "mail.untrash",
+    "calendar.calendars", "calendar.get", "calendar.delete_event", "calendar.respond",
+    "contacts.create", "contacts.update", "slides.read", "slides.create", "forms.read", "forms.responses",
+    "meet.recent",
+})
+
 COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
     "mail.search": SlugMapping(
         "GMAIL_FETCH_EMAILS", lambda a: {"query": a.query, "max_results": a.max_results}

@@ -123,4 +123,38 @@ def render_read(data: Any) -> str:
     )
 
 
-RENDERERS = {"mail.search": render_search, "mail.read": render_read}
+def render_change(data: Any) -> str:
+    """Result of an organising action: what was done to how many, never the mail itself."""
+    if not isinstance(data, dict):
+        return "Done."
+    verb = str(data.get("verb") or "Updated")
+    bits = []
+    if data.get("messages"):
+        bits.append(f"{data['messages']} email(s)")
+    if data.get("threads"):
+        bits.append(f"{data['threads']} conversation(s)")
+    text = f"Done. {verb} {' and '.join(bits) or 'the mail'}."
+    if data.get("added"):
+        text += f" Added label ids: {', '.join(map(str, data['added']))}."
+    if data.get("removed") and verb.startswith("Updated"):
+        text += f" Removed label ids: {', '.join(map(str, data['removed']))}."
+    return text
+
+
+def render_labels(data: Any) -> str:
+    labels = data.get("labels") if isinstance(data, dict) else None
+    if labels is None:
+        return render_change(data)
+    mine = [x for x in labels if isinstance(x, dict) and x.get("type") == "user"]
+    system = [x for x in labels if isinstance(x, dict) and x.get("type") != "user"]
+    lines = [f"{len(labels)} label(s). Use label names with mail_label."]
+    lines += [f"- {x.get('name', '')} (id {x.get('id', '')})" for x in mine]
+    lines.append("System: " + ", ".join(str(x.get("name", "")) for x in system))
+    return "\n".join(lines)
+
+
+RENDERERS = {
+    "mail.search": render_search, "mail.read": render_read, "mail.archive": render_change,
+    "mail.mark_read": render_change, "mail.mark_unread": render_change, "mail.trash": render_change,
+    "mail.untrash": render_change, "mail.label": render_labels,
+}

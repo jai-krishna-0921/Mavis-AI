@@ -49,13 +49,13 @@ async def test_google_authorize_url(oauth):
     assert q["access_type"] == "offline" and q["prompt"] == "consent"
     assert q["include_granted_scopes"] == "true" and q["code_challenge_method"] == "S256"
     scopes = q["scope"].split()
-    assert {"openid", "email", "profile", "https://www.googleapis.com/auth/gmail.readonly",
-            "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.compose",
-            "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/documents", "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/tasks", "https://www.googleapis.com/auth/meetings.space.created",
-            "https://www.googleapis.com/auth/meetings.space.readonly",
-            "https://www.googleapis.com/auth/contacts.readonly"} == set(scopes)
+    A = "https://www.googleapis.com/auth/"
+    assert {"openid", "email", "profile", *(A + n for n in (
+        "gmail.modify", "gmail.send", "gmail.compose", "calendar", "drive", "documents", "spreadsheets",
+        "presentations", "forms.body.readonly", "forms.responses.readonly", "tasks", "contacts",
+        "contacts.other.readonly", "directory.readonly", "meetings.space.created",
+        "meetings.space.readonly"))} == set(scopes)
+    assert len(scopes) == len(set(scopes)) == 19
     verifier = verify_state(q["state"]).verifier
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     assert q["code_challenge"] == challenge

@@ -33,6 +33,11 @@ def test_catalog_covers_spec_actions():
         "drive.meta", "drive.permissions", "drive.download", "tasks.get", "mail.profile",
         "contacts.list",
         "docs.append", "sheets.append_row", "sheets.update_range", "docs.insert_text", "tasks.patch",
+        # full Workspace read and write
+        "mail.archive", "mail.mark_read", "mail.mark_unread", "mail.label", "mail.trash", "mail.untrash",
+        "calendar.calendars", "calendar.get", "calendar.delete_event", "calendar.respond",
+        "contacts.create", "contacts.update", "slides.read", "slides.create", "forms.read",
+        "forms.responses", "meet.recent",
     }
     assert set(ACTIONS) == expected
 
@@ -73,7 +78,8 @@ def test_capabilities_match_action_prefix():
     prefix_caps = {"mail": Capability.GMAIL, "calendar": Capability.CALENDAR,
                    "slack": Capability.SLACK, "notion": Capability.NOTION,
                    "drive": Capability.DRIVE, "docs": Capability.DOCS, "sheets": Capability.SHEETS,
-                   "tasks": Capability.TASKS, "contacts": Capability.CONTACTS, "meet": Capability.MEET}
+                   "tasks": Capability.TASKS, "contacts": Capability.CONTACTS, "meet": Capability.MEET,
+                   "slides": Capability.DOCS, "forms": Capability.DOCS}
     for name, spec in ACTIONS.items():
         assert spec.capability is prefix_caps[name.split(".")[0]]
 

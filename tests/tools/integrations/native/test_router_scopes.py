@@ -66,6 +66,22 @@ def test_every_action_the_google_executor_handles_has_a_scope_entry():
         (["contacts.readonly"], ["contacts.search", "contacts.list"], ["mail.search", "drive.search"]),
         (["openid", "email", "profile"], [], ["mail.search", "calendar.list", "drive.search",
                                               "contacts.list"]),
+        # the full-scope set: broader scopes satisfy the narrower needs
+        (["gmail.modify"], ["mail.read", "mail.thread", "mail.profile", "mail.archive", "mail.mark_read",
+                            "mail.mark_unread", "mail.label", "mail.trash", "mail.untrash"], []),
+        (["gmail.readonly"], ["mail.read"], ["mail.archive", "mail.label", "mail.trash"]),
+        (["gmail.send", "gmail.compose"], ["mail.send", "mail.draft"], ["mail.archive", "mail.search"]),
+        (["calendar"], ["calendar.list", "calendar.find", "calendar.get", "calendar.calendars",
+                        "calendar.delete_event", "calendar.respond", "calendar.free_slots"], []),
+        (["contacts"], ["contacts.search", "contacts.list", "contacts.create", "contacts.update"], []),
+        (["presentations"], ["slides.read", "slides.create"], ["forms.read", "docs.create"]),
+        (["presentations.readonly"], ["slides.read"], ["slides.create"]),
+        (["forms.body.readonly"], ["forms.read"], ["forms.responses"]),
+        (["forms.body.readonly", "forms.responses.readonly"], ["forms.read", "forms.responses"], []),
+        (["forms.responses.readonly"], [], ["forms.read", "forms.responses"]),
+        (["drive"], ["slides.read", "slides.create", "forms.read", "forms.responses"], []),
+        (["meetings.space.readonly"], ["meet.recent", "meet.transcript"], ["meet.create"]),
+        (["contacts.other.readonly", "directory.readonly"], [], ["contacts.search", "contacts.create"]),
     ],
 )
 def test_scope_matrix(scopes, allowed, denied):
@@ -167,3 +183,32 @@ async def test_a_full_grant_runs_the_writes_natively(tokens, oauth, client):
     for action in WRITES:
         assert (await router.execute(U, action, {})).ok
     assert len(ex.calls) == len(WRITES) and fallback.executed == []
+
+
+PREVIOUS_SCOPES = ["openid", "email", "profile", "gmail.readonly", "gmail.send", "gmail.compose",
+                   "calendar.events", "drive", "documents", "spreadsheets", "tasks",
+                   "meetings.space.created", "meetings.space.readonly", "contacts.readonly"]
+STILL_WORKS = [a for a in ACTION_SCOPES if a not in {
+    "mail.archive", "mail.mark_read", "mail.mark_unread", "mail.label", "mail.trash", "mail.untrash",
+    "calendar.calendars", "contacts.create", "contacts.update", "slides.read", "slides.create",
+    "forms.read", "forms.responses"}]
+
+
+def test_a_grant_made_with_the_previous_scopes_keeps_everything_it_covered():
+    old = g(*PREVIOUS_SCOPES)
+    assert all(allows(old, action) for action in STILL_WORKS), [a for a in STILL_WORKS if not allows(old, a)]
+    # an event delete or an RSVP is an events call, so calendar.events covers it
+    assert allows(old, "calendar.delete_event") and allows(old, "calendar.respond")
+
+
+@pytest.mark.parametrize("action", ["mail.archive", "mail.trash", "mail.label", "calendar.calendars",
+                                    "contacts.create", "contacts.update", "slides.read", "slides.create",
+                                    "forms.read", "forms.responses"])
+async def test_an_older_grant_gets_permission_missing_only_for_the_new_actions(parts, tokens, action):
+    fallback, ex, router = parts
+    ex._actions.add(action)
+    older = ["gmail.readonly", "gmail.send", "calendar.events", "contacts.readonly", "tasks"]
+    await grant(tokens, G, [A + s for s in older])
+    res = await router.execute(U, action, {})
+    assert not res.ok and res.error_kind is FailureKind.PERMISSION_MISSING
+    assert ex.calls == [] and "reconnect" in res.error

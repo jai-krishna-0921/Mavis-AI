@@ -78,11 +78,12 @@ def test_every_workspace_write_self_action_needs_approval_when_tainted():
             assert spec.taint_approve, spec.name
 
 
-def test_chat_exposure_is_reads_plus_three_writes():
+def test_chat_exposure_is_reads_plus_the_self_only_writes():
     chat_writes = {n for n, s in ACTIONS.items()
                    if "conversation" in s.agents and s.capability in WORKSPACE_CAPABILITIES
                    and s.risk is not RiskClass.READ}
-    assert chat_writes == {"docs.create", "tasks.add", "tasks.complete"}
+    assert chat_writes == {"docs.create", "tasks.add", "tasks.complete", "slides.create", "contacts.create",
+                           "contacts.update"}
 
 
 async def test_tainted_run_queues_docs_create_for_approval(workspace_on, user):

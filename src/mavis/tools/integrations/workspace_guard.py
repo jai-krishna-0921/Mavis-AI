@@ -27,7 +27,15 @@ from mavis.domain.policy import RiskClass
 from mavis.domain.tasks import TaskOrigin
 from mavis.store.repo import tasks as tasks_repo
 from mavis.store.repo import users
-from mavis.tools.integrations.actions import FileArgs, NoArgs, SheetsReadArgs, SheetUpdateArgs, TaskRefArgs
+from mavis.tools.integrations.actions import (
+    CalendarGetArgs,
+    FileArgs,
+    MailReadArgs,
+    NoArgs,
+    SheetsReadArgs,
+    SheetUpdateArgs,
+    TaskRefArgs,
+)
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connections import ConnectionCache
 from mavis.tools.integrations.normalize import extract_list, pick
@@ -316,7 +324,47 @@ async def prepare_move(ctx: ToolContext, args: Any) -> Prepared:
     return Prepared(risk=folder.risk, note=f"{await file_note(ctx, args.file_id)}\n{folder.note}")
 
 
+EVENT_UNKNOWN = "I couldn't find that calendar event, so I haven't changed anything."
+MAX_TRASH_NOTES = 5
+
+
+async def prepare_event(ctx: ToolContext, args: Any) -> Prepared:
+    """calendar.delete_event / calendar.respond: the approval card names the real event, its time and its
+    guests (what Google says, never the model's words). An event that cannot be found is refused."""
+    try:
+        event = await action_data(ctx, "calendar.get",
+                                  CalendarGetArgs(event_id=args.event_id, calendar_id=args.calendar_id))
+    except ActionFailed:
+        return Prepared(refusal=EVENT_UNKNOWN)
+    if not isinstance(event, dict) or not pick(event, "id", "data.id"):
+        return Prepared(refusal=EVENT_UNKNOWN)
+    start = pick(event, "start.dateTime", "start.date", default="") or "unknown time"
+    guests = [str(g["email"]) for g in event.get("attendees") or [] if isinstance(g, dict) and g.get("email")]
+    lines = [f"Event: {one_line(event.get('summary') or '(untitled)')} | {str(start)[:16]}"]
+    if guests:
+        lines.append(f"Guests: {one_line(', '.join(guests[:8]), 200)}")
+    return Prepared(note="\n".join(lines))
+
+
+async def prepare_trash(ctx: ToolContext, args: Any) -> Prepared:
+    """mail.trash: the card shows who sent the first few emails and their subjects, so the user never
+    approves a pile of ids. A lookup that fails just leaves that email out of the note."""
+    lines = []
+    for mid in args.message_ids[:MAX_TRASH_NOTES]:
+        try:
+            msg = await action_data(ctx, "mail.read", MailReadArgs(message_id=mid))
+        except ActionFailed:
+            continue
+        if isinstance(msg, dict):
+            lines.append(f"- {one_line(msg.get('sender') or msg.get('from') or '', 60)}: "
+                         f"{one_line(msg.get('subject') or '(no subject)', 80)}")
+    return Prepared(note="\n".join(lines) or None)
+
+
 ESCALATIONS: dict[str, PrepareFn] = {
+    "calendar.delete_event": prepare_event,
+    "calendar.respond": prepare_event,
+    "mail.trash": prepare_trash,
     "drive.share": prepare_named_file,
     "docs.comment": prepare_named_file,
     "drive.move": prepare_move,

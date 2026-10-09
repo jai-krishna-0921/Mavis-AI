@@ -142,7 +142,10 @@ class Cloud:
 
     # -- consent (what the person does in the browser) ------------------------------------------------
 
-    def google_consent(self, url: str, email: str, *, untick: tuple[str, ...] = ()) -> dict[str, str]:
+    def google_consent(self, url: str, email: str, *, untick: tuple[str, ...] = (),
+                       earlier: tuple[str, ...] = ()) -> dict[str, str]:
+        """`earlier`: scopes the person granted on a previous consent (include_granted_scopes=true returns
+        them with the new ones), e.g. the narrower mail scope an older Mavis asked for."""
         parts = urlsplit(url)
         assert parts.netloc == "accounts.google.com", url
         q = {k: v[0] for k, v in parse_qs(parts.query).items()}
@@ -150,6 +153,7 @@ class Cloud:
         assert q["code_challenge_method"] == "S256" and q["response_type"] == "code"
         asked = q["scope"].split()
         granted = [s for s in asked if not any(s.endswith(u) or s == u for u in untick)]
+        granted += [s for s in earlier if s not in granted]
         self._n += 1
         code = f"gcode-{self._n}"
         self._codes[code] = {"email": email, "challenge": q["code_challenge"], "redirect": q["redirect_uri"],

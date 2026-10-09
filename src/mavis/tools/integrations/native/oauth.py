@@ -51,20 +51,18 @@ SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_REVOKE_URL = "https://slack.com/api/auth.revoke"
 SLACK_OPEN_DM_URL = "https://slack.com/api/conversations.open"
 
-_GMAIL = "https://www.googleapis.com/auth/gmail"
-GOOGLE_SCOPES = (
-    "openid", "email", "profile",
-    f"{_GMAIL}.readonly", f"{_GMAIL}.send", f"{_GMAIL}.compose",
-    "https://www.googleapis.com/auth/calendar.events",
-    # drive (full): editing, moving, commenting on and sharing the user's EXISTING files needs it; drive.file
-    # only reaches files this app made. It also covers every read, so drive.readonly is not asked for.
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/documents",
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/tasks",
-    "https://www.googleapis.com/auth/meetings.space.created",  # create Meet links
-    "https://www.googleapis.com/auth/meetings.space.readonly",  # read transcripts of the user's meetings
-    "https://www.googleapis.com/auth/contacts.readonly",
+_AUTH = "https://www.googleapis.com/auth/"
+# Full Workspace read and write. A broader scope covers the narrower ones (gmail.modify reads, calendar
+# covers events, drive covers every Drive read, contacts covers contacts.readonly), so none of the
+# narrower variants is asked for. router.ACTION_SCOPES still honours older grants made with them.
+GOOGLE_SCOPES = ("openid", "email", "profile") + tuple(
+    _AUTH + name for name in (
+        "gmail.modify", "gmail.send", "gmail.compose",
+        "calendar", "drive", "documents", "spreadsheets", "presentations",
+        "forms.body.readonly", "forms.responses.readonly",
+        "tasks", "contacts", "contacts.other.readonly", "directory.readonly",
+        "meetings.space.created", "meetings.space.readonly",
+    )
 )
 SLACK_USER_SCOPES = (
     "channels:history", "groups:history", "im:history", "mpim:history",
