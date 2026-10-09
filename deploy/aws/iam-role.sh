@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Shared contract B (Plans 11 and 12): IAM role + instance profile `mavis-ec2` for the box, associated to the
-# instance, and IMDSv2 with hop limit 2 so containers can use the role. Attaches NO policies: each plan adds
-# its own inline policy (mavis-backups, mavis-machine) in its own script. Idempotent. Dry run by default.
+# instance, and IMDSv2. The hop limit is raised to 2 (so the api, worker and timer containers can use the role)
+# ONLY after the DOCKER-USER rule that keeps every other container away from 169.254.169.254 is verified on the
+# box (imds.sh install, run by bootstrap.sh and deploy.sh); a failed check afterwards lowers it to 1 again.
+# Attaches NO policies: each plan adds its own inline policy (mavis-backups, mavis-machine) in its own script.
+# Idempotent. Dry run by default.
 #   deploy/aws/iam-role.sh            print the plan
 #   deploy/aws/iam-role.sh --apply    create what is missing
 set -euo pipefail
@@ -58,6 +61,21 @@ else
     [[ -n "${MAVIS_SKIP_PROPAGATION_WAIT:-}" ]] || sleep 10
   done
 fi
+# 1. the guard must be in place first; refuse to raise the hop limit when it is not
+if [[ "$APPLY" == 1 ]]; then
+  "$AWS_DIR/imds.sh" verify-rule || die "refusing to raise the instance metadata hop limit: run deploy/aws/imds.sh install and fix the failure above"
+else
+  printf 'PLAN: imds.sh verify-rule (iptables guard in place and postgres blocked; the hop limit is not raised unless it passes)\n'
+fi
 act "IMDSv2 required, hop limit 2" -- ec2 modify-instance-metadata-options --instance-id "$MAVIS_INSTANCE_ID" \
   --http-tokens required --http-put-response-hop-limit 2 --http-endpoint enabled
+# 2. and it must hold with the limit raised; otherwise roll back
+if [[ "$APPLY" == 1 ]]; then
+  if ! "$AWS_DIR/imds.sh" verify-containers; then
+    "$AWS_DIR/imds.sh" lower-hop-limit
+    die "verification failed after raising the hop limit; it was set back to 1"
+  fi
+else
+  printf 'PLAN: imds.sh verify-containers (postgres and redis blocked, worker allowed; hop limit back to 1 if not)\n'
+fi
 log "done (apply=$APPLY)"
