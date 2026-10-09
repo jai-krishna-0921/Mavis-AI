@@ -201,3 +201,17 @@ async def test_owner_of_finds_the_holder_of_a_vendor_account(tokens):
     assert await tokens.owner_of(G, "email", "a@x.com") == 1
     assert await tokens.owner_of(G, "email", "other@x.com") is None
     assert await tokens.owner_of(S, "email", "a@x.com") is None
+
+
+@pytest.mark.parametrize("exc", [httpx.ReadTimeout("slow"), httpx.RemoteProtocolError("cut")],
+                         ids=lambda e: type(e).__name__)
+@pytest.mark.parametrize(("provider", "url"), [(G, GOOGLE_TOKEN_URL), (S, SLACK_TOKEN_URL)],
+                         ids=["google", "slack"])
+async def test_refresh_is_not_repeated_after_the_request_was_sent(tokens, vendor, exc, provider, url):
+    """Slack rotates the refresh token on use, so a blind repeat after a lost answer can strand the grant."""
+    await save(tokens, provider, expires_in=0)
+    vendor.routes[url] = lambda r: (_ for _ in ()).throw(exc)
+    with pytest.raises(IntegrationError):
+        await tokens.access_token(1, provider)
+    assert len(vendor.to(url)) == 1
+    assert (await tokens.grant(1, provider)).status == "ACTIVE"  # a lost answer does not revoke the grant

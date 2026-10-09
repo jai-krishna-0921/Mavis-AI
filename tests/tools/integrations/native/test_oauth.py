@@ -252,3 +252,17 @@ async def test_revoke_forgets_locally_even_when_the_vendor_fails(oauth, tokens, 
     await oauth.revoke(5, G)
     assert await tokens.grant(5, G) is None
     await oauth.revoke(5, G)  # nothing to revoke is not an error
+
+
+@pytest.mark.parametrize("exc", [httpx.ReadTimeout("slow"), httpx.ReadError("cut"),
+                                 httpx.RemoteProtocolError("cut"), httpx.ConnectError("down")],
+                         ids=lambda e: type(e).__name__)
+@pytest.mark.parametrize("provider", [G, S], ids=["google", "slack"])
+async def test_code_exchange_is_sent_once_whatever_goes_wrong(oauth, vendor, exc, provider):
+    """An authorization code is single use: a repeat after the request was sent would fail or burn it."""
+    url = GOOGLE_TOKEN_URL if provider is G else SLACK_TOKEN_URL
+    vendor.routes[url] = lambda r: (_ for _ in ()).throw(exc)
+    state = query(await oauth.authorize_url(5, provider))["state"]
+    with pytest.raises(OAuthError) as e:
+        await oauth.complete(state, "c", provider)
+    assert e.value.kind == "exchange_failed" and len(vendor.to(url)) == 1
