@@ -111,15 +111,45 @@ class GoogleError(Exception):
         self.kind, self.detail, self.field = kind, detail, field
 
 
+def _balanced(query: str) -> bool:
+    """Quotes close and brackets nest. Anything else would let the exclusions we append land inside a
+    phrase or a group, where they no longer apply."""
+    stack: list[str] = []
+    in_quote = False
+    for ch in query:
+        if ch == '"':
+            in_quote = not in_quote
+        elif in_quote:
+            continue
+        elif ch in "({":
+            stack.append(")" if ch == "(" else "}")
+        elif ch in ")}":
+            if not stack or stack.pop() != ch:
+                return False
+    return not in_quote and not stack
+
+
 def search_query(query: str) -> str:
     """The Gmail query with structural exclusions. Spam and trash are always left out unless the query
     names them (or in:anywhere). Promotions, social and forums are left out of a listing (a query with no
     sender, recipient, subject or free-text term) unless the query names that category, so sync and
-    "what's new" never read bulk mail, while a search for a named sender still finds theirs."""
-    targeted, mentioned = False, set()
-    for raw in _TOKEN.findall(query):
+    "what's new" never read bulk mail, while a search for a named sender still finds theirs.
+
+    The exclusions are ANDed onto the whole query, so the query must not be able to escape them: quotes and
+    brackets must balance (else INVALID_ARGUMENT), a dangling OR or minus at the end is dropped, and a query
+    that uses OR or braces is wrapped in parentheses so no alternative sits outside the exclusions."""
+    query = query.strip()
+    if not _balanced(query):
+        raise GoogleError(FailureKind.INVALID_ARGUMENT,
+                          "search query has an unclosed quote or bracket", "query")
+    tokens = _TOKEN.findall(query)
+    while tokens and (tokens[-1].lower() in _CONNECTORS or tokens[-1] in ("-", "+")):
+        query = query[: query.rindex(tokens.pop())].rstrip()
+    targeted, mentioned, grouped = False, set(), False
+    for raw in tokens:
         token = raw.lstrip("-+({").rstrip(")}")
         negated = raw.startswith("-")
+        grouped = grouped or token.lower() in ("or", "|") or "{" in raw or "|" in raw
         if not token or token.lower() in _CONNECTORS:
             continue
         m = _OPERATOR.match(token)
@@ -136,10 +166,170 @@ def search_query(query: str) -> str:
         extra += [f"-in:{box}" for box in MAILBOXES if box not in mentioned]
     if not targeted:
         extra += [f"-category:{c}" for c in CATEGORIES if c not in mentioned]
-    return " ".join(part for part in (query.strip(), *extra) if part)
+    if grouped and query:
+        query = f"({query})"
+    return " ".join(part for part in (query, *extra) if part)
 
 
-def _q(value: str) -> str:
+def _drive_quote(value: str) -> str:
+    """A Drive query string literal: backslash and single quote escaped, nothing else can end it."""
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+_DRIVE_TOKEN = re.compile(r"""\s*(?:(?P<str>'(?:[^'\\]|\\.)*')|(?P<op><=|>=|!=|=|<|>)|(?P<par>[()])"""
+                          r"""|(?P<word>[A-Za-z_][A-Za-z0-9_]*))""")
+_DRIVE_TEXT_FIELDS = {"name": ("contains", "=", "!="), "fulltext": ("contains",),
+                      "mimetype": ("contains", "=", "!=")}
+_DRIVE_TIME_FIELDS = {"modifiedtime": "modifiedTime", "createdtime": "createdTime",
+                      "viewedbymetime": "viewedByMeTime", "sharedwithmetime": "sharedWithMeTime"}
+_DRIVE_CANONICAL = {"name": "name", "fulltext": "fullText", "mimetype": "mimeType"}
+_DRIVE_PEOPLE = {"parents", "owners", "writers", "readers"}
+_DRIVE_TIME_VALUE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9:.]+(?:Z|[+-][0-9:]+)?)?$")
+_DRIVE_MAX_DEPTH = 8
+_DRIVE_MAX_TERMS = 30
+
+
+class _DriveParser:
+    """Recursive descent over the part of Drive's query language we allow:
+
+        expr  := and ("or" and)*          and := not ("and" not)*        not := "not" not | atom
+        atom  := "(" expr ")" | "sharedWithMe" | 'id' "in" (parents|owners|writers|readers)
+               | (name|fullText|mimeType) (contains|=|!=) 'text'
+               | (modifiedTime|createdTime|viewedByMeTime|sharedWithMeTime) (=|!=|<|<=|>|>=) 'date'
+               | starred (=|!=) true|false
+
+    parse() returns (query rebuilt from the tree with every group parenthesised, uses_fulltext) or None when
+    the text is not in the grammar. `trashed` is deliberately absent: the caller always adds it."""
+
+    def __init__(self, tokens: list[tuple[str, str]]) -> None:
+        self.t, self.i, self.fulltext, self.terms = tokens, 0, False, 0
+
+    @classmethod
+    def parse(cls, text: str) -> tuple[str, bool] | None:
+        tokens: list[tuple[str, str]] = []
+        pos = 0
+        while pos < len(text):
+            m = _DRIVE_TOKEN.match(text, pos)
+            if m is None or m.end() == pos:
+                return None if text[pos:].strip() else cls._done(tokens)
+            kind = m.lastgroup or ""
+            tokens.append((kind, m[kind]))
+            pos = m.end()
+        return cls._done(tokens)
+
+    @classmethod
+    def _done(cls, tokens: list[tuple[str, str]]) -> tuple[str, bool] | None:
+        p = cls(tokens)
+        try:
+            out = p._expr(0)
+        except _NotDrive:
+            return None
+        return (out, p.fulltext) if p.i == len(tokens) else None
+
+    def _peek(self) -> tuple[str, str]:
+        return self.t[self.i] if self.i < len(self.t) else ("", "")
+
+    def _take(self, kind: str, value: str | None = None) -> str:
+        k, v = self._peek()
+        if k != kind or (value is not None and v.lower() != value):
+            raise _NotDrive
+        self.i += 1
+        return v
+
+    def _is_word(self, word: str) -> bool:
+        k, v = self._peek()
+        return k == "word" and v.lower() == word
+
+    def _expr(self, depth: int) -> str:
+        if depth > _DRIVE_MAX_DEPTH:
+            raise _NotDrive
+        parts = [self._and(depth)]
+        while self._is_word("or"):
+            self.i += 1
+            parts.append(self._and(depth))
+        return " or ".join(parts) if len(parts) > 1 else parts[0]
+
+    def _and(self, depth: int) -> str:
+        parts = [self._not(depth)]
+        while self._is_word("and"):
+            self.i += 1
+            parts.append(self._not(depth))
+        return " and ".join(parts) if len(parts) > 1 else parts[0]
+
+    def _not(self, depth: int) -> str:
+        if self._is_word("not"):
+            self.i += 1
+            return f"not {self._not(depth + 1)}"
+        return self._atom(depth)
+
+    def _string(self) -> str:
+        raw = self._take("str")[1:-1]
+        return re.sub(r"\\(.)", r"\1", raw, flags=re.S)
+
+    def _atom(self, depth: int) -> str:
+        self.terms += 1
+        if self.terms > _DRIVE_MAX_TERMS:
+            raise _NotDrive
+        kind, value = self._peek()
+        if kind == "par" and value == "(":
+            self.i += 1
+            inner = self._expr(depth + 1)
+            self._take("par", ")")
+            return f"({inner})"
+        if kind == "str":
+            ident = self._string()
+            self._take("word", "in")
+            who = self._take("word").lower()
+            if who not in _DRIVE_PEOPLE:
+                raise _NotDrive
+            return f"{_drive_quote(ident)} in {who}"
+        if kind != "word":
+            raise _NotDrive
+        self.i += 1
+        field = value.lower()
+        if field == "sharedwithme":
+            return "sharedWithMe"
+        if field in _DRIVE_TEXT_FIELDS:
+            op = self._peek()[1].lower()
+            if self._peek()[0] not in ("op", "word") or op not in _DRIVE_TEXT_FIELDS[field]:
+                raise _NotDrive
+            self.i += 1
+            self.fulltext = self.fulltext or field == "fulltext"
+            return f"{_DRIVE_CANONICAL[field]} {op} {_drive_quote(self._string())}"
+        if field in _DRIVE_TIME_FIELDS:
+            op = self._take("op")
+            when = self._string()
+            if op not in ("=", "!=", "<", "<=", ">", ">=") or not _DRIVE_TIME_VALUE.match(when):
+                raise _NotDrive
+            return f"{_DRIVE_TIME_FIELDS[field]} {op} '{when}'"
+        if field == "starred":
+            op = self._take("op")
+            flag = self._take("word").lower()
+            if op not in ("=", "!=") or flag not in ("true", "false"):
+                raise _NotDrive
+            return f"starred {op} {flag}"
+        raise _NotDrive
+
+
+class _NotDrive(Exception):
+    """The text is not in the allowed Drive grammar."""
+
+
+
+def _bad_segment(value: str, *, allow_slash: bool = False) -> bool:
+    """Would this value, used as one URL path segment, change which resource is addressed? Empty, a dot
+    segment, a slash (or backslash, which some servers fold into one) or a control character would."""
+    if value in ("", ".", "..") or value != value.strip():
+        return True
+    return any(ch == "\\" or (ch == "/" and not allow_slash) or ord(ch) < 32 or ord(ch) == 127
+               for ch in value)
+
+
+def _q(value: str, *, allow_slash: bool = False) -> str:
+    """Percent-encode one path segment. Refuses what _bad_segment names, so a model-supplied id can never
+    reach another endpoint."""
+    if _bad_segment(value, allow_slash=allow_slash):
+        raise GoogleError(FailureKind.INVALID_ARGUMENT, "id is not a valid identifier")
     return quote(value, safe="")
 
 
@@ -232,6 +422,11 @@ class GoogleExecutor:
             locs = [".".join(str(p) for p in e["loc"]) for e in exc.errors()]
             return ToolResult(ok=False, error=f"invalid arguments for {action}: {', '.join(locs)}",
                               error_kind=FailureKind.INVALID_ARGUMENT, error_field=locs[0] if locs else None)
+        for name in ID_ARGS:  # an id becomes a URL path segment: refuse one that could address something else
+            value = getattr(parsed, name, None)
+            if isinstance(value, str) and _bad_segment(value):
+                return ToolResult(ok=False, error=f"invalid arguments for {action}: {name}",
+                                  error_kind=FailureKind.INVALID_ARGUMENT, error_field=name)
         try:
             return ToolResult(ok=True, data=await handler(user.user_id, parsed))
         except ReauthRequired as exc:
@@ -570,12 +765,19 @@ class GoogleExecutor:
 
     @staticmethod
     def _drive_q(query: str, *, extra: str = "") -> tuple[str, bool]:
-        """(q, ordered): the user's Drive query ANDed with trashed = false. Drive refuses orderBy together
-        with fullText terms."""
-        clauses = [f"({query.strip()})"] if query.strip() else []
+        """(q, ordered). The model's query is never spliced into q. It is parsed against a small allowlisted
+        grammar (see _DriveParser) and rebuilt with every value escaped; text that is not in that grammar is
+        searched as plain words (`fullText contains '<escaped>'`). The result is ANDed with trashed = false,
+        so no input can widen the search to trashed files or add a clause of its own. Drive refuses orderBy
+        together with fullText terms, hence `ordered`."""
+        text = query.strip()
+        parsed = _DriveParser.parse(text) if text else None
+        if text and parsed is None:
+            parsed = (f"fullText contains {_drive_quote(text)}", True)
+        clauses = [f"({parsed[0]})"] if parsed else []
         clauses += [extra] if extra else []
         clauses.append("trashed = false")
-        return " and ".join(clauses), not re.search(r"\bfulltext\b", query, re.I)
+        return " and ".join(clauses), not (parsed and parsed[1])
 
     async def _files(self, uid: int, q: str, order: str | None, limit: int) -> dict:
         params: dict[str, Any] = {
@@ -664,7 +866,8 @@ class GoogleExecutor:
             if not title:
                 raise GoogleError(FailureKind.NOT_FOUND, "google spreadsheet has no sheets")
             target = "'" + str(title).replace("'", "''") + "'"
-        got = await self._json(uid, "GET", f"{SHEETS}/{_q(a.spreadsheet_id)}/values/{_q(target)}",
+        sheet = _q(a.spreadsheet_id)
+        got = await self._json(uid, "GET", f"{SHEETS}/{sheet}/values/{_q(target, allow_slash=True)}",
                                params={"valueRenderOption": "FORMATTED_VALUE"})
         got["values"] = (got.get("values") or [])[:MAX_SHEET_ROWS]
         return {"valueRanges": [got]}
