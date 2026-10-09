@@ -8,6 +8,7 @@ import re
 from mavis.machine.errors import SandboxPathError
 
 HIDDEN_PREFIX = ".mavis/"
+WORK_DIRS = ("inbox", "out", "work", ".mavis/tmp")  # created in every fresh workspace
 SAFE_ENV_KEYS = frozenset({"PATH", "HOME", "LANG", "LC_ALL", "PYTHONIOENCODING", "TMPDIR", "MPLBACKEND",
                            "PYTHONDONTWRITEBYTECODE"})
 _NAME_BAD = re.compile(r"[^A-Za-z0-9._-]+")
