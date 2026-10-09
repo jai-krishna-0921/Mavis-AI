@@ -15,7 +15,7 @@ from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.messages import TAINT_SUFFIX, Button, Outbound, Role
 from mavis.domain.tasks import TaskStatus
-from mavis.domain.wakeups import REMINDER_PREFIX, WakeupKind, WakeupStatus
+from mavis.domain.wakeups import REMINDER_PREFIX, WakeupKind, WakeupStatus, clean_what
 from mavis.initiative import guards, subjects
 from mavis.initiative.composer import Composer
 from mavis.initiative.quiet import QuietTracker
@@ -163,7 +163,7 @@ class InitiativeExecutor:
                     scale=False, reminder=True, dedupe_key=f"deferred:{dedupe_key}",
                 )
             return False
-        text = reminder_text(reason, due, now, user.timezone)
+        text = reminder_text(clean_what(reason, user.name), due, now, user.timezone)
         await self.deliver(user, [text], dedupe_key, REMINDER_URGENCY)
         return True
 

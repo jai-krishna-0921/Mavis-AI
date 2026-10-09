@@ -7,7 +7,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from mavis import bus
 from mavis.agents import cancellation
@@ -22,12 +22,14 @@ from mavis.domain.policy import RiskClass
 from mavis.domain.results import ToolOutput
 from mavis.domain.tasks import ApprovalStatus, TaskStatus
 from mavis.domain.timefmt import DueStatus, relative_due, relative_past
+from mavis.domain.wakeups import REMINDER_PREFIX, WakeupKind, clean_what
 from mavis.loops import service as loops_service
 from mavis.memory import service as memory_service
 from mavis.policy import outcomes
 from mavis.policy.risk import wrap_untrusted
 from mavis.store.repo import approvals, policy_rules, tasks, users
 from mavis.store.repo import loops as loops_repo
+from mavis.store.repo import wakeups as wakeups_repo
 from mavis.timers import service as timers_service
 from mavis.tools.registry import MavisTool, TaintPolicy, ToolContext, call_untrusted, current_run
 
@@ -60,14 +62,29 @@ class ForgetArgs(ToolArgs):
 
 class WakeMeArgs(LocalTimes):
     at: datetime = Field(description=wall_clock("When to fire, in the future"))
-    reason: str = Field(min_length=2, max_length=300, description="What to do or check when it fires")
+    what: str = Field(min_length=2, max_length=300, description=(
+        "The thing to do, in the user's own perspective, short and without their name or 'remind me "
+        "to': \"Stretch\", \"Call mom\", \"Take the chicken out\". Not an instruction to Mavis."))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_name(cls, data):  # `reason` was this field's name; stored calls and old prompts use it
+        if isinstance(data, dict) and "what" not in data and "reason" in data:
+            data = {**data, "what": data["reason"]}
+            del data["reason"]
+        return data
+
+    @property
+    def reason(self) -> str:
+        return self.what
 
 
 class TrackLoopArgs(LocalTimes):
     kind: LoopKind
     title: str = Field(min_length=2, max_length=200, description=(
-        "What it is, read days later: write any day as an absolute date (Sun 4 Oct), never today or "
-        "tomorrow"))
+        "What it is, read days later, as the thing to do in the user's own perspective (\"Renew "
+        "passport\", \"Call mom\"), without their name or 'remind me to': write any day as an absolute "
+        "date (Sun 4 Oct), never today or tomorrow"))
     due_at: datetime | None = Field(
         default=None, description=wall_clock("Optional deadline")
     )
@@ -156,11 +173,12 @@ async def wake_me(user_id: int, args: WakeMeArgs) -> ToolOutput:
     if at > timeutil.now() + MAX_WAKE_AHEAD:
         raise ActionFailed("That time is more than a year away; pick a nearer time.",
                            reason="that time is more than a year away", kind=FailureKind.INVALID_ARGUMENT)
-    key = f"remind:{user_id}:{at:%Y%m%d%H%M}:{hashlib.sha1(args.reason.encode()).hexdigest()[:8]}"
+    what = clean_what(args.what, (await users.get(user_id)).name, capitalise=True)
+    key = f"remind:{user_id}:{at:%Y%m%d%H%M}:{hashlib.sha1(what.encode()).hexdigest()[:8]}"
     # A reason derived from third-party text (registry.call_untrusted) fires on the untrusted path: the
     # composer words it, scrubbed of links and addresses, never relayed verbatim as "your reminder".
     wakeup_id = await timers_service.WakeupService().wake_me(
-        user_id, at, f"Reminder the user asked for: {args.reason}", kind="agent",
+        user_id, at, f"{REMINDER_PREFIX}{what}", kind="agent",
         reminder=True, dedupe_key=key, payload={"untrusted": True} if call_untrusted() else None,
     )
     # args.at is the user's wall clock (the registry attached their zone), so it reads as they said it
@@ -170,9 +188,10 @@ async def wake_me(user_id: int, args: WakeMeArgs) -> ToolOutput:
 
 async def track_loop(user_id: int, args: TrackLoopArgs) -> ToolOutput:
     due = await to_utc(user_id, args.due_at) if args.due_at else None
+    title = clean_what(args.title, (await users.get(user_id)).name, capitalise=True)
     loop = await loops_service.LoopService(bus.get_bus()).upsert(
         user_id,
-        LoopUpsert(kind=args.kind, title=args.title, due_at=due, entities=args.entities,
+        LoopUpsert(kind=args.kind, title=title, due_at=due, entities=args.entities,
                    importance=args.importance, source="tool:track_loop",
                    # the user's own request (their words, or a card they approved); worded from
                    # third-party text without a card, it is stored as untrusted (registry.call_untrusted)
@@ -230,7 +249,7 @@ def _loop_line(lp: Loop, now: datetime, tz: str, shown_untrusted: list[bool]) ->
         title = "(from your inbox) " + wrap_untrusted(lp.title, "pending")
         shown_untrusted.append(True)
     note = ", waiting for your reply to my follow-up" if lp.status is LoopStatus.AWAITING_REPLY else ""
-    line = f"- [{due.status.value}] {title}: {due.label}{note}"
+    line = f"- [{due.status.value}] {title}: {due.label}{note} (ref loop:{lp.id})"
     far = datetime.max.replace(tzinfo=UTC)
     return _URGENCY.index(due.status), timeutil.ensure_utc(lp.due_at) or far, line
 
@@ -259,6 +278,17 @@ async def pending(user_id: int, args: PendingArgs) -> str:
     sections: list[str] = []
     if ranked:
         sections.append("Open items:\n" + "\n".join(r[2] for r in ranked))
+    reminders = []
+    for w in await wakeups_repo.list_pending(user_id, WakeupKind.AGENT):
+        if not w.payload.get("reminder"):
+            continue
+        reason = clean_what(w.reason.removeprefix(REMINDER_PREFIX), user.name)
+        if w.payload.get("untrusted"):
+            reason = wrap_untrusted(reason, "pending")
+            shown_untrusted.append(True)
+        reminders.append(f"- {reason}: {relative_due(w.due_at, now, tz).label} (ref reminder:{w.id})")
+    if reminders:
+        sections.append("Reminders:\n" + "\n".join(reminders))
     cards = []
     for a in await approvals.open_for_user(user_id):
         if a.status not in (ApprovalStatus.PENDING.value, ApprovalStatus.AWAITING_EDIT.value):
@@ -299,6 +329,38 @@ async def pending(user_id: int, args: PendingArgs) -> str:
     return "\n\n".join(sections) or NOTHING_OPEN
 
 
+class CompleteItemArgs(ToolArgs):
+    ref: str = Field(description=(
+        "Ref of the item from the pending tool, e.g. loop:12 or reminder:5. Call pending first to find it"))
+
+
+async def complete_item(user_id: int, args: CompleteItemArgs) -> ToolOutput:
+    """Close one open item the user is done with (or wants dropped): a to-do or tracked loop is marked
+    done, a reminder is cancelled. Only the user's own items."""
+    kind, _, raw = args.ref.strip().partition(":")
+    kind = kind.strip().lower()
+    if not raw.strip().isdigit() or kind not in ("loop", "reminder"):
+        raise ActionFailed("Unknown ref; call pending and use a ref like loop:12 or reminder:5.",
+                           reason="I couldn't tell which item you meant", kind=FailureKind.INVALID_ARGUMENT)
+    item_id = int(raw)
+    if kind == "loop":
+        loop = await loops_repo.get(item_id)
+        if loop is None or loop.user_id != user_id or loop.status not in (LoopStatus.OPEN,
+                                                                         LoopStatus.AWAITING_REPLY):
+            raise ActionFailed("No open item with that ref; call pending to see the current list.",
+                               reason="there was no open item like that", kind=FailureKind.NOT_FOUND)
+        await loops_service.LoopService(bus.get_bus()).close(item_id, LoopStatus.DONE)
+        return ToolOutput(f"Marked done: {loop.title}", f"Closed loop #{item_id}.")
+    mine = {w.id: w for w in await wakeups_repo.list_pending(user_id)}
+    wake = mine.get(item_id)
+    if wake is None or not wake.payload.get("reminder"):
+        raise ActionFailed("No pending reminder with that ref; call pending to see the current list.",
+                           reason="there was no reminder like that", kind=FailureKind.NOT_FOUND)
+    await wakeups_repo.cancel_ids([item_id])
+    return ToolOutput(f"Reminder cancelled: {wake.reason.removeprefix(REMINDER_PREFIX)}",
+                      f"Cancelled wakeup #{item_id}.")
+
+
 class AcknowledgeArgs(ToolArgs):
     refs: list[str] = Field(min_length=1, description=(
         "Refs from the pending tool's \"Recently failed\" list, e.g. [\"approval:9\", \"task:14\"]"))
@@ -325,7 +387,7 @@ TOOLS = [
               "(local wall-clock ISO 8601, no offset).",
               WakeMeArgs, RiskClass.WRITE_SELF, wake_me, _CONV, priority=65,
               preview=_preview_wake, preview_needs_ctx=True, on_taint=TaintPolicy.APPROVE,
-              provenance=("reason",)),
+              provenance=("what",)),
     MavisTool("track_loop", "Track an open loop: commitment, waiting-on, goal, concern, routine or watch.",
               TrackLoopArgs, RiskClass.WRITE_SELF, track_loop, _CONV, priority=55,
               preview=_preview_loop, on_taint=TaintPolicy.APPROVE, provenance=("title",)),
@@ -333,6 +395,10 @@ TOOLS = [
               "due they are, approvals waiting for the user's OK and background work. Call it for any "
               "question about what is open, due, left or whether something went through.",
               PendingArgs, RiskClass.READ, pending, _CONV, priority=70),
+    MavisTool("complete_item", "Close an open item (a to-do, tracked loop or reminder) the user says is "
+              "done or wants dropped. Takes the ref shown by the pending tool.",
+              CompleteItemArgs, RiskClass.WRITE_SELF, complete_item, _CONV, priority=58,
+              preview=lambda a: f"Mark done: {a.ref}", on_taint=TaintPolicy.APPROVE),
     MavisTool("acknowledge_failure", "Stop listing a recently failed action or task once the user has "
               "seen it and decided (they said to leave it, or will handle it themselves).",
               AcknowledgeArgs, RiskClass.WRITE_SELF, acknowledge_failure, _CONV, priority=30,
