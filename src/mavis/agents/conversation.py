@@ -60,6 +60,7 @@ from mavis.config import get_settings
 from mavis.domain.errors import ConnectionRequired, LLMError
 from mavis.domain.events import Event
 from mavis.domain.messages import Outbound, Role
+from mavis.domain.policy import Capability
 from mavis.domain.tasks import ApprovalStatus, TaskKind, TaskOrigin
 from mavis.domain.timefmt import strip_stamps
 from mavis.llm import models as llm
@@ -78,7 +79,7 @@ current_route: ContextVar[str | None] = ContextVar("current_route", default=None
 
 CHAT_TOOL_LIMIT = 10
 # each only when available; track_loop and wake_me carry agreements and reminders (LEARN does not)
-CHAT_ALWAYS = ("start_task", "pending", "web_search", "track_loop", "wake_me")
+CHAT_ALWAYS = ("start_task", "pending", "web_search", "track_loop", "wake_me", "complete_item")
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
 # Sends the user a link by itself: offered only when they ask to connect something (commands.wants_connect).
 CONNECT_TOOL = "connect_account"
@@ -121,13 +122,21 @@ TOOL_RULES = (
     "or done. Only a tool call makes a card; never promise one you didn't queue.\n"
     "- Saying you'll do something is not doing it: call its tool in this same turn, or offer and ask "
     "instead of announcing it. Never say something is done, set or waiting unless a tool said so.\n"
-    "- Reminders: wake_me at the exact time they asked for.\n"
+    "- Reminders: wake_me at the exact time they asked for. Write what as the thing to do in their own "
+    "voice (\"Stretch\", \"Call mom\"), never \"Remind <name> to...\" and never with their name.\n"
     "- When they agree to something you suggested (\"yes\", \"do that\", \"the second one\") or ask you "
     "to remember or remind them of something, call track_loop or wake_me in this same turn with the "
     "concrete item from the conversation, written out in full. Nothing else saves it for them.\n"
-    "- For any question about what is pending, open, due, on their radar or left to do, call pending and "
-    "answer only from its result. Your earlier messages and the conversation summary may be outdated: "
-    "they are claims, not facts.\n"
+    "- For any question about what is pending, open, due, on their radar, on their to-do list or left to "
+    "do, call pending and answer only from its result (open items and reminders). Your earlier messages "
+    "and the conversation summary may be outdated: they are claims, not facts.\n"
+    "- Their to-dos are yours to keep: add one with track_loop (one call per item, a short title, a due "
+    "date only if they gave one), list them with pending, and when they say one is done or to drop it, "
+    "call complete_item with its ref from pending. If a Google Tasks tool is offered, their account is "
+    "linked: use it for to-dos they want in Google Tasks, otherwise keep them yourself. If it is not "
+    "offered, never tell them to connect anything to get this done; you can add that Google Tasks sync "
+    "is available (/connect google) at most once in a while, in a short closing line, never as a "
+    "requirement.\n"
     "- Multi-step work (research, comparisons, plans, documents): call start_task and tell them you'll "
     "report back.\n"
     "- To link an account, call connect_account. The link goes out on its own; don't repeat it.\n"
@@ -163,8 +172,31 @@ DURATION_RULE = (
 )
 
 
+async def unlinked_with_internal(user_id: int) -> frozenset[Capability]:
+    """Accounts the user has not linked that Mavis can stand in for itself (INTERNAL_EQUIVALENT). Their
+    tools are not offered to a chat turn: the internal ones (track_loop, wake_me, pending, complete_item)
+    serve the request, and a missing link never interrupts it. Never raises."""
+    try:
+        from mavis.tools.integrations.actions import INTERNAL_EQUIVALENT, active_capabilities
+        from mavis.tools.registry import get_registry
+
+        registry = get_registry()
+        missing = set()
+        for capability in INTERNAL_EQUIVALENT & set(active_capabilities()):
+            try:
+                linked = await registry.capability_check(user_id, capability)
+            except ConnectionRequired:  # expired or revoked: not usable either
+                linked = False
+            if not linked:
+                missing.add(capability)
+        return frozenset(missing)
+    except Exception:  # noqa: BLE001 - an extra; unknown means the old behaviour
+        log.warning("simple_turn.link_state_failed", exc_info=True)
+        return frozenset()
+
+
 def chat_tools(user_id: int, query: str = "", *, focus: tuple[str, ...] = (),
-               connect: bool = False) -> list[BaseTool]:
+               connect: bool = False, unlinked: frozenset[Capability] = frozenset()) -> list[BaseTool]:
     """The tools a chat turn may use (at most CHAT_TOOL_LIMIT, plus any `focus` tools, which are always
     offered). connect_account only when `connect` (the user asked to link an account). Never raises: no
     tools = plain reply."""
@@ -175,7 +207,7 @@ def chat_tools(user_id: int, query: str = "", *, focus: tuple[str, ...] = (),
         always = tuple(dict.fromkeys((*CHAT_ALWAYS, *((CONNECT_TOOL,) if connect else ()), *focus)))
         exclude = CHAT_EXCLUDED if connect else CHAT_EXCLUDED | {CONNECT_TOOL}
         tools = registry.select("conversation", user_id, query=query, limit=CHAT_TOOL_LIMIT,
-                                always=always, exclude=exclude)
+                                always=always, exclude=exclude, exclude_capabilities=unlinked)
         return _with_companions(registry, user_id, tools)
     except Exception:  # noqa: BLE001 - tools are an extra; the turn must still answer
         log.warning("simple_turn.tools_unavailable", exc_info=True)
@@ -633,7 +665,8 @@ async def run_turn(event: Event) -> None:
             register_line="" if web_prefs.register_opt_out(user) else register.prompt_line(their_register),
         )
         tools = chat_tools(user.id, query=f"{text}\n{previous or ''}",
-                           focus=await focus_tools(user.id, history), connect=commands.wants_connect(text))
+                           focus=await focus_tools(user.id, history), connect=commands.wants_connect(text),
+                           unlinked=await unlinked_with_internal(user.id))
         if tools:
             system = f"{system}\n\n{TOOL_RULES}"
             if any(t.name == "web_search" for t in tools):

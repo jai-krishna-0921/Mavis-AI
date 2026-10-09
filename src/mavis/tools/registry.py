@@ -446,14 +446,16 @@ class ToolRegistry:
 
     def select(
         self, agent: str, user_id: int, query: str, limit: int = 8, always: Iterable[str] = (),
-        exclude: Iterable[str] = (),
+        exclude: Iterable[str] = (), exclude_capabilities: Iterable[Capability] = (),
     ) -> list[BaseTool]:
         """Top-`limit` tools for an agent: `always` first, the rest by word overlap then priority.
-        `exclude` names are never offered, whatever their agents."""
+        `exclude` names and tools needing an `exclude_capabilities` capability are never offered."""
         words = _terms(query)
         banned = set(exclude)
+        no_caps = set(exclude_capabilities)
         candidates = [t for t in self._tools.values()
                       if agent in t.agents and self.available(t) and t.name not in banned
+                      and (t.requires is None or t.requires not in no_caps)
                       and not self._excluded(t)]
         pinned: list[MavisTool] = []
         for name in always:
