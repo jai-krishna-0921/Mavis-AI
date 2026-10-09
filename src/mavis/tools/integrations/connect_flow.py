@@ -70,10 +70,15 @@ OnGoogleActive = Callable[[int], Awaitable[object]]  # once per googlesuper acti
 HasChecks = Callable[[int, int], Awaitable[bool]]  # (user_id, pending_id) -> a check is still scheduled
 CancelChecks = Callable[[int, int], Awaitable[object]]  # (user_id, pending_id): drop its scheduled checks
 FIRST_SYNC_CLAIM_TTL_S = 600
+MORE_ACCESS_KEY = "more_access_offered"  # user state: {service: day an "add the missing permission" link went out}
 GOOGLE_KEY = "google"  # one reconnect prompt per day for all eight Google capabilities
 NUDGE_KEY = "workspace_nudged"
 UPGRADE_TEXT = ("I can now work with your Drive, Docs, Sheets and Tasks too. "
                 "Tap to upgrade your Google connection.")
+
+
+def _join(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 ForgetSource = Callable[[int, str], Awaitable[int]]
@@ -306,7 +311,8 @@ class ConnectFlow:
                 if row.task_id:
                     await self._resume(row.task_id, p.user_id, False, f"expired:{row.id}")
             return
-        state = (await self.cache.status(p.user_id, fresh=True)).get(capability.value, ConnectionState.NONE)
+        states = await self.cache.status(p.user_id, fresh=True)
+        state = self._state_of(capability, states)
         if state is ConnectionState.FAILED:
             st = await self.state.get(p.user_id)
             if st.get("synced", {}).get(capability.value) or st.get("reconnect_prompted", {}).get(
@@ -323,6 +329,18 @@ class ConnectFlow:
             source="integrations", trust=Trust.SYSTEM,
             payload={"capability": capability.value, "state": state.value, "pending_id": pending_id},
         ))
+
+    @staticmethod
+    def _state_of(capability: Capability, states: dict[str, ConnectionState]) -> ConnectionState:
+        """The state a pending for `capability` waits on. One Google consent covers every Google service, and
+        a person may leave some boxes unticked, so for Google it is ACTIVE as soon as any service is."""
+        if not is_google(capability):
+            return states.get(capability.value, ConnectionState.NONE)
+        mine = [states.get(c.value, ConnectionState.NONE) for c in GOOGLE_CAPABILITIES]
+        for wanted in (ConnectionState.ACTIVE, ConnectionState.FAILED, ConnectionState.INITIATED):
+            if wanted in mine:
+                return wanted
+        return ConnectionState.NONE
 
     async def on_check_wakeup(self, user_id: int, reason: str) -> None:
         try:
@@ -365,10 +383,39 @@ class ConnectFlow:
 
     async def _announce(self, user_id: int, capability: Capability) -> None:
         if is_google(capability):
-            await self.send(user_id, f"Connected ✓ I can now work with your {GOOGLE_ABILITIES}.")
+            await self.send(user_id, await self._google_announcement(user_id))
             return
-        await self.send(user_id, f"Connected ✓ I can see your {display_name(capability)} now. "
-                                 "Give me a minute to get familiar with it.")
+        text = (f"Connected ✓ I can see your {display_name(capability)} now. "
+                "Give me a minute to get familiar with it.")
+        if capability is Capability.SLACK and await self._slack_chat_ready(user_id):
+            text += " You can also message me right in Slack: open the Mavis AI app under Apps."
+        await self.send(user_id, text)
+
+    async def _slack_chat_ready(self, user_id: int) -> bool:
+        ready = getattr(self.provider, "slack_chat_ready", None)
+        if ready is None:
+            return False
+        try:
+            return bool(await ready(user_id))
+        except Exception as exc:  # noqa: BLE001 - a courtesy line, never a reason to fail the announcement
+            log.warning("connect.slack_chat_check_failed", error=type(exc).__name__)
+            return False
+
+    async def _google_announcement(self, user_id: int) -> str:
+        full = f"Connected ✓ I can now work with your {GOOGLE_ABILITIES}."
+        access = getattr(self.provider, "google_access", None)
+        if access is None:
+            return full
+        try:
+            found = await access(user_id)
+        except Exception as exc:  # noqa: BLE001 - the announcement must not fail the activation
+            log.warning("connect.google_access_failed", error=type(exc).__name__)
+            return full
+        if found is None or not found[1]:
+            return full
+        can, cannot = found
+        return (f"Connected ✓ I can {_join(can)}. Not allowed on Google's screen: {', '.join(cannot)}. "
+                "To add them, send /connect google and leave every box ticked.")
 
     async def _google_fan_out(self, user_id: int, capability: Capability) -> list[Capability]:
         """The Google account is googlesuper (the anchor is ACTIVE): every Google capability activates.
@@ -376,11 +423,12 @@ class ConnectFlow:
         if not is_google(capability):
             return [capability]
         states = await self.cache.status(user_id, fresh=True)
-        if states.get(GOOGLE_ANCHOR.value) is not ConnectionState.ACTIVE:
-            return [capability]
+        live = [c for c in GOOGLE_CAPABILITIES if states.get(c.value) is ConnectionState.ACTIVE]
+        if not live or (len(live) == 1 and live[0] is capability):
+            return [capability]  # a lone legacy Gmail or Calendar activation stays on its own capability
         if self.on_google_begin is not None:
             self.on_google_begin(user_id)
-        return list(GOOGLE_CAPABILITIES)
+        return live  # only what the consent actually allowed
 
     async def _activate(self, user_id: int, capability: Capability) -> bool:
         """Activate `capability`, or all eight Google capabilities when the Google account is googlesuper.
@@ -449,6 +497,33 @@ class ConnectFlow:
             return False  # no link went out: try again next time
         prompted[key] = today
         await self.state.update(user_id, {"reconnect_prompted": prompted})
+        return True
+
+    async def offer_more_access(self, user_id: int, capability: Capability) -> bool:
+        """The account is connected but lacks a permission the user just needed (they unticked it on the
+        consent screen). Send the way to add it, once per service per day. True if it went out. No pending
+        request is made: nothing is "connected" until they sign in again, and then the callback does it."""
+        st = await self.state.get(user_id)
+        today = self.clock().date().isoformat()
+        offered = dict(st.get(MORE_ACCESS_KEY, {}))
+        key = GOOGLE_KEY if is_google(capability) else capability.value
+        if offered.get(key) == today:
+            return False
+        name = display_name(capability)
+        try:
+            url = await self.provider.connect_link(UserRef(user_id=user_id), capability.value,
+                                                   f"{self.base_url}/connect/callback")
+        except IntegrationError as exc:
+            log.warning("connect.more_access_link_failed", capability=capability.value, error=str(exc))
+            return False
+        text = (f"That needs more access to your {name} than you allowed. One tap here, and leave every box "
+                f"ticked:\nYou'll sign in on {BRANDS[capability]}'s own page. No password comes to me, and "
+                "you can revoke access anytime.")
+        if notice := consent_notice(capability):
+            text += f"\n{notice}"
+        await self.send(user_id, text, [[Button(label=f"Reconnect {name}", url=url)]])
+        offered[key] = today
+        await self.state.update(user_id, {MORE_ACCESS_KEY: offered})
         return True
 
     # --- user controls ----------------------------------------------------------------------------

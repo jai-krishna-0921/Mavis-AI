@@ -27,8 +27,8 @@ from mavis.domain.events import Event, EventType, Trust
 log = structlog.get_logger(__name__)
 
 CHAT_SUBTYPES = frozenset({"file_share", "thread_broadcast"})
-UNKNOWN_REPLY = ("I don't know you yet. Open Mavis on Telegram, send /connect slack, approve it, and then "
-                 "message me here again.")
+UNKNOWN_REPLY = ("I don't know you yet. Mavis is by invite: join on Telegram with your invite link, send "
+                 "/connect slack there, and then message me here again.")
 UNKNOWN_REPLY_EVERY_S = 3600
 _COMMAND = re.compile(r"^/([A-Za-z0-9_]{1,32})(?:@\w+)?(?:\s|$)")
 _MENTION = re.compile(r"<@([UW][A-Z0-9]+)(?:\|[^>]*)?>")

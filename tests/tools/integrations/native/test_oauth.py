@@ -335,3 +335,20 @@ async def test_the_same_account_in_different_providers_is_fine(tokens):
                       expires_at=None)
     await tokens.save(2, S, account={"user_id": "a@x.com"}, access_token="a", refresh_token="r",
                       expires_at=None)
+
+
+async def test_the_same_slack_user_id_in_two_workspaces_is_two_accounts(oauth, tokens, vendor):
+    """Defect: the owner check ignored the workspace, so a second workspace's user with the same Slack id was
+    told their account was taken (the database key was already team plus user)."""
+    slack_vendor(vendor)
+    await oauth.complete(query(await oauth.authorize_url(5, S))["state"], "c", S)  # T1 / U1
+    body = {"ok": True, "team": {"id": "T2", "name": "Other"},
+            "authed_user": {"id": "U1", "scope": "chat:write", "access_token": "xoxp-2", "token_type": "user"}}
+    vendor.routes[SLACK_TOKEN_URL] = lambda r: httpx.Response(200, json=body)
+    done = await oauth.complete(query(await oauth.authorize_url(6, S))["state"], "c", S)
+    assert done.user_id == 6 and (await tokens.grant(6, S)).account["team_id"] == "T2"
+    again = await oauth.authorize_url(7, S)  # but the same person in the same workspace is still taken
+    slack_vendor(vendor)
+    with pytest.raises(OAuthError) as exc:
+        await oauth.complete(query(again)["state"], "c", S)
+    assert exc.value.kind == "account_taken"

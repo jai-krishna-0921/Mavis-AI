@@ -245,3 +245,19 @@ async def test_timezone_change_moves_the_morning_checkin_to_the_new_zone(db, use
     assert after.id != before.id
     hour = timeutil.to_local(after.due_at, "Pacific/Auckland").hour
     assert hour == timeutil.to_local(before.due_at, user.timezone).hour
+
+
+async def test_connector_offer_adds_slack_when_slack_sign_in_is_set_up(db, channel, monkeypatch):
+    from mavis.config import get_settings
+
+    for k, v in {"SLACK_CLIENT_ID": "sid", "SLACK_CLIENT_SECRET": "ss", "NATIVE_TOKEN_KEK": "k" * 44}.items():
+        monkeypatch.setenv(k, v)
+    get_settings.cache_clear()
+    u, _ = await _activate(6401, "Noor", "Europe/Lisbon", None)
+    await onboarding.on_button(_btn(u.id, "ob:tz:yes"), "ob:tz:yes")
+    await onboarding.onboarding_gate(Event(id="m:7", user_id=u.id, type=EventType.USER_MESSAGE, occurred_at=utcnow(),
+                                           source="telegram", payload={"text": "hello"}, trust=Trust.USER))
+    await onboarding.after_first_value(u.id)
+    texts = await _texts(channel)
+    assert texts[-1] == onboarding.CONNECT_WITH_SLACK == "Want me to keep an eye on your email, calendar and Slack too?"
+    assert [b.label for row in channel.sent[-1].buttons for b in row] == ["Connect Google", "Connect Slack", "Later"]

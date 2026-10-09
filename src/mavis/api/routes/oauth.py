@@ -55,6 +55,8 @@ _USER_TEXT = {
 
 
 WEB_ORIGIN = "web"
+_NOTHING_ALLOWED = ("You signed in with {account} but did not allow any Google service, so nothing is connected. "
+                    "Send /connect google to try again and leave every box ticked.")
 
 
 def _capability(provider: NativeProvider) -> Capability:
@@ -63,6 +65,12 @@ def _capability(provider: NativeProvider) -> Capability:
     if provider is NativeProvider.SLACK:
         return Capability.SLACK
     return GOOGLE_ANCHOR if workspace_enabled() else Capability.GMAIL
+
+
+async def _nothing_allowed(integrations: IntegrationProvider, user_id: int) -> bool:
+    access = getattr(integrations, "google_access", None)
+    found = await access(user_id) if access is not None else None
+    return found is not None and not found[0]
 
 
 def _back_to_dashboard(error: str | None, *, connected: str | None = None) -> RedirectResponse:
@@ -171,6 +179,15 @@ async def oauth_callback(
                                       "and try again from Telegram.", 400)
 
     get_connection_cache().invalidate(done.user_id)
+    if native is NativeProvider.GOOGLE and await _nothing_allowed(integrations, done.user_id):
+        # Every service box was unticked: there is nothing to connect, so do not call it connected.
+        await oauth.revoke(done.user_id, native)
+        await _tell(done.user_id, _NOTHING_ALLOWED.format(account=_external(native, done.account)))
+        if done.origin == WEB_ORIGIN:
+            return _back_to_dashboard(f"{native.value}_nothing_allowed")
+        return _page("Nothing was allowed", (
+            "You did not allow any Google service, so nothing was connected. Go back to Telegram, ask me "
+            "to connect Google again, and leave the boxes ticked."), 400)
     await _remember_identity(done.user_id, native, done.account)
     # A granted Google address is not a sign-in identity: anyone can be handed a consent link. An address
     # becomes one only through a Google sign-in by the signed-in user, or the approved Telegram link.
