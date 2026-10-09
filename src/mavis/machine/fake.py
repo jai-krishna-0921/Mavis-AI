@@ -8,6 +8,8 @@ from collections.abc import Callable
 
 from mavis.machine.paths import guard
 from mavis.machine.ports import BackendHealth, ExecRequest, ExecResult, FileEntry
+from mavis.machine.s3store import MetaReads, put_with_quota
+from mavis.store.repo import machine as repo_machine
 
 _ids = itertools.count(1)
 
@@ -85,3 +87,30 @@ class FakeSandbox:
 
     async def health(self) -> BackendHealth:
         return BackendHealth(ok=self.fail_open is None)
+
+
+class MemoryWorkspaceStore(MetaReads):
+    """Bytes in a dict, metadata in the real workspace_files table (so quota logic is the same code)."""
+
+    def __init__(self) -> None:
+        self.blobs: dict[tuple[int, str], bytes] = {}
+
+    async def put(self, user_id, path, data, *, provenance, cls=None, task_id=None):
+        async def write(rel, _cls):
+            self.blobs[(int(user_id), rel)] = bytes(data)
+        return await put_with_quota(user_id, path, data, provenance=provenance, cls=cls, task_id=task_id,
+                                    write=write)
+
+    async def get(self, user_id, path):
+        rel = await self._require(user_id, path)
+        return self.blobs[(int(user_id), rel)]
+
+    async def delete(self, user_id, path):
+        rel = guard(path)
+        self.blobs.pop((int(user_id), rel), None)
+        await repo_machine.soft_delete_file(user_id, rel)
+
+    async def purge_user(self, user_id):
+        for key in [k for k in self.blobs if k[0] == int(user_id)]:
+            self.blobs.pop(key)
+        await repo_machine.purge_user(user_id)
