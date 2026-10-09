@@ -84,7 +84,19 @@ class Settings(BaseSettings):
     composio_timeout_s: float = 30.0
     integration_polling: bool = False
     integration_status_ttl_s: int = 60
-    integration_provider: Literal["composio"] = "composio"
+    integration_provider: Literal["composio", "native"] = "composio"
+    # --- native Google and Slack connectors (spec 2026-10-09) -------------------
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_signing_secret: str = ""
+    native_token_kek: str = ""  # 32 random bytes, base64: wraps the data key of every sealed grant token
+    native_token_kek_previous: str = ""  # comma list of retired KEKs, kept only to unwrap during rotation
+    sync_gmail_days: int = 14
+    sync_slack_days: int = 7
+    sync_calendar_back_days: int = 7
+    sync_calendar_ahead_days: int = 30
     tavily_api_key: str = ""
     web_search_enabled: bool = True  # WEB capability: Tavily when keyed, else DuckDuckGo; False turns it off
     # Google Workspace through Composio's googlesuper toolkit (spec 2026-10-03). Off: behaviour is exactly
