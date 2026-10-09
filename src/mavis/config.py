@@ -144,9 +144,60 @@ class Settings(BaseSettings):
     # chat are copied there with a "[test]" header and no buttons. Unset: no mirror.
     test_mirror_chat_id: int | None = None
 
-    # --- sandbox --------------------------------------------------------------
-    sandbox_backend: Literal["auto", "docker", "agentcore", "local"] = "auto"
-    # Phase 6 adds the rest (sandbox_runtime, sandboxd_socket, agentcore_*, aws_profile, ...).
+    # --- machine (Phase 12, spec 2026-10-08) ------------------------------------
+    machine_enabled: bool = False  # false: no machine tools or specialists are registered
+    machine_browser_enabled: bool = False  # false: no browser tools
+    machine_live_view_enabled: bool = False  # Watch live takeover (not built in this plan)
+    machine_users: list[int] = []  # user ids allowed to use the machine; empty means every user
+    machine_allow_spend: bool = False  # lets a user raise their own quota
+    machine_live_token_secret: str = ""  # owner supplied; signs live view links
+    sandbox_backend: Literal["auto", "agentcore", "e2b", "local", "fake"] = "auto"
+    browser_backend: Literal["auto", "agentcore", "local", "fake", "none"] = "auto"
+    agentcore_region: str = "ap-south-1"
+    agentcore_code_interpreter_id: str = "aws.codeinterpreter.v1"
+    agentcore_browser_id: str = "aws.browser.v1"
+    agentcore_write_max_mb: int = 25  # largest single file written into an AgentCore session
+    browser_viewport: str = "1280x800"
+    e2b_api_key: str = ""  # reserved for a later adapter
+    workspace_backend: Literal["auto", "s3", "local"] = "auto"
+    workspace_bucket: str = ""
+    workspace_prefix: str = "ws/"
+    sandbox_exec_timeout_s: int = 60  # default per exec
+    sandbox_exec_max_s: int = 300  # no exec runs longer than this
+    browser_nav_timeout_s: int = 45
+    browser_action_timeout_s: int = 20
+    machine_session_grace_s: int = 120  # session lifetime = remaining task budget plus this
+    browser_approval_hold_s: int = 300
+    machine_reaper_interval_s: int = 120
+    operator_max_steps: int = 30
+    analyst_max_steps: int = 20
+    machine_max_concurrent: int = 3  # sessions across all users
+    machine_max_concurrent_per_user: int = 1
+    machine_global_wait_s: float = 60  # how long a task waits for a free global slot
+    machine_user_daily_minutes: int = 60  # owner decision 3
+    machine_user_monthly_usd: float = 5.0  # owner decision 3
+    workspace_quota_mb: int = 500  # stored bytes per user
+    workspace_sync_max_mb: int = 100  # above this only recent inbox files and .mavis/ sync in
+    max_upload_mb: int = 20
+    machine_price_vcpu_hour: float = 0.0895  # list prices, used for an upper-bound estimate
+    machine_price_gb_hour: float = 0.00945
+    machine_ci_vcpu: float = 2
+    machine_ci_gb: float = 4
+    machine_browser_vcpu: float = 2
+    machine_browser_gb: float = 4
+    machine_assumed_active_fraction: float = 1.0
+    machine_stdout_max_chars: int = 8000
+    pip_index_url: str = "https://pypi.org/simple"
+    machine_package_allow: list[str] = []
+    machine_platform_tags: list[str] = ["manylinux2014_x86_64", "manylinux_2_17_x86_64", "linux_x86_64"]
+    machine_python_version: str = "3.12"
+    browser_domain_deny: list[str] = []
+    # LocalSandbox (dev only) resource limits per command
+    local_sandbox_mem_mb: int = 1024
+    local_sandbox_cpu_s: int = 120
+    local_sandbox_file_mb: int = 100
+    local_sandbox_procs: int = 64
+    local_sandbox_network: bool = False  # true only for a dev who knowingly wants it
 
     # --- observability --------------------------------------------------------
     langfuse_public_key: str = ""
