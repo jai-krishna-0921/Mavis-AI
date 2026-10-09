@@ -15,8 +15,8 @@ def test_no_bot_means_no_link(settings):
 
 
 def test_the_base_can_be_overridden(settings, monkeypatch):
-    monkeypatch.setattr(settings, "telegram_link_base", "https://t.me/")
-    assert telegram_link("bot") == "https://t.me/bot"
+    monkeypatch.setattr(settings, "telegram_link_base", "https://telegram.me/")
+    assert telegram_link("bot") == "https://telegram.me/bot"
 
 
 @pytest.mark.parametrize("bad", ["", "a" * 65, "has space", "semi;colon", "q?x=1"])
