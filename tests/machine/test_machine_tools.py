@@ -175,8 +175,9 @@ async def test_install_writes_wheels_in_and_runs_an_offline_pip(env, monkeypatch
     out = await _call(reg, user, "machine_install", packages=["tablekit"])
     assert "exit 0" in out
     assert "--no-index" in seen[-1] and "tablekit" in seen[-1]
-    meta = await rt.store.meta(user.id, ".mavis/wheels/tablekit-2.1.0-py3-none-any.whl")
-    assert meta is not None and meta.provenance is Provenance.MAVIS
+    [session] = rt.sandbox.sessions.values()
+    assert ".mavis/wheels/tablekit-2.1.0-py3-none-any.whl" in session.files  # in the session only
+    assert await rt.store.meta(user.id, ".mavis/wheels/tablekit-2.1.0-py3-none-any.whl") is None
     assert rt.exec_log(tid) == []  # installs are not attempts shown to the user
 
 

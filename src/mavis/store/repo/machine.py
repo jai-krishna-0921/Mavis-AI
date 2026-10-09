@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from datetime import date, datetime
 
 from sqlalchemy import delete, func, select, update
@@ -9,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 
 from mavis.machine.ports import WorkspaceFile
 from mavis.store.db import Session, utcnow
-from mavis.store.models import ComputeUsage, MachineSession, UserQuota, WorkspaceFileRow
+from mavis.store.models import ComputeUsage, MachineSession, User, UserQuota, WorkspaceFileRow
 
 # --- workspace file metadata ------------------------------------------------------------------
 
@@ -54,6 +56,14 @@ async def soft_delete_file(user_id: int, path: str) -> None:
         await s.commit()
 
 
+async def delete_file_rows(user_id: int, paths: list[str]) -> None:
+    async with Session() as s:
+        for i in range(0, len(paths), 500):
+            await s.execute(delete(WorkspaceFileRow).where(WorkspaceFileRow.user_id == user_id,
+                                                           WorkspaceFileRow.path.in_(paths[i:i + 500])))
+        await s.commit()
+
+
 async def live_bytes(user_id: int) -> int:
     async with Session() as s:
         total = await s.scalar(select(func.coalesce(func.sum(WorkspaceFileRow.size), 0))
@@ -73,6 +83,45 @@ async def open_session(*, user_id: int, task_id: int, kind: str, backend: str, s
         s.add(row)
         await s.commit()
         return row.id
+
+
+_reserve_locks: dict[int, asyncio.Lock] = {}
+
+
+async def reserve_session(*, user_id: int, task_id: int, kind: str, backend: str,
+                          deadline_at: datetime | None,
+                          max_open: int) -> int | None:
+    """Atomically take one of the user's session slots: count their other open sessions, insert a placeholder
+    row in one transaction under the user's row lock (and a process lock where the database has no row locks).
+    Returns the row id, or None when the user is at the limit. `bind_session` fills in the real id."""
+    async with _reserve_locks.setdefault(user_id, asyncio.Lock()):
+        async with Session() as s:
+            await s.execute(select(User.id).where(User.id == user_id).with_for_update())
+            busy = int(await s.scalar(select(func.count()).select_from(MachineSession).where(
+                MachineSession.user_id == user_id, MachineSession.status == "open",
+                MachineSession.task_id != task_id)) or 0)
+            if busy >= max_open:
+                await s.rollback()
+                return None
+            row = MachineSession(user_id=user_id, task_id=task_id, kind=kind, backend=backend,
+                                 session_id=f"pending-{uuid.uuid4().hex}", status="open",
+                                 deadline_at=deadline_at)
+            s.add(row)
+            await s.commit()
+            return row.id
+
+
+async def bind_session(row_id: int, session_id: str) -> None:
+    async with Session() as s:
+        await s.execute(update(MachineSession).where(MachineSession.id == row_id)
+                        .values(session_id=session_id))
+        await s.commit()
+
+
+async def drop_session(row_id: int) -> None:
+    async with Session() as s:
+        await s.execute(delete(MachineSession).where(MachineSession.id == row_id))
+        await s.commit()
 
 
 async def close_session(session_id: str, status: str, wall_s: float, cost: float) -> bool:

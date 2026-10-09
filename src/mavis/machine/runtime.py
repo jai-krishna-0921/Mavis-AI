@@ -22,7 +22,7 @@ import structlog
 from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed
 from mavis.domain.tasks import TaskOrigin, TaskStatus
-from mavis.machine.errors import MachineBusy, QuotaExceeded, SessionUserMismatch
+from mavis.machine.errors import MachineBusy, QuotaExceeded, SandboxPathError, SessionUserMismatch
 from mavis.machine.paths import artifact_file, guard, is_hidden, safe_name
 from mavis.machine.ports import (
     ExecRequest,
@@ -60,11 +60,13 @@ def missing_probe(imports: dict[str, str]) -> str:
 
 
 class _Open:
-    __slots__ = ("kind", "listing", "opened", "session", "user_id")
+    __slots__ = ("kind", "listing", "notes", "opened", "reported", "session", "user_id")
 
     def __init__(self, session: SandboxSession, user_id: int, kind: str, opened: float) -> None:
         self.session, self.user_id, self.kind, self.opened = session, user_id, kind, opened
         self.listing: dict[str, str | None] = {}
+        self.notes: list[str] = []  # told to the model once, with the next exec result
+        self.reported: set[str] = set()
 
 
 class MachineRuntime:
@@ -86,6 +88,24 @@ class MachineRuntime:
     def untrusted(self, task_id: int) -> bool:
         return task_id in self._untrusted
 
+    @staticmethod
+    def _run_tainted() -> bool:
+        from mavis.tools.registry import current_run
+
+        run = current_run.get()
+        return run is not None and run.tainted
+
+    def provenance_for(self, task_id: int) -> Provenance:
+        """The one provenance of anything the model's code or tools write: untrusted when the task has read
+        untrusted input or the current turn is tainted (web content, a forwarded file)."""
+        if self.untrusted(task_id) or self._run_tainted():
+            return Provenance.GENERATED_TAINTED
+        return Provenance.GENERATED_CLEAN
+
+    def _absorb_taint(self, task_id: int) -> None:
+        if self._run_tainted():
+            self.mark_untrusted(task_id)
+
     def exec_log(self, task_id: int) -> list[ExecResult]:
         return list(self._log.get(task_id, []))
 
@@ -96,31 +116,53 @@ class MachineRuntime:
             if live is not None:
                 if live.user_id != user_id:
                     raise SessionUserMismatch(f"task {task_id} session belongs to another user")
-                return live.session
+                if not getattr(live.session, "dead", False):
+                    return live.session
+                await self._replace_dead(task_id, live)  # stopped after a timeout: open a fresh one below
             for row in await repo.sessions_for_task(task_id):
                 if row.user_id != user_id:
                     raise SessionUserMismatch(f"task {task_id} session belongs to another user")
             if (refusal := await self.meter.refusal(user_id)) is not None:
                 raise QuotaExceeded(refusal)
             s = get_settings()
-            others = await repo.open_count_for_user(user_id, exclude_task=task_id)
-            if others >= s.machine_max_concurrent_per_user:
+            timeout = int(await self._remaining_s(task_id) + s.machine_session_grace_s)
+            row_id = await repo.reserve_session(  # atomic per-user limit, and the reaper can see it
+                user_id=user_id, task_id=task_id, kind="code", backend=self.sandbox.name,
+                deadline_at=utcnow() + timedelta(seconds=timeout), max_open=s.machine_max_concurrent_per_user)
+            if row_id is None:
                 raise QuotaExceeded(CONCURRENT_TEXT)
             if not await self.slots.acquire(task_id):
+                await repo.drop_session(row_id)
                 raise MachineBusy(BUSY_TEXT)
-            timeout = int(await self._remaining_s(task_id) + s.machine_session_grace_s)
             try:
                 session = await self.sandbox.open(user_id=user_id, task_id=task_id, timeout_s=timeout)
-            except Exception:
+            except BaseException:
+                await repo.drop_session(row_id)
                 await self.slots.release(task_id)
                 raise
-            await repo.open_session(user_id=user_id, task_id=task_id, kind="code", backend=self.sandbox.name,
-                                    session_id=session.id, deadline_at=utcnow() + timedelta(seconds=timeout))
             live = _Open(session, user_id, "code", self._clock())
+            bound = False
+            try:
+                await repo.bind_session(row_id, session.id)
+                bound = True
+                await self._sync_in(user_id, task_id, live)
+                for e in await session.list():
+                    live.listing[e.path] = e.sha256
+            except BaseException:
+                # never leave a billed session or a half-registered one behind
+                await self._close(live, task_id, "failed")
+                if not bound:
+                    await repo.drop_session(row_id)
+                await self.slots.release(task_id)
+                raise
             self._sessions[task_id] = live
-            await self._sync_in(user_id, task_id, live)
-            live.listing = {e.path: e.sha256 for e in await session.list()}
             return session
+
+    async def _replace_dead(self, task_id: int, live: _Open) -> None:
+        """Forget a session the backend stopped (timeout). The slot stays with the task; the next call opens
+        a new session and syncs the saved workspace in again."""
+        self._sessions.pop(task_id, None)
+        await self._close(live, task_id, "timed_out")
 
     async def _remaining_s(self, task_id: int) -> float:
         from mavis.agents.task_clock import current_clock
@@ -133,31 +175,74 @@ class MachineRuntime:
 
     async def _sync_in(self, user_id: int, task_id: int, live: _Open) -> None:
         s = get_settings()
+        cap = s.file_max_bytes
         files = await self.store.list(user_id)
+        # delivery is idempotent: what the store already holds is known, whatever happens to the copy-in
+        live.listing = {f.path: f.sha256 for f in files}
         total = sum(f.size for f in files)
         if total > s.workspace_sync_max_mb * 1024 * 1024:
             cutoff = utcnow() - timedelta(hours=24)
             rows = {r.path: r for r in await repo.list_files(user_id)}
             files = [f for f in files if f.path.startswith(".mavis/")
                      or (f.path.startswith("inbox/") and rows[f.path].updated_at >= cutoff)]
+        too_big: list[str] = []
+        missing: list[str] = []
         for f in files:
+            if f.path.startswith(".mavis/wheels/"):
+                continue  # installs bring their own wheels
+            if f.size > cap:
+                too_big.append(f.path)
+                continue
+            try:
+                data = await self.store.get(user_id, f.path)
+            except FileNotFoundError:  # expired by the bucket lifecycle: the row follows the object
+                await repo.soft_delete_file(user_id, f.path)
+                live.listing.pop(f.path, None)
+                missing.append(f.path)
+                continue
             if f.provenance.untrusted:
                 self.mark_untrusted(task_id)
-            await live.session.write(f.path, await self.store.get(user_id, f.path))
+            await live.session.write(f.path, data)
+        if too_big:
+            live.notes.append(
+                "Too large to copy into the machine (still in your files): " + ", ".join(too_big))
+        if missing:
+            live.notes.append("No longer in storage, removed from your files: " + ", ".join(missing))
+
+    async def read_stored(self, user_id: int, path: str) -> bytes:
+        """Bytes of a stored file. An object that is gone (lifecycle expiry) marks its row deleted."""
+        try:
+            return await self.store.get(user_id, path)
+        except FileNotFoundError:
+            await repo.soft_delete_file(user_id, guard(path))
+            raise
 
     # --- operations -----------------------------------------------------------------
     async def exec(
         self, user_id: int, task_id: int, req: ExecRequest, *, record: bool = True
     ) -> ExecResult:
         session = await self.session(user_id, task_id)
+        self._absorb_taint(task_id)
         req = req.model_copy(update={"timeout_s": max(1, min(int(req.timeout_s),
                                                              get_settings().sandbox_exec_max_s))})
         result = await session.exec(req)
-        saved, skipped = await self._sync_out_checked(user_id, task_id)
-        result.changed = saved
-        if skipped:
-            result.stderr = (result.stderr + "\n" if result.stderr else "") + (
-                "Not saved to the workspace because storage is full: " + ", ".join(skipped))
+        live = self._sessions.get(task_id)
+        notes: list[str] = []
+        if live is not None and getattr(session, "dead", False):
+            # stopped after a timeout: the model still gets the result; the next call opens a fresh machine
+            await self._replace_dead(task_id, live)
+            notes.append("The machine was stopped after the timeout, so files from this run were not kept. "
+                         "The next command starts in a fresh machine with your saved files.")
+        else:
+            saved, skipped = await self._sync_out_checked(user_id, task_id)
+            result.changed = saved
+            if skipped:
+                notes.append("Not saved to the workspace because storage is full: " + ", ".join(skipped))
+            if live is not None:
+                notes += live.notes
+                live.notes = []
+        if notes:
+            result.stderr = (result.stderr + "\n" if result.stderr else "") + "\n".join(notes)
         if record:  # internal calls (installs, builders) are not attempts the user should see
             self._log.setdefault(task_id, []).append(result)
         return result
@@ -167,10 +252,13 @@ class MachineRuntime:
         from mavis.machine.wheels import WheelCache
 
         wheels = await WheelCache().resolve(packages)
+        session = await self.session(user_id, task_id)
+        cap = get_settings().file_max_bytes
         for filename, blob in wheels:
-            await self.write_in(
-                user_id, task_id, f".mavis/wheels/{filename}", blob, provenance=Provenance.MAVIS
-            )
+            if len(blob) > cap:
+                raise ActionFailed(f"{filename} is too large to install in the machine")
+            # straight into the session: wheels are a cache of the worker, not user files
+            await session.write(f".mavis/wheels/{filename}", blob)
         names = " ".join(shlex.quote(p) for p in packages)
         cmd = f"python -m pip install --no-index --find-links .mavis/wheels --quiet {names}"
         req = ExecRequest(language="shell", timeout_s=180, code=cmd)
@@ -190,8 +278,12 @@ class MachineRuntime:
     async def write_in(self, user_id: int, task_id: int, path: str, data: bytes, *,
                        provenance: Provenance) -> None:
         session = await self.session(user_id, task_id)
+        if provenance is Provenance.GENERATED_CLEAN:
+            provenance = self.provenance_for(task_id)
         if provenance.untrusted:
             self.mark_untrusted(task_id)
+        if len(data) > get_settings().file_max_bytes:
+            raise ActionFailed(f"{path} is too large to put in the machine")
         await self.store.put(user_id, path, data, provenance=provenance, task_id=task_id)
         await session.write(path, data)
         # our own write: record its hash so it is not mistaken for a new file made by code
@@ -201,7 +293,7 @@ class MachineRuntime:
         meta = await self.store.meta(user_id, path)
         if meta is None:
             raise FileNotFoundError(path)
-        await self.write_in(user_id, task_id, path, await self.store.get(user_id, path),
+        await self.write_in(user_id, task_id, path, await self.read_stored(user_id, path),
                             provenance=meta.provenance)
 
     async def read_out(self, user_id: int, task_id: int, path: str) -> bytes:
@@ -212,16 +304,31 @@ class MachineRuntime:
         live = self._sessions.get(task_id)
         if live is None:
             return [], []
-        s = get_settings()
+        if getattr(live.session, "dead", False):
+            return [], []
+        cap = get_settings().file_max_bytes
         now = {e.path: e for e in await live.session.list()}
-        changed = [e for p, e in now.items()
-                   if live.listing.get(p, "missing") != e.sha256 and not is_hidden(p)]
-        prov = Provenance.GENERATED_TAINTED if self.untrusted(task_id) else Provenance.GENERATED_CLEAN
+        changed: list[FileEntry] = []
+        for p, e in list(now.items()):
+            try:
+                hidden = is_hidden(p)
+            except SandboxPathError:  # backslash, leading ~, drive letter: not a name we can keep
+                now.pop(p)
+                if p not in live.reported:
+                    live.reported.add(p)
+                    live.notes.append(f"Skipped a file whose name I cannot keep: {p[:60]!r}")
+                continue
+            if not hidden and live.listing.get(p, "missing") != e.sha256:
+                changed.append(e)
+        prov = self.provenance_for(task_id)
         saved: list[FileEntry] = []
         skipped: list[str] = []
         for e in changed:
-            if e.size > s.machine_file_max_mb * 1024 * 1024:
+            if e.size > cap:
                 log.info("machine.file_too_big", task_id=task_id, size=e.size)
+                if e.path not in live.reported:
+                    live.reported.add(e.path)
+                    live.notes.append(f"{e.path} is over the size limit, so it was not saved or sent")
                 now.pop(e.path)  # not tracked, so a smaller rewrite later is still seen
                 continue
             data = await live.session.read(e.path)
@@ -292,7 +399,7 @@ class MachineRuntime:
         await self.ensure_packages(user_id, task_id, BUILDER_IMPORTS[builder])
         script, data_path = f".mavis/builders/{builder}.py", f".mavis/data/{uuid.uuid4().hex}.json"
         await self.write_in(user_id, task_id, script, load(builder).encode(), provenance=Provenance.MAVIS)
-        prov = Provenance.GENERATED_TAINTED if self.untrusted(task_id) else Provenance.GENERATED_CLEAN
+        prov = self.provenance_for(task_id)
         await self.write_in(
             user_id, task_id, data_path, json.dumps(data, ensure_ascii=False).encode(), provenance=prov
         )

@@ -20,6 +20,7 @@ class FakeSession:
         self.user_id, self.task_id, self._owner = user_id, task_id, owner
         self.files: dict[str, bytes] = {}
         self.closed = False
+        self.dead = False
         self.execs: list[ExecRequest] = []
 
     def _live(self) -> None:
@@ -30,10 +31,15 @@ class FakeSession:
         self._live()
         self.execs.append(req)
         if self._owner.on_exec is not None:
-            return self._owner.on_exec(req, self.files)
-        if self._owner.results:
-            return self._owner.results.pop(0)
-        return ExecResult(ok=True, exit_code=0)
+            res = self._owner.on_exec(req, self.files)
+        elif self._owner.results:
+            res = self._owner.results.pop(0)
+        else:
+            res = ExecResult(ok=True, exit_code=0)
+        if res.timed_out and self._owner.die_on_timeout:  # like AgentCore: the session is stopped
+            self.dead = self.closed = True
+            self._owner.stopped.append(self.id)
+        return res
 
     async def write(self, path: str, data: bytes) -> None:
         self._live()
@@ -69,6 +75,7 @@ class FakeSandbox:
         self.opened: list[tuple[int, int]] = []
         self.stopped: list[str] = []
         self.fail_open: Exception | None = None
+        self.die_on_timeout = True
         self.on_exec: Callable[[ExecRequest, dict[str, bytes]], ExecResult] | None = None
 
     async def open(self, *, user_id: int, task_id: int, timeout_s: int) -> FakeSession:
@@ -103,7 +110,10 @@ class MemoryWorkspaceStore(MetaReads):
 
     async def get(self, user_id, path):
         rel = await self._require(user_id, path)
-        return self.blobs[(int(user_id), rel)]
+        try:
+            return self.blobs[(int(user_id), rel)]
+        except KeyError:
+            raise FileNotFoundError(rel) from None
 
     async def delete(self, user_id, path):
         rel = guard(path)
