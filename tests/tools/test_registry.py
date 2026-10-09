@@ -345,3 +345,28 @@ async def test_execute_approved_raises_untrusted_tool_errors(user):
     aid = await _approval_for(user.id, "send_note")
     with pytest.raises(RuntimeError):
         await reg.execute_approved(aid)
+
+
+async def test_a_permission_missing_failure_offers_more_access_once_per_call(user):
+    """The grant exists but lacks the permission: besides telling the model, the user gets the way to fix it."""
+    from mavis.domain.errors import ActionFailed, FailureKind
+
+    offered: list[tuple[int, Capability]] = []
+
+    async def _offer(user_id: int, capability: Capability) -> None:
+        offered.append((user_id, capability))
+
+    async def _send(user_id: int, args: TextArgs) -> str:
+        raise ActionFailed("not allowed", reason="not allowed", kind=FailureKind.PERMISSION_MISSING)
+
+    async def _other(user_id: int, args: TextArgs) -> str:
+        raise ActionFailed("nope", reason="nope", kind=FailureKind.NOT_FOUND)
+
+    reg = ToolRegistry()
+    reg.permission_missing = _offer
+    reg.register(_tool(name="mail_search", fn=_send, requires=Capability.GMAIL))
+    reg.register(_tool(name="drive_find", fn=_other, requires=Capability.DRIVE))
+    by_name = {t.name: t for t in reg.for_agent("conversation", user.id)}
+    assert "not allowed" in await by_name["mail_search"].ainvoke({"text": "x"})
+    await by_name["drive_find"].ainvoke({"text": "x"})
+    assert offered == [(user.id, Capability.GMAIL)]  # only the permission failure, and for the tool's capability

@@ -352,5 +352,5 @@ class JourneyLLM(FakeLLM):
 
 
 def mail(mid: str, sender: str, subject: str, text: str, *, ts_ms: int | None = None) -> dict:
-    ts_ms = ts_ms or int((time.time() - 86400) * 1000)
+    ts_ms = ts_ms or int((timeutil.now().timestamp() - 86400) * 1000)
     return gmail_message(mid, thread=f"t-{mid}", sender=sender, subject=subject, text=text, ts=ts_ms)

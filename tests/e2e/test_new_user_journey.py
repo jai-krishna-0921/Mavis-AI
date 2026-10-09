@@ -14,7 +14,8 @@ import json
 import re
 from contextlib import suppress
 from datetime import timedelta
-from urllib.parse import parse_qs, urlsplit
+from datetime import datetime
+from urllib.parse import parse_qs, parse_qsl, urlsplit
 
 import httpx
 import pytest
@@ -115,14 +116,14 @@ class Journey:
         c = client or self.http()
         return await c.get(f"/oauth/{provider}/callback", params=params)
 
-    async def connect_google(self, chat: int, email: str, *, untick: tuple[str, ...] = ()):
+    async def connect_google(self, chat: int, email: str, *, untick: tuple[str, ...] = (), status: int = 200):
         """/connect google: the link the bot sends, the consent screen, the browser callback, then the worker
         does the rest (connection check, announcement, first sync). Returns (link, callback response)."""
         await self.tg.say(chat, "/connect google")
         url = self.tg.link_in(chat, "https://accounts.google.com/")
         params = self.cloud.google_consent(url, email, untick=untick)
         r = await self.callback("google", params)
-        assert r.status_code == 200, r.text
+        assert r.status_code == status, r.text
         await self.settle()
         return url, r
 
@@ -230,7 +231,12 @@ async def test_invite_is_single_use_by_default_and_expires(j, clock):
         "That code didn't work. Check it and send it again, or ask the person who invited you."]
     assert (await users.get_by_chat(5102)).status == "pending"
     again = await j.join(5101, "First", link)  # the same person tapping the link twice burns nothing
-    assert (await users.get_by_chat(5101)).status == "active" and not any("didn't work" in o.text for o in again)
+    assert (await users.get_by_chat(5101)).status == "active"
+    assert [o.text for o in again] == [
+        "You're already in, First. Tell me what's on your mind, or send /connect to link your Google or Slack."]
+    assert j.llm.calls == []  # a repeated Start is never a chat turn for the model
+    bare = await j.tg.say(5101, "/start", "First")
+    assert [o.text for o in bare] == [again[0].text] and j.llm.calls == []
     link2, _ = await j.owner_invite("days=2")
     clock.advance(days=3)
     late = await j.join(5103, "Late", link2)
@@ -297,8 +303,13 @@ async def test_first_messages_name_timezone_then_the_connector_offer(j, clock):
     await current().timer.tick()
     await j.settle()
     offer = j.tg.texts(6001)[-1]
-    assert offer == "Want me to keep an eye on your Gmail and calendar too?"
-    assert [b.label for b in j.tg.buttons(6001)] == ["Connect Google", "Later"]
+    assert offer == "Want me to keep an eye on your email, calendar and Slack too?"
+    assert [b.label for b in j.tg.buttons(6001)] == ["Connect Google", "Connect Slack", "Later"]
+    slack = await j.tg.tap(6001, "ob:conn:slack")
+    assert slack[-1].text.startswith("Let's connect your Slack.") and UNVERIFIED not in slack[-1].text
+    google = await j.tg.tap(6001, "ob:conn:google")
+    assert google[-1].text.startswith("Let's connect your Google.") and UNVERIFIED in google[-1].text
+    assert all(not DASHES.search(t) for t in j.tg.texts(6001))
 
 
 # --- 3. Google ----------------------------------------------------------------------------------------
@@ -344,6 +355,11 @@ async def test_connect_google_from_telegram_end_to_end(j, memory):
     # first sync read only recent mail, with the junk categories excluded
     assert any("newer_than:14d" in q for q in j.cloud.gmail_queries)
     assert all("-in:spam" in q and "-in:trash" in q for q in j.cloud.gmail_queries if q)
+    [cal] = j.cloud.calls_to("www.googleapis.com", r"/calendar/v3/calendars/.+/events$")[:1]
+    now = timeutil.now()
+    t_min = datetime.fromisoformat(cal.url.params["timeMin"].replace("Z", "+00:00"))
+    t_max = datetime.fromisoformat(cal.url.params["timeMax"].replace("Z", "+00:00"))
+    assert timedelta(days=6) < now - t_min < timedelta(days=8) and timedelta(days=29) < t_max - now < timedelta(days=31)
 
     # guarded records reached the graph, for this user only, with the mail they came from
     priya, dev = await users.get_by_chat(6101), await users.get_by_chat(6102)
@@ -358,7 +374,7 @@ async def test_connect_google_from_telegram_end_to_end(j, memory):
     people = (await c.get("/api/v1/vault/items", params={"kind": "person"}, headers=h)).json()
     assert "Priya Nair" in json.dumps(people)
     srcs = (await c.get("/api/v1/vault/sources", headers=h)).json()
-    assert any(s["source"] == "gmail" and s["count"] > 0 for s in srcs) if srcs and "source" in srcs[0] else "gmail" in json.dumps(srcs)
+    assert [(x["source"], x["count"] > 0) for x in srcs] == [("gmail", True)]
     c2, h2 = await j.dashboard(6102, "Dev")
     assert "Priya Nair" not in json.dumps((await c2.get("/api/v1/vault/items", params={"kind": "person"}, headers=h2)).json())
 
@@ -466,16 +482,23 @@ async def test_connect_slack_from_telegram_backfill_events_and_chat(j, memory):
     texts = j.tg.texts(6301)
     assert any(t.startswith("Slack is connected: the Kripya workspace") for t in texts)
     assert any(t.startswith("Connected") and "Slack" in t for t in texts)
+    assert any("message me right in Slack" in t for t in texts)  # the bot DM is there too
 
     # identity mapping + backfill: the DM from Dev Patel is a guarded record in Priya's graph only
     from mavis.attention.connector_ingest import load_identities
 
     priya, dev = await users.get_by_chat(6301), await users.get_by_chat(6302)
     assert (await load_identities(priya.id))["slack_ids"] == ["U0PRIYA01"]
+    hist = [dict(parse_qsl(r.content.decode())) for r in j.cloud.calls_to("slack.com", r"conversations\.history")]
+    assert all(timedelta(days=6).total_seconds() < timeutil.now().timestamp() - float(h["oldest"]) < timedelta(days=8).total_seconds() for h in hist)
     dump = await memory.graph.dump(priya.id)
     assert {d["source_ref"].split(":")[1] for d in dump if is_third_party(d["source_ref"])} == {"slack"}
     assert "Dev Patel" in {e.name for e in await memory.graph.entities(priya.id)}
     assert await memory.graph.dump(dev.id) == []
+    c, h = await j.dashboard(6301, "Priya")
+    people = json.dumps((await c.get("/api/v1/vault/items", params={"kind": "person"}, headers=h)).json())
+    assert "Dev Patel" in people
+    assert any(x["source"] == "slack" for x in (await c.get("/api/v1/vault/sources", headers=h)).json())
 
     # a live message in that DM reaches Priya (not Dev) through the signed webhook
     live = event_callback("T0KRIPYA1", {"type": "message", "channel": person.dms[0]["channel"], "channel_type": "im",
@@ -702,3 +725,142 @@ async def test_revoked_google_token_asks_for_a_reconnect_and_reconnecting_heals_
     grant = await j.grant_of(6601, __import__("mavis.tools.integrations.native.base", fromlist=["NativeProvider"]).NativeProvider.GOOGLE)
     assert grant.status == "ACTIVE"
     assert [x["status"] for x in (await c.get("/api/v1/connectors", headers=h)).json()][0] == "active"
+
+
+# --- 7. an unverified-app consent with boxes unticked --------------------------------------------------
+
+
+async def test_unticked_boxes_are_recorded_as_granted_and_the_router_obeys_them(j):
+    from langchain_core.messages import AIMessage
+
+    from mavis.domain.integrations import UserRef
+    from mavis.tools.integrations import get_provider
+    from mavis.tools.integrations.native.base import NativeProvider
+
+    link, _ = await j.owner_invite()
+    await j.onboard(6701, "Priya", link)
+    j.google_account("priya@kripya.com", PRIYA_MAIL)
+    # she keeps mail read and calendar, and unticks sending mail, Drive, Docs, Sheets and the rest
+    untick = ("gmail.send", "gmail.compose", "drive", "documents", "spreadsheets", "tasks",
+              "meetings.space.created", "meetings.space.readonly", "contacts.readonly")
+    url, r = await j.connect_google(6701, "priya@kripya.com", untick=untick)
+    grant = await j.grant_of(6701, NativeProvider.GOOGLE)
+    assert grant.status == "ACTIVE"
+    assert set(grant.scopes) == {"openid", "email", "profile", "https://www.googleapis.com/auth/gmail.readonly",
+                                 "https://www.googleapis.com/auth/calendar.events"}
+    texts = j.tg.texts(6701)
+    done = next(t for t in texts if t.startswith("Connected"))
+    # the confirmation says what works and what was left out, and how to add it, in plain words
+    can, left_out = done.split("Not allowed on Google's screen:")
+    assert "read your mail" in can and "see your calendar" in can and "browse Drive" not in can
+    assert "send mail" in left_out and "browse Drive" in left_out and "/connect google" in left_out
+    assert not DASHES.search(done)
+
+    router = get_provider()
+    me = UserRef(user_id=(await users.get_by_chat(6701)).id)
+    assert (await router.execute(me, "mail.search", {"query": "contract"})).ok  # allowed, run natively
+    posts = len([x for x in j.cloud.requests if x.method == "POST" and x.url.host.endswith("googleapis.com")
+                 and "oauth2" not in x.url.host])
+    denied = await router.execute(me, "mail.send", {"to": ["dev@acme.com"], "subject": "x", "body": "y"})
+    assert not denied.ok and denied.error_kind.value == "permission_missing"
+    assert len([x for x in j.cloud.requests if x.method == "POST" and x.url.host.endswith("googleapis.com")
+                and "oauth2" not in x.url.host]) == posts  # it never reached Google
+    assert not (await router.execute(me, "drive.search", {"query": "plan"})).ok
+
+    # the dashboard shows exactly what is missing
+    c, h = await j.dashboard(6701, "Priya")
+    google = (await c.get("/api/v1/connectors", headers=h)).json()[0]
+    assert {"mail", "calendar"} <= set(google["scopes_granted"])
+    assert {"drive", "docs", "sheets", "tasks", "contacts", "meet"} <= set(google["missing_scopes"])
+
+    # in chat: asking for a send ends in an explanation and a way to fix it, not a silent failure
+    j.llm.push_ai(AIMessage(content="", tool_calls=[{"name": "mail_send", "id": "c1", "args": {
+        "to": ["dev@acme.com"], "subject": "Running late", "body": "I'll be 10 minutes late."}}]))
+    j.llm.push_text("Ready to send it to Dev, waiting for your OK.")
+    await j.tg.say(6701, "email dev@acme.com that I'll be 10 minutes late", "Priya")
+    approve = next(b for b in j.tg.buttons(6701) if b.data and b.data.endswith(":ok"))
+    out = await j.tg.tap(6701, approve.data)
+    final = " ".join(t.text for t in out)
+    assert "not given permission" in final or "not allowed" in final.lower()
+    offer = [b for b in j.tg.buttons(6701) if b.label == "Reconnect Google"]
+    assert offer and any("That needs more access to your Google than you allowed" in t for t in j.tg.texts(6701))
+    # she taps it and this time leaves every box ticked: the grant widens, sending now reaches Google
+    r = await j.callback("google", j.cloud.google_consent(offer[0].url, "priya@kripya.com"))
+    assert r.status_code == 200
+    await j.settle()
+    widened = await j.grant_of(6701, NativeProvider.GOOGLE)
+    assert "https://www.googleapis.com/auth/gmail.send" in widened.scopes
+    assert j.tg.texts(6701)[-1].startswith("Connected") and "Not allowed" not in j.tg.texts(6701)[-1]
+    assert (await router.execute(me, "mail.send", {"to": ["dev@acme.com"], "subject": "x", "body": "y"})).ok
+
+
+async def test_a_consent_with_every_service_unticked_is_not_called_connected(j):
+    from mavis.tools.integrations.native.base import NativeProvider
+
+    link, _ = await j.owner_invite()
+    await j.onboard(6801, "Priya", link)
+    j.google_account("priya@kripya.com", PRIYA_MAIL)
+    everything = ("gmail.readonly", "gmail.send", "gmail.compose", "calendar.events", "drive", "documents",
+                  "spreadsheets", "tasks", "meetings.space.created", "meetings.space.readonly", "contacts.readonly")
+    await j.connect_google(6801, "priya@kripya.com", untick=everything, status=400)
+    texts = j.tg.texts(6801)
+    assert not any(t.startswith("Connected") or t.startswith("Google is connected") for t in texts)
+    note = texts[-1]
+    assert "did not allow" in note and "/connect google" in note
+    assert (await users.get_by_chat(6801)).state.get("synced", {}) == {}  # no first sync on nothing
+    g = await j.grant_of(6801, NativeProvider.GOOGLE)
+    assert g is None or not any(s.endswith(("gmail.readonly", "calendar.events")) for s in g.scopes)
+
+
+# --- 8. Slack as a public app: other workspaces --------------------------------------------------------
+
+
+async def test_slack_users_from_other_workspaces_map_by_workspace_and_strangers_are_refused(j, memory):
+    from mavis.tools.integrations.native.base import NativeProvider
+
+    link, _ = await j.owner_invite("uses=3")
+    await j.onboard(6901, "Ana", link)
+    await j.onboard(6902, "Ben", link)
+    # two people in two workspaces who happen to have the same Slack user id (ids are per workspace)
+    ana = slack_person("T0ALPHA001", "Alpha Co", "U0SAME0001", "Ana", "ana@alpha.example", "U0PEER0001", "Mara Lindqvist",
+                       "mara@nordwind.example", "Mara Lindqvist: the Nordwind pilot starts Monday")
+    ben = slack_person("T0BRAVO001", "Bravo Ltd", "U0SAME0001", "Ben", "ben@bravo.example", "U0PEER0002", "Tomas Weber",
+                       "tomas@helix.example", "Tomas Weber: the Helix audit is done")
+    await connect_slack(j, 6901, ana)
+    await connect_slack(j, 6902, ben)
+    a, b = await users.get_by_chat(6901), await users.get_by_chat(6902)
+    assert (await j.grant_of(6901, NativeProvider.SLACK)).account["team_id"] == "T0ALPHA001"
+    assert (await j.grant_of(6902, NativeProvider.SLACK)).account["team_id"] == "T0BRAVO001"
+    assert "Mara Lindqvist" in {e.name for e in await memory.graph.entities(a.id)}
+    assert "Tomas Weber" in {e.name for e in await memory.graph.entities(b.id)}
+    assert "Tomas Weber" not in {e.name for e in await memory.graph.entities(a.id)}
+
+    # events carry the team: the same Slack id in another workspace is a different person
+    ev_a = event_callback("T0ALPHA001", {"type": "message", "channel": ana.dms[0]["channel"], "channel_type": "im",
+                                          "user": "U0PEER0001", "text": "Mara Lindqvist: pilot moved", "ts": _ts()},
+                          event_id="Ev400", auth_user="U0SAME0001")
+    assert (await post_slack(j, ev_a)).json()["published"] == 1
+    assert any("pilot moved" in str(c["user"]) for c in j.llm.structured_calls)
+    refs_b = {d["source_ref"] for d in await memory.graph.dump(b.id)}
+    assert not any("T0ALPHA001" in r for r in refs_b)
+
+    # a workspace where Mavis is installed (by Ben) but the sender never connected: a plain refusal, nothing kept
+    from tests.channels.slack_fakes import SlackFake
+
+    assert isinstance(j.slack_channel, SlackFake)
+    before_calls = len(j.llm.calls)
+    stranger = event_callback("T0BRAVO001", {"type": "message", "channel": "DBOTU0SAME0001", "channel_type": "im",
+                                              "user": "U0NEWBIE01", "text": "hi bot, show me Ben's mail", "ts": _ts()},
+                              event_id="Ev401", auth_user="U0SAME0001", bot="B0BRAVO001")
+    r = await post_slack(j, stranger)
+    assert r.json()["unmapped"] == 1 and r.json()["published"] == 0
+    told = [s.text for s in j.slack_channel.sent if "I don't know you yet" in s.text]
+    assert len(told) == 1 and not DASHES.search(told[0])
+    assert "invite" in told[0] and "/connect slack" in told[0]  # a person from a new workspace is told how to start
+    assert len(j.llm.calls) == before_calls and not (await memory.graph.dump(b.id)) == []
+    # the refusal is not repeated for the same person within the hour
+    again = event_callback("T0BRAVO001", {"type": "message", "channel": "DBOTU0SAME0001", "channel_type": "im",
+                                           "user": "U0NEWBIE01", "text": "hello??", "ts": _ts()},
+                           event_id="Ev402", auth_user="U0SAME0001", bot="B0BRAVO001")
+    await post_slack(j, again)
+    assert len([s for s in j.slack_channel.sent if "I don't know you yet" in s.text]) == 1
