@@ -124,7 +124,7 @@ function ItemRow({ item }: { item: VaultItem }) {
           {item.detail && <div className="row-sub mt-0.5">{item.detail}</div>}
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted">
             <span className="tag">{provenance(item.source)}</span>
-            {THIRD_PARTY.has(item.source) && <span className="rounded-full border border-dashed border-white/20 px-2.5 py-0.5 italic">Not confirmed</span>}
+            {THIRD_PARTY.has(item.source) && <span className="rounded-full border border-dashed border-ink/30 px-2.5 py-0.5 italic">Not confirmed</span>}
             {item.updated_at && <span className="tnum">updated {fmtDate(item.updated_at)}</span>}
           </div>
         </div>
@@ -138,7 +138,7 @@ function ItemRow({ item }: { item: VaultItem }) {
         </div>
       </div>
       {mode === 'forget' && (
-        <div className="mt-4 grid gap-3 rounded-3xl border border-white/10 bg-black/25 p-5" role="group" aria-label={`Forget ${item.title}`}>
+        <div className="mt-4 grid gap-3 rounded-3xl border border-line-strong bg-sunken p-5" role="group" aria-label={`Forget ${item.title}`}>
           <p>Mavis will delete this and its search vectors.</p>
           <label className="check">
             <input type="checkbox" checked={suppress} onChange={(e) => setSuppress(e.target.checked)} />
@@ -169,7 +169,7 @@ function Sources() {
         Sources
         <span className="text-sm font-normal text-muted transition-transform duration-500 ease-fluid group-open:rotate-45" aria-hidden="true">+</span>
       </summary>
-      <ul className="m-0 mt-1.5 list-none rounded-[calc(2rem-0.375rem)] bg-surface px-6 py-2">
+      <ul className="m-0 mt-1.5 list-none px-6 py-2">
         {sources.data.map((s) => (
           <li key={s.source} className="row flex-wrap">
             <div className="min-w-0 flex-1">
@@ -220,13 +220,13 @@ export function Vault() {
       <PageHead title="Vault" lede="Everything Mavis knows about you. Correct it or make it forget." />
       <ProfileCard />
 
-      <div role="tablist" aria-label="Vault sections" className="no-scrollbar mb-6 flex gap-1 overflow-x-auto rounded-full border border-white/[0.07] bg-white/[0.025] p-1.5">
+      <div role="tablist" aria-label="Vault sections" className="no-scrollbar mb-6 flex gap-1 overflow-x-auto rounded-full border border-line bg-sunken p-1.5">
         {TABS.map((t) => {
           const Icon = TAB_ICON[t.kind]
           return (
             <button key={t.kind} role="tab" type="button" id={`tab-${t.kind}`} aria-selected={kind === t.kind} aria-controls={panelId}
               tabIndex={kind === t.kind ? 0 : -1}
-              className="flex min-h-10 shrink-0 items-center gap-2 rounded-full px-4 text-[14px] font-medium text-muted transition-[background-color,color] duration-500 ease-fluid hover:text-ink aria-selected:bg-ink aria-selected:text-bg"
+              className="flex min-h-10 shrink-0 items-center gap-2 rounded-full px-4 text-[14px] font-medium text-muted transition-[background-color,color] duration-500 ease-fluid hover:text-ink aria-selected:bg-ink aria-selected:text-white"
               onClick={() => { setKind(t.kind); setSource(null) }}
               onKeyDown={(e) => {
                 const i = TABS.findIndex((x) => x.kind === kind)

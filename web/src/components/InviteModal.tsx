@@ -41,7 +41,7 @@ export function InviteModal({ onClose }: { onClose: () => void }) {
       <ul className="m-0 list-none p-0">
         {invites.data?.map((inv) => (
           <li key={inv.code} className="row flex-wrap">
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1 basis-[12rem]">
               <div className="row-title">{inv.name || 'Unnamed link'}</div>
               <div className="row-sub">{inv.link ?? (inv.hint ? `Link ending in ${inv.hint}` : 'Link made earlier')}</div>
               <div className="row-sub tnum">

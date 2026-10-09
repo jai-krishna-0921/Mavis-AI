@@ -16,13 +16,13 @@ import { Footer } from '../components/landing/Footer'
 // A small pill-shaped visual that sits inside a heading, in line with the words.
 function InlinePill({ tone, children }: { tone: 'warm' | 'cool' | 'plain'; children: React.ReactNode }) {
   const bg = tone === 'warm'
-    ? 'bg-[linear-gradient(135deg,#f26b3a,#c4471c)] text-bg'
+    ? 'bg-accent-hi text-white'
     : tone === 'cool'
-      ? 'bg-[linear-gradient(135deg,#3b5273,#1e2a3a)] text-ink'
-      : 'bg-raised text-ink'
+      ? 'bg-navy text-white'
+      : 'bg-sunken text-ink'
   return (
     <span
-      className={`mx-[0.04em] inline-flex h-[0.78em] w-[1.9em] -translate-y-[0.06em] items-center justify-center overflow-hidden rounded-full border border-white/15 align-middle shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] ${bg}`}
+      className={`mx-[0.04em] inline-flex h-[0.78em] w-[1.9em] -translate-y-[0.06em] items-center justify-center overflow-hidden rounded-full border border-line-strong align-middle shadow-[inset_0_1px_0_rgba(255,255,255,0.3)] ${bg}`}
       aria-hidden="true"
     >
       {children}
@@ -31,7 +31,7 @@ function InlinePill({ tone, children }: { tone: 'warm' | 'cool' | 'plain'; child
 }
 
 export function Landing() {
-  const me = useMe()
+  const me = useMe({ publicPage: true })
   const [params] = useSearchParams()
   const invite = params.get('invite')
   const signIn = invite ? `/login?invite=${encodeURIComponent(invite)}` : '/login'
@@ -55,7 +55,7 @@ export function Landing() {
       <main id="main" tabIndex={-1} className="relative w-full max-w-full overflow-x-clip">
         <Hero signedIn={signedIn} signIn={signIn} />
 
-        <section aria-labelledby="what" className="px-5 py-32 md:py-48">
+        <section aria-labelledby="what" className="px-5 py-20 md:py-32">
           <div className="mx-auto max-w-6xl">
             <h2 id="what" data-reveal className="mb-16 max-w-6xl text-[length:clamp(2.1rem,4.6vw,4.25rem)] font-bold leading-[1.1] tracking-[-0.035em] md:mb-24">
               Mavis keeps <InlinePill tone="warm"><EnvelopeSimple size="0.42em" weight="fill" /></InlinePill> your inbox clear,
@@ -66,9 +66,9 @@ export function Landing() {
           </div>
         </section>
 
-        <section aria-labelledby="where" className="px-5 py-32 md:py-48">
+        <section id="where" aria-labelledby="where-h" className="px-5 py-20 md:py-32">
           <div className="mx-auto max-w-6xl">
-            <h2 id="where" data-reveal className="mb-6 max-w-3xl text-[length:clamp(2.1rem,4.4vw,4rem)] font-bold leading-[1.05] tracking-[-0.035em]">Wherever you already work.</h2>
+            <h2 id="where-h" data-reveal className="mb-6 max-w-3xl text-[length:clamp(2.1rem,4.4vw,4rem)] font-bold leading-[1.05] tracking-[-0.035em]">Wherever you already work.</h2>
             <p data-reveal className="mb-14 max-w-xl text-lg text-muted">Mavis meets you in the apps you open every day, and only reaches into the ones you connect.</p>
             <Surfaces />
           </div>
@@ -77,13 +77,13 @@ export function Landing() {
         <How />
         <Privacy />
 
-        <section aria-labelledby="examples" className="px-5 py-32 md:py-48">
+        <section aria-labelledby="examples" className="px-5 py-20 md:py-32">
           <div className="mx-auto max-w-6xl"><Examples /></div>
         </section>
 
-        <FinalCta />
+        <FinalCta signIn={signIn} />
       </main>
-      <Footer />
+      <Footer signIn={signIn} />
     </div>
   )
 }

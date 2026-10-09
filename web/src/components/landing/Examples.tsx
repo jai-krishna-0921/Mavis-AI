@@ -68,17 +68,17 @@ export function Examples() {
       </div>
       <div
         ref={track} role="region" aria-label="Example conversations" tabIndex={0}
-        className="no-scrollbar flex snap-x snap-mandatory gap-4 overflow-x-auto scroll-smooth pb-4"
+        className="no-scrollbar flex snap-x snap-mandatory gap-4 overflow-x-auto scroll-smooth px-1 pb-10 pt-1"
       >
         {EXAMPLES.map((ex) => (
-          <article key={ex.title} data-card className="panel w-[min(86vw,400px)] shrink-0 snap-start">
+          <article key={ex.title} data-card className="panel w-[min(86vw,400px)] shrink-0 snap-start shadow-card">
             <div className="panel-core flex h-full min-h-[400px] flex-col !px-5 !py-5">
               <h3 className="text-lg font-bold tracking-tight">{ex.title}</h3>
               <div className="mt-6 flex flex-1 flex-col gap-2.5 text-[15px] leading-snug">
                 {ex.chat.map((l, i) => (
                   <p
                     key={i}
-                    className={`relative max-w-[88%] px-4 py-2.5 ${l.from === 'you' ? 'ml-auto rounded-3xl rounded-br-lg bg-navy-hi/25 text-ink' : 'rounded-3xl rounded-bl-lg bg-raised text-ink'}`}
+                    className={`relative max-w-[88%] px-4 py-2.5 ${l.from === 'you' ? 'ml-auto rounded-3xl rounded-br-lg bg-navy text-white' : 'rounded-3xl rounded-bl-lg bg-sunken text-ink'}`}
                   >
                     <span className="sr-only">{l.from === 'you' ? 'You: ' : 'Mavis: '}</span>{l.text}
                   </p>

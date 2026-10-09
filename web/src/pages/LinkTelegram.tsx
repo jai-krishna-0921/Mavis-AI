@@ -8,7 +8,7 @@ import { AuthShell } from '../components/AuthShell'
 
 export function LinkTelegram({ pollIntervalMs }: { pollIntervalMs?: number }) {
   const [params] = useSearchParams()
-  const me = useMe()
+  const me = useMe({ publicPage: true })
   const linkId = params.get('i') ?? undefined
   const pending = useQuery({ queryKey: ['pending-link', linkId], queryFn: () => api.pendingLink(linkId!), enabled: !!linkId, retry: false })
   if (me.data) return <Navigate to="/workspace" replace />
@@ -18,7 +18,7 @@ export function LinkTelegram({ pollIntervalMs }: { pollIntervalMs?: number }) {
       lede="We could not find a Mavis account for that Google address. Mavis lives in chat, so start there. Once you are in, your Google address is confirmed on your account and you can use either way to sign in next time."
     >
       {pending.data && (
-        <p className="status mb-6 flex items-start gap-2 rounded-2xl border border-white/10 bg-black/25 p-3">
+        <p className="status mb-6 flex items-start gap-2 rounded-2xl border border-line-strong bg-sunken p-3">
           <EnvelopeSimple size={18} weight="light" className="mt-0.5 shrink-0" aria-hidden="true" />
           <span>Google address to link: {pending.data.email}. Telegram will ask you to approve this.</span>
         </p>
