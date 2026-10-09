@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react'
-import ui from '../styles/ui.module.css'
+import { X } from '@phosphor-icons/react'
 
 const FOCUSABLE = 'a[href],button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex]:not([tabindex="-1"])'
 
@@ -27,10 +27,18 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
   }, [])
 
   return (
-    <div className={ui.overlay} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
-      <div className={ui.dialog} role="dialog" aria-modal="true" aria-labelledby={titleId} ref={ref}>
-        <h2 id={titleId}>{title}</h2>
-        {children}
+    <div
+      className="overlay-in fixed inset-0 z-50 grid place-items-center bg-black/65 p-4 backdrop-blur-sm"
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div className="dialog-in panel max-h-[90dvh] w-full max-w-[540px] overflow-auto" role="dialog" aria-modal="true" aria-labelledby={titleId} ref={ref}>
+        <div className="panel-core relative">
+          <h2 id={titleId} className="pr-10 text-2xl font-bold tracking-tight">{title}</h2>
+          <button type="button" className="btn btn-sm absolute right-4 top-4 !min-h-0 !size-9 !p-0" aria-label="Close dialog" onClick={onClose}>
+            <X size={16} weight="light" />
+          </button>
+          <div className="mt-2">{children}</div>
+        </div>
       </div>
     </div>
   )

@@ -10,6 +10,10 @@ export const useMe = () =>
     staleTime: 60_000,
   })
 
+// The bot link and sign-in flags. There is no built-in fallback: if this fails the link is hidden and a retry is shown.
+export const useConfig = () =>
+  useQuery({ queryKey: ['config'], queryFn: api.config, staleTime: 5 * 60_000, retry: 2, retryDelay: 800 })
+
 export const useConnectors = () => useQuery({ queryKey: ['connectors'], queryFn: api.connectors })
 
 export function useDisconnect() {

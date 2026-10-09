@@ -1,5 +1,5 @@
 import type {
-  Connector, ConnectorId, Invite, Me, PollStatus, Preferences, SourceInfo, TelegramStart,
+  Connector, PublicConfig, ConnectorId, Invite, Me, PollStatus, Preferences, SourceInfo, TelegramStart,
   VaultItem, VaultKind, VaultPage, VaultSummary,
 } from './types'
 
@@ -67,6 +67,7 @@ const q = (params: Record<string, string | undefined>) => {
 }
 
 export const api = {
+  config: () => request<PublicConfig>('/config', { silent401: true }),
   async me(): Promise<Me> {
     const me = await request<Me>('/me', { silent401: true })
     setCsrf(me.csrf)

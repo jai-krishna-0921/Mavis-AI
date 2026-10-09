@@ -1,37 +1,44 @@
 import { Navigate, useSearchParams } from 'react-router-dom'
-import { useMe } from '../api/hooks'
+import { GoogleLogo, WarningCircle } from '@phosphor-icons/react'
+import { useConfig, useMe } from '../api/hooks'
 import { TelegramSignIn } from '../components/TelegramSignIn'
-import { Weave } from '../components/Weave'
+import { AuthShell } from '../components/AuthShell'
 import { API_BASE } from '../api/client'
-import ui from '../styles/ui.module.css'
-import styles from './Login.module.css'
 
 export function Login({ pollIntervalMs }: { pollIntervalMs?: number }) {
   const [params] = useSearchParams()
   const invite = params.get('invite') ?? undefined
   const problem = params.get('error')
   const me = useMe()
+  const cfg = useConfig()
   if (me.data) return <Navigate to="/workspace" replace />
+  const googleOff = cfg.data?.google_signin_enabled === false
   return (
-    <main className={styles.page}>
-      <Weave size={44} title="Mavis AI" />
-      <h1 className={styles.h1}>Sign in to Mavis AI</h1>
-      <p className={ui.lede}>Mavis lives in chat, so you sign in with Telegram.</p>
+    <AuthShell title="Sign in to Mavis AI" lede="Mavis lives in chat, so you sign in with Telegram. Nothing to remember, no password.">
       {problem?.startsWith('google_') && (
-        <p className={ui.error} role="alert">
+        <p className="mb-6 flex items-start gap-2 rounded-2xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger" role="alert">
+          <WarningCircle size={20} weight="light" className="mt-0.5 shrink-0" aria-hidden="true" />
           {problem === 'google_unavailable' ? 'Google sign in is not available right now.' : 'Google sign in did not work. Try again, or use Telegram.'}
         </p>
       )}
-      <section className={styles.block} aria-labelledby="tg">
-        <h2 id="tg" className={styles.h2}>Telegram</h2>
+      <section aria-labelledby="tg">
+        <h2 id="tg" className="mb-5 text-lg font-bold tracking-tight">Telegram</h2>
         <TelegramSignIn invite={invite} pollIntervalMs={pollIntervalMs} />
       </section>
-      <hr className={ui.rule} style={{ opacity: 0.15 }} />
-      <section className={styles.block} aria-labelledby="g">
-        <h2 id="g" className={styles.h2}>Already linked?</h2>
-        <p className={ui.lede}>If you connected Google to Mavis, you can sign in with the same account.</p>
-        <a className={ui.btn} style={{ marginTop: 12 }} href={`${API_BASE}/auth/google/start`}>Sign in with Google</a>
-      </section>
-    </main>
+      {!googleOff && (
+        <>
+          <div className="my-8 flex items-center gap-4 text-[13px] text-muted" aria-hidden="true">
+            <span className="h-px flex-1 bg-line" />or<span className="h-px flex-1 bg-line" />
+          </div>
+          <section aria-labelledby="g">
+            <h2 id="g" className="text-lg font-bold tracking-tight">Already linked?</h2>
+            <p className="mt-1 text-sm text-muted">If you connected Google to Mavis, you can sign in with the same account.</p>
+            <a className="btn mt-4 !min-h-12 !px-5" href={`${API_BASE}/auth/google/start`}>
+              <GoogleLogo size={20} weight="bold" aria-hidden="true" /> Sign in with Google
+            </a>
+          </section>
+        </>
+      )}
+    </AuthShell>
   )
 }

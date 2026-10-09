@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from mavis.api.dashboard import account, auth, common, connectors, invites, me, vault
+from mavis.api.dashboard import account, auth, common, connectors, invites, me, public_config, vault
 from mavis.api.dashboard.common import DashError
 
 log = structlog.get_logger(__name__)
@@ -47,6 +47,6 @@ def create_dashboard_app() -> FastAPI:
         log.error("dashboard.unhandled", error=type(exc).__name__)  # never the message: it may hold user text
         return _json(500, "server_error", "Something went wrong on our side. Please try again.")
 
-    for module in (auth, me, connectors, vault, invites, account):
+    for module in (public_config, auth, me, connectors, vault, invites, account):
         app.include_router(module.router)
     return app

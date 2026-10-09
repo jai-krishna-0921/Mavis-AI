@@ -6,8 +6,7 @@
 <g transform="rotate(90 256 256)"><use href="#s" fill="none" stroke="#000" stroke-width="86"/></g>
 </mask>
 </defs>
-<rect width="512" height="512" rx="112" fill="#0A0A0D"/>
-<g transform="translate(256 256) scale(1.0) translate(-256 -256)">
+<g transform="translate(256 256) scale(1.12) translate(-256 -256)">
 <use href="#s" fill="none" stroke="#6F88AB" stroke-width="54" stroke-linecap="round" mask="url(#m)"/>
 <g transform="rotate(90 256 256)"><use href="#s" fill="none" stroke="#F26B3A" stroke-width="54" stroke-linecap="round"/></g>
 </g>
