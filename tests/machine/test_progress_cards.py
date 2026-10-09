@@ -337,3 +337,34 @@ async def test_files_sent_before_the_card_exists_show_in_its_first_render(setup)
     await cards.file_sent(tid)
     await cards.start(tid, u.id, "g", STEPS, tainted=False)
     assert "1 file sent" in ch.texts[0]
+
+
+async def test_default_interval_is_eight_seconds(settings):
+    assert settings.progress_edit_min_interval_s >= 8.0
+
+
+async def test_a_long_noisy_task_edits_at_most_every_interval_and_the_final_always_goes(setup, settings):
+    """E2E run 2: 51 edits in 8 minutes. Updates every second now give one edit per interval."""
+    cards, ch, clock, u, tid = setup
+    stamps: list[float] = []
+    real_edit = ch.edit_text
+
+    async def edit(chat_id, message_id, text, buttons=None):
+        stamps.append(clock.t)
+        return await real_edit(chat_id, message_id, text, buttons)
+
+    ch.edit_text = edit
+    await cards.start(tid, u.id, "g", STEPS, tainted=False)
+    interval = settings.progress_edit_min_interval_s
+    began = clock.t
+    for i in range(120):  # two minutes, an update every second
+        clock.t += 1
+        await cards.tool_called(tid, f"opened page {i}")
+    await _settle(cards, tid)
+    live_edits = len(stamps)
+    assert live_edits <= (clock.t - began) / interval + 2  # the fake sleep also advances this clock
+    assert all(b - a >= interval - 1e-9 for a, b in zip(stamps, stamps[1:], strict=False))
+    clock.t += 1  # the final edit is never held back by the interval
+    await cards.finalize(tid, CardFinal.DONE)
+    assert len(stamps) == live_edits + 1
+    assert "page 119" in ch.edits[-1][2]
