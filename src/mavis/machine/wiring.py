@@ -6,7 +6,9 @@ import asyncio
 
 from mavis import machine
 from mavis.agents import cancellation
+from mavis.agents.context_hooks import register_context_provider
 from mavis.config import get_settings
+from mavis.machine import intake
 from mavis.worker.runner import register_startup_hook
 
 _reaper: asyncio.Task | None = None
@@ -36,5 +38,6 @@ def register_machine() -> None:
     from mavis.tools.registry import get_registry
 
     register_machine_tools(get_registry())
+    register_context_provider(intake.inbox_context)
     cancellation.register_cancel_hook(_cancel_hook)
     register_startup_hook(_start_reaper)

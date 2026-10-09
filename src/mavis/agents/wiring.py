@@ -47,7 +47,11 @@ async def _task_delivery(user_id: int, reason: str) -> None:
 
 
 def register() -> None:
-    register_event_handler(EventType.USER_MESSAGE, conversation.run_turn, replace=True)
+    from mavis.machine.intake import on_user_message as file_intake  # no-op unless the machine is on
+
+    # file intake first, so a task started by this message already finds the file in the inbox
+    register_event_handler(EventType.USER_MESSAGE, file_intake, replace=True)
+    register_event_handler(EventType.USER_MESSAGE, conversation.run_turn)
     register_event_handler(EventType.BUTTON_PRESSED, buttons.dispatch_button)
     buttons.register_approval_buttons()
     task_buttons.register_task_buttons()  # tk: Cancel on a progress card
