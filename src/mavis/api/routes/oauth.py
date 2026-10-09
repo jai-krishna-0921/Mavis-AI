@@ -38,11 +38,11 @@ background:#0f1115;color:#e8e8e8}}main{{text-align:center;padding:24px}}h1{{font
 
 _USER_TEXT = {
     "denied": "{name} sign-in was cancelled, so nothing was connected. Tell me when you want to try again.",
-    "expired_state": "That {name} sign-in link expired. Ask me to connect {name} again and I will send a new one.",
+    "expired_state": "That {name} sign-in link expired. Ask me to connect {name} again for a new one.",
     "replayed_state": "That {name} sign-in link was already used or is no longer valid. "
                       "Ask me to connect {name} again for a fresh one.",
     "exchange_failed": "{name} did not complete the sign-in. Ask me to connect {name} again in a moment.",
-    "account_taken": "That {name} account is already connected to another Mavis user, so I did not connect it.",
+    "account_taken": "That {name} account is already connected to another Mavis user, so I skipped it.",
     "not_configured": "{name} sign-in is not set up on my side yet.",
 }
 
