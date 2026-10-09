@@ -287,3 +287,14 @@ async def test_router_is_not_configured_when_neither_side_is(parts, monkeypatch)
     assert router.configured is False
     fallback.configured = True
     assert router.configured is True
+
+
+async def test_router_offers_only_what_it_can_connect(parts):
+    """A native-only Mavis (no Composio key) must not offer Notion or any service nothing can serve."""
+    fallback, _, _, router = parts
+    fallback.configured = False
+    assert router.can_connect(Capability.GMAIL) and router.can_connect(Capability.DRIVE)
+    assert router.can_connect(Capability.SLACK)
+    assert not router.can_connect(Capability.NOTION)
+    fallback.configured = True
+    assert router.can_connect(Capability.NOTION)

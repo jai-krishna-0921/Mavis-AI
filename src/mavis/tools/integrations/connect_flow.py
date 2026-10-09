@@ -571,11 +571,17 @@ class ConnectFlow:
             if states.get(c.value) is ConnectionState.ACTIVE:
                 await self.reconcile(user_id, c)
 
+    def _offered(self) -> tuple[Capability, ...]:
+        """Capabilities worth offering: the ones something can actually connect (a native-only Mavis has no
+        Notion, and listing it would only lead to a dead end)."""
+        can = getattr(self.provider, "can_connect", None)
+        return tuple(c for c in active_capabilities() if can is None or can(c))
+
     def _menu(self) -> list[tuple[Capability, str]]:
         """(capability, label) per menu row: with Workspace on, one Google row instead of Gmail + Calendar."""
         if not workspace_enabled():
-            return [(c, display_name(c)) for c in active_capabilities()]
-        others = [c for c in active_capabilities() if c not in GOOGLE_CAPABILITIES]
+            return [(c, display_name(c)) for c in self._offered()]
+        others = [c for c in self._offered() if c not in GOOGLE_CAPABILITIES]
         return [(GOOGLE_ANCHOR, WORKSPACE_ROW), *((c, display_name(c)) for c in others)]
 
     async def offer_menu(self, user_id: int) -> None:
