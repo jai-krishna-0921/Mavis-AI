@@ -174,7 +174,7 @@ _FILLER = frozenset({"your", "the", "a", "an", "is", "are", "was", "es", "ist", 
                      "deine", "seu", "sua", "tuo", "e", "è", "son", "sono", "mi", "mon", "ton",
                      "our", "my", "this", "that", "here", "below", "following", "otp", "code", "pin",
                      "verification", "security", "sms", "email", "mobile", "number", "no", "-", ":", "=",
-                     "(", ")", "–", "→", "->", "=>", "ist:", "is:", "mfa", "2fa", "auth", "authentication",
+                     "(", ")", "\u2013", "\u2192", "->", "=>", "ist:", "is:", "mfa", "2fa", "auth", "authentication",
                      "confirmation", "access", "single-use", "single", "di", "de", "del", "du", "des", "von",
                      "da", "do", "lautet", "verifica", "verificacion", "verificação", "bestatigung", "validation", "validacion", "con", "per", "pour", "fur", "für", "zur"})
 
