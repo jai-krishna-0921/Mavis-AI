@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 import structlog
 
-from mavis.channels import get_channel
+from mavis.channels import get_channel, routing
 from mavis.channels.base import Channel, ChannelRateLimited
 from mavis.channels.pacing import get_pacer
 from mavis.store.db import utcnow
@@ -65,21 +65,42 @@ class OutboxSender:
 
     async def _deliver(self, row: OutboxMessage) -> None:
         user = await users.get(row.user_id)
-        if user.telegram_chat_id is None:
-            raise RuntimeError(f"user {row.user_id} has no chat id")
         msg = outbox.to_outbound(row)
+        chats = await routing.destinations(user, route=msg.route, proactive=msg.proactive,
+                                           private=bool(msg.buttons))
+        if not chats:
+            raise RuntimeError(f"user {row.user_id} has no chat id")
+        ids: list[int] = []
+        for i, chat in enumerate(chats):
+            try:
+                ids += await self._send_to(chat, msg)
+            except ChannelRateLimited:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if i == 0:
+                    raise  # the first destination decides retry; later copies are best effort
+                log.warning("outbox.extra_channel_failed", outbox_id=row.id, error=type(exc).__name__)
+        await outbox.mark_sent(row.id, ids)
+
+    def _channel_for(self, chat) -> Channel:
+        if self._channel is not None:
+            return self._channel  # an injected channel serves every destination (tests)
+        return routing.channel_for(chat)
+
+    async def _send_to(self, chat, msg) -> list[int]:
+        channel = self._channel_for(chat)
         ids: list[int] = []
         if msg.media:
             caps = msg.text.split("\n") if msg.text else []
             caps = (caps + [""] * len(msg.media))[: len(msg.media)]
-            ids += await self.channel.send_media_group(user.telegram_chat_id, msg.media, caps)
+            ids += await channel.send_media_group(chat, msg.media, caps)
         elif msg.photo_path:
-            ids.append(await self.channel.send_photo(user.telegram_chat_id, msg.photo_path, msg.text))
+            ids.append(await channel.send_photo(chat, msg.photo_path, msg.text))
         elif msg.document_path:
-            ids.append(await self.channel.send_document(user.telegram_chat_id, msg.document_path, msg.text))
+            ids.append(await channel.send_document(chat, msg.document_path, msg.text))
         elif msg.text:
-            ids += await self.channel.send_text(user.telegram_chat_id, msg.text, msg.buttons or None)
-        await outbox.mark_sent(row.id, ids)
+            ids += await channel.send_text(chat, msg.text, msg.buttons or None)
+        return ids
 
     async def run_forever(self, interval_s: float = 0.3) -> None:
         while True:

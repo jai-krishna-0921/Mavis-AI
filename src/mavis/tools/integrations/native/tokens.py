@@ -143,6 +143,38 @@ class NativeTokenStore:
                 NativeGrant.provider == NativeProvider.SLACK.value, NativeGrant.account_key == key,
                 NativeGrant.status == ACTIVE))
 
+    # --- the workspace bot (Slack chat as Mavis) ----------------------------------------------------------
+
+    async def _bot_rows(self, team_id: str) -> list[NativeGrant]:
+        if not team_id:
+            return []
+        async with dbm.Session() as s:
+            rows = await s.scalars(select(NativeGrant).where(
+                NativeGrant.provider == NativeProvider.SLACK_BOT.value, NativeGrant.status == ACTIVE,
+                NativeGrant.account_key.like(f"{team_id}/%")).order_by(NativeGrant.updated_at.desc()))
+            return list(rows)
+
+    async def bot_token_for_team(self, team_id: str) -> str | None:
+        """The newest ACTIVE bot token of this workspace. Used only by the Slack chat channel."""
+        for row in await self._bot_rows(team_id):
+            token = crypto.open_text(row.access_token, _ctx(row.user_id, NativeProvider.SLACK_BOT,
+                                                            "access_token"))
+            if token:
+                return token
+        return None
+
+    async def bot_account(self, team_id: str) -> dict | None:
+        """Non-secret facts of the workspace bot (bot_user_id, scopes), or None when not installed."""
+        rows = await self._bot_rows(team_id)
+        return dict(rows[0].account or {}) if rows else None
+
+    async def bot_dm_owner(self, team_id: str, channel: str) -> int | None:
+        """The Mavis user whose DM with the bot is this channel (noted at connect), or None."""
+        for row in await self._bot_rows(team_id):
+            if channel and (row.account or {}).get("dm") == channel:
+                return row.user_id
+        return None
+
     async def reveal(self, user_id: int, provider: NativeProvider) -> tuple[str, str | None] | None:
         """(access, refresh) for a revoke call. Only the OAuth module uses this."""
         async with dbm.Session() as s:

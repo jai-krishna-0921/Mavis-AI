@@ -21,7 +21,7 @@ from typing import Any
 
 import structlog
 
-from mavis.channels import get_channel
+from mavis.channels import get_channel, routing
 from mavis.channels.base import Channel, ChannelRateLimited, MessageGone
 from mavis.channels.pacing import get_pacer
 from mavis.config import get_settings
@@ -55,7 +55,7 @@ class _Live:
     __slots__ = ("chat_id", "dirty", "failures", "last_edit", "last_text", "late", "message_id",
                  "retry_until", "state", "user_id")
 
-    def __init__(self, state: CardState, user_id: int, chat_id: int, message_id: int | None,
+    def __init__(self, state: CardState, user_id: int, chat_id: int | str, message_id: int | None,
                  last_text: str, last_edit: float) -> None:
         self.state, self.user_id, self.chat_id, self.message_id = state, user_id, chat_id, message_id
         self.last_text, self.last_edit, self.dirty = last_text, last_edit, False
@@ -81,6 +81,10 @@ class ProgressCards:
     def channel(self) -> Channel:
         return self._channel or get_channel()
 
+    def _channel_of(self, chat: int | str) -> Channel:
+        """The channel a card's chat lives on (an injected channel serves every chat)."""
+        return self._channel or routing.channel_for(chat)
+
     def _lock(self, task_id: int) -> asyncio.Lock:
         return self._locks.setdefault(task_id, asyncio.Lock())
 
@@ -104,8 +108,8 @@ class ProgressCards:
             if not final_ok:
                 return None
         state = CardState.model_validate(row.state)
-        live = _Live(state, row.user_id, row.chat_id, row.message_id, render_card(state, self._wall())[0],
-                     self._clock())
+        live = _Live(state, row.user_id, state.chat or row.chat_id, row.message_id,
+                     render_card(state, self._wall())[0], self._clock())
         live.late = bool(row.final)
         self._live[task_id] = live
         return live
@@ -122,16 +126,22 @@ class ProgressCards:
             if task is not None and task.status in [s.value for s in _TERMINAL]:
                 return  # the task ended while the delayed start was waiting: no card for a finished task
             user = await users.get(user_id)
-            if user.telegram_chat_id is None:
+            # a card carries buttons, so it goes to a private chat: where the user last wrote from
+            chats = await routing.destinations(user, route=None, proactive=False, private=True)
+            if not chats:
                 return
+            chat = chats[0]
             state = card_from_plan(task_id, goal, steps, tainted=tainted, now=self._wall())
+            if isinstance(chat, str):
+                state.chat = chat
             for change in self._early.pop(task_id, []):
                 change(state)
             text, buttons = render_card(state, self._wall())
-            ids = await self.channel.send_text(user.telegram_chat_id, text, buttons)
-            live = _Live(state, user_id, user.telegram_chat_id, ids[-1] if ids else None, text, self._clock())
+            ids = await self._channel_of(chat).send_text(chat, text, buttons)
+            live = _Live(state, user_id, chat, ids[-1] if ids else None, text, self._clock())
             self._live[task_id] = live
-            await task_cards.save(task_id, user_id, live.chat_id, live.message_id, state.model_dump(), False)
+            await task_cards.save(task_id, user_id, live.chat_id if isinstance(live.chat_id, int) else 0,
+                                  live.message_id, state.model_dump(), False)
 
     @_cosmetic
     async def _update(self, task_id: int, change: Callable[[CardState], None]) -> None:
@@ -210,8 +220,8 @@ class ProgressCards:
             await self._maybe_edit(task_id, live)
 
     async def _persist(self, task_id: int, live: _Live, *, final: bool) -> None:
-        await task_cards.save(task_id, live.user_id, live.chat_id, live.message_id,
-                              live.state.model_dump(), final)
+        await task_cards.save(task_id, live.user_id, live.chat_id if isinstance(live.chat_id, int) else 0,
+                              live.message_id, live.state.model_dump(), final)
 
     async def _maybe_edit(self, task_id: int, live: _Live) -> None:
         """Send the newest render if allowed now, else schedule a flush for when it is. Never sleeps."""
@@ -267,7 +277,7 @@ class ProgressCards:
             return
         # the edit keeps failing: say the outcome in a new message so the user is not left with a live Cancel
         try:
-            await self.channel.send_text(live.chat_id, text, None)
+            await self._channel_of(live.chat_id).send_text(live.chat_id, text, None)
         except Exception as exc:  # noqa: BLE001
             log.warning("progress_card.final_resend_failed", task_id=task_id, error=type(exc).__name__)
         self._live.pop(task_id, None)
@@ -295,14 +305,15 @@ class ProgressCards:
             log.warning("progress_card.deferred_flush_failed", task_id=task_id, error=type(exc).__name__)
 
     async def _send(self, live: _Live, text: str, buttons) -> None:
+        channel = self._channel_of(live.chat_id)
         if live.message_id is None:
-            ids = await self.channel.send_text(live.chat_id, text, buttons or None)
+            ids = await channel.send_text(live.chat_id, text, buttons or None)
             live.message_id = ids[-1] if ids else None
             return
         try:
-            await self.channel.edit_text(live.chat_id, live.message_id, text, buttons or None)
+            await channel.edit_text(live.chat_id, live.message_id, text, buttons or None)
         except MessageGone:
-            ids = await self.channel.send_text(live.chat_id, text, buttons or None)
+            ids = await channel.send_text(live.chat_id, text, buttons or None)
             live.message_id = ids[-1] if ids else None
 
 
