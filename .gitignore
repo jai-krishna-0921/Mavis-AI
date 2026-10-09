@@ -11,3 +11,6 @@ __pycache__/
 
 # isolated agent workspaces (inside this repo only)
 .worktrees/
+
+# reference screenshots (not ours to commit)
+instinct_screenshots/
