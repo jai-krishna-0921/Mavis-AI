@@ -32,5 +32,9 @@ def register_machine() -> None:
         from mavis.machine.selection import build_runtime
 
         machine.set_runtime(build_runtime())
+    from mavis.tools.machine_tools import register_machine_tools
+    from mavis.tools.registry import get_registry
+
+    register_machine_tools(get_registry())
     cancellation.register_cancel_hook(_cancel_hook)
     register_startup_hook(_start_reaper)

@@ -50,3 +50,11 @@ def safe_name(name: str, default: str = "file") -> str:
     if not stem:
         return default
     return f"{stem[:80]}.{ext}" if ext else stem[:80]
+
+
+def artifact_file(user_id: int, task_id: int, name: str):
+    """Where a machine output is kept on the host before delivery. The one place that knows the layout, so
+    the per-user artifact directories (store.artifacts.user_dir) can replace it at merge."""
+    from mavis.config import get_settings
+
+    return get_settings().artifacts_dir / f"u{int(user_id)}" / f"t{int(task_id)}" / safe_name(name)

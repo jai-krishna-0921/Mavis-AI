@@ -15,6 +15,7 @@ from dataclasses import dataclass
 class ToolOutput:
     user_text: str = ""  # plain words safe to show the user as written; may be empty
     model_note: str = ""  # for the model only: instructions, ids, raw details
+    untrusted: bool | None = None  # per result; None: the tool's untrusted_output decides
 
     def for_model(self) -> str:
         return "\n".join(p for p in (self.user_text, self.model_note) if p)
