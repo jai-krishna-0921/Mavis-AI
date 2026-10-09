@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { Wordmark } from '../components/Logo'
 
 const UPDATED = '9 October 2026'
-const CONTACT = 'jaikrishna0921@gmail.com'
+const CONTACT = 'mothi@cashfree.com'
 
 function LegalPage({ title, children }: { title: string; children: ReactNode }) {
   return (
