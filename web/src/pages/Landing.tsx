@@ -4,7 +4,13 @@ import { Weave } from '../components/Weave'
 import { BOT_URL } from '../lib/channels'
 import styles from './Landing.module.css'
 
-const TASKS = ['dispute an unwarranted bill', 'send birthday gifts to friends', 'chase an invoice', 'book a doctor\'s appointment', 'plan a weekend getaway']
+const TASKS = [
+  'catch up on what you missed in Slack',
+  'draft a reply to the email that matters',
+  'find a free slot and set up the meeting',
+  'pull the numbers from your sheet into a summary',
+  'remind you before a deadline slips',
+]
 
 export function Landing() {
   const me = useMe()
@@ -16,10 +22,10 @@ export function Landing() {
       <a className="skip-link" href="#main">Skip to content</a>
       <header className={styles.mark}><Weave size={72} animated title="Mavis AI" /></header>
       <main id="main" className={styles.copy} tabIndex={-1}>
-        <h1 className={styles.lead}>Mavis AI is a personal assistant that knows what you are working on and what matters to you.</h1>
+        <h1 className={styles.lead}>An assistant that lives in the chat you already use.</h1>
         <p>
-          There is nothing new to learn. You text it in Telegram or Slack, the places you already talk, and it gets on with it.
-          It reads your mail and calendar when you allow it, remembers what you tell it, and asks before it acts.
+          Nothing new to learn. Text Mavis in Telegram or Slack and it gets on with the task.
+          It reads your mail and calendar only when you allow it, remembers what you tell it, and asks before it acts.
         </p>
         <p>
           It can help you{' '}

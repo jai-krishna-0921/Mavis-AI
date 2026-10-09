@@ -20,6 +20,18 @@ const TABS: { kind: VaultKind; label: string; count: 'people' | 'organisations' 
 const SOURCE_LABEL: Record<string, string> = { you: 'You', gmail: 'Gmail', slack: 'Slack', calendar: 'Calendar', dashboard: 'Dashboard' }
 const srcLabel = (s: string) => SOURCE_LABEL[s] ?? s
 
+// Plain provenance for an item: where Mavis learned it, in the user's terms.
+const PROVENANCE: Record<string, string> = {
+  you: 'You told Mavis',
+  gmail: 'From your mail',
+  slack: 'From Slack',
+  calendar: 'From your calendar',
+  dashboard: 'You corrected this',
+}
+const provenance = (s: string) => PROVENANCE[s] ?? srcLabel(s)
+// Only third-party sources are unconfirmed until the user says otherwise.
+const THIRD_PARTY = new Set(['gmail', 'slack', 'calendar'])
+
 function useDebounced<T>(v: T, ms = 250) {
   const [d, setD] = useState(v)
   useEffect(() => { const t = setTimeout(() => setD(v), ms); return () => clearTimeout(t) }, [v, ms])
@@ -51,9 +63,9 @@ function ProfileCard() {
                 </form>
               </dd>
             ) : (
-              <dd>
-                <span>{v}</span>{' '}
-                <button type="button" className={ui.btnLink} aria-label={`Edit ${k}`} onClick={() => { setEditing(k); setVal(v) }}>Edit</button>
+              <dd className={styles.pfRow}>
+                <span>{v}</span>
+                <button type="button" className={`${ui.btn} ${styles.pfEdit}`} aria-label={`Edit ${k}`} onClick={() => { setEditing(k); setVal(v) }}>Edit</button>
               </dd>
             )}
           </div>
@@ -86,7 +98,7 @@ function ItemRow({ item }: { item: VaultItem }) {
             <label htmlFor={did}>Details</label>
             <textarea id={did} className={ui.input} value={detail} onChange={(e) => setDetail(e.target.value)} />
           </div>
-          <p className={ui.status}>Your correction is saved with your own trust and marked as from the dashboard.</p>
+          <p className={ui.status}>Saving marks this as something you corrected.</p>
           {patch.error && <p className={ui.error} role="alert">{patch.error.message}</p>}
           <div className={ui.rowActions} style={{ justifyContent: 'flex-start', marginTop: 10 }}>
             <button type="submit" className={`${ui.btn} ${ui.btnPrimary}`} disabled={patch.isPending || !title.trim()}>Save</button>
@@ -105,8 +117,8 @@ function ItemRow({ item }: { item: VaultItem }) {
           <div className={ui.rowTitle}>{item.title}</div>
           {item.detail && <div className={ui.rowSub}>{item.detail}</div>}
           <div className={styles.meta}>
-            <span className={ui.tag}>{srcLabel(item.source)}</span>
-            <span>trust {item.trust}</span>
+            <span className={ui.tag}>{provenance(item.source)}</span>
+            {THIRD_PARTY.has(item.source) && <span className={styles.unconfirmed}>Not confirmed</span>}
             <span>updated {fmtDate(item.updated_at)}</span>
           </div>
         </div>

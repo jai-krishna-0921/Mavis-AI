@@ -19,6 +19,15 @@ describe('landing', () => {
     expect(screen.getByRole('link', { name: 'Sign in' })).toBeInTheDocument()
     expect(screen.getByTestId('weave')).toBeInTheDocument()
   })
+
+  it('describes Mavis in its own words with its real examples', async () => {
+    loggedOut()
+    renderApp('/')
+    expect(await screen.findByRole('heading', { name: 'An assistant that lives in the chat you already use.' })).toBeInTheDocument()
+    expect(screen.getByText('catch up on what you missed in Slack')).toBeInTheDocument()
+    expect(screen.getByText('remind you before a deadline slips')).toBeInTheDocument()
+    expect(screen.queryByText(/dispute an unwarranted bill/)).not.toBeInTheDocument()
+  })
 })
 
 describe('login polling', () => {
@@ -98,6 +107,22 @@ describe('vault', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByText('Priya R.')).toBeInTheDocument()
     expect(db().items.find((i) => i.id === 'p1')).toMatchObject({ title: 'Priya R.', source: 'dashboard', trust: 'user' })
+  })
+
+  it('shows plain provenance and marks third-party items as not confirmed', async () => {
+    renderApp('/vault')
+    await screen.findByText('Priya Raman')
+    expect(screen.getAllByText('You told Mavis').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('From your mail').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Not confirmed').length).toBeGreaterThan(0)
+    expect(screen.queryByText(/trust/i)).not.toBeInTheDocument()
+  })
+
+  it('opens the profile editor from a separate Edit button', async () => {
+    const user = userEvent.setup()
+    renderApp('/vault')
+    await user.click(await screen.findByRole('button', { name: 'Edit name' }))
+    expect(screen.getByLabelText('Edit name')).toBeInTheDocument()
   })
 
   it('forgets an item and can suppress re-learning', async () => {
