@@ -627,12 +627,12 @@ async def test_two_people_connecting_in_parallel_stay_fully_apart(j, memory):
     assert "Kripya" in mine and "Kripya" not in theirs and "Nordwind" in theirs and "Nordwind" not in mine
 
     # reminders: set by chat tool calls, owned and delivered per person
+    from zoneinfo import ZoneInfo
+
     from langchain_core.messages import AIMessage
 
     from mavis.domain.wakeups import WakeupKind
     from mavis.timers.service import WakeupService
-
-    from zoneinfo import ZoneInfo
 
     for chat, what in ((6401, "Call the dentist"), (6402, "Send the Nordwind deck")):
         tz = ZoneInfo((await users.get_by_chat(chat)).timezone)
