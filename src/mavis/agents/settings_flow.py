@@ -31,8 +31,9 @@ async def _state(user_id: int, **patch) -> dict:
 
 
 async def settings_command(event: Event, user: User, args: list[str]) -> str | None:
-    await _say(user.id, "Want to change your time zone?", f"offer:{event.id}",
-               [[Button(label="Change time zone", data="st:tz")]])
+    await _say(user.id, "Want to change your time zone, or clear this chat?", f"offer:{event.id}",
+               [[Button(label="Change time zone", data="st:tz")],
+                [Button(label="Clear chat or start fresh", data="clr:ask")]])
     return (f"Time zone: {user.timezone}\nCurrency: {user.currency or '(default)'}\n"
             f"Name: {user.name or '(none)'}\nSay 'use EUR' or 'call me Sam' to change the others.")
 

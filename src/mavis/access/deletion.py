@@ -44,11 +44,17 @@ async def confirm(user_id: int, data: str) -> bool:
     return True
 
 
-async def request_deletion(user_id: int, *, by_owner: bool = False) -> None:
+async def mark_deleting(user_id: int, *, by_owner: bool = False, reset: bool = False) -> None:
     await users.update(user_id, status="deleting")  # the gate now drops every event for this user
-    await audit.record(user_id, actor="owner" if by_owner else "user", action="user.delete_requested",
-                       detail={})
-    await bus.get_bus().enqueue(Job(id=f"delete:{user_id}", user_id=user_id, kind=JobKind.DELETE_USER))
+    await audit.record(user_id, actor="owner" if by_owner else "user",
+                       action="user.reset_requested" if reset else "user.delete_requested", detail={})
+
+
+async def request_deletion(user_id: int, *, by_owner: bool = False, reset: bool = False) -> None:
+    """Start the erase job. `reset` makes it a fresh start: the same chat is re-admitted afterwards."""
+    await mark_deleting(user_id, by_owner=by_owner, reset=reset)
+    await bus.get_bus().enqueue(Job(id=f"delete:{user_id}", user_id=user_id, kind=JobKind.DELETE_USER,
+                                    payload={"reset": reset} if reset else {}))
 
 
 async def _redis(user_id: int) -> dict:
@@ -196,8 +202,17 @@ def _steps():
     yield "artifacts", _artifacts
 
 
-async def run_steps(user_id: int) -> dict:
+async def run_steps(user_id: int, *, reset: bool = False) -> dict:
+    """Erase the user from every store. With `reset` the chat is cleared first and, at the end, the same chat
+    is re-admitted as a new user (see `_readmit`) instead of leaving a deleted tombstone."""
+    before = await users.get(user_id)
     report: dict = {}
+    if reset and "chat" not in (before.state or {}).get("deletion", {}).get("done", []):
+        from mavis.agents.clear import wipe_chat
+
+        report["chat"] = await wipe_chat(user_id, before.telegram_chat_id)
+        await users.modify_nested(user_id, "deletion",
+                                  lambda cur: {**cur, "done": [*cur.get("done", []), "chat"]})
     for name, fn in _steps():
         done = (await users.get_state(user_id)).get("deletion", {}).get("done", [])
         if name in done:
@@ -207,23 +222,52 @@ async def run_steps(user_id: int) -> dict:
                                   lambda cur, n=name: {**cur, "done": [*cur.get("done", []), n]})
     chat = (await users.get(user_id)).telegram_chat_id
     report["postgres"] = await repo.delete_user_rows(user_id)
-    if chat is not None:
-        from mavis.channels import get_channel
+    if reset:
+        await _readmit(before)
+    else:
+        if chat is not None:
+            from mavis.channels import get_channel
 
-        try:
-            await get_channel().send_text(chat, DONE_TEXT)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("deletion.final_message_failed", error=type(exc).__name__)
-    await users.update(user_id, status="deleted", name=None, state={}, telegram_chat_id=None,
-                       telegram_user_id=None, composio_user_id=None, deleted_at=utcnow(), locale=None,
-                       currency=None, country=None)
-    await audit.record(user_id, actor="system", action="user.deleted",
-                       detail={k: (sum(v.values()) if isinstance(v, dict) else v) for k, v in report.items()})
+            try:
+                await get_channel().send_text(chat, DONE_TEXT)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("deletion.final_message_failed", error=type(exc).__name__)
+        await users.update(user_id, status="deleted", name=None, state={}, telegram_chat_id=None,
+                           telegram_user_id=None, composio_user_id=None, deleted_at=utcnow(), locale=None,
+                           currency=None, country=None)
+    await audit.record(user_id, actor="system", action="user.reset" if reset else "user.deleted",
+                       detail={k: (sum(v.values()) if isinstance(v, dict) else v)
+                               for k, v in report.items() if k != "chat"})
+    if reset:
+        user = await users.get(user_id)
+        from mavis.agents import onboarding
+
+        await onboarding.start(user, None)
     return report
 
 
+async def _readmit(before) -> None:
+    """After a reset the same chat is a new user right away. The owner chat comes back as an active owner
+    (the OWNER_TELEGRAM_CHAT_IDS grandfathering); anyone else keeps the tier they were admitted with and is
+    active without a new invite. Everything personal stays erased."""
+    from mavis.access import UserStatus, UserTier
+    from mavis.config import get_settings
+    from mavis.tools.integrations.identity import new_provider_id
+
+    s = get_settings()
+    owner = before.telegram_chat_id is not None and before.telegram_chat_id in s.owner_telegram_chat_ids
+    await users.update(before.id, status=UserStatus.ACTIVE.value,
+                       tier=UserTier.OWNER.value if owner else before.tier, name=None, state={},
+                       telegram_chat_id=before.telegram_chat_id, telegram_user_id=before.telegram_user_id,
+                       composio_user_id=new_provider_id(before.id), deleted_at=None, banned_at=None,
+                       ban_reason=None, activated_at=utcnow(), inactive_since=None, locale=None,
+                       currency=None, country=None, timezone=s.default_timezone, onboarded=False)
+
+
 async def run_deletion(job: Job) -> None:
-    await run_steps(job.user_id)
+    if (await users.get(job.user_id)).status != "deleting":
+        return  # a retried job after it already finished: the account is deleted, or reset and in use again
+    await run_steps(job.user_id, reset=bool(job.payload.get("reset")))
 
 
 async def _delete_cmd(event: Event, user, args) -> str | None:

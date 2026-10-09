@@ -81,7 +81,7 @@ def test_verify_machine_runs_in_the_worker_that_writes_the_sink():
 
 def test_the_reverse_proxy_serves_the_oauth_callback_and_the_slack_webhook():
     caddy = (ROOT / "Caddyfile").read_text()
-    public = next(ln for ln in caddy.splitlines() if "@public path" in ln).split()
+    public = next(ln for ln in caddy.splitlines() if ln.strip().startswith("@api path")).split()
     assert "/oauth/*" in public and "/webhooks/*" in public
     assert "/telegram/webhook" in public and "/connect/callback" in public
 
