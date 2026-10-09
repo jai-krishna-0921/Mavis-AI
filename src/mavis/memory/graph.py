@@ -65,6 +65,7 @@ class GraphStore(Protocol):
     async def entities(self, user_id: int) -> list[Entity]: ...
     async def dump(self, user_id: int) -> list[dict]: ...
     async def forget(self, user_id: int, needle: str) -> int: ...
+    async def forget_source(self, user_id: int, prefix: str) -> int: ...
     async def merge_entities(self, user_id: int, keep: str, drop: str, label: str) -> None: ...
 
 
@@ -270,6 +271,27 @@ class SqliteGraphStore:
                 await s.execute(delete(GraphNode).where(GraphNode.user_id == user_id, GraphNode.key.in_(node_keys)))
             await s.commit()
             return res.rowcount or 0
+
+    async def forget_source(self, user_id: int, prefix: str) -> int:
+        """Delete every edge learned from third-party records whose reference starts with `prefix`
+        ("gmail:", "slack:"), then the entities left with no edge at all. Returns the edges removed."""
+        if not prefix.strip():
+            return 0
+        like = escape_like(THIRD_PARTY_PREFIX + prefix) + "%"
+        async with dbm.Session() as s:
+            edges = list(await s.scalars(select(GraphEdge).where(
+                GraphEdge.user_id == user_id, GraphEdge.source_ref.like(like, escape="\\"))))
+            touched = {k for e in edges for k in (e.src_key, e.dst_key)} - {USER_KEY}
+            for e in edges:
+                await s.delete(e)
+            await s.flush()
+            for key in touched:
+                left = await s.scalar(select(GraphEdge.id).where(
+                    GraphEdge.user_id == user_id, or_(GraphEdge.src_key == key, GraphEdge.dst_key == key)).limit(1))
+                if left is None:
+                    await s.execute(delete(GraphNode).where(GraphNode.user_id == user_id, GraphNode.key == key))
+            await s.commit()
+            return len(edges)
 
     async def merge_entities(self, user_id: int, keep: str, drop: str, label: str) -> None:
         lab = sanitize_label(label)

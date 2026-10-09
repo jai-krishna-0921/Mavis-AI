@@ -24,6 +24,7 @@ from mavis.memory.recall import LoopsReader
 from mavis.memory.resolver import resolve
 from mavis.memory.spotter import SpotterCache
 from mavis.memory.vector import QdrantVectorStore, VectorStore
+from mavis.store.repo import events as events_repo
 from mavis.store.repo import loops as loops_repo
 from mavis.store.repo import profile as profile_repo
 from mavis.store.repo import users
@@ -363,6 +364,16 @@ class MemoryService:
         if facts:
             parts.append("Things I've picked up:\n" + "\n".join(f"- {f}" for f in facts))
         return "\n\n".join(parts) or "I don't know much about you yet."
+
+    async def forget_source(self, user_id: int, prefix: str) -> int:
+        """Everything learned from one connected source ("gmail:", "slack:"): its graph facts, its signal
+        vectors and the processed markers, so a later reconnect learns the records again."""
+        await self.init()
+        removed = await self.graph.forget_source(user_id, prefix)
+        removed += await self.vector.forget_source(user_id, prefix)
+        await events_repo.forget_prefix(f"learn:{user_id}:{prefix}")
+        self.invalidate(user_id)
+        return removed
 
     async def forget(self, user_id: int, needle: str) -> int:
         if not needle.strip():

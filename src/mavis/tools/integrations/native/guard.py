@@ -313,7 +313,7 @@ def _scan_secret_after(text: str, words: frozenset[str], kind: str, shaped: Call
                 b = _bare(raw)
                 if is_weak and b.isdigit() and len(b) == 4:
                     nxt = _fold(_bare(toks[j + 1].group(0))) if j + 1 < len(toks) else ""
-                    if nxt and not raw[-1:] in _EDGE and nxt not in _CLAUSE_CLOSERS:
+                    if nxt and raw[-1:] not in _EDGE and nxt not in _CLAUSE_CLOSERS:
                         break  # "code 2026 budget review": a number inside a phrase, not a code
                 spans.append(span(toks[j]))
                 break

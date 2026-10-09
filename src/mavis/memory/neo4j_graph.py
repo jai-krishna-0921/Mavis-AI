@@ -13,7 +13,7 @@ from typing import Any
 
 from mavis.domain import timeutil
 from mavis.domain.memory import SINGLE_VALUED_RELS, Entity, Relation
-from mavis.memory.graph import Fact, edge_score, is_third_party
+from mavis.memory.graph import THIRD_PARTY_PREFIX, Fact, edge_score, is_third_party
 from mavis.memory.names import USER_KEY, is_user, node_key, normalize_name, sanitize_label, sanitize_rel
 
 _DEDUPE = "reduce(acc = [], a IN coalesce(n.{f}, []) + ${p} | CASE WHEN a IN acc THEN acc ELSE acc + a END)"
@@ -44,6 +44,13 @@ Q_FORGET_EDGES = (
 Q_FORGET_NODES = (
     "MATCH (n:Entity {user_id:$u}) WHERE n.label <> 'User' AND toLower(n.name) CONTAINS toLower($n) "
     "OPTIONAL MATCH (n)-[r]-() WITH n, count(r) AS c DETACH DELETE n RETURN coalesce(sum(c), 0) AS c"
+)
+Q_FORGET_SOURCE = (
+    "MATCH (:Entity {user_id:$u})-[r]->(:Entity) WHERE r.source_ref STARTS WITH $p "
+    "WITH collect(r) AS rs FOREACH (x IN rs | DELETE x) RETURN size(rs) AS c"
+)
+Q_DROP_ORPHANS = (
+    "MATCH (n:Entity {user_id:$u}) WHERE n.label <> 'User' AND NOT (n)--() DETACH DELETE n"
 )
 Q_DROP_EDGES = (
     "MATCH (d:Entity {user_id:$u, key:$drop})-[r]-(o:Entity) "
@@ -272,6 +279,13 @@ class Neo4jGraphStore:
         edges = await self._run(Q_FORGET_EDGES, u=user_id, n=needle.strip())
         nodes = await self._run(Q_FORGET_NODES, u=user_id, n=needle.strip())
         return int((edges[0]["c"] if edges else 0) + (nodes[0]["c"] if nodes else 0))
+
+    async def forget_source(self, user_id: int, prefix: str) -> int:
+        if not prefix.strip():
+            return 0
+        rows = await self._run(Q_FORGET_SOURCE, u=user_id, p=THIRD_PARTY_PREFIX + prefix)
+        await self._run(Q_DROP_ORPHANS, u=user_id)
+        return int(rows[0]["c"]) if rows else 0
 
     async def merge_entities(self, user_id: int, keep: str, drop: str, label: str) -> None:
         lab = sanitize_label(label)

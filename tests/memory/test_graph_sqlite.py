@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from sqlalchemy import select
 
 from mavis.domain.memory import Entity, Relation

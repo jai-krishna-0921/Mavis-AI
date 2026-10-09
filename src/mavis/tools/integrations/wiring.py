@@ -192,6 +192,12 @@ def get_activator() -> Activator:
                      polling_forced=s.integration_polling or not s.composio_webhook_secret)
 
 
+async def forget_learned_source(user_id: int, prefix: str) -> int:
+    from mavis.memory.service import get_memory
+
+    return await get_memory().forget_source(user_id, prefix)
+
+
 @lru_cache
 def get_connect_flow() -> ConnectFlow:
     return ConnectFlow(
@@ -199,7 +205,7 @@ def get_connect_flow() -> ConnectFlow:
         schedule=wakeup_schedule, state=RepoUserState(), base_url=get_settings().public_base_url,
         on_active=get_activator().on_active, has_checks=connection_checks_pending,
         cancel_checks=cancel_connection_checks, on_google_active=google_activated,
-        on_google_begin=get_activator().begin_google,
+        on_google_begin=get_activator().begin_google, forget_source=forget_learned_source,
     )
 
 

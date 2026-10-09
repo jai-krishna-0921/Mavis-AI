@@ -75,6 +75,9 @@ UPGRADE_TEXT = ("I can now work with your Drive, Docs, Sheets and Tasks too. "
                 "Tap to upgrade your Google connection.")
 
 
+ForgetSource = Callable[[int, str], Awaitable[int]]
+
+
 class UserState(Protocol):
     async def get(self, user_id: int) -> dict: ...
     async def update(self, user_id: int, patch: dict) -> dict: ...
@@ -127,7 +130,9 @@ class ConnectFlow:
         clock: Callable[[], datetime] = timeutil.now,
         on_google_active: OnGoogleActive | None = None,
         on_google_begin: OnGoogleBegin | None = None,
+        forget_source: ForgetSource | None = None,
     ) -> None:
+        self.forget_source = forget_source
         self.provider, self.cache, self.bus = provider, cache, bus
         self.notify, self.schedule, self.state = notify, schedule, state
         self.base_url = base_url.rstrip("/")
@@ -578,7 +583,24 @@ class ConnectFlow:
             await self.state.update(user_id, {"synced": synced})
         if polling != st.get("polling", {}):
             await self.state.update(user_id, {"polling": polling})
-        await self.send(user_id, f"Disconnected {name}. I can't see it anymore.")
+        forgotten = await self._forget_learned(user_id, capability)
+        await self.send(user_id, f"Disconnected {name}. I can't see it anymore."
+                        + (" I also removed what I had learned from it." if forgotten else ""))
+
+    async def _forget_learned(self, user_id: int, capability: Capability) -> int:
+        """Forget is the default: what was learned from mail or Slack records goes with the connection."""
+        prefix = ""
+        if capability is Capability.GMAIL or is_google(capability):
+            prefix = "gmail:"
+        elif capability is Capability.SLACK:
+            prefix = "slack:"
+        if not prefix or self.forget_source is None:
+            return 0
+        try:
+            return int(await self.forget_source(user_id, prefix))
+        except Exception as exc:  # noqa: BLE001 - the disconnect itself already succeeded
+            log.warning("connect.forget_source_failed", prefix=prefix, error=type(exc).__name__)
+            return 0
 
     async def _disconnect_legacy_accounts(self, user_id: int) -> int:
         """No googlesuper account: remove the old Gmail and Calendar accounts instead. Returns how many."""

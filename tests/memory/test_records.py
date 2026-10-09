@@ -495,3 +495,32 @@ async def test_slack_record_ref_is_stable_across_webhook_poll_and_backfill(me):
     for extra in ({"team": "T0TEAM1"}, {}, {"team": ""}):  # webhook, poll, backfill
         await ing.slack(me.id, slack_msg(base["user"], base["text"], **extra))
     assert len(set(seen)) == 1 and seen[0].startswith("slack:T0TEAM1:")
+
+
+# --- forget on disconnect -----------------------------------------------------------------------------------
+
+
+async def test_forgetting_a_source_removes_its_facts_vectors_and_markers_and_nothing_else(memory, me, fake_llm):
+    fake_llm.push_structured(invoice_extraction())
+    await jobs.handle_learn(Job(id="j1", user_id=me.id, kind=JobKind.LEARN,
+                                payload=records.email_record(me.id, INVOICE, self_ids=SELF).payload()))
+    fake_llm.push_structured(Extraction(entities=[Entity(name="Arjun Rao", label="Person")], relations=[
+        Relation(subject="Arjun Rao", rel="COLLEAGUE_OF", object="User", statement="Arjun Rao is Jai's colleague.")]))
+    n = slack_msg("U0ARJUN01", "Arjun Rao here, the plan is ready", user_name="Arjun Rao")
+    await jobs.handle_learn(Job(id="j2", user_id=me.id, kind=JobKind.LEARN,
+                                payload=records.slack_record(me.id, n, team="T0TEAM1", self_ids=SELF).payload()))
+    await memory.graph.upsert_relation(me.id, Relation(subject="User", rel="FRIEND_OF", object="Kiran",
+                                                       statement="Kiran is the user's friend."), "turn:1")
+
+    removed = await memory.forget_source(me.id, "gmail:")
+    assert removed > 0
+    dump = await memory.graph.dump(me.id)
+    refs = {d["source_ref"] for d in dump}
+    assert not any(r.startswith("tp:gmail:") for r in refs)
+    assert "tp:slack:T0TEAM1:D0DM00001:1791451800.000100" in refs and "turn:1" in refs
+    assert "Meera Iyer" not in {e.name for e in await memory.graph.entities(me.id)}  # no edge left, no node
+    hits = await memory.vector.search_hits(me.id, "Phoenix migration invoice due", k=20, min_score=0.0)
+    assert not any("Phoenix" in text for text, _, _ in hits)
+    assert not await events_repo.seen(records.record_marker(me.id, "gmail:m-inv"))  # a reconnect learns it again
+    assert await events_repo.seen(records.record_marker(me.id, "slack:T0TEAM1:D0DM00001:1791451800.000100"))
+    assert await memory.forget_source(me.id, "") == 0
