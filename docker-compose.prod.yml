@@ -212,7 +212,10 @@ services:
       start_period: 40s
 
   caddy:
-    image: caddy:2
+    build:
+      context: .
+      dockerfile: deploy/caddy/Dockerfile
+    image: mavis-caddy
     profiles: ["prod"]
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN}
