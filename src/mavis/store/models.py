@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Date,
     Float,
     ForeignKey,
     Index,
@@ -463,3 +464,72 @@ class NativeOAuthState(Base):
     provider: Mapped[str] = mapped_column(String(16))
     pending_id: Mapped[int | None] = mapped_column(nullable=True)
     expires_at: Mapped[datetime] = mapped_column(index=True)
+
+
+class MachineSession(Base):
+    """One sandbox or browser session of a task (Phase 12). The row is how the reaper finds orphans."""
+
+    __tablename__ = "machine_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # code | browser
+    backend: Mapped[str] = mapped_column(String(24))
+    session_id: Mapped[str] = mapped_column(String(200), unique=True)
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open | closed | stopped
+    opened_at: Mapped[datetime] = mapped_column(default=utcnow)
+    deadline_at: Mapped[datetime | None] = mapped_column(default=None)
+    closed_at: Mapped[datetime | None] = mapped_column(default=None)
+    wall_s: Mapped[float] = mapped_column(Float, default=0.0)
+    est_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class ComputeUsage(Base):
+    """Metered machine time per user and local day; one row per session (idempotent)."""
+
+    __tablename__ = "compute_usage"
+    __table_args__ = (UniqueConstraint("session_id", name="uq_compute_usage_session"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    day: Mapped[date] = mapped_column(Date)
+    provider: Mapped[str] = mapped_column(String(24))
+    kind: Mapped[str] = mapped_column(String(16))
+    task_id: Mapped[int | None] = mapped_column(Integer)
+    session_id: Mapped[str] = mapped_column(String(200))
+    wall_s: Mapped[float] = mapped_column(Float, default=0.0)
+    est_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class WorkspaceFileRow(Base):
+    """Metadata of a file in a user's workspace; the bytes live in the workspace store."""
+
+    __tablename__ = "workspace_files"
+    __table_args__ = (UniqueConstraint("user_id", "path", name="uq_workspace_files_user_path"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    path: Mapped[str] = mapped_column(String(512))
+    size: Mapped[int] = mapped_column(BigInteger, default=0)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    cls: Mapped[str] = mapped_column(String(8))
+    provenance: Mapped[str] = mapped_column(String(24))
+    task_id: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow)
+    deleted_at: Mapped[datetime | None] = mapped_column(default=None)
+
+
+class UserQuota(Base):
+    """Per-user override of a machine quota (owner or plan tooling sets it)."""
+
+    __tablename__ = "user_quotas"
+    __table_args__ = (UniqueConstraint("user_id", "key", name="uq_user_quotas_user_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    key: Mapped[str] = mapped_column(String(40))
+    value: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow)

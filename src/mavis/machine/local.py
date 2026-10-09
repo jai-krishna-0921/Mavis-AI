@@ -25,6 +25,8 @@ from mavis.config import get_settings
 from mavis.machine.errors import SandboxPathError
 from mavis.machine.paths import clip, guard, safe_env
 from mavis.machine.ports import BackendHealth, ExecRequest, ExecResult, FileEntry
+from mavis.machine.s3store import MetaReads, put_with_quota
+from mavis.store.repo import machine as repo_machine
 
 log = structlog.get_logger(__name__)
 _ids = itertools.count(1)
@@ -203,3 +205,38 @@ class LocalSandbox:
     async def health(self) -> BackendHealth:
         net = "isolated network" if _probe_unshare() else "network blocked in Python only"
         return BackendHealth(ok=True, detail=f"local subprocess, {net}")
+
+
+class LocalWorkspaceStore(MetaReads):
+    """Dev store: bytes under root/u{user_id}/{path}, metadata in the real table."""
+
+    def __init__(self, root: Path | None = None) -> None:
+        self._root = root or (get_settings().data_dir / "workspaces")
+
+    def _host(self, user_id: int, path: str) -> Path:
+        base = (self._root / f"u{int(user_id)}").resolve()
+        target = (base / guard(path)).resolve()
+        if not target.is_relative_to(base):
+            raise SandboxPathError(f"path resolves outside the workspace: {path[:80]!r}")
+        return target
+
+    async def put(self, user_id, path, data, *, provenance, cls=None, task_id=None):
+        async def write(rel, _cls):
+            target = self._host(user_id, rel)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(bytes(data))
+        return await put_with_quota(user_id, path, data, provenance=provenance, cls=cls, task_id=task_id,
+                                    write=write)
+
+    async def get(self, user_id, path):
+        rel = await self._require(user_id, path)
+        return self._host(user_id, rel).read_bytes()
+
+    async def delete(self, user_id, path):
+        rel = guard(path)
+        self._host(user_id, rel).unlink(missing_ok=True)
+        await repo_machine.soft_delete_file(user_id, rel)
+
+    async def purge_user(self, user_id):
+        shutil.rmtree(self._root / f"u{int(user_id)}", ignore_errors=True)
+        await repo_machine.purge_user(user_id)
