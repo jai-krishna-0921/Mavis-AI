@@ -69,6 +69,8 @@ done
 # Google and Slack run in house. The router still falls back to Composio for a user with no native grant,
 # so this is safe to force; it must not depend on what the local env file happens to say.
 set_key INTEGRATION_PROVIDER native force
+# Owner decision 2026-10-09: other people join with invite codes (the owner chats stay admitted in every mode)
+set_key ACCESS_MODE invite force
 tz="$(envget "$DEMO_ENV" DEFAULT_TIMEZONE)"
 [[ -z "$tz" ]] || set_key DEFAULT_TIMEZONE "$tz"
 set_key COMPOSIO_WEBHOOK_SECRET ""
