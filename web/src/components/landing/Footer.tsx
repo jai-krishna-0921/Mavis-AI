@@ -10,6 +10,8 @@ export function Footer({ signIn }: { signIn: string }) {
           <a href="#where" className="no-underline hover:text-ink">Connected apps</a>
           <a href="#how" className="no-underline hover:text-ink">How it works</a>
           <a href="#privacy" className="no-underline hover:text-ink">Privacy</a>
+          <Link to="/privacy" className="no-underline hover:text-ink">Privacy Policy</Link>
+          <Link to="/terms" className="no-underline hover:text-ink">Terms</Link>
           <Link to={signIn} className="no-underline hover:text-ink">Sign in</Link>
           <span>© 2026 Mavis AI</span>
         </nav>

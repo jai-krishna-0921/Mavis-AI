@@ -272,3 +272,16 @@ describe('logout', () => {
     expect(seen).toEqual([{ all: true }])
   })
 })
+
+describe('legal pages', () => {
+  it('serves the privacy policy with the Google Limited Use statement, and the terms', async () => {
+    const { PrivacyPolicy, TermsOfService } = await import('./Legal')
+    const { MemoryRouter } = await import('react-router-dom')
+    const { render: r, screen: s } = await import('@testing-library/react')
+    r(<MemoryRouter><PrivacyPolicy /></MemoryRouter>)
+    expect(s.getByRole('heading', { level: 1, name: 'Privacy Policy' })).toBeInTheDocument()
+    expect(s.getByText(/Limited Use requirements/)).toBeInTheDocument()
+    r(<MemoryRouter><TermsOfService /></MemoryRouter>)
+    expect(s.getByRole('heading', { level: 1, name: 'Terms of Service' })).toBeInTheDocument()
+  })
+})
