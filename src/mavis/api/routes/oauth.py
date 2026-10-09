@@ -19,6 +19,8 @@ from mavis.bus.base import EventBus
 from mavis.domain import timeutil
 from mavis.domain.events import Job, JobKind
 from mavis.domain.messages import Outbound
+from mavis.store import db as dbm
+from mavis.store.models import User
 from mavis.tools.integrations import get_connection_cache, get_provider
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.native.base import NativeProvider
@@ -49,6 +51,27 @@ _USER_TEXT = {
 
 def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
     return HTMLResponse(_PAGE.format(title=html.escape(title), body=html.escape(body)), status_code=status)
+
+
+def _clean(value: object, limit: int = 60) -> str:
+    """Third-party or user-chosen text for a page or a message: one line, no control characters, bounded."""
+    text = "".join(ch if ch.isprintable() else " " for ch in str(value or ""))
+    return " ".join(text.split())[:limit]
+
+
+def _external(provider: NativeProvider, account: dict) -> str:
+    """Which outside account was just linked, in words the person consenting will recognise."""
+    if provider is NativeProvider.GOOGLE:
+        return _clean(account.get("email")) or "a Google account"
+    team = _clean(account.get("team_name"))
+    return f"the {team} workspace" if team else "a Slack workspace"
+
+
+async def _mavis_name(user_id: int) -> str:
+    """The Telegram display name of the Mavis account being linked (never an id, token or secret)."""
+    async with dbm.Session() as s:
+        user = await s.get(User, user_id)
+    return _clean(user.name) if user is not None and user.name else "a Mavis account"
 
 
 async def _tell(user_id: int, text: str) -> None:
@@ -101,6 +124,13 @@ async def oauth_callback(
             id=f"conncheck:{done.pending_id}:{int(now.timestamp()) // THROTTLE_S}",
             user_id=done.user_id, kind=JobKind.CONNECTION_CHECK, payload={"pending_id": done.pending_id},
         ))
-    else:
-        await _tell(done.user_id, f"{name} is connected.")
-    return _page("Connected", f"{name} is connected. You can close this tab and head back to Telegram.")
+    # Login CSRF: a consent link forwarded to someone else links THEIR account to the sender's Mavis user.
+    # Both ends are told exactly what was linked to whom, so a surprised person can undo it.
+    outside = _external(native, done.account)
+    await _tell(done.user_id, f"{name} is connected: {outside}. If that is not yours, tell me to "
+                              f"disconnect {name} and I will remove it.")
+    who = await _mavis_name(done.user_id)
+    return _page("Connected", (
+        f"{outside} is now linked to the Mavis account of {who}. You can close this tab and head back to "
+        f"Telegram. If this is not you, close this tab and remove Mavis from your {name} account's "
+        "connected apps."))
