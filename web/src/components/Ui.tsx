@@ -48,8 +48,8 @@ export function SkeletonRows({ rows = 3, label = 'Loading' }: { rows?: number; l
 
 export function EmptyState({ icon, title, children }: { icon: ReactNode; title: string; children?: ReactNode }) {
   return (
-    <div className="grid place-items-center gap-3 rounded-3xl border border-dashed border-white/10 px-6 py-12 text-center">
-      <div className="grid size-12 place-items-center rounded-2xl bg-white/[0.05] text-muted">{icon}</div>
+    <div className="grid place-items-center gap-3 rounded-3xl border border-dashed border-line-strong bg-surface/60 px-6 py-12 text-center">
+      <div className="grid size-12 place-items-center rounded-2xl bg-sunken text-muted">{icon}</div>
       <p className="font-semibold">{title}</p>
       {children && <p className="max-w-[40ch] text-sm text-muted">{children}</p>}
     </div>
@@ -58,7 +58,7 @@ export function EmptyState({ icon, title, children }: { icon: ReactNode; title: 
 
 export function IconTile({ children, tone = 'plain' }: { children: ReactNode; tone?: 'plain' | 'accent' }) {
   return (
-    <div className={`grid size-11 shrink-0 place-items-center rounded-2xl border ${tone === 'accent' ? 'border-accent/30 bg-accent/10 text-accent-hi' : 'border-white/10 bg-white/[0.04] text-ink'}`}>
+    <div className={`grid size-11 shrink-0 place-items-center rounded-2xl border ${tone === 'accent' ? 'border-accent/30 bg-accent-soft text-accent-hi' : 'border-line-strong bg-sunken text-ink'}`}>
       {children}
     </div>
   )

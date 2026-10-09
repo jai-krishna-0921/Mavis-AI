@@ -2,7 +2,7 @@ import { Navigate, useLocation } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { useMe } from '../api/hooks'
 import { ApiError } from '../api/client'
-import { Weave } from './Weave'
+import { Logo } from './Logo'
 
 export function RequireAuth({ children }: { children: ReactNode }) {
   const me = useMe()
@@ -10,7 +10,7 @@ export function RequireAuth({ children }: { children: ReactNode }) {
   if (me.isPending) {
     return (
       <div className="grid min-h-[100dvh] place-items-center" role="status">
-        <Weave size={56} animated />
+        <Logo size={56} live />
         <span className="sr-only">Loading</span>
       </div>
     )

@@ -9,14 +9,14 @@ export function Login({ pollIntervalMs }: { pollIntervalMs?: number }) {
   const [params] = useSearchParams()
   const invite = params.get('invite') ?? undefined
   const problem = params.get('error')
-  const me = useMe()
+  const me = useMe({ publicPage: true })
   const cfg = useConfig()
   if (me.data) return <Navigate to="/workspace" replace />
   const googleOff = cfg.data?.google_signin_enabled === false
   return (
     <AuthShell title="Sign in to Mavis AI" lede="Mavis lives in chat, so you sign in with Telegram. Nothing to remember, no password.">
       {problem?.startsWith('google_') && (
-        <p className="mb-6 flex items-start gap-2 rounded-2xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger" role="alert">
+        <p className="mb-6 flex items-start gap-2 rounded-2xl border border-danger/30 bg-danger-soft p-3 text-sm text-danger" role="alert">
           <WarningCircle size={20} weight="light" className="mt-0.5 shrink-0" aria-hidden="true" />
           {problem === 'google_unavailable' ? 'Google sign in is not available right now.' : 'Google sign in did not work. Try again, or use Telegram.'}
         </p>

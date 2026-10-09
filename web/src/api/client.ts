@@ -1,3 +1,4 @@
+import { setSessionHint } from '../lib/session'
 import type {
   Connector, PublicConfig, ConnectorId, Invite, Me, PollStatus, Preferences, SourceInfo, TelegramStart,
   VaultItem, VaultKind, VaultPage, VaultSummary,
@@ -69,8 +70,15 @@ const q = (params: Record<string, string | undefined>) => {
 export const api = {
   config: () => request<PublicConfig>('/config', { silent401: true }),
   async me(): Promise<Me> {
-    const me = await request<Me>('/me', { silent401: true })
+    let me: Me
+    try {
+      me = await request<Me>('/me', { silent401: true })
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) setSessionHint(false)
+      throw e
+    }
     setCsrf(me.csrf)
+    setSessionHint(true)
     return me
   },
   telegramStart: (invite?: string, linkId?: string) =>
@@ -80,7 +88,7 @@ export const api = {
   pendingLink: (linkId: string) => request<{ email: string }>(`/auth/telegram/link${q({ i: linkId })}`, { silent401: true }),
   telegramPoll: (nonce: string) =>
     request<PollStatus>(`/auth/telegram/poll${q({ nonce })}`, { silent401: true }),
-  logout: (all = false) => request<void>('/auth/logout', { method: 'POST', body: { all } }),
+  logout: (all = false) => { setSessionHint(false); return request<void>('/auth/logout', { method: 'POST', body: { all } }) },
   connectors: () => request<Connector[]>('/connectors'),
   connect: (id: ConnectorId) => request<{ url: string }>(`/connectors/${id}/connect`, { method: 'POST', body: {} }),
   disconnect: (id: ConnectorId, forget: boolean) =>

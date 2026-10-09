@@ -1,10 +1,10 @@
 import { useState } from 'react'
-import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { List, SignOut, SlidersHorizontal, SquaresFour, UserPlus, Vault as VaultIcon, X } from '@phosphor-icons/react'
 import { useMe } from '../api/hooks'
 import { api, setCsrf } from '../api/client'
-import { Weave } from './Weave'
+import { Wordmark } from './Logo'
 import { InviteModal } from './InviteModal'
 
 const LINKS = [
@@ -13,7 +13,7 @@ const LINKS = [
   { to: '/preferences', label: 'Preferences', Icon: SlidersHorizontal },
 ]
 
-const item = 'group flex w-full items-center gap-3 rounded-2xl px-3.5 py-2.5 text-left text-[15px] font-medium text-muted no-underline transition-[background-color,color] duration-500 ease-fluid hover:bg-white/[0.05] hover:text-ink'
+const item = 'group flex w-full items-center gap-3 rounded-2xl px-3.5 py-2.5 text-left text-[15px] font-medium text-muted no-underline transition-[background-color,color] duration-500 ease-fluid hover:bg-sunken hover:text-ink'
 
 export function Layout() {
   const me = useMe()
@@ -34,8 +34,8 @@ export function Layout() {
   return (
     <div className="mesh-app min-h-[100dvh] lg:grid lg:grid-cols-[272px_minmax(0,1fr)]">
       <a className="skip-link" href="#main">Skip to content</a>
-      <header className="sticky top-0 z-40 flex items-center justify-between border-b border-line bg-bg/80 px-5 py-3 backdrop-blur-xl lg:hidden">
-        <span className="flex items-center gap-2.5 text-lg font-bold tracking-tight"><Weave size={28} /> Mavis AI</span>
+      <header className="sticky top-0 z-40 flex items-center justify-between border-b border-line bg-bg/85 px-5 py-3 backdrop-blur-xl lg:hidden">
+        <Link to="/" aria-label="Mavis AI home" className="no-underline"><Wordmark size={30} live /></Link>
         <button type="button" className="btn btn-sm" aria-expanded={open} aria-controls="site-nav" onClick={() => setOpen((o) => !o)}>
           {open ? <X size={16} weight="bold" /> : <List size={16} weight="bold" />}
           {open ? 'Close' : 'Menu'}
@@ -44,17 +44,17 @@ export function Layout() {
 
       <nav
         id="site-nav" aria-label="Main"
-        className={`${open ? 'flex' : 'hidden'} fixed inset-x-0 top-[57px] bottom-0 z-40 flex-col gap-1 overflow-auto border-b border-line bg-bg/95 p-4 backdrop-blur-2xl lg:sticky lg:top-0 lg:flex lg:h-[100dvh] lg:border-r lg:bg-surface/60 lg:p-5 lg:backdrop-blur-none`}
+        className={`${open ? 'flex' : 'hidden'} fixed inset-x-0 top-[57px] bottom-0 z-40 flex-col gap-1 overflow-auto border-b border-line bg-bg p-4 lg:sticky lg:top-0 lg:flex lg:h-[100dvh] lg:border-r lg:bg-surface lg:p-5`}
         onClick={(e) => { if ((e.target as HTMLElement).closest('a,button')) setOpen(false) }}
       >
-        <span className="mb-6 hidden items-center gap-3 px-2 pt-2 text-xl font-bold tracking-tight lg:flex"><Weave size={34} /> Mavis AI</span>
+        <Link to="/" aria-label="Mavis AI home" className="mb-6 hidden px-2 pt-2 no-underline lg:inline-flex"><Wordmark size={36} live /></Link>
         <ul className="grid gap-1">
           {LINKS.map(({ to, label, Icon }) => (
             <li key={to}>
-              <NavLink to={to} className={({ isActive }) => `${item} ${isActive ? '!bg-white/[0.07] !text-ink' : ''}`}>
+              <NavLink to={to} className={({ isActive }) => `${item} ${isActive ? '!bg-accent-soft !text-ink' : ''}`}>
                 {({ isActive }) => (
                   <>
-                    <Icon size={22} weight={isActive ? 'duotone' : 'light'} className={isActive ? 'text-accent' : ''} aria-hidden="true" />
+                    <Icon size={22} weight={isActive ? 'duotone' : 'light'} className={isActive ? 'text-accent-hi' : ''} aria-hidden="true" />
                     {label}
                   </>
                 )}
@@ -69,8 +69,8 @@ export function Layout() {
 
         <div className="mt-auto grid gap-3 pt-6">
           {me.data ? (
-            <div className="flex items-center gap-3 rounded-2xl border border-line bg-white/[0.03] p-3">
-              <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-accent/15 font-bold text-accent-hi" aria-hidden="true">{initial}</div>
+            <div className="flex items-center gap-3 rounded-2xl border border-line bg-bg p-3">
+              <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-accent-soft font-bold text-accent-hi" aria-hidden="true">{initial}</div>
               <div className="min-w-0 text-sm leading-tight">
                 <div className="truncate font-semibold">{me.data.name}</div>
                 {me.data.email && <div className="mt-0.5 truncate text-muted">{me.data.email}</div>}
@@ -80,7 +80,7 @@ export function Layout() {
             <div className="skeleton h-16 !rounded-2xl" aria-hidden="true" />
           )}
           <button type="button" className={item} onClick={() => void logout(false)}><SignOut size={22} weight="light" aria-hidden="true" />Log out</button>
-          <button type="button" className="px-3.5 text-left text-[13px] text-muted underline decoration-white/20 underline-offset-4 transition-colors hover:text-ink hover:decoration-current" onClick={() => void logout(true)}>
+          <button type="button" className="px-3.5 text-left text-[13px] text-muted underline decoration-ink/25 underline-offset-4 transition-colors hover:text-ink hover:decoration-current" onClick={() => void logout(true)}>
             Log out everywhere
           </button>
         </div>

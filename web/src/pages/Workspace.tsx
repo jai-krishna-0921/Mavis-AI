@@ -59,11 +59,11 @@ function DisconnectDialog({ c, onClose }: { c: Connector; onClose: () => void })
       <p className="text-muted">Mavis will stop reading {c.account ?? c.name}. What should happen to what it learned from there?</p>
       <fieldset className="m-0 mt-5 grid gap-3 border-0 p-0">
         <legend className="sr-only">What to do with learned data</legend>
-        <label className="check rounded-2xl border border-white/10 p-4 has-[:checked]:border-accent/50 has-[:checked]:bg-accent/[0.06]">
+        <label className="check rounded-2xl border border-line-strong p-4 has-[:checked]:border-accent-hi/50 has-[:checked]:bg-accent-soft">
           <input type="radio" name="forget" checked={forget} onChange={() => setForget(true)} />
           <span><strong>Disconnect and forget.</strong> Remove people, facts and projects learned from {c.name}.</span>
         </label>
-        <label className="check rounded-2xl border border-white/10 p-4 has-[:checked]:border-accent/50 has-[:checked]:bg-accent/[0.06]">
+        <label className="check rounded-2xl border border-line-strong p-4 has-[:checked]:border-accent-hi/50 has-[:checked]:bg-accent-soft">
           <input type="radio" name="forget" checked={!forget} onChange={() => setForget(false)} />
           <span><strong>Disconnect, keep what was learned.</strong> You can forget it later in the Vault.</span>
         </label>
@@ -107,7 +107,7 @@ function ConnectorRow({ c }: { c: Connector }) {
             {SERVICES.map((s) => {
               const granted = c.scopes_granted.includes(s)
               return (
-                <li key={s} className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-[13px] capitalize ${granted ? 'border-ok/25 bg-ok/[0.07] text-ink' : 'border-white/10 text-muted'}`}>
+                <li key={s} className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-[13px] capitalize ${granted ? 'border-ok/30 bg-ok-soft text-ink' : 'border-line-strong text-muted'}`}>
                   <ServiceIcon name={s} size={18} />
                   <span>{s}</span>
                   <span className="sr-only">{granted ? 'allowed' : 'not allowed'}</span>
@@ -135,10 +135,10 @@ function ConnectorRow({ c }: { c: Connector }) {
 function ConnectNote() {
   const [params] = useSearchParams()
   if (params.get('connected')) {
-    return <p className="mb-4 flex items-center gap-2 rounded-2xl border border-ok/25 bg-ok/[0.07] p-3 text-sm" role="status"><CheckCircle size={20} weight="light" className="text-ok" aria-hidden="true" />Connected. Mavis is reading it now.</p>
+    return <p className="mb-4 flex items-center gap-2 rounded-2xl border border-ok/30 bg-ok-soft p-3 text-sm" role="status"><CheckCircle size={20} weight="light" className="text-ok" aria-hidden="true" />Connected. Mavis is reading it now.</p>
   }
   if (params.get('error')) {
-    return <p className="mb-4 flex items-center gap-2 rounded-2xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger" role="alert"><WarningCircle size={20} weight="light" aria-hidden="true" />That account was not connected. You can try again.</p>
+    return <p className="mb-4 flex items-center gap-2 rounded-2xl border border-danger/30 bg-danger-soft p-3 text-sm text-danger" role="alert"><WarningCircle size={20} weight="light" aria-hidden="true" />That account was not connected. You can try again.</p>
   }
   return null
 }
