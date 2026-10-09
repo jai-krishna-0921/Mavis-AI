@@ -29,6 +29,7 @@ from mavis.initiative import wiring as initiative_wiring
 from mavis.initiative.briefs_integrations import CalendarBrief, InboxBrief
 from mavis.initiative.email_triage import EmailTriage, email_prefilter
 from mavis.initiative.untrusted import wrap_untrusted
+from mavis.memory import personal_layer
 from mavis.timers.system import register_system_wakeup
 from mavis.tools.integrations import get_connection_cache, get_provider
 from mavis.tools.integrations.actions import (
@@ -232,7 +233,8 @@ def get_first_sync() -> FirstSync:
     from mavis.loops.service import LoopService
 
     return FirstSync(provider=get_provider(), memory=JobLearner(), loops=LoopService(get_bus()),
-                     bus=_LazyBus(), tz_of=user_timezone, connectors=get_connector_ingest())
+                     bus=_LazyBus(), tz_of=user_timezone, connectors=get_connector_ingest(),
+                     meetings=personal_layer.record_meetings, after_sync=personal_layer.schedule)
 
 
 @lru_cache
