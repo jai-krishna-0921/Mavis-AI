@@ -910,3 +910,116 @@ async def test_best_effort_call_timeout_is_the_short_one_and_holds_no_cooldown(c
     lim = next(iter(models._limiters.values()))
     assert lim._free == 3 and lim._be_inflight == 0
     assert models._ollama.cooldown_until == 0.0
+
+
+# --- E2E run 2 (R4): a background timeout never blocks interactive work -------------------------------
+
+
+async def test_background_timeout_marks_only_the_background_lane(chain) -> None:
+    log, scripts, s = chain
+    s.llm_timeout_cooldown_s = 0.5
+    scripts[s.model_fast] = [_timeout()]
+    task = asyncio.create_task(models.complete([HumanMessage("bg")], priority="background"))
+    await asyncio.sleep(0.05)
+    assert models._ollama.unavailable_s("interactive") <= 0  # chat sees a healthy account
+    assert models._ollama.unavailable_s("background") > 0
+    assert models.unavailable_s() > 0  # background drains still wait it out
+    await task
+
+
+async def test_interactive_timeout_still_marks_the_interactive_lane(chain) -> None:
+    log, scripts, s = chain
+    s.llm_timeout_cooldown_s = 0.5
+    scripts[s.model_fast] = [_timeout()]
+    task = asyncio.create_task(models.complete([HumanMessage("chat")]))
+    await asyncio.sleep(0.05)
+    assert models._ollama.unavailable_s("interactive") > 0
+    await task
+
+
+async def test_chat_takes_back_the_slot_a_timed_out_background_call_holds(chain) -> None:
+    """One slot, held 45 s after a background timeout: a chat reply must not wait for it."""
+    log, scripts, s = chain
+    s.llm_timeout_cooldown_s = 30
+    scripts[s.model_fast] = [_timeout()]  # the background attempt; its retry then queues for a slot
+    bg = asyncio.create_task(models.complete([HumanMessage("bg")], priority="background"))
+    await asyncio.sleep(0.05)
+    assert models._limiter()._free == 0  # the abandoned request still occupies the slot
+    t0 = asyncio.get_running_loop().time()
+    assert await asyncio.wait_for(models.complete([HumanMessage("chat")]), 2) == f"from {s.model_fast}"
+    assert asyncio.get_running_loop().time() - t0 < 1
+    bg.cancel()
+
+
+async def test_background_timeout_does_not_send_chat_to_the_secondary(secondary) -> None:
+    log, scripts, s = secondary
+    s.llm_timeout_cooldown_s = 0.5
+    models._ollama.note_timeout("background")
+    assert not models._prefer_secondary(Tier.FAST, "interactive")
+    models._ollama.note_timeout("interactive")
+    assert models._prefer_secondary(Tier.FAST, "interactive")
+
+
+async def test_rate_limit_backoff_stays_global(chain) -> None:
+    models._ollama.note_rate_limit(None)
+    assert models._ollama.unavailable_s("interactive") > 0 and models._ollama.unavailable_s("background") > 0
+
+
+async def _fill(lim, n, priority="background"):
+    for _ in range(n):
+        await lim.acquire(priority, 1)
+
+
+async def test_hold_goes_straight_to_a_chat_call_already_queued() -> None:
+    lim = models._Limiter(3)
+    await _fill(lim, 3)  # three background calls fill the slots
+    chat = asyncio.create_task(lim.acquire("interactive", 5))
+    await asyncio.sleep(0.01)
+    assert not chat.done()
+    lim.hold_background(30)  # one of them timed out: its slot would be parked for 30 s
+    await asyncio.wait_for(chat, 0.5)  # ... but the queued chat gets it now
+    assert lim._free == 0 and lim._bg_holds == []  # still at most 3 in flight, no hold left over
+
+
+@pytest.mark.parametrize("waiter", ["interactive", "aged_background"])
+async def test_hold_yields_to_any_waiter_ranking_as_interactive(waiter) -> None:
+    lim = models._Limiter(2)
+    await _fill(lim, 2)
+    task = asyncio.create_task(lim.acquire("interactive" if waiter == "interactive" else "background", 5))
+    await asyncio.sleep(0.01)
+    if waiter != "interactive":
+        for w in lim._waiters:
+            w.since -= models.BACKGROUND_AGING_S + 1
+    lim.hold_background(30)
+    await asyncio.wait_for(task, 0.5)
+    assert lim._free == 0
+
+
+async def test_hold_still_applies_with_no_one_waiting_and_chat_can_reclaim_it() -> None:
+    lim = models._Limiter(3)
+    await _fill(lim, 3)
+    lim.hold_background(30)
+    assert lim._free == 0 and len(lim._bg_holds) == 1  # parked: nobody needs it
+    await asyncio.wait_for(lim.acquire("interactive", 1), 0.5)  # a later chat call still takes it back
+    assert lim._free == 0 and lim._bg_holds == []
+    # a fresh background waiter does not break the hold
+    lim2 = models._Limiter(1)
+    await _fill(lim2, 1)
+    bg = asyncio.create_task(lim2.acquire("background", 5))
+    await asyncio.sleep(0.01)
+    lim2.hold_background(30)
+    await asyncio.sleep(0.02)
+    assert not bg.done() and len(lim2._bg_holds) == 1
+    bg.cancel()
+
+
+async def test_best_effort_hold_release_keeps_the_counters_exact() -> None:
+    lim = models._Limiter(3)
+    await lim.acquire("best_effort", 1)
+    await _fill(lim, 2)
+    assert lim._be_inflight == 1 and lim._free == 0
+    chat = asyncio.create_task(lim.acquire("interactive", 5))
+    await asyncio.sleep(0.01)
+    lim.hold_background(30, best_effort=True)
+    await asyncio.wait_for(chat, 0.5)
+    assert lim._be_inflight == 0 and lim._free == 0

@@ -8,7 +8,7 @@ import pytest
 def test_progress_defaults(settings):
     assert settings.progress_card_enabled is True
     assert settings.progress_card_after_s == 4.0
-    assert settings.progress_edit_min_interval_s == 3.0
+    assert settings.progress_edit_min_interval_s == 8.0
     assert settings.progress_max_screenshots == 4
     assert settings.telegram_global_send_rate == 25.0
     assert settings.test_mirror_chat_id is None

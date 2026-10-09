@@ -179,7 +179,7 @@ async def test_inbox_digest_in_the_prompt_makes_the_whole_turn_tainted(user, cha
     # card-only turn: no prose bubble; the card itself is logged tainted when the APPROVAL task shows it
     assert [m for m in await messages.recent(user.id) if m.role == "assistant"] == []
     [learn] = jobs(JobKind.LEARN)
-    assert learn.payload["trust"] == "untrusted"
+    assert learn.payload["trust"] == "user" and learn.payload["tainted"] is True
 
 
 async def test_approved_start_task_from_a_tainted_turn_is_tainted(user, channel, fake_llm, fake_memory, jobs,
@@ -359,7 +359,7 @@ async def test_injected_email_cannot_cause_a_send_without_approval(user, channel
     assert task.kind == TaskKind.APPROVAL and task.tainted is True
     # remember after taint is kept only as an unverified note
     assert fake_memory.learned_trust == [Trust.UNTRUSTED]
-    assert [j.payload["trust"] for j in jobs(JobKind.LEARN)] == ["untrusted"]
+    assert [j.payload["tainted"] for j in jobs(JobKind.LEARN)] == [True]
 
 
 async def test_standing_rule_still_auto_approves_in_a_clean_turn(user, channel, fake_llm, fake_memory, jobs,
@@ -566,7 +566,7 @@ async def test_approval_prompt_from_a_tainted_task_keeps_the_next_turn_tainted(
     fake_llm.push_text("Waiting for your OK on that reminder.")
     await run_turn(_event(user.id, "remind me about it later", n=2))
     assert [a.tool for a in await approvals.open_for_user(user.id)] == ["send_note", "wake_me"]
-    assert [j.payload["trust"] for j in jobs(JobKind.LEARN)] == ["untrusted", "untrusted"]
+    assert [j.payload["tainted"] for j in jobs(JobKind.LEARN)] == [True, True]
 
 
 async def test_cancel_reply_to_a_tainted_prompt_learns_untrusted(user, channel, fake_llm, fake_memory, jobs,
@@ -582,7 +582,7 @@ async def test_cancel_reply_to_a_tainted_prompt_learns_untrusted(user, channel, 
     await run_turn(_event(user.id, "no", n=2))
     assert (await approvals.get(pending.id)).status == ApprovalStatus.RESOLVING
     assert conversation.current_route.get() == "APPROVAL_REPLY"
-    assert jobs(JobKind.LEARN)[-1].payload["trust"] == "untrusted"
+    assert jobs(JobKind.LEARN)[-1].payload["tainted"] is True
 
 
 async def test_yes_after_a_later_proactive_question_does_not_approve(user, channel, fake_llm, fake_memory,
