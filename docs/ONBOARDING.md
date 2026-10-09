@@ -13,7 +13,7 @@ and Slack sign-in are configured. Check these on the server (names only, never p
 |---|---|---|
 | `ACCESS_MODE=invite` | Invite codes | Anyone without a code gets a polite refusal and is never processed. |
 | `OWNER_TELEGRAM_CHAT_IDS` | You | Your chat is the owner and can run `/invite`. |
-| `TELEGRAM_BOT_USERNAME` | Invite links | Links look like `https://t.me/<bot>?start=MAV...`. |
+| `TELEGRAM_BOT_USERNAME` | Invite links | Links look like `https://telegram.me/<bot>?start=MAV...` (telegram.me: the t.me alias that works where t.me is blocked). |
 | `PUBLIC_BASE_URL` | Sign-in return | Must be the public https address of the API. |
 | `INTEGRATION_PROVIDER=native` | Google and Slack | Mavis connects them itself. Composio is not needed. |
 | `NATIVE_TOKEN_KEK` | Both | Seals every stored token. Without it nothing can connect. |

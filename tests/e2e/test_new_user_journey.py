@@ -80,7 +80,7 @@ class Journey:
         """/invite new from the owner's chat: (link, reply text)."""
         out = await self.tg.say(OWNER_CHAT, f"/invite new {args}".strip(), "Owner")
         text = out[-1].text
-        link = next(w for w in text.split() if w.startswith("https://t.me/"))
+        link = next(w for w in text.split() if w.startswith("https://telegram.me/"))
         return link, text
 
     @staticmethod
@@ -180,7 +180,7 @@ async def j(env, db, bus, channel, memory, monkeypatch):
 
 async def test_owner_makes_an_invite_by_telegram_and_a_stranger_joins_with_the_link(j):
     link, reply = await j.owner_invite("uses=1 days=7 tz=Asia/Kolkata Priya")
-    assert link.startswith(f"https://t.me/{BOT_NAME}?start=MAV")
+    assert link.startswith(f"https://telegram.me/{BOT_NAME}?start=MAV")
     assert "1 use" in reply and "expires" in reply
     out = await j.join(5001, "Priya", link)
     assert out[0].text.startswith("Hi Priya, I'm Mavis")
