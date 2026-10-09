@@ -22,6 +22,8 @@ def upgrade() -> None:
         sa.Column("user_id", sa.Integer, sa.ForeignKey("users.id"), nullable=False),
         sa.Column("provider", sa.String(16), nullable=False),
         sa.Column("account", sa.JSON, nullable=False),
+        # the vendor's own id for the account (Google email, Slack team and user): one account, one Mavis user
+        sa.Column("account_key", sa.String(255), nullable=True),
         sa.Column("access_token", sa.Text, nullable=False),
         sa.Column("refresh_token", sa.Text, nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
@@ -29,6 +31,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("user_id", "provider", name="uq_native_grants_user_provider"),
+        sa.UniqueConstraint("provider", "account_key", name="uq_native_grants_provider_account"),
     )
     op.create_index("ix_native_grants_user_id", "native_grants", ["user_id"])
     op.create_table(

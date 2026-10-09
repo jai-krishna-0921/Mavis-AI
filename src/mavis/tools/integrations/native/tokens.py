@@ -21,6 +21,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from mavis.config import get_settings
 from mavis.domain import timeutil
@@ -73,6 +74,20 @@ def _expiry(resp: dict, now: datetime) -> datetime | None:
     except (TypeError, ValueError):
         ttl = None
     return now + timedelta(seconds=ttl) if ttl else None
+
+
+class AccountTaken(Exception):
+    """Another Mavis user already holds this vendor account (the database's unique constraint said so)."""
+
+
+def account_key(provider: NativeProvider, account: dict[str, Any]) -> str | None:
+    """The vendor's id for the account behind a grant: what must be unique per provider."""
+    if provider is NativeProvider.GOOGLE:
+        key = str(account.get("email") or "").lower()
+    else:
+        user, team = str(account.get("user_id") or ""), str(account.get("team_id") or "")
+        key = f"{team}/{user}" if user and team else user
+    return key[:255] or None
 
 
 class _Gone(Exception):
@@ -131,22 +146,42 @@ class NativeTokenStore:
 
     async def save(self, user_id: int, provider: NativeProvider, *, account: dict[str, Any],
                    access_token: str, refresh_token: str | None, expires_at: datetime | None) -> None:
-        """Create or replace the grant (a reconnect revives a REVOKED row)."""
+        """Create or replace the grant (a reconnect revives a REVOKED row). One vendor account belongs to
+        one Mavis user: the unique (provider, account_key) constraint decides a race, and the loser gets
+        AccountTaken. A REVOKED grant of another user does not hold the account."""
         now = self._clock()
+        key = account_key(provider, account)
         sealed_access = crypto.seal_text(access_token, _ctx(user_id, provider, "access_token"))
         sealed_refresh = crypto.seal_text(refresh_token, _ctx(user_id, provider, "refresh_token"))
-        async with dbm.Session() as s:
-            row = await s.scalar(select(NativeGrant).where(
-                NativeGrant.user_id == user_id, NativeGrant.provider == provider.value))
-            if row is None:
-                s.add(NativeGrant(user_id=user_id, provider=provider.value, account=account,
-                                  access_token=sealed_access, refresh_token=sealed_refresh,
-                                  expires_at=expires_at, status=ACTIVE, created_at=now, updated_at=now))
-            else:
-                row.account, row.access_token, row.refresh_token = account, sealed_access, sealed_refresh
-                row.expires_at, row.status, row.updated_at = expires_at, ACTIVE, now
-            await s.commit()
+        try:
+            async with dbm.Session() as s:
+                if key is not None:
+                    await s.execute(delete(NativeGrant).where(
+                        NativeGrant.provider == provider.value, NativeGrant.account_key == key,
+                        NativeGrant.user_id != user_id, NativeGrant.status != ACTIVE))
+                row = await s.scalar(select(NativeGrant).where(
+                    NativeGrant.user_id == user_id, NativeGrant.provider == provider.value))
+                if row is None:
+                    s.add(NativeGrant(user_id=user_id, provider=provider.value, account=account,
+                                      account_key=key, access_token=sealed_access,
+                                      refresh_token=sealed_refresh, expires_at=expires_at, status=ACTIVE,
+                                      created_at=now, updated_at=now))
+                else:
+                    row.account, row.account_key = account, key
+                    row.access_token, row.refresh_token = sealed_access, sealed_refresh
+                    row.expires_at, row.status, row.updated_at = expires_at, ACTIVE, now
+                await s.commit()
+        except IntegrityError:
+            holder = await self._holder(provider, key) if key is not None else None
+            if holder is not None and holder != user_id:
+                raise AccountTaken from None
+            raise  # some other conflict: not ours to hide
         self._generation[(user_id, provider.value)] = self._generation.get((user_id, provider.value), 0) + 1
+
+    async def _holder(self, provider: NativeProvider, key: str) -> int | None:
+        async with dbm.Session() as s:
+            return await s.scalar(select(NativeGrant.user_id).where(
+                NativeGrant.provider == provider.value, NativeGrant.account_key == key))
 
     async def mark(self, user_id: int, provider: NativeProvider, status: str) -> None:
         async with dbm.Session() as s:

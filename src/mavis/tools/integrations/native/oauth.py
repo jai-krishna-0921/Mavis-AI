@@ -33,7 +33,12 @@ from mavis.store import db as dbm
 from mavis.store.models import NativeOAuthState
 from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.http import TOKEN_BYTES, ResponseTooLarge, send_capped
-from mavis.tools.integrations.native.tokens import GOOGLE_TOKEN_URL, SLACK_TOKEN_URL, NativeTokenStore
+from mavis.tools.integrations.native.tokens import (
+    GOOGLE_TOKEN_URL,
+    SLACK_TOKEN_URL,
+    AccountTaken,
+    NativeTokenStore,
+)
 
 STATE_TTL_S = 600
 
@@ -229,8 +234,11 @@ class NativeOAuth:
         owner = await self.tokens.owner_of(provider, key, value) if value else None
         if owner is not None and owner != st.user_id:
             raise OAuthError("account_taken", user_id=st.user_id, pending_id=pending)
-        await self.tokens.save(st.user_id, provider, account=account, access_token=access,
-                               refresh_token=refresh, expires_at=expires)
+        try:
+            await self.tokens.save(st.user_id, provider, account=account, access_token=access,
+                                   refresh_token=refresh, expires_at=expires)
+        except AccountTaken:  # the check above can lose a race; the database constraint cannot
+            raise OAuthError("account_taken", user_id=st.user_id, pending_id=pending) from None
         return Completed(st.user_id, provider, pending, account)
 
     async def _post(self, url: str, **kw) -> dict:

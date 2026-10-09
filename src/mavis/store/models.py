@@ -433,12 +433,16 @@ class NativeGrant(Base):
     encryption bound to user, provider and column); `account` holds non-secret facts only."""
 
     __tablename__ = "native_grants"
-    __table_args__ = (UniqueConstraint("user_id", "provider", name="uq_native_grants_user_provider"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_native_grants_user_provider"),
+        UniqueConstraint("provider", "account_key", name="uq_native_grants_provider_account"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     provider: Mapped[str] = mapped_column(String(16))
     account: Mapped[dict] = mapped_column(JSON, default=dict)
+    account_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     access_token: Mapped[str] = mapped_column(Text)
     refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(nullable=True)
