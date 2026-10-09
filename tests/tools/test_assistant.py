@@ -79,7 +79,7 @@ async def test_wake_me_naive_time_is_user_local(user, wakeups):
     assert at.tzinfo is not None and at.utcoffset() == timedelta(0)
     # user timezone defaults to Asia/Kolkata: 10:00 IST == 04:30 UTC
     assert (at.hour, at.minute) == (4, 30)
-    assert reason.endswith("pep talk") and kind == "agent"
+    assert reason.endswith("Pep talk") and kind == "agent"
 
 
 async def test_wake_me_rejects_past(user, wakeups):

@@ -119,7 +119,7 @@ aws_ ec2 associate-address --allocation-id "$ALLOC_ID" --instance-id "$INSTANCE_
 EIP="$(aws_ ec2 describe-addresses --allocation-ids "$ALLOC_ID" --query 'Addresses[0].PublicIp' --output text)"
 state_set MAVIS_ALLOC_ID "$ALLOC_ID"
 state_set MAVIS_EIP "$EIP"
-state_set MAVIS_DOMAIN "${EIP//./-}.sslip.io"
+[[ -n "${MAVIS_DOMAIN:-}" ]] || state_set MAVIS_DOMAIN "${EIP//./-}.sslip.io"  # keep a chosen domain
 
 log "done: instance=$INSTANCE_ID eip=$EIP host=${EIP//./-}.sslip.io"
 log "next: deploy/aws/bootstrap.sh"

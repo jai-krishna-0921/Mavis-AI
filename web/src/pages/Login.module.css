@@ -1,4 +1,0 @@
-.page { max-width: 640px; margin: 0 auto; padding: 56px var(--gutter) 80px; display: grid; gap: 14px; justify-items: start; }
-.h1 { font-size: 32px; margin-top: 12px; }
-.h2 { font-size: 20px; margin-bottom: 12px; }
-.block { padding: 24px 0; width: 100%; }

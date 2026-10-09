@@ -19,6 +19,13 @@ for a in "$@"; do
   esac
 done
 [[ -f "$DEMO_ENV" ]] || die "demo env file not found: $DEMO_ENV (set DEMO_ENV=...)"
+# A custom domain must already resolve to the box, or Caddy cannot get a certificate and the Telegram
+# webhook would point at nothing.
+if [[ -n "${MAVIS_DOMAIN:-}" ]]; then
+  resolved="$(getent ahostsv4 "$MAVIS_HOST" | awk 'NR==1{print $1}')"
+  [[ "$resolved" == "$MAVIS_EIP" ]] \
+    || die "$MAVIS_HOST resolves to '${resolved:-nothing}', not $MAVIS_EIP: fix its DNS A record first"
+fi
 
 # --- build the prod .env locally in a private temp file ----------------------
 # An existing .env on the box is the base: its keys are preserved (so generated secrets never rotate)
@@ -131,8 +138,8 @@ if ! \$C run --rm migrate; then
 fi
 \$C up -d --wait --wait-timeout 300 && RC=0
 # rsync replaces the Caddyfile with a new inode, which a single-file bind mount does not follow: recreate
-# caddy only when the file changed, so routes like /oauth/* go live without a needless TLS restart
-CADDY_SHA="\$(sha256sum Caddyfile | cut -d' ' -f1)"
+# caddy only when the file or the public host (DOMAIN) changed, so routes like /oauth/* go live without a needless TLS restart
+CADDY_SHA="\$( (cat Caddyfile; grep -E '^DOMAIN=' .env) | sha256sum | cut -d' ' -f1)"  # the file or the host changed
 if [ "\$CADDY_SHA" != "\$(cat .caddy.sha 2>/dev/null)" ]; then
   \$C up -d --force-recreate caddy && echo "\$CADDY_SHA" > .caddy.sha
 fi

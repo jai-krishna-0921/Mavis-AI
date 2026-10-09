@@ -17,27 +17,27 @@ features:
     always_online: true
   slash_commands:
     - command: /channel
-      url: https://13-233-241-141.sslip.io/webhooks/slack/interactive
+      url: https://mavis-0de9f18d.sslip.io/webhooks/slack/interactive
       description: Choose where Mavis sends its own messages
       usage_hint: "[telegram|slack|both]"
       should_escape: false
     - command: /connect
-      url: https://13-233-241-141.sslip.io/webhooks/slack/interactive
+      url: https://mavis-0de9f18d.sslip.io/webhooks/slack/interactive
       description: Connect an account
       usage_hint: "[google|slack]"
       should_escape: false
     - command: /connections
-      url: https://13-233-241-141.sslip.io/webhooks/slack/interactive
+      url: https://mavis-0de9f18d.sslip.io/webhooks/slack/interactive
       description: Show connected accounts
       should_escape: false
     - command: /disconnect
-      url: https://13-233-241-141.sslip.io/webhooks/slack/interactive
+      url: https://mavis-0de9f18d.sslip.io/webhooks/slack/interactive
       description: Disconnect an account
       usage_hint: "[google|slack]"
       should_escape: false
 oauth_config:
   redirect_urls:
-    - https://13-233-241-141.sslip.io/oauth/slack/callback
+    - https://mavis-0de9f18d.sslip.io/oauth/slack/callback
   scopes:
     bot:
       - chat:write
@@ -64,7 +64,7 @@ oauth_config:
       - search:read
 settings:
   event_subscriptions:
-    request_url: https://13-233-241-141.sslip.io/webhooks/slack
+    request_url: https://mavis-0de9f18d.sslip.io/webhooks/slack
     bot_events:
       - message.im
       - app_mention
@@ -75,7 +75,7 @@ settings:
       - message.mpim
   interactivity:
     is_enabled: true
-    request_url: https://13-233-241-141.sslip.io/webhooks/slack/interactive
+    request_url: https://mavis-0de9f18d.sslip.io/webhooks/slack/interactive
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false

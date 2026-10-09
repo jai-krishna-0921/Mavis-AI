@@ -1,12 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
 <defs>
 <path id="s" d="M325 108 A90 90 0 1 0 256 256 A90 90 0 1 1 187 404"/>
+<mask id="m" maskUnits="userSpaceOnUse" x="-100" y="-100" width="720" height="720">
+<rect x="-100" y="-100" width="720" height="720" fill="#fff"/>
+<g transform="rotate(90 256 256)"><use href="#s" fill="none" stroke="#000" stroke-width="86"/></g>
+</mask>
 </defs>
-<g transform="translate(256 256) scale(1.12) translate(-256 -256)">
-<use href="#s" fill="none" stroke="#1E2A3A" stroke-width="54" stroke-linecap="round"/>
-<g transform="rotate(90 256 256)">
-<use href="#s" fill="none" stroke="#FFFFFF" stroke-width="86"/>
-<use href="#s" fill="none" stroke="#F26B2B" stroke-width="54" stroke-linecap="round"/>
-</g>
+<rect width="512" height="512" rx="112" fill="#0A0A0D"/>
+<g transform="translate(256 256) scale(1.0) translate(-256 -256)">
+<use href="#s" fill="none" stroke="#6F88AB" stroke-width="54" stroke-linecap="round" mask="url(#m)"/>
+<g transform="rotate(90 256 256)"><use href="#s" fill="none" stroke="#F26B3A" stroke-width="54" stroke-linecap="round"/></g>
 </g>
 </svg>
