@@ -20,9 +20,11 @@ from telegram.error import BadRequest, RetryAfter
 
 from mavis.channels.base import ChannelRateLimited, MessageGone
 from mavis.channels.formatting import to_plain, to_telegram_html
+from mavis.channels.sent_log import note_sent
 from mavis.channels.text import TELEGRAM_LIMIT, split_text
 from mavis.domain.messages import Button
 
+DELETE_BATCH = 100  # deleteMessages: 1-100 ids per call
 _CHUNK_LIMIT = 3500  # leave room for HTML tags under Telegram's 4096 cap
 
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
@@ -85,6 +87,7 @@ class TelegramChannel:
                 ids.extend(await self._send_markdown(chat_id, chunk, markup))
             except RetryAfter as exc:
                 raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
+        await note_sent(chat_id, ids)
         return ids
 
     async def _send_markdown(
@@ -135,6 +138,7 @@ class TelegramChannel:
                 )
         except RetryAfter as exc:
             raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
+        await note_sent(chat_id, [msg.message_id])
         return msg.message_id
 
     async def edit_text(self, chat_id: int, message_id: int, text: str,
@@ -163,6 +167,7 @@ class TelegramChannel:
                 msg = await self._bot.send_photo(chat_id=chat_id, photo=fh, caption=caption[:1024] or None)
         except RetryAfter as exc:
             raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
+        await note_sent(chat_id, [msg.message_id])
         return msg.message_id
 
     async def send_media_group(self, chat_id: int, paths: list[str],
@@ -179,7 +184,9 @@ class TelegramChannel:
         finally:
             for h in handles:
                 h.close()
-        return [m.message_id for m in msgs]
+        ids = [m.message_id for m in msgs]
+        await note_sent(chat_id, ids)
+        return ids
 
     async def send_typing(self, chat_id: int) -> None:
         await self._ensure()
@@ -193,6 +200,21 @@ class TelegramChannel:
         await self._ensure()
         reaction = [ReactionTypeEmoji(emoji)] if emoji else []
         await self._bot.set_message_reaction(chat_id=chat_id, message_id=message_id, reaction=reaction)
+
+    async def delete_messages(self, chat_id: int, message_ids: list[int]) -> bool:
+        """deleteMessages takes 1-100 ids; unknown or too old ids are skipped by Telegram. A BadRequest
+        (nothing in the batch can be deleted) is a refusal, not an error."""
+        await self._ensure()
+        ids = list(dict.fromkeys(int(m) for m in message_ids))
+        if not ids or len(ids) > DELETE_BATCH:
+            raise ValueError(f"deleteMessages takes 1 to {DELETE_BATCH} ids")
+        try:
+            return bool(await self._bot.delete_messages(chat_id=chat_id, message_ids=ids))
+        except RetryAfter as exc:
+            raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
+        except BadRequest as exc:
+            log.info("telegram.delete_refused", error=str(exc)[:120])
+            return False
 
     async def leave_chat(self, chat_id: int) -> None:
         await self._ensure()

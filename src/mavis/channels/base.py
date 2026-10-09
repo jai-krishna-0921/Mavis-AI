@@ -44,3 +44,8 @@ class Channel(Protocol):
 
     async def send_media_group(self, chat_id: int, paths: list[str],
                                captions: list[str] | None = None) -> list[int]: ...
+
+    async def delete_messages(self, chat_id: int, message_ids: list[int]) -> bool:
+        """Delete up to 100 messages in one call (Telegram deleteMessages). Ids that no longer exist or are
+        too old are skipped by the provider. Returns False when the provider refused the whole batch (or the
+        channel cannot delete); raises ChannelRateLimited on 429."""

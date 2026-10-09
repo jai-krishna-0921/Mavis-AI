@@ -57,6 +57,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             log.info("telegram.webhook_set", path=telegram_webhook.WEBHOOK_PATH)
         except Exception as exc:  # noqa: BLE001 - the api must still boot; /readyz and logs surface it
             log.error("telegram.webhook_failed", error=str(exc))
+    if s.telegram_bot_token and s.env == "prod":
+        try:
+            await telegram_webhook.set_commands()
+        except Exception as exc:  # noqa: BLE001 - the menu is cosmetic; the api must still boot
+            log.warning("telegram.commands_failed", error=str(exc))
     try:
         yield
     finally:

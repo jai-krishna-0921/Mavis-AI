@@ -93,6 +93,21 @@ class OutboxMessage(Base):
     sent_at: Mapped[datetime | None] = mapped_column(default=None)
 
 
+class ChatMessageId(Base):
+    """Telegram message ids seen in a chat (the bot's and the user's), so /clear can delete them within
+    Telegram's 48 hour window. Ids only, no text. Keyed by chat, not user: the bot only ever learns ids."""
+
+    __tablename__ = "chat_message_ids"
+    __table_args__ = (UniqueConstraint("chat_id", "message_id", name="uq_chat_message_ids_chat_msg"),
+                      Index("ix_chat_message_ids_chat_sent", "chat_id", "sent_at"))
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    direction: Mapped[str] = mapped_column(String(8))  # "in" (the user's) | "out" (the bot's)
+    sent_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
 class ProcessedEvent(Base):
     __tablename__ = "processed_events"
 

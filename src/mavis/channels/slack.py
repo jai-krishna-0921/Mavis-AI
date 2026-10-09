@@ -220,6 +220,9 @@ class SlackChannel:
             while len(self._reacted) > 500:
                 self._reacted.popitem(last=False)
 
+    async def delete_messages(self, chat_id: Any, message_ids: list[int]) -> bool:
+        return False  # /clear is Telegram only: Slack keeps its messages (docs/LIMITATIONS.md)
+
     async def download_file(self, file_id: str, dest_path: str) -> str:
         raise NotImplementedError("Slack file downloads are not supported")
 
