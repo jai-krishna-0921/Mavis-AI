@@ -19,6 +19,7 @@ Tiers: `user` (what they told Mavis or corrected), `self` (their own mail, messa
 
 from __future__ import annotations
 
+import re
 import statistics
 import unicodedata
 from collections import Counter, defaultdict
@@ -81,6 +82,7 @@ class Evidence:
     sources: list[str] = field(default_factory=list)
     weight: float = 0.0
     verbatim: bool = False  # a user's correction: shown exactly as written, never rephrased
+    free_text: bool = False  # the text is a statement extracted from a record (may quote other people)
     meta: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -225,6 +227,32 @@ async def aggregate_people(user_id: int, now: datetime) -> list[PersonAgg]:
     return sorted(out, key=lambda a: (-a.score, a.key))
 
 
+_NAME_OK = re.compile(r"^[^\W\d_]+(?:[ '.\-]+[^\W\d_]+){0,4}\.?$", re.UNICODE)
+_ADDR_BAD = re.compile(r"[^A-Za-z0-9._%+@\-]")
+NAME_CAP, ADDR_CAP = 40, 64
+
+
+def safe_address(email: str) -> str:
+    """An address reduced to the characters an address has, capped; "" when nothing usable is left."""
+    addr = _ADDR_BAD.sub("", email.strip())[:ADDR_CAP]
+    return addr if "@" in addr else ""
+
+
+def safe_label(a: PersonAgg, told: bool) -> str:
+    """How the layer names a person. A display name comes from other people's mail, so it is used only when it
+    is plain letters (short, no markup or newlines) AND something the user controls vouches for it: they
+    named the person themselves, or it matches the address. Otherwise the address (reduced to address
+    characters) stands in, and without one a neutral placeholder. Never free text from a third party."""
+    name = " ".join(a.name.split())
+    addr = safe_address(a.email or (a.key if "@" in a.key else ""))
+    if name and len(name) <= NAME_CAP and _NAME_OK.match(name):
+        words = [w.casefold().strip(".'-") for w in re.split(r"[ '.\-]+", name) if len(w.strip(".'-")) >= 3]
+        local = re.sub(r"[^a-z0-9]", "", addr.partition("@")[0].lower())
+        if told or (words and local and any(w in local or local in w for w in words)):
+            return name
+    return addr or "a contact"
+
+
 def person_evidence(a: PersonAgg, told: bool) -> Evidence:
     parts = []
     if a.counts["sent"]:
@@ -240,7 +268,7 @@ def person_evidence(a: PersonAgg, told: bool) -> Evidence:
     tier = TIER_USER if told else TIER_SELF if own else TIER_THIRD
     return Evidence(
         id=itemids.person_id(a.key), kind=itemids.PERSON, section="people",
-        text=_clip(f"{a.display}: {', '.join(parts)} in the last {INTERACTION_DAYS} days{last}"),
+        text=_clip(f"{safe_label(a, told)}: {', '.join(parts)} in the last {INTERACTION_DAYS} days{last}"),
         tier=tier, sources=a.refs[-3:], weight=a.score,
         meta={"name": a.name, "email": a.email, "key": a.key})
 
@@ -419,6 +447,7 @@ def _graph_evidence(items: list[GraphItem], top_people: dict[str, PersonAgg]) ->
             id=g.id, kind=itemids.FACT, section=section, text=_clip(g.statement), tier=g.tier,
             sources=[s] if (s := source_label(g.source_ref)) else ["told Mavis"],
             weight=float(g.index) / 1000 + (2.0 if g.tier == TIER_USER else 0.0), verbatim=bool(correction),
+            free_text=g.tier != TIER_USER,
             meta={"rel": g.rel, "slot": _SLOT.get(g.rel, "") if is_user(g.subject) else "",
                   "subject": g.subject, "object": g.obj}))
     return out
