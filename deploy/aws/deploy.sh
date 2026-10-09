@@ -133,8 +133,8 @@ if ! \$C run --rm migrate; then
 fi
 \$C up -d --wait --wait-timeout 300 && RC=0
 # rsync replaces the Caddyfile with a new inode, which a single-file bind mount does not follow: recreate
-# caddy only when the file changed, so routes like /oauth/* go live without a needless TLS restart
-CADDY_SHA="\$(sha256sum Caddyfile | cut -d' ' -f1)"
+# caddy only when the file or the public host (DOMAIN) changed, so routes like /oauth/* go live without a needless TLS restart
+CADDY_SHA="\$( (cat Caddyfile; grep -E '^DOMAIN=' .env) | sha256sum | cut -d' ' -f1)"  # the file or the host changed
 if [ "\$CADDY_SHA" != "\$(cat .caddy.sha 2>/dev/null)" ]; then
   \$C up -d --force-recreate caddy && echo "\$CADDY_SHA" > .caddy.sha
 fi
