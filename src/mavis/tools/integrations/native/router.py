@@ -119,6 +119,14 @@ class NativeRouter:
         if aclose is not None:
             await aclose()
 
+    @property
+    def configured(self) -> bool:
+        """Can this Mavis connect anything? Native sign-in set up for either vendor counts on its own: a
+        native-only deployment (no Composio key) is fully configured. Otherwise ask the fallback."""
+        if any(self._ready(p) for p in self.executors):
+            return True
+        return bool(getattr(self.fallback, "configured", True))
+
     # --- routing -------------------------------------------------------------------------------------
 
     def _ready(self, provider: NativeProvider | None) -> bool:
