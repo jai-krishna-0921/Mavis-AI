@@ -878,7 +878,19 @@ async def complete_task(state: dict, messages: list[str], status: TaskStatus, re
     if not await tasks.claim(task_id, active, status, **fields):
         log.info("orchestrator.finish_skipped", task_id=task_id)
         return False
-    await _cards().finalize(task_id, final_of(status.value))
+    try:
+        await _cards().finalize(task_id, final_of(status.value))
+    except Exception:  # noqa: BLE001 - the card is cosmetic; the result must still go out
+        log.warning("orchestrator.card_finalize_failed", task_id=task_id, exc_info=True)
+    await publish_completed(task_id, user_id, messages, artifacts, status)
+    return True
+
+
+async def publish_completed(
+    task_id: int, user_id: int, messages: list[str], artifacts: list[str], status: TaskStatus
+) -> None:
+    """Publish the delivery event of a task whose terminal status is already claimed. The event id is the
+    task's, so publishing it again (a retry after a failure here) can never deliver twice."""
     task = await tasks.get(task_id)
     await bus.get_bus().publish(Event(
         id=f"task:{task_id}:completed", user_id=user_id, type=EventType.TASK_COMPLETED,
@@ -889,7 +901,6 @@ async def complete_task(state: dict, messages: list[str], status: TaskStatus, re
             "tainted": bool(task.tainted), "status": status.value,
         },
     ))
-    return True
 
 
 def entry_route(state: OrchestratorState) -> str:
