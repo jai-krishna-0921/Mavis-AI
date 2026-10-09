@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from mavis.channels.turn_route import reply_chat
 from mavis.domain.messages import Button, Outbound
 from mavis.store.db import Session, utcnow
 from mavis.store.models import OutboxMessage
@@ -33,6 +34,7 @@ async def enqueue(session: AsyncSession, msg: Outbound) -> int:
         photo_path=msg.photo_path,
         media=list(msg.media),
         proactive=msg.proactive,
+        route=msg.route or reply_chat.get(),
         dedupe_key=msg.dedupe_key,
     )
     try:
@@ -142,5 +144,6 @@ def to_outbound(row: OutboxMessage) -> Outbound:
         photo_path=row.photo_path,
         media=list(row.media or []),
         proactive=row.proactive,
+        route=row.route,
         dedupe_key=row.dedupe_key,
     )

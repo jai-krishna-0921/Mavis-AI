@@ -53,7 +53,7 @@ from mavis.agents.turn_support import (
     user_text,
     window_tainted,
 )
-from mavis.channels import presence
+from mavis.channels import presence, routing
 from mavis.channels.formatting import strip_verbatim
 from mavis.config import get_settings
 from mavis.domain.errors import ConnectionRequired, LLMError
@@ -519,9 +519,12 @@ async def _approval_reply(event: Event, user_id: int, text: str, history: list[M
 # --- the turn --------------------------------------------------------------------------------------
 
 
-def _reaction_target(event: Event, chat_id: int | None) -> tuple[int, int] | None:
-    """(chat_id, message_id) when this turn answers a Telegram message that can carry a reaction."""
+def _reaction_target(event: Event, chat_id: int | None) -> tuple[int | str, int] | None:
+    """(chat, message_id) when this turn answers a Telegram or Slack message that can carry a reaction."""
     message_id = event.payload.get("message_id")
+    if event.source == routing.SLACK_SOURCE:
+        chat = event.payload.get("reply_chat")
+        return (chat, int(message_id)) if message_id is not None and chat else None
     if event.source != "telegram" or message_id is None or chat_id is None:
         return None
     return chat_id, int(message_id)
@@ -541,6 +544,7 @@ async def run_turn(event: Event) -> None:
         return
     user = await users.get(event.user_id)
     await messages.log(user.id, Role.USER, text, event_id=event.id)
+    await routing.note_inbound(user, event)
     await initiative_hook("quiet.on_user_message", lambda i: i.quiet.on_user_message(user.id))
     await initiative_hook("routines.on_user_message", lambda i: i.routines.on_user_message(user))
     await initiative_hook("executor.release_deferred", lambda i: i.executor.release_deferred(user))
@@ -599,7 +603,7 @@ async def run_turn(event: Event) -> None:
             m.role == Role.ASSISTANT.value for m in persona.recent_messages(history, utcnow())
         )
         hint = RESTART_HINT if recent_assistant else START_HINT
-    async with presence.typing(user.telegram_chat_id):  # refreshed until the reply is queued
+    async with presence.typing(routing.turn_chat(event, user)):  # refreshed until the reply is queued
         (context, hooked), connections, card_name = await asyncio.gather(
             build_context_ex(user.id, text, hint, tz=user.timezone), connection_states(user.id),
             known_name(user.id),

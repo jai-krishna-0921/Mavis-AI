@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 
 import structlog
 
-from mavis.channels import get_channel
+from mavis.channels import get_channel, routing
 from mavis.config import get_settings
 
 log = structlog.get_logger(__name__)
@@ -22,7 +22,7 @@ TYPING_REFRESH_S = 4.0
 CALL_TIMEOUT_S = 3.0
 
 
-async def react(chat_id: int, message_id: int | None, emoji: str | None = None) -> bool:
+async def react(chat_id: int | str, message_id: int | None, emoji: str | None = None) -> bool:
     """Set a reaction on the user's message; True when the channel accepted it. Never raises. The
     "seen" cue is off unless PRESENCE_REACTION is set (or an explicit emoji is passed)."""
     emoji = emoji or get_settings().presence_reaction
@@ -31,16 +31,17 @@ async def react(chat_id: int, message_id: int | None, emoji: str | None = None) 
     return await _set_reaction(chat_id, message_id, emoji)
 
 
-async def clear(chat_id: int, message_id: int | None) -> bool:
+async def clear(chat_id: int | str, message_id: int | None) -> bool:
     """Remove the bot's reaction from the user's message. Never raises."""
     if message_id is None:
         return False
     return await _set_reaction(chat_id, message_id, None)
 
 
-async def _set_reaction(chat_id: int, message_id: int, emoji: str | None) -> bool:
+async def _set_reaction(chat_id: int | str, message_id: int, emoji: str | None) -> bool:
     try:
-        fn = getattr(get_channel(), "react", None)
+        channel = routing.channel_for(chat_id) if routing.is_slack_chat(chat_id) else get_channel()
+        fn = getattr(channel, "react", None)
         if fn is None:
             return False
         await asyncio.wait_for(fn(chat_id, message_id, emoji), CALL_TIMEOUT_S)
@@ -66,15 +67,16 @@ async def ack_settled(key: str) -> None:
         await asyncio.wait({task}, timeout=CALL_TIMEOUT_S)
 
 
-async def _send_typing(chat_id: int) -> None:
+async def _send_typing(chat_id: int | str) -> None:
     try:
-        await asyncio.wait_for(get_channel().send_typing(chat_id), CALL_TIMEOUT_S)
+        channel = routing.channel_for(chat_id) if routing.is_slack_chat(chat_id) else get_channel()
+        await asyncio.wait_for(channel.send_typing(chat_id), CALL_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001 - cosmetic
         log.debug("presence.typing_failed", error=type(exc).__name__)
 
 
 @contextlib.asynccontextmanager
-async def typing(chat_id: int | None, interval_s: float = TYPING_REFRESH_S) -> AsyncIterator[None]:
+async def typing(chat_id: int | str | None, interval_s: float = TYPING_REFRESH_S) -> AsyncIterator[None]:
     """Show "typing" now and refresh it every `interval_s` until the block exits."""
     if chat_id is None:
         yield

@@ -20,7 +20,7 @@ from mavis.tools.integrations.composio_map import LEGACY_ALIASES
 from mavis.tools.integrations.connect_flow import ConnectFlow
 
 NOT_CONFIGURED_TEXT = "Connections aren't set up on this Mavis yet."
-COMMANDS = ("connect", "connections", "disconnect", "mute", "unmute")
+COMMANDS = ("connect", "connections", "disconnect", "mute", "unmute", "channel")
 MUTE_COMMANDS = ("mute", "unmute")
 
 _KEYWORDS: tuple[tuple[re.Pattern[str], Capability], ...] = (
@@ -221,7 +221,34 @@ async def run_mute(f: ConnectFlow, user_id: int, name: str, args: list[str]) -> 
         await f.send(user_id, f"Unmuted {value}. I'll learn from {what} {value} again.")
 
 
+CHANNEL_NAMES = {"telegram": "Telegram", "slack": "Slack", "both": "Telegram and Slack"}
+
+
+async def run_channel(f: ConnectFlow, user_id: int, args: list[str]) -> None:
+    """/channel [telegram|slack|both]: where proactive messages (briefs, reminders, heads-ups) go. Replies
+    always go back to the channel you wrote from."""
+    from mavis.channels import routing
+    from mavis.store.repo import users
+
+    current = routing.pref_of(await users.get_state(user_id))
+    choice = (args[0].lower() if args else "")
+    if choice not in routing.PREFS:
+        await f.send(user_id, f"I send my own messages to {CHANNEL_NAMES[current]}. Replies always come back "
+                              "where you wrote from. Change it with /channel telegram, /channel slack or "
+                              "/channel both.")
+        return
+    if choice != "telegram" and await routing.slack_chat_for(user_id) is None:
+        await f.send(user_id, "Slack isn't set up for chatting yet. Connect Slack with /connect slack "
+                              "(approve the bot too), then try again.")
+        return
+    await routing.set_pref(user_id, choice)
+    await f.send(user_id, f"Done. My own messages now go to {CHANNEL_NAMES[choice]}.")
+
+
 async def _run(f: ConnectFlow, event: Event, name: str, args: list[str]) -> None:
+    if name == "channel":
+        await run_channel(f, event.user_id, args)
+        return
     if name in MUTE_COMMANDS:
         await run_mute(f, event.user_id, name, args)
         return
