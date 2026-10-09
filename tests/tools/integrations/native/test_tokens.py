@@ -19,7 +19,8 @@ G, S = NativeProvider.GOOGLE, NativeProvider.SLACK
 
 async def save(tokens, provider=G, *, expires_in=3600, refresh="r-1", access="a-1", user=1):
     exp = timeutil.now() + timedelta(seconds=expires_in) if expires_in is not None else None
-    await tokens.save(user, provider, account={"email": "a@x.com", "scopes": ["openid"]},
+    email = "a@x.com" if user == 1 else f"u{user}@x.com"  # one vendor account per Mavis user
+    await tokens.save(user, provider, account={"email": email, "scopes": ["openid"]},
                       access_token=access, refresh_token=refresh, expires_at=exp)
 
 

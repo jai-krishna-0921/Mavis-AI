@@ -266,3 +266,67 @@ async def test_code_exchange_is_sent_once_whatever_goes_wrong(oauth, vendor, exc
     with pytest.raises(OAuthError) as e:
         await oauth.complete(state, "c", provider)
     assert e.value.kind == "exchange_failed" and len(vendor.to(url)) == 1
+
+
+# ---- one vendor account, one Mavis user: enforced by the database, not by a check-then-save ------------
+
+async def test_the_database_refuses_a_second_user_for_the_same_account_even_if_the_check_is_skipped(
+        oauth, tokens, vendor, monkeypatch):
+    google_vendor(vendor)
+    await oauth.complete(query(await oauth.authorize_url(5, G))["state"], "c", G)
+
+    async def blind(*a, **k):  # the race: both callbacks passed the owner check before either saved
+        return None
+
+    monkeypatch.setattr(tokens, "owner_of", blind)
+    with pytest.raises(OAuthError) as exc:
+        await oauth.complete(query(await oauth.authorize_url(6, G, 2))["state"], "c", G)
+    assert exc.value.kind == "account_taken" and exc.value.user_id == 6 and exc.value.pending_id == 2
+    assert await tokens.grant(6, G) is None and (await tokens.grant(5, G)).status == "ACTIVE"
+
+
+@pytest.mark.parametrize("provider", [G, S], ids=["google", "slack"])
+async def test_two_callbacks_racing_for_one_account_leave_exactly_one_owner(oauth, tokens, vendor, provider):
+    import asyncio
+
+    (google_vendor if provider is G else slack_vendor)(vendor)
+    states = [query(await oauth.authorize_url(u, provider))["state"] for u in (5, 6, 7)]
+    results = await asyncio.gather(*(oauth.complete(st, "c", provider) for st in states),
+                                   return_exceptions=True)
+    won = [r for r in results if not isinstance(r, BaseException)]
+    lost = [r for r in results if isinstance(r, OAuthError) and r.kind == "account_taken"]
+    assert len(won) == 1 and len(lost) == 2
+    owners = [u for u in (5, 6, 7) if await tokens.grant(u, provider) is not None]
+    assert owners == [won[0].user_id]
+
+
+async def test_a_revoked_grant_does_not_lock_the_account_for_ever(oauth, tokens, vendor):
+    google_vendor(vendor)
+    await oauth.complete(query(await oauth.authorize_url(5, G))["state"], "c", G)
+    await tokens.mark(5, G, "REVOKED")
+    await oauth.complete(query(await oauth.authorize_url(6, G))["state"], "c", G)
+    assert await tokens.grant(5, G) is None and (await tokens.grant(6, G)).status == "ACTIVE"
+
+
+async def test_a_user_can_switch_to_another_account_and_free_the_old_one(oauth, tokens, vendor):
+    google_vendor(vendor, email="one@x.com")
+    await oauth.complete(query(await oauth.authorize_url(5, G))["state"], "c", G)
+    google_vendor(vendor, email="two@x.com")
+    await oauth.complete(query(await oauth.authorize_url(5, G))["state"], "c", G)
+    google_vendor(vendor, email="one@x.com")
+    await oauth.complete(query(await oauth.authorize_url(6, G))["state"], "c", G)  # one@x.com is free again
+    assert (await tokens.account(6, G))["email"] == "one@x.com"
+
+
+async def test_accounts_without_a_vendor_id_do_not_collide(tokens):
+    for user in (1, 2):
+        await tokens.save(user, G, account={"scopes": []}, access_token="a", refresh_token="r",
+                          expires_at=None)
+    assert len(await tokens.grants(1)) == len(await tokens.grants(2)) == 1
+
+
+async def test_the_same_account_in_different_providers_is_fine(tokens):
+    await tokens.save(1, G, account={"email": "a@x.com"}, access_token="a", refresh_token="r",
+                      expires_at=None)
+    await tokens.save(2, S, account={"user_id": "a@x.com"}, access_token="a", refresh_token="r",
+                      expires_at=None)
