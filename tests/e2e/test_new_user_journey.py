@@ -632,9 +632,13 @@ async def test_two_people_connecting_in_parallel_stay_fully_apart(j, memory):
     from mavis.domain.wakeups import WakeupKind
     from mavis.timers.service import WakeupService
 
+    from zoneinfo import ZoneInfo
+
     for chat, what in ((6401, "Call the dentist"), (6402, "Send the Nordwind deck")):
+        tz = ZoneInfo((await users.get_by_chat(chat)).timezone)
+        when = (timeutil.now().astimezone(tz) + timedelta(days=2)).replace(hour=10, minute=0, second=0, microsecond=0)
         j.llm.push_ai(AIMessage(content="", tool_calls=[{"name": "wake_me", "id": f"c{chat}", "args": {
-            "at": "2026-09-30T10:00:00", "what": what}}]))
+            "at": when.strftime("%Y-%m-%dT%H:%M:%S"), "what": what}}]))
         j.llm.push_text("Reminder set.")
         await j.tg.say(chat, f"remind me tomorrow at 10: {what}")
     svc = WakeupService()
