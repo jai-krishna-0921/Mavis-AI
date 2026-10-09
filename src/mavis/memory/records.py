@@ -144,11 +144,16 @@ def email_record(user_id: int, n: dict, *, self_ids: Mapping[str, Iterable[str]]
     if sender[0].lower() == sender[1]:
         sender = ("", sender[1])
     people: dict[str, Person] = {}
+    # A From header is a claim. The mail is the user's own only when it carries the SENT label (the mailbox
+    # put it there) or the sending domain authenticated it (DMARC or DKIM). A forged mail from the user's
+    # own address, or one using the user's display name, never becomes "the user".
+    labels = {str(x).upper() for x in n.get("labels") or []}
+    vouched = "SENT" in labels or bool(n.get("from_me")) or bool(n.get("sender_authenticated"))
 
     def add(name: str, addr: str, role: str) -> None:
         if addr and addr not in people and len(people) < MAX_PEOPLE:
-            people[addr] = Person(name=name if name.lower() != addr else "", email=addr, role=role,
-                                  is_user=_is_self(addr, "", self_ids))
+            mine = _is_self(addr, "", self_ids) and (role != "sender" or vouched)
+            people[addr] = Person(name=name if name.lower() != addr else "", email=addr, role=role, is_user=mine)
 
     add(sender[0], sender[1], "sender")
     for name, addr in _addresses(str(n.get("to") or headers.get("to", "")), headers.get("cc", "")):
@@ -167,7 +172,7 @@ def email_record(user_id: int, n: dict, *, self_ids: Mapping[str, Iterable[str]]
         user_id=user_id, source_ref=f"gmail:{mid}", text=text, kind="email",
         trust=TRUST_MEDIUM if n.get("sender_authenticated") else TRUST_LOW, anchor_at=received,
         people=list(people.values()), label=f"email from {who.canonical()}", subject=subject,
-        self_names=[x for x in self_names if x],
+        self_names=[x for x in self_names if x] if vouched else [],
     )
 
 
@@ -185,13 +190,15 @@ def slack_record(user_id: int, n: dict, *, team: str, self_ids: Mapping[str, Ite
     directory = directory or {}
     people: dict[str, Person] = {}
 
-    def person(sid: str, name: str, email: str, role: str) -> None:
+    def person(sid: str, name: str, email: str, role: str, *, me: bool = False) -> None:
         if sid not in people and len(people) < MAX_PEOPLE:
             d = directory.get(sid, {})
             people[sid] = Person(name=name or d.get("name", ""), email=(email or d.get("email", "")).lower(),
-                                 slack_id=sid, role=role, is_user=_is_self("", sid, self_ids))
+                                 slack_id=sid, role=role, is_user=me or _is_self("", sid, self_ids))
 
-    person(uid, str(n.get("user_name") or ""), str(n.get("user_email") or ""), "sender")
+    # from_me is set by our own intake (the authorizing Slack user is the author), not read from the message
+    person(uid, str(n.get("user_name") or ""), str(n.get("user_email") or ""), "sender",
+           me=bool(n.get("from_me")))
     raw = str(n.get("text") or "")
     for m in MENTION.finditer(raw):
         person(m.group(1), "", "", "mention")

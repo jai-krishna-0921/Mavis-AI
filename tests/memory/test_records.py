@@ -450,3 +450,48 @@ async def test_intake_hands_every_mail_to_the_connector_ingest_and_survives_its_
                   occurred_at=datetime(2026, 10, 8, tzinfo=UTC), source="poll", payload=sent)
     await intake.on_email(event)  # a sent mail returns early in intake, but the connector saw it first
     assert seen == ["z1"]
+
+
+# --- who counts as "the user" -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("labels", "auth", "mine"), [
+    (("INBOX",), False, False),          # forged From: the user's address, no proof
+    (("INBOX", "UNREAD"), False, False),
+    (("INBOX",), True, True),            # the sending domain authenticated it
+    (("SENT",), False, True),            # the mailbox filed it as sent by the user
+])
+def test_a_from_header_is_the_user_only_with_proof(labels, auth, mine):
+    n = gmail("m-self", "Jai Krishna <jai@kripya.com>", "Wire the money", "Please wire it today.", labels=labels, auth=auth)
+    job = records.email_record(5, n, self_ids=SELF, self_names=["Jai Krishna"])
+    sender = next(p for p in job.people if p.role == "sender")
+    assert sender.is_user is mine
+    assert bool(job.self_names) is mine  # the user's display name maps to the User node only with proof
+    assert ("(the user)" in job.text.split("\n\n", 1)[0]) is mine
+
+
+def test_a_recipient_line_naming_the_user_address_stays_the_user():
+    n = gmail("m-to", "Meera <meera@vendorco.in>", "Hello", "Hi there, a short note.", auth=False)
+    job = records.email_record(5, n, self_ids=SELF)
+    assert next(p for p in job.people if p.role == "recipient").is_user
+
+
+def test_slack_from_me_is_the_user_even_before_identities_exist():
+    mine = {**slack_msg("U0ANY0001", "I will send the plan today"), "from_me": True}
+    theirs = slack_msg("U0ANY0002", "I will send the plan today")
+    assert records.slack_record(5, mine, team="T0TEAM1", self_ids={}).people[0].is_user
+    assert not records.slack_record(5, theirs, team="T0TEAM1", self_ids={}).people[0].is_user
+
+
+async def test_slack_record_ref_is_stable_across_webhook_poll_and_backfill(me):
+    seen = []
+
+    async def sink(job):
+        seen.append(job.source_ref)
+        return True
+
+    ing = ConnectorIngest(sink)
+    base = dict(channel="D0DM00001", ts="1791451800.000100", user="U0ARJUN01", text="plan is ready for review")
+    for extra in ({"team": "T0TEAM1"}, {}, {"team": ""}):  # webhook, poll, backfill
+        await ing.slack(me.id, slack_msg(base["user"], base["text"], **extra))
+    assert len(set(seen)) == 1 and seen[0].startswith("slack:T0TEAM1:")
