@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 import structlog
 
 from mavis.bus.base import SELF_RETRYING, EventBus, run_with_inline_retries
-from mavis.channels import presence
+from mavis.channels import presence, routing
 from mavis.config import get_settings
 from mavis.domain.errors import LLMError
 from mavis.domain.events import Event, EventType, Job, JobKind, Trust
@@ -97,12 +97,14 @@ def _event_lock(event: Event):
 async def _acknowledge(event: Event) -> None:
     """React to the user's Telegram message right away, before waiting on the user lock. Best effort."""
     message_id = event.payload.get("message_id")
-    if event.type is not EventType.USER_MESSAGE or event.source != "telegram" or message_id is None:
+    if event.type is not EventType.USER_MESSAGE or message_id is None \
+            or event.source not in ("telegram", routing.SLACK_SOURCE):
         return
     try:
         user = await users.get(event.user_id)
-        if user.telegram_chat_id is not None:
-            await presence.react(user.telegram_chat_id, int(message_id))
+        chat = routing.turn_chat(event, user)
+        if chat is not None:
+            await presence.react(chat, int(message_id))
     except Exception as exc:  # noqa: BLE001 - cosmetic, must not fail the turn
         log.warning("worker.ack_failed", error=type(exc).__name__)
 
@@ -122,10 +124,14 @@ async def handle_event(event: Event) -> None:
         presence.track_ack(event.id, ack)  # the turn's mood reaction waits for it (T1.3)
         # The user lock is held across the inline retries (and their sleeps) so this user's next
         # event cannot overtake a retrying one. Other users run on the other consumer loops.
-        async with _event_lock(event):
-            await run_with_inline_retries(
-                lambda: _run_handlers(event, handlers), what="event", ref=event.id
-            )
+        route_token = routing.bind(event)  # replies queued by this turn go back to the channel it came from
+        try:
+            async with _event_lock(event):
+                await run_with_inline_retries(
+                    lambda: _run_handlers(event, handlers), what="event", ref=event.id
+                )
+        finally:
+            routing.unbind(route_token)
 
 
 setattr(handle_event, SELF_RETRYING, True)

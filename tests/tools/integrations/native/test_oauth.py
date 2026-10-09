@@ -61,9 +61,11 @@ async def test_google_authorize_url(oauth):
     assert verifier not in url  # the verifier travels sealed, never in the clear
 
 
-async def test_slack_authorize_url_uses_user_scopes_only(oauth):
+async def test_slack_authorize_url_asks_for_user_and_bot_scopes(oauth):
     q = query(await oauth.authorize_url(1, S))
-    assert "scope" not in q and q["client_id"] == "sid"
+    assert q["client_id"] == "sid"
+    assert {"chat:write", "im:history", "im:write", "app_mentions:read", "reactions:write"} <= set(
+        q["scope"].split(","))
     assert q["user_scope"].split(",")[0] == "channels:history" and "chat:write" in q["user_scope"]
     assert q["redirect_uri"] == "https://mavis.test/oauth/slack/callback"
 

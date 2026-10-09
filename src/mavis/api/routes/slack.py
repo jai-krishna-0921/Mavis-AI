@@ -41,3 +41,21 @@ async def slack_webhook(request: Request, bus: EventBus = Depends(get_bus)) -> d
         raise HTTPException(status_code=401, detail="invalid signature") from None
     except IntegrationError:
         raise HTTPException(status_code=400, detail="unrecognised payload") from None
+
+
+@router.post("/webhooks/slack/interactive")
+async def slack_interactive(request: Request, bus: EventBus = Depends(get_bus)) -> dict[str, Any]:
+    """Block Kit button presses and slash commands (signed form posts). Acknowledged within Slack's 3 seconds:
+    the work is a bus publish and, at most, one response_url call."""
+    from mavis.channels import slack_interactive as interactive
+
+    body = await _read_capped(request, slack_events.MAX_BODY_BYTES)
+    secret = getattr(get_settings(), "slack_signing_secret", "")
+    try:
+        return await interactive.handle_request(
+            secret, dict(request.headers), body, slack_events.get_user_lookup(), bus
+        )
+    except WebhookVerificationError:
+        raise HTTPException(status_code=401, detail="invalid signature") from None
+    except IntegrationError:
+        raise HTTPException(status_code=400, detail="unrecognised payload") from None

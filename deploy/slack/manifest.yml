@@ -1,16 +1,54 @@
 # Slack app manifest for Mavis AI: an internal, single-workspace app (not distributed).
 # Internal customer-built apps keep Tier 3 limits for conversations.history and conversations.replies.
+# Mavis is also a bot user: users DM it (App Home messages tab) or @mention it, and it posts cards with buttons.
 # Create at api.slack.com/apps ("From a manifest"), install to the workspace, then give the client id,
 # client secret and signing secret to the deployment (SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET).
 display_information:
   name: Mavis AI
   description: Your personal assistant. Reads the Slack messages you can read and posts as you when you ask.
   background_color: "#1f2937"
-# No bot user and no bot scopes: Mavis acts only through the user token.
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: Mavis
+    always_online: true
+  slash_commands:
+    - command: /channel
+      url: https://13-233-241-141.sslip.io/webhooks/slack/interactive
+      description: Choose where Mavis sends its own messages
+      usage_hint: "[telegram|slack|both]"
+      should_escape: false
+    - command: /connect
+      url: https://13-233-241-141.sslip.io/webhooks/slack/interactive
+      description: Connect an account
+      usage_hint: "[google|slack]"
+      should_escape: false
+    - command: /connections
+      url: https://13-233-241-141.sslip.io/webhooks/slack/interactive
+      description: Show connected accounts
+      should_escape: false
+    - command: /disconnect
+      url: https://13-233-241-141.sslip.io/webhooks/slack/interactive
+      description: Disconnect an account
+      usage_hint: "[google|slack]"
+      should_escape: false
 oauth_config:
   redirect_urls:
     - https://13-233-241-141.sslip.io/oauth/slack/callback
   scopes:
+    bot:
+      - chat:write
+      - im:history
+      - im:read
+      - im:write
+      - app_mentions:read
+      - reactions:write
+      - users:read
+      - files:write
+      - commands
     user:
       - channels:history
       - groups:history
@@ -27,11 +65,17 @@ oauth_config:
 settings:
   event_subscriptions:
     request_url: https://13-233-241-141.sslip.io/webhooks/slack
+    bot_events:
+      - message.im
+      - app_mention
     user_events:
       - message.channels
       - message.groups
       - message.im
       - message.mpim
+  interactivity:
+    is_enabled: true
+    request_url: https://13-233-241-141.sslip.io/webhooks/slack/interactive
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false

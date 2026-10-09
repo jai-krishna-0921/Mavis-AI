@@ -57,6 +57,7 @@ class CardState(BaseModel):
     final: CardFinal | None = None
     finished_at: float | None = None
     live_url: str | None = None
+    chat: str | None = None  # a non-Telegram chat handle (Slack); the stored chat_id column is Telegram only
 
 
 def fmt_elapsed(seconds: float) -> str:

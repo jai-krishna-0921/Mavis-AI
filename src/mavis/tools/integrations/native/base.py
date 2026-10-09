@@ -16,6 +16,7 @@ from mavis.domain.integrations import ToolResult, UserRef
 class NativeProvider(StrEnum):
     GOOGLE = "google"
     SLACK = "slack"
+    SLACK_BOT = "slack_bot"  # the workspace bot token (chat as Mavis); never a user-data capability
 
 
 class ReauthRequired(Exception):

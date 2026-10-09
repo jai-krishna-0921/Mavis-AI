@@ -195,6 +195,14 @@ async def handle_callback(
         counts["duplicate"] = 1
         return counts
     ev = payload.get("event")
+    if isinstance(ev, dict):
+        from mavis.channels import slack_inbound  # chat with the bot: a turn, never a third-party record
+
+        if await slack_inbound.is_chat_event(payload, ev, lookup):
+            counts.update(await slack_inbound.handle(payload, ev, lookup, bus))
+            if event_id:
+                await dedupe.mark(event_id)
+            return counts
     if not isinstance(ev, dict) or ev.get("type") != "message":
         counts["skipped"] = 1
         return counts
