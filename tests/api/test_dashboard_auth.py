@@ -590,3 +590,33 @@ async def test_an_address_is_linked_only_after_the_person_approves(app, google, 
         await tap(3, f"wl:n:{nonce}")
         assert await emails.user_for("attacker@evil.example") is None
         assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json() == {"status": "expired"}
+
+
+# --- public config ----------------------------------------------------------------------------------------
+
+
+async def test_public_config_needs_no_session_and_reflects_settings(app):
+    async with new_client(app) as c:
+        r = await c.get(f"{API}/config")
+        assert r.status_code == 200
+        assert r.json() == {"bot_username": "MavisTestBot", "bot_url": "https://t.me/MavisTestBot",
+                            "slack_enabled": True, "google_signin_enabled": True}
+
+
+async def test_public_config_without_a_bot_username_has_no_link(app, monkeypatch):
+    from mavis.config import get_settings
+
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "")
+    get_settings.cache_clear()
+    async with new_client(app) as c:
+        body = (await c.get(f"{API}/config")).json()
+        assert body["bot_username"] is None and body["bot_url"] is None
+
+
+async def test_public_config_is_404_while_the_dashboard_is_off(app, monkeypatch):
+    from mavis.config import get_settings
+
+    monkeypatch.setenv("DASHBOARD_ENABLED", "false")
+    get_settings.cache_clear()
+    async with new_client(app) as c:
+        assert (await c.get(f"{API}/config")).status_code == 404
