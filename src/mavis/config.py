@@ -123,7 +123,7 @@ class Settings(BaseSettings):
     # tasks that finish sooner get no card (0 for machine plans)
     progress_card_after_s: float = Field(4.0, ge=0, le=600)
     # at most one card edit per chat per interval
-    progress_edit_min_interval_s: float = Field(3.0, ge=0, le=60)
+    progress_edit_min_interval_s: float = Field(8.0, ge=0, le=60)  # Telegram rate-limit friendly
     # milestone photos per task (approval photos not counted)
     progress_max_screenshots: int = Field(4, ge=0, le=10)
     # messages per second across all chats (shared with the outbox)
