@@ -11,7 +11,7 @@ from mavis.domain.errors import LLMError
 from mavis.llm import models as llm
 from mavis.memory.embeddings import Embedder, cosine
 from mavis.memory.extractor import wrap_untrusted
-from mavis.memory.graph import GraphStore
+from mavis.memory.graph import GraphStore, is_third_party
 from mavis.memory.names import normalize_name
 from mavis.memory.profile import LIST_FIELDS, MAX_ITEMS
 from mavis.store.repo import profile as profile_repo
@@ -77,7 +77,9 @@ async def consolidate(user_id: int, memory: MemoryService) -> dict:
         log.warning("memory.merge_failed", user_id=user_id, error=type(exc).__name__)
         merged = 0
     # dump() is ordered oldest-first (valid_from, id), so the tail is the newest facts
-    facts = [d["statement"] for d in await memory.graph.dump(user_id)][-MAX_FACTS:]
+    # facts learned from third-party records never rewrite the user's own card
+    facts = [d["statement"] for d in await memory.graph.dump(user_id)
+             if not is_third_party(d.get("source_ref"))][-MAX_FACTS:]
     rewritten = False
     if facts:
         card = await profile_repo.get(user_id)
