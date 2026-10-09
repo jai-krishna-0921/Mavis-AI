@@ -101,6 +101,9 @@ async def drive_read(
                 "Docs, Sheets, Slides and text files work.")
     data = await action_data(ctx, "drive.download", DriveDownloadArgs(file_id=args.file_id, mime_type=export),
                              provider=provider, cache=cache)
+    inline = pick(data, "text")
+    if isinstance(inline, str):  # the native provider returns the exported text itself
+        return f"{head}\n\n{clip_body(inline) or '(empty)'}"
     url = pick(data, "downloaded_file_content.s3url", "data.downloaded_file_content.s3url")
     if not isinstance(url, str) or not url:
         raise ActionFailed("drive.read failed: the download returned no file",
