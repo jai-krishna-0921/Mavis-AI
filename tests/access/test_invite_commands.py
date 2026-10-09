@@ -36,7 +36,7 @@ async def test_invite_new_with_options_replies_with_code_and_link(owner, channel
     assert await commands.command_gate(_cmd(owner.id, "/invite new uses=3 days=7 tier=trusted "
                                                       "tz=Europe/Lisbon cur=eur family friends")) is False
     (reply,) = await _replies(channel)
-    assert "MAV-" in reply and "https://t.me/" in reply and "?start=MAV" in reply
+    assert "MAV-" in reply and "https://telegram.me/" in reply and "?start=MAV" in reply
     (row,) = await invites.list_active()
     assert (row.max_uses, row.tier, row.default_timezone, row.default_currency, row.label) == (
         3, "trusted", "Europe/Lisbon", "EUR", "family friends")
@@ -96,4 +96,4 @@ async def test_new_invite_deep_link_uses_the_configured_bot_name(owner, channel,
     get_settings.cache_clear()
     await commands.command_gate(_cmd(owner.id, "/invite new"))
     (reply,) = await _replies(channel)
-    assert "https://t.me/MavisTestBot?start=MAV" in reply
+    assert "https://telegram.me/MavisTestBot?start=MAV" in reply

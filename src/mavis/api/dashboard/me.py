@@ -13,6 +13,7 @@ from mavis.api.dashboard.common import DashError
 from mavis.api.dashboard.connectors import native_provider
 from mavis.api.dashboard.invites import left_for
 from mavis.channels import routing
+from mavis.channels.telegram_links import telegram_link
 from mavis.config import get_settings
 from mavis.store.repo import users
 from mavis.tools.integrations.native.base import NativeProvider
@@ -42,7 +43,7 @@ async def me(active: Active = Depends(common.authed), provider: Any = Depends(na
         "invites_left": await left_for(user),
         "channels": {
             "telegram": {"connected": user.telegram_chat_id is not None,
-                         "open_url": f"https://t.me/{bot}" if bot else "https://t.me"},
+                         "open_url": telegram_link(bot) if bot else None},
             "slack": await _slack_channel(user.id, provider),
         },
     }

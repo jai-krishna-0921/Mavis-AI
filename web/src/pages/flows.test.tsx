@@ -17,7 +17,7 @@ describe('landing', () => {
     renderApp('/')
     const links = await screen.findAllByRole('link', { name: /Text Mavis/ })
     expect(links.length).toBeGreaterThanOrEqual(3)
-    for (const l of links) expect(l).toHaveAttribute('href', 'https://t.me/Mavis247_bot')
+    for (const l of links) expect(l).toHaveAttribute('href', 'https://telegram.me/Mavis247_bot')
     expect(screen.getAllByRole('link', { name: 'Sign in' }).length).toBeGreaterThan(0)
     expect(screen.getAllByTestId('logo').length).toBeGreaterThan(0)
   })
@@ -36,11 +36,11 @@ describe('landing', () => {
   it('serves the configured bot when it changes', async () => {
     loggedOut()
     server.use(http.get('/api/v1/config', () => HttpResponse.json({
-      bot_username: 'OtherBot', bot_url: 'https://t.me/OtherBot', slack_enabled: false, google_signin_enabled: false,
+      bot_username: 'OtherBot', bot_url: 'https://telegram.me/OtherBot', slack_enabled: false, google_signin_enabled: false,
     })))
     renderApp('/')
     const links = await screen.findAllByRole('link', { name: /Text Mavis/ })
-    for (const l of links) expect(l).toHaveAttribute('href', 'https://t.me/OtherBot')
+    for (const l of links) expect(l).toHaveAttribute('href', 'https://telegram.me/OtherBot')
   })
 
   it('hides the Telegram link and offers a retry when the config cannot load', async () => {
@@ -48,7 +48,7 @@ describe('landing', () => {
     let fail = true
     server.use(http.get('/api/v1/config', () => fail
       ? HttpResponse.json({ error: 'not_found', message: 'Not found.' }, { status: 404 })
-      : HttpResponse.json({ bot_username: 'Mavis247_bot', bot_url: 'https://t.me/Mavis247_bot', slack_enabled: true, google_signin_enabled: true })))
+      : HttpResponse.json({ bot_username: 'Mavis247_bot', bot_url: 'https://telegram.me/Mavis247_bot', slack_enabled: true, google_signin_enabled: true })))
     const user = userEvent.setup()
     renderApp('/')
     const retry = (await screen.findAllByRole('button', { name: /Retry/ }, { timeout: 8000 }))[0]
@@ -56,7 +56,7 @@ describe('landing', () => {
     expect(document.body.innerHTML).not.toContain('MavisAIBot')
     fail = false
     await user.click(retry)
-    expect((await screen.findAllByRole('link', { name: /Text Mavis/ }))[0]).toHaveAttribute('href', 'https://t.me/Mavis247_bot')
+    expect((await screen.findAllByRole('link', { name: /Text Mavis/ }))[0]).toHaveAttribute('href', 'https://telegram.me/Mavis247_bot')
   }, 15_000)
 
   it('describes Mavis in its own words with its real examples', async () => {
@@ -79,7 +79,7 @@ describe('login polling', () => {
     server.use(http.get('/api/v1/auth/telegram/poll', () => { signedIn = true; return HttpResponse.json({ status: 'ok' }) }))
     renderApp('/login?invite=abc')
     const btn = await screen.findByRole('link', { name: 'Continue with Telegram' })
-    expect(btn.getAttribute('href')).toMatch(/^https:\/\/t\.me\/Mavis247_bot\?start=login_[0-9a-f]+_abc$/)
+    expect(btn.getAttribute('href')).toMatch(/^https:\/\/telegram\.me\/Mavis247_bot\?start=login_[0-9a-f]+_abc$/)
     expect(screen.getByRole('img', { name: /QR code/ })).toBeInTheDocument()
     expect(screen.getByText('4 8 2 7')).toBeInTheDocument()
     expect(screen.getByText(/Waiting for you to approve in Telegram/)).toBeInTheDocument()
