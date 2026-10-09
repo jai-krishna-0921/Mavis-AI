@@ -77,3 +77,16 @@ def test_sink_file_lives_in_the_shared_volume():
 def test_verify_machine_runs_in_the_worker_that_writes_the_sink():
     text = (ROOT / "deploy/aws/deploy.sh").read_text()
     assert "exec -T worker python -m scripts.machine_demo" in text
+
+
+def test_the_reverse_proxy_serves_the_oauth_callback_and_the_slack_webhook():
+    caddy = (ROOT / "Caddyfile").read_text()
+    public = next(ln for ln in caddy.splitlines() if "@public path" in ln).split()
+    assert "/oauth/*" in public and "/webhooks/*" in public
+    assert "/telegram/webhook" in public and "/connect/callback" in public
+
+
+def test_deploy_forces_the_native_provider_after_copying_local_values():
+    text = (ROOT / "deploy" / "aws" / "deploy.sh").read_text()
+    assert "set_key INTEGRATION_PROVIDER native force" in text
+    assert text.index("set_key INTEGRATION_PROVIDER native force") > text.index("SLACK_SIGNING_SECRET INTEGRATION_PROVIDER")

@@ -65,6 +65,9 @@ for k in OLLAMA_API_KEY TAVILY_API_KEY COMPOSIO_API_KEY TELEGRAM_BOT_TOKEN ALLOW
   v="$(envget "$DEMO_ENV" "$k")"
   if [[ -n "$v" ]]; then set_key "$k" "$v" force; else set_key "$k" ""; fi
 done
+# Google and Slack run in house. The router still falls back to Composio for a user with no native grant,
+# so this is safe to force; it must not depend on what the local env file happens to say.
+set_key INTEGRATION_PROVIDER native force
 tz="$(envget "$DEMO_ENV" DEFAULT_TIMEZONE)"
 [[ -z "$tz" ]] || set_key DEFAULT_TIMEZONE "$tz"
 set_key COMPOSIO_WEBHOOK_SECRET ""

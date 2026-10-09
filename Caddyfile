@@ -3,7 +3,7 @@
 {$DOMAIN} {
 	encode zstd gzip
 
-	@public path /telegram/webhook /webhooks/* /connect/callback /healthz
+	@public path /telegram/webhook /webhooks/* /connect/callback /oauth/* /healthz
 	handle @public {
 		request_body {
 			max_size 1MB
