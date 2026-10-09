@@ -186,3 +186,18 @@ async def test_drive_read_httpcore_errors_are_action_failed(google, cache, exc):
 
     with pytest.raises(ActionFailed, match="could not fetch the file"):
         await drive_read(CTX, a.FileArgs(file_id="f1"), provider=google, cache=cache, fetch=fetch)
+
+
+async def test_drive_read_uses_inline_text_without_fetching(google, cache):
+    """The native provider exports the text itself: no download link, nothing fetched."""
+    google.results["drive.meta"] = ToolResult(ok=True, data={
+        "name": "Budget", "mimeType": "application/vnd.google-apps.spreadsheet"})
+    google.results["drive.download"] = ToolResult(ok=True, data={
+        "file_id": "f1", "name": "Budget", "mimeType": "text/csv", "text": "month,amount\nOct,1200\n",
+        "truncated": False})
+
+    async def fetch(url: str) -> str:
+        raise AssertionError("nothing to fetch")
+
+    out = await drive_read(CTX, a.FileArgs(file_id="f1"), provider=google, cache=cache, fetch=fetch)
+    assert out == "file_id=f1 | Budget | Sheet\n\nmonth,amount\nOct,1200"
