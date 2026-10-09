@@ -60,6 +60,8 @@ What Mavis can and cannot do today, what it costs, and what would lift each limi
 | Hosting | One EC2 t4g.medium (2 vCPU, 4 GB) in ap-south-1 | No redundancy: if the box is down, Mavis is down. Fine for tens of users. |
 | Address | `mavis-0de9f18d.sslip.io` | A free wildcard DNS name. A real domain is better long term and may be required if Google rejects this redirect address. |
 
+**Security note: where the secrets live.** No secret is stored in a file on the box. Every setting and key is an encrypted SSM Parameter Store SecureString under `/mavis/prod/` (AWS managed key `alias/aws/ssm`). The box renders them into `/run/mavis/mavis.env` (tmpfs, root, mode 600) at boot, so a stopped or snapshotted disk holds no key. Limits: the rendered file and the container environments still hold the values in memory while the stack runs, so root on the box (or anyone in the docker group) can read them; the managed key means any principal in the account with `ssm:GetParameter*` and `kms:Decrypt` through SSM can too (no customer-managed key, no per-key audit trail beyond CloudTrail); and the three never-rotate secrets are in SSM only, so deleting a parameter by hand is unrecoverable. See `docs/SECRETS.md`.
+
 ## 7. Telegram
 
 | Item | Limit |

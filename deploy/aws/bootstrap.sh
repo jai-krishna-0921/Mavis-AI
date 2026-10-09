@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-time (idempotent) host setup over SSH: docker + compose plugin, 2 GB swapfile,
-# unattended-upgrades, ufw. Safe to re-run.
+# unattended-upgrades, ufw, AWS CLI v2 + mavis-secrets.service (secrets.sh install-box). Safe to re-run.
 set -euo pipefail
 # shellcheck source=deploy/aws/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -71,7 +71,8 @@ d=/var/backups/mavis
 mkdir -p "\$d"
 cd "$MAVIS_REMOTE_DIR"
 f="\$d/mavis-\$(date +%Y%m%d-%H%M%S).sql.gz"
-docker compose -f docker-compose.prod.yml exec -T postgres pg_dump -U mavis -d mavis --no-owner --no-acl | gzip >"\$f.tmp"
+[ -s /run/mavis/mavis.env ] || /usr/local/sbin/mavis-secrets render
+docker compose --env-file /run/mavis/mavis.env -f docker-compose.prod.yml exec -T postgres pg_dump -U mavis -d mavis --no-owner --no-acl | gzip >"\$f.tmp"
 mv "\$f.tmp" "\$f"
 chmod 600 "\$f"
 ls -1t "\$d"/mavis-*.sql.gz | tail -n +8 | xargs -r rm -f
@@ -88,6 +89,8 @@ docker --version
 docker compose version
 free -m
 REMOTE
+log "installing the AWS CLI v2 and the mavis-secrets unit (the .env is rendered from SSM into /run/mavis at boot)"
+"$AWS_DIR/secrets.sh" install-box
 log "installing the instance metadata guard (only api, worker and timer may reach 169.254.169.254)"
 "$AWS_DIR/imds.sh" install
 log "bootstrap done. next: deploy/aws/deploy.sh --no-webhook"

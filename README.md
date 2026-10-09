@@ -135,20 +135,31 @@ Prerequisites: the AWS CLI with a `cashfree` profile (override with `AWS_PROFILE
 
 ```bash
 deploy/aws/provision.sh              # key pair, security group, t4g.small, Elastic IP (idempotent)
-deploy/aws/bootstrap.sh              # docker + compose, 2 GB swap, unattended-upgrades, ufw
-deploy/aws/deploy.sh --no-webhook    # rsync, prod .env, build on the box, up, migrate (Telegram untouched)
+deploy/aws/iam-role.sh --apply       # role mavis-ec2 + read-only mavis-secrets-read policy (dry run without --apply)
+deploy/aws/bootstrap.sh              # docker + compose, 2 GB swap, unattended-upgrades, ufw, AWS CLI, mavis-secrets unit
+deploy/aws/deploy.sh --no-webhook    # push config to SSM, render on the box, build, up, migrate (Telegram untouched)
 deploy/aws/migrate-data.sh --yes     # copy demo Postgres, Qdrant and Neo4j to the box
 # stop the local poller (`mavis dev`, the demo bot) now, then:
 deploy/aws/webhook.sh set            # switch Telegram to the webhook
 ```
 
-Later redeploys are just `deploy/aws/deploy.sh`. It reuses the `.env` already on the box: existing keys (generated secrets and any you added by hand) are kept and only missing ones are added, except `ENV`, `PUBLIC_BASE_URL`, `DOMAIN` and `TELEGRAM_MODE`, which follow the run. An ssh failure aborts the deploy rather than regenerating secrets.
+Later redeploys are just `deploy/aws/deploy.sh`. It reads the existing keys from SSM Parameter Store: they are kept (generated secrets and any you added with `secrets.sh set`) and only missing ones are added, except `ENV`, `PUBLIC_BASE_URL`, `DOMAIN` and `TELEGRAM_MODE`, which follow the run. A failed read aborts the deploy rather than regenerating secrets.
 
-The prod `.env` is built by `deploy.sh` from the demo `.env` keys (`OLLAMA_API_KEY`, `TAVILY_API_KEY`, `COMPOSIO_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_CHAT_IDS`) plus generated secrets (`TELEGRAM_WEBHOOK_SECRET`, database passwords) and the in-stack URLs; the template is `deploy/.env.prod.example`. It is copied to `/opt/mavis/.env` with mode 600. `ENV=prod` makes the allowlist mandatory: the api refuses to start without `ALLOWED_TELEGRAM_CHAT_IDS`. `COMPOSIO_WEBHOOK_SECRET` stays empty, which keeps Composio on polling. The Composio connect redirect lands on `https://<host>/connect/callback`, served by the `api` service.
+Secrets and configuration are not stored on the box's disk. Every key is a SecureString under `/mavis/prod/<KEY>` in SSM Parameter Store (standard tier, free, encrypted with the AWS managed key `alias/aws/ssm`, tagged `Project=mavis`). `deploy.sh` builds the desired key set from the demo `.env` keys (`OLLAMA_API_KEY`, `TAVILY_API_KEY`, `COMPOSIO_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_CHAT_IDS` and the optional ones) plus generated secrets (`TELEGRAM_WEBHOOK_SECRET`, database passwords, `NATIVE_TOKEN_KEK`) and the in-stack settings, pushes only the changed keys (`deploy/aws/secrets.sh push`, values are never printed), and the `mavis-secrets.service` unit on the box renders them to `/run/mavis/mavis.env` (tmpfs, root, mode 600; recreated on every boot). Compose always runs with `--env-file /run/mavis/mavis.env` as root: use `deploy/aws/compose.sh ps` from your laptop, or `sudo docker compose --env-file /run/mavis/mavis.env -f docker-compose.prod.yml --profile prod ...` on the box. The box role can only read `/mavis/prod/*`; it cannot write or delete. Rotation, recovery and what never to rotate: [docs/SECRETS.md](docs/SECRETS.md). `ENV=prod` makes the allowlist mandatory: the api refuses to start without `ALLOWED_TELEGRAM_CHAT_IDS`. `COMPOSIO_WEBHOOK_SECRET` stays empty, which keeps Composio on polling. The Composio connect redirect lands on `https://<host>/connect/callback`, served by the `api` service.
+
+Moving an existing box from the old plaintext `/opt/mavis/.env` to SSM is a one-time migration, in this order (each step is a dry run until `--apply`):
+
+```bash
+deploy/aws/iam-role.sh --apply                    # adds the read-only mavis-secrets-read policy
+deploy/aws/secrets.sh seed-from-box               # plan; then again with --apply (keeps the generated secrets)
+deploy/aws/secrets.sh seed-from-box --apply
+deploy/aws/bootstrap.sh                           # AWS CLI v2 + mavis-secrets.service + env-file backup cron
+deploy/aws/deploy.sh                              # push, render, rebuild; then deletes the old /opt/mavis/.env
+```
 
 ### Web dashboard
 
-Off by default. Set `DASHBOARD_ENABLED=true` (and `TELEGRAM_BOT_USERNAME`, which the sign-in deep links need) in the box `.env`, then redeploy with `deploy/aws/deploy.sh`. The Caddy image builds the React app from `web/` and serves it at `/`; `/api/*` (the dashboard API, mounted at `/api/v1`) and `/oauth/*` are proxied to the `api` service. While the flag is off the API answers 404 for every `/api/v1` path.
+Off by default. Set `DASHBOARD_ENABLED=true` (and `TELEGRAM_BOT_USERNAME`, which the sign-in deep links need) in SSM (`printf true | deploy/aws/secrets.sh set DASHBOARD_ENABLED --apply`), then redeploy with `deploy/aws/deploy.sh`. The Caddy image builds the React app from `web/` and serves it at `/`; `/api/*` (the dashboard API, mounted at `/api/v1`) and `/oauth/*` are proxied to the `api` service. While the flag is off the API answers 404 for every `/api/v1` path.
 
 Sign in is a Telegram link (always on) and Google (`GOOGLE_SIGNIN_ENABLED=true`). Google sign in reuses `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` and asks only for `openid email profile`. In Google Cloud, open the same OAuth client and add a second Authorised redirect URI next to the connector one: `https://<host>/api/v1/auth/google/callback`. Google never creates a Mavis user: an address is matched to a user who connected that Google account or confirmed it in Preferences.
 
@@ -178,7 +189,7 @@ Run it before switching Telegram to the webhook, and do not run it again once th
 
 ### Backups
 
-`bootstrap.sh` installs a cron job (03:00) that writes a gzipped `pg_dump` to `/var/backups/mavis` (mode 600, newest 7 kept). It covers Postgres only. Copy the dumps off the box if you hold data you cannot lose, since the volume is deleted with the instance. The instance has termination protection on; `teardown.sh --yes` lifts it.
+`bootstrap.sh` installs a cron job (03:00, uses the rendered env file) that writes a gzipped `pg_dump` to `/var/backups/mavis` (mode 600, newest 7 kept). It covers Postgres only. Copy the dumps off the box if you hold data you cannot lose, since the volume is deleted with the instance. The instance has termination protection on; `teardown.sh --yes` lifts it.
 
 ### Operations
 
@@ -214,7 +225,7 @@ Every incoming Gmail message is understood (kind, money, risk flags), scored aga
 
 - **Settings** (all optional): `ATTENTION_ENABLED`, `ATTENTION_LARGE_AMOUNTS` (per currency, JSON), `ATTENTION_EVENING_TIME` (default `20:30`), `ATTENTION_UNDERSTAND_PER_WINDOW` (LLM calls per user per 2 minute window, default 4), `ATTENTION_RETENTION_DAYS` (default 90). The defaults are the production values.
 - **Migration order**: `0008_attention` follows `0007_orchestrator` and creates four tables. `deploy/aws/deploy.sh` runs `mavis migrate` before it restarts the worker. If another branch adds a migration after 0007 (Phase 4's `0009_orchestrator_followups`), point its `down_revision` at `0008_attention` when the two merge, then run `uv run pytest tests/store/test_migrations.py`.
-- **First deploy**: for each user with Gmail polling on, the worker queues the last 14 days (up to 40 emails) as backfill. They are understood at 4 per 2 minutes in the background, about 20 minutes in all. Backfill only builds baselines. It never pings, so there is no burst of messages. When it finishes, the user may get one "first look" summary. Watch with `docker compose logs -f worker | grep attention`.
+- **First deploy**: for each user with Gmail polling on, the worker queues the last 14 days (up to 40 emails) as backfill. They are understood at 4 per 2 minutes in the background, about 20 minutes in all. Backfill only builds baselines. It never pings, so there is no burst of messages. When it finishes, the user may get one "first look" summary. Watch with `deploy/aws/compose.sh logs -f worker | grep attention`.
 - **Roll back**: set `ATTENTION_ENABLED=false` and restart the worker. The earlier email path is used again. The attention tables stay but are unused, and pending attention wakeups and its buttons are ignored. No migration downgrade is needed.
 - **Check it**: `uv run python scripts/verify_attention.py` runs the offline scenario tests. `--live` reads recent mail through Composio (read only) and refuses to run when `DATABASE_URL` points at a non-local host. It sends nothing and writes nothing.
 
@@ -225,7 +236,7 @@ Off by default (`MACHINE_ENABLED=false`): no machine tools or specialists are re
 To turn it on in production:
 
 1. Create the AWS resources once with the scripts in `deploy/aws` (the `mavis-ec2` role, the machine policy, the workspace bucket and the budget).
-2. Set in the server `.env`: `MACHINE_ENABLED=true`, `SANDBOX_BACKEND=agentcore` (or `auto`), `WORKSPACE_BACKEND=s3`, `WORKSPACE_BUCKET=<bucket>`, `AGENTCORE_REGION=ap-south-1`.
+2. Set in SSM (`printf true | deploy/aws/secrets.sh set MACHINE_ENABLED --apply`, one call per key, then `deploy/aws/deploy.sh`): `MACHINE_ENABLED=true`, `SANDBOX_BACKEND=agentcore` (or `auto`), `WORKSPACE_BACKEND=s3`, `WORKSPACE_BUCKET=<bucket>`, `AGENTCORE_REGION=ap-south-1`.
 3. Optional: `MACHINE_USERS=[<ids>]` to start with a few users, `MACHINE_PACKAGE_ALLOW=[...]` to limit installable packages, `MACHINE_USER_DAILY_MINUTES` and `MACHINE_USER_MONTHLY_USD` for quotas, `MAX_UPLOAD_MB` (Telegram allows 20 MB downloads), `ANALYST_MAX_STEPS`.
 4. Redeploy. `MACHINE_BROWSER_ENABLED` stays false until the browser slice ships.
 5. Check it live: `MAVIS_LIVE_AGENTCORE=1 AWS_PROFILE=<profile> AWS_REGION=ap-south-1 uv run pytest tests/machine/test_live_tools.py` (costs a few cents).

@@ -1,7 +1,7 @@
 """Live check of the native Google and Slack connectors for one Mavis user. Run inside the api or worker
 container (it needs the same environment, database and sealed token key as the running stack):
 
-    docker compose -f docker-compose.prod.yml exec api \
+    sudo docker compose --env-file /run/mavis/mavis.env -f docker-compose.prod.yml exec api \
         uv run python -m scripts.live_native <mavis_user_id> [--sync] [--send-test]
 
 Prints, never a secret: grant status per provider (masked account, scope count, expiry), mail.profile,

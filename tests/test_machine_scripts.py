@@ -103,7 +103,7 @@ def _mutations(calls):
 
 
 @pytest.mark.parametrize("script", ["iam-role.sh", "machine.sh", "imds.sh", "imds-guard.sh", "bootstrap.sh",
-                                    "deploy.sh"])
+                                    "deploy.sh", "secrets.sh", "compose.sh", "webhook.sh", "migrate-data.sh"])
 def test_syntax(script):
     subprocess.run(["bash", "-n", str(ROOT / "deploy" / "aws" / script)], check=True)
 
@@ -125,21 +125,22 @@ def test_iam_role_apply_creates_role_profile_and_imds(stub):
         "iam create-instance-profile",
         "iam add-role-to-instance-profile",
         "ec2 associate-iam-instance-profile",
+        "iam put-role-policy",
         "ec2 modify-instance-metadata-options",
     ]
     imds = next(c for c in calls if "modify-instance-metadata-options" in c)
     assert imds[imds.index("--http-put-response-hop-limit") + 1] == "2"
     assert imds[imds.index("--http-tokens") + 1] == "required"
-    assert not any(
-        "put-role-policy" in c or "attach-role-policy" in c for c in calls
-    )  # contract B: no policies
+    policies = [c for c in calls if "put-role-policy" in c or "attach-role-policy" in c]
+    assert [c[c.index("--policy-name") + 1] for c in policies] == ["mavis-secrets-read"]
 
 
 def test_iam_role_apply_twice_creates_nothing_new(stub):
     proc, calls = stub("iam-role.sh", "--apply", exists=True)
     assert proc.returncode == 0
-    # only the idempotent metadata-options call may repeat
-    assert [c for c in _mutations(calls) if "modify-instance-metadata-options" not in c] == []
+    # only the idempotent metadata-options and inline-policy calls may repeat
+    assert [c for c in _mutations(calls)
+            if "modify-instance-metadata-options" not in c and "put-role-policy" not in c] == []
 
 
 def test_machine_apply_needs_the_budget_email(stub):

@@ -20,7 +20,8 @@ for a in "$@"; do [[ "$a" == --dry-run ]] && DRY=1; done
 log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 ipt() { if [[ "$DRY" == 1 ]]; then printf 'PLAN: iptables %s\n' "$*"; else "$IPT" "$@"; fi; }
-compose() { (cd "$APP_DIR" && docker compose -f "$COMPOSE_FILE" --profile prod "$@"); }
+ENV_FILE="${MAVIS_ENV_FILE:-/run/mavis/mavis.env}"
+compose() { (cd "$APP_DIR" && docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile prod "$@"); }
 
 apply() {
   if [[ "$DRY" == 0 ]]; then "$IPT" -L DOCKER-USER -n >/dev/null 2>&1 || die "no DOCKER-USER chain: is docker running?"; fi

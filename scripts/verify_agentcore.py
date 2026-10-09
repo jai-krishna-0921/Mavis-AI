@@ -1,6 +1,6 @@
 """Live smoke test for AgentCore (spec 13.3). Run on the box after iam-role.sh and machine.sh:
 
-    docker compose -f docker-compose.prod.yml exec -T worker python -m scripts.verify_agentcore
+    deploy/aws/compose.sh exec -T worker python -m scripts.verify_agentcore
 
 Prints PASS/FAIL per check with timings and an upper-bound cost. Uses synthetic user ids 0 and -1 that
 never exist in the users table; touches no real user's workspace."""

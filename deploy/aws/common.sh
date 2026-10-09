@@ -16,6 +16,9 @@
 : "${DEMO_PG_CONTAINER:=mavis-dev-postgres-1}"
 : "${DEMO_QDRANT_URL:=http://localhost:6340}"
 : "${MAVIS_COMPOSE_FILE:=docker-compose.prod.yml}"
+# Rendered from SSM Parameter Store by the mavis-secrets unit (tmpfs, root, mode 600): the only copy of the
+# configuration on the box. Every docker compose call passes it with --env-file, as root (sudo).
+: "${MAVIS_ENV_FILE:=/run/mavis/mavis.env}"
 
 AWS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$AWS_DIR/../.." && pwd)"
@@ -88,8 +91,11 @@ rsync_box() { # rsync_box ARGS... (the -e transport is added)
 
 # compose_remote ARGS...: run docker compose on the box in the app dir.
 compose_remote() {
-  ssh_box "cd $MAVIS_REMOTE_DIR && docker compose -f $MAVIS_COMPOSE_FILE --profile prod $*"
+  ssh_box "cd $MAVIS_REMOTE_DIR && sudo docker compose --env-file $MAVIS_ENV_FILE -f $MAVIS_COMPOSE_FILE --profile prod $*"
 }
+
+# COMPOSE_BOX: the remote command prefix for compose calls that do not want the prod profile.
+COMPOSE_BOX="sudo docker compose --env-file $MAVIS_ENV_FILE -f $MAVIS_COMPOSE_FILE"
 
 # envget FILE KEY: read one value from an env file without sourcing it (never echoed by callers).
 envget() {

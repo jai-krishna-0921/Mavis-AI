@@ -1,6 +1,7 @@
 # Production stack for ONE t4g.small (arm64, 2 GB RAM + 2 GB swap). See deploy/aws/README section in README.md.
-#   docker compose -f docker-compose.prod.yml --profile prod up -d --build
-# Variables come from the .env next to this file (deploy/.env.prod.example documents them).
+#   sudo docker compose --env-file /run/mavis/mavis.env -f docker-compose.prod.yml --profile prod up -d --build
+# Variables come from /run/mavis/mavis.env, rendered from SSM Parameter Store (deploy/aws/secrets.sh render,
+# docs/SECRETS.md). There is no .env on the box. Locally, pass your own file with --env-file.
 # The `prod` profile adds Caddy (HTTPS). Without it the api is reachable only inside the compose network
 # (or via an override that publishes a port, which is how it is smoke-tested locally).
 name: mavis-prod
