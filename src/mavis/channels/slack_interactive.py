@@ -84,7 +84,7 @@ async def _publish(event: Event, bus: EventBus) -> bool:
 
 
 async def _owner_chat(lookup: Any, team: str, slack_user: str,
-                      channel: str) -> tuple[int | None, str | None, str]:
+                      channel: str | None) -> tuple[int | None, str | None, str]:
     """(Mavis user, their DM chat, refusal text). The refusal is empty when the presser owns this channel."""
     user_id = await lookup.user_for_slack(team, slack_user) if lookup is not None else None
     if user_id is None:
@@ -92,7 +92,7 @@ async def _owner_chat(lookup: Any, team: str, slack_user: str,
     dm = await routing.slack_chat_for(user_id)
     if dm is None:
         return user_id, None, NO_DM
-    if channel and parse_chat(dm).channel != channel:
+    if channel is not None and parse_chat(dm).channel != channel:
         return user_id, dm, NOT_YOURS
     return user_id, dm, ""
 
@@ -133,7 +133,7 @@ async def _slash(form: dict[str, str], lookup: Any, bus: EventBus) -> dict[str, 
     if name not in SLASH_COMMANDS:
         return _ephemeral("I don't know that command.")
     team, slack_user = form.get("team_id", ""), form.get("user_id", "")
-    user_id, dm, refusal = await _owner_chat(lookup, team, slack_user, "")
+    user_id, dm, refusal = await _owner_chat(lookup, team, slack_user, None)
     if refusal or user_id is None or dm is None:
         return _ephemeral(refusal)
     text = f"/{name} {form.get('text', '')}".strip()

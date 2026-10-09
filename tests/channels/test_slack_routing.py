@@ -136,6 +136,17 @@ async def test_both_channels_telegram_failure_retries_but_slack_failure_does_not
     assert (await outbox_row(oid2)).status == "pending" and slack.texts == []  # nothing duplicated
 
 
+@pytest.mark.parametrize("failure", [ChannelRateLimited(3), RuntimeError("slack down")])
+async def test_both_channels_a_later_failure_never_redelivers_the_first(world, failure):
+    user, slack, tg, _ = world
+    await routing.set_pref(user.id, "both")
+    oid = await queue(user, "brief", proactive=True)
+    slack.fail_next.append(failure)
+    assert await deliver() == 1
+    assert tg.texts == ["brief"] and (await outbox_row(oid)).status == "sent"
+    assert await deliver() == 0 and tg.texts == ["brief"]  # no retry, no duplicate
+
+
 async def test_a_slack_rate_limit_is_a_backoff_not_a_failure(world):
     user, slack, _, _ = world
     oid = await queue(user, "x", route=DM_CHAT)

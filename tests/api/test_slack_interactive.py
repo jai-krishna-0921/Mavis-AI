@@ -127,6 +127,17 @@ async def test_card_in_a_shared_channel_is_refused_even_for_a_known_user(env):
     assert bus.events == []
 
 
+async def test_press_with_no_channel_is_refused(env):
+    app, bus, posted = env
+    form = press()
+    payload = json.loads(form["payload"])
+    payload.pop("channel")
+    payload["container"].pop("channel_id")
+    r = await post(app, {"payload": json.dumps(payload)})
+    assert r.json() == {"refused": 1} and bus.events == []
+    assert posted[0][1]["text"].startswith("This card isn't yours")
+
+
 async def test_repeated_delivery_publishes_once_and_does_not_re_update(env):
     app, bus, posted = env
     await post(app, press())
