@@ -12,6 +12,8 @@ const LinkTelegram = lazy(() => import('./pages/LinkTelegram').then((m) => ({ de
 const Workspace = lazy(() => import('./pages/Workspace').then((m) => ({ default: m.Workspace })))
 const Vault = lazy(() => import('./pages/Vault').then((m) => ({ default: m.Vault })))
 const Preferences = lazy(() => import('./pages/Preferences').then((m) => ({ default: m.Preferences })))
+const PrivacyPolicy = lazy(() => import('./pages/Legal').then((m) => ({ default: m.PrivacyPolicy })))
+const TermsOfService = lazy(() => import('./pages/Legal').then((m) => ({ default: m.TermsOfService })))
 
 function Loading() {
   return (
@@ -28,6 +30,8 @@ export function App({ pollIntervalMs }: { pollIntervalMs?: number }) {
       <Suspense fallback={<Loading />}>
         <Routes>
           <Route path="/" element={<Landing />} />
+          <Route path="/privacy" element={<PrivacyPolicy />} />
+          <Route path="/terms" element={<TermsOfService />} />
           <Route path="/login" element={<Login pollIntervalMs={pollIntervalMs} />} />
           <Route path="/link-telegram" element={<LinkTelegram pollIntervalMs={pollIntervalMs} />} />
           <Route element={<RequireAuth><Layout /></RequireAuth>}>
