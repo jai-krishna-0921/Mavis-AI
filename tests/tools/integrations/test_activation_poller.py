@@ -194,8 +194,8 @@ async def test_state_read_failure_keeps_the_chain(provider, cache, fake_bus, sta
 async def test_ensure_chains_rearms_every_polling_capability(provider, cache, fake_bus, state, rec):
     poller = make_poller(provider, cache, fake_bus, state, rec)
     await state.update(1, {"polling": {"gmail": True, "googlecalendar": False, "slack": True}})
-    assert await poller.ensure_chains(1) == 1  # slack is not pollable, calendar polling is off
-    assert rec.scheduled == [(1, NOW, "gmail", POLL_KIND)]
+    assert await poller.ensure_chains(1) == 2  # calendar polling is off
+    assert sorted(rec.scheduled) == [(1, NOW, "gmail", POLL_KIND), (1, NOW, "slack", POLL_KIND)]
     await state.update(2, {})
     assert await poller.ensure_chains(2) == 0
 

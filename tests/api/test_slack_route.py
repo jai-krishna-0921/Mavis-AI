@@ -90,7 +90,8 @@ async def test_message_publishes_event_that_parses_through_normalize(env):
     p = event.payload
     assert p["text"] == "can you review the deck?" and p["thread_ts"] == "1760000000.000050"
     assert p["from"] == OTHER and p["from_me"] is False and p["channel_type"] == "channel"
-    assert {k: p[k] for k in normalize_slack(p)} == normalize_slack(p)
+    parsed = normalize_slack(p)
+    assert (parsed["channel"], parsed["ts"], parsed["user"]) == ("C0000GEN01", "1760000100.000100", OTHER)
     assert lookup.asked == [(TEAM, ME)]
 
 
