@@ -20,6 +20,7 @@ from mavis.domain.events import Event, Job, JobKind
 from mavis.domain.messages import TAINT_SUFFIX, Role, tainted_event_id
 from mavis.domain.timefmt import message_stamp, stamped
 from mavis.initiative import wiring
+from mavis.memory import personal_layer
 from mavis.memory.service import CONTEXT_CLOSE, CONTEXT_NOTE, CONTEXT_OPEN, USER_PREFIX, get_memory
 from mavis.store.models import Message
 from mavis.store.repo import profile as profile_repo
@@ -99,6 +100,7 @@ async def build_context_ex(
                        if tz else "")
             parts.append(f"## Earlier in our conversation{written}\n{summary.summary}")
         parts.append(recall.render())
+        parts.append((await personal_layer.prompt_block(user_id)).text)
     except Exception:
         log.warning("simple_turn.recall_failed", exc_info=True)
     extra = await context_hooks.gather_context(user_id, text)  # never raises
