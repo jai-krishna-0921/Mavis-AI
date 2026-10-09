@@ -84,7 +84,7 @@ def test_calendar_update_blank_guest_list_changes_nothing_but_empty_list_removes
     (DriveShareArgs, {"file_id": "", "email": "p@x.io"}, "file_id"),
     (TaskAddArgs, {"title": "  "}, "title"),
     (StartTaskArgs, {"goal": "     "}, "goal"),
-    (WakeMeArgs, {"at": START, "reason": "  "}, "reason"),
+    (WakeMeArgs, {"at": START, "reason": "  "}, "what"),
 ])
 def test_blank_required_strings_are_rejected(model, kwargs, field):
     with pytest.raises(ValidationError) as exc:
