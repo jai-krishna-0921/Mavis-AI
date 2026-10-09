@@ -526,3 +526,49 @@ class NativeOAuthState(Base):
     provider: Mapped[str] = mapped_column(String(16))
     pending_id: Mapped[int | None] = mapped_column(nullable=True)
     expires_at: Mapped[datetime] = mapped_column(index=True)
+
+
+class PersonalLayerRow(Base):
+    """The versioned personal layer of one user: a compact, evidence-linked description of who they are."""
+
+    __tablename__ = "personal_layers"
+    __table_args__ = (UniqueConstraint("user_id", "version", name="uq_personal_layers_user_version"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    content: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class LearningSuppression(Base):
+    """Something the user told Mavis to stop learning: `key` is an item id (fact, person, routine...)
+    checked at learn time and when the personal layer is built."""
+
+    __tablename__ = "learning_suppressions"
+    __table_args__ = (UniqueConstraint("user_id", "key", name="uq_learning_suppressions_user_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    key: Mapped[str] = mapped_column(String(240))
+    label: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class PersonalSignal(Base):
+    """Deterministic evidence for the personal layer: one row per interaction with a person (kind
+    'interaction') or per calendar occurrence (kind 'meeting'), written when a record is ingested."""
+
+    __tablename__ = "personal_signals"
+    __table_args__ = (
+        UniqueConstraint("user_id", "kind", "key", "source_ref", name="uq_personal_signals_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    key: Mapped[str] = mapped_column(String(200))
+    source_ref: Mapped[str] = mapped_column(String(200), default="")
+    label: Mapped[str] = mapped_column(String(200), default="")
+    at: Mapped[datetime] = mapped_column()
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
