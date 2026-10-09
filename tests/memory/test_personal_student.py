@@ -35,7 +35,7 @@ async def test_a_student_layer_has_studies_at_identity_and_confirmed_professor(s
     await learn_all(memory, sink)
     layer = await personal_layer.build(memory, student.user_id)
     identity = [ln for ln in layer["lines"] if ln["section"] == "identity"]
-    assert identity and "studies at IIT Madras" in identity[0]["text"] and identity[0]["confirmed"]
+    assert identity and "studies at IIT Madras" in identity[0]["text"] and not identity[0]["confirmed"]  # self-authored statements may quote others
     people = {tuple(ln["evidence"]): ln for ln in layer["lines"] if ln["section"] == "people"}
     prof = people[("person:ramanathan@iitm.ac.in",)]
     assert prof["confirmed"] and "2 sent" in prof["text"] and "1 received" in prof["text"]

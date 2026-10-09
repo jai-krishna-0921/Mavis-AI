@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -54,6 +55,7 @@ class VectorStore(Protocol):
     ) -> list[tuple[str, str, datetime | None]]: ...
     async def forget(self, user_id: int, needle: str) -> int: ...
     async def forget_source(self, user_id: int, prefix: str) -> int: ...
+    async def forget_where(self, user_id: int, match: Callable[[str, str, str], bool]) -> int: ...
     async def count(self, user_id: int) -> int: ...
 
 
@@ -189,6 +191,16 @@ class QdrantVectorStore:
             for p in await self._scroll_user(user_id)
             if n in str((p.payload or {}).get("text", "")).casefold()
         ]
+        if ids:
+            await self._client.delete(COLLECTION, points_selector=models.PointIdsList(points=ids))
+        return len(ids)
+
+    async def forget_where(self, user_id: int, match: Callable[[str, str, str], bool]) -> int:
+        """Delete this user's points for which `match(text, source_ref, kind)` holds (the caller decides
+        what a point being about something means; no substring semantics here)."""
+        ids = [p.id for p in await self._scroll_user(user_id)
+               if match(str((p.payload or {}).get("text", "")), str((p.payload or {}).get("source_ref", "")),
+                        str((p.payload or {}).get("kind", "")))]
         if ids:
             await self._client.delete(COLLECTION, points_selector=models.PointIdsList(points=ids))
         return len(ids)
