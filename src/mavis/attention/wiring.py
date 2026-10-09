@@ -131,7 +131,7 @@ def get_connector_ingest():
 
 
 async def slack_directory(user_id: int, team: str, ids: frozenset[str]) -> dict[str, dict[str, str]]:
-    """Display names for Slack ids, through the native Slack executor's cached users.info (none without it)."""
+    """Display names for Slack ids via the native Slack executor's cached users.info."""
     from mavis.tools.integrations import get_provider
     from mavis.tools.integrations.native.base import NativeProvider
 

@@ -26,7 +26,6 @@ from mavis.tools.integrations.normalize import (
     extract_messages,
     normalize_calendar_event,
     normalize_email,
-    normalize_slack,
     pick,
     to_datetime,
 )
