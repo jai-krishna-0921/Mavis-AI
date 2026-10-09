@@ -21,6 +21,8 @@ Every change refreshes the stored layer at once (stale lines are dropped) and sc
 
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +31,7 @@ import structlog
 from mavis.domain import timeutil
 from mavis.domain.memory import Entity, Relation
 from mavis.memory import controls, itemids, personal, personal_layer
+from mavis.memory.graph import is_derived
 from mavis.memory.names import is_user
 from mavis.memory.personal import CORRECTION_PREFIX, SECTIONS, TIER_THIRD, TIER_USER, GraphItem
 from mavis.memory.service import get_memory
@@ -44,6 +47,28 @@ KINDS = ("fact", "signal", "person", "routine", "profile", "layer", "suppression
 CONNECTOR_PREFIXES = {"gmail": ("gmail:",), "slack": ("slack:",), "calendar": ("calendar:",)}
 MAX_CORRECTION = 300
 MIN_SUBSTRING_FORGET = 4  # vectors are forgotten by text; shorter needles would take unrelated memories
+
+
+def _about_person(names: set[str], refs: set[str]) -> Callable[[str, str, str], bool]:
+    """Which stored memories are about this person, by identity and never by a bare substring: the full name
+    or the address as whole words (anywhere, since that is specifically them), or their given name as a
+    whole capitalised word, only inside records this person appears in and never in what the user told."""
+    full = [n for n in names if "@" in n or len(n.split()) >= 2]
+    given = {n.split()[0] for n in names if "@" not in n and n.split()}
+    full_re = [re.compile(r"(?<!\w)" + r"\s+".join(re.escape(w) for w in n.split()) + r"(?!\w)", re.IGNORECASE)
+               for n in full if len(n) >= MIN_SUBSTRING_FORGET]
+    given_re = [re.compile(r"(?<!\w)" + re.escape(g) + r"(?!\w)") for g in given
+                if len(g) >= MIN_SUBSTRING_FORGET - 1 and g[:1].isupper()]
+
+    def match(text: str, source_ref: str, kind: str) -> bool:
+        if any(r.search(text) for r in full_re):
+            return True
+        if kind != "signal" and not is_derived(source_ref):  # the user's own words are only touched through the full name
+            return False
+        label = personal.source_label(source_ref)
+        return (source_ref in refs or label in refs) and any(r.search(text) for r in given_re)
+
+    return match
 
 
 class VaultError(ValueError):
@@ -347,11 +372,8 @@ class Vault:
             removed = await personal_repo.delete_signals_by_key(user_id, "interaction", key)
             for name in sorted(names, key=len, reverse=True):
                 removed += await memory.graph.forget_entity(user_id, name)
-            # memories are found by text: the full name, the address, and the given name people write with
-            given = {n.split()[0] for n in names if "@" not in n and len(n.split()) >= 2}
-            for needle in sorted(names | given, key=len, reverse=True):
-                if len(needle) >= MIN_SUBSTRING_FORGET:
-                    removed += await memory.vector.forget(user_id, needle)
+            removed += await memory.vector.forget_where(
+                user_id, _about_person(names, {r.source_ref for r in rows if r.source_ref}))
             if suppress:
                 await personal_repo.suppress(user_id, item_id, ", ".join(sorted(names)[:2]))
                 for name in names:
@@ -391,6 +413,7 @@ class Vault:
         """Make the stored layer honest at once and ask for a rebuild."""
         self.memory.invalidate(user_id)
         await self.prune(user_id, drop_lines=replaced_lines or set(), drop_evidence=removed_evidence or set())
+        await personal_repo.keep_only_latest_layer(user_id)  # older versions would still hold what was removed
         await personal_layer.schedule(user_id)
 
     async def prune(self, user_id: int, *, drop_lines: set[str] | None = None,
@@ -398,7 +421,7 @@ class Vault:
         """Drop stored lines that are no longer true: named lines, lines citing removed evidence, and lines
         whose evidence has changed or gone since they were written. Saves a new version if any changed."""
         layer = await personal_layer.current(user_id)
-        if not layer["lines"]:
+        if not layer["lines"] and not layer.get("entities"):
             return 0
         evidence = {e.id: e for e in await personal.gather(self.memory, user_id)}
         keep = []
@@ -410,8 +433,11 @@ class Vault:
             if not stale:
                 keep.append(ln)
         dropped = len(layer["lines"]) - len(keep)
-        if dropped:
-            await personal_layer.patch(user_id, keep=keep)
+        entities = personal_layer.key_entities(list(evidence.values()))
+        known = {n for ent in entities for n in ent["names"]}
+        kept_entities = [e for e in layer.get("entities") or [] if set(e["names"]) <= known]
+        if dropped or len(kept_entities) != len(layer.get("entities") or []):
+            await personal_layer.patch(user_id, keep=keep, entities=kept_entities)
         return dropped
 
 

@@ -59,6 +59,8 @@ SOON = timedelta(minutes=10)  # after a first sync or a correction: let queued L
 DAILY = timedelta(hours=24)
 RETRY = timedelta(minutes=15)
 MAX_RETRIES = 3
+VOLATILE_KINDS = frozenset({itemids.PERSON, itemids.ROUTINE, itemids.STYLE})  # their text holds counts and dates
+SPREAD = timedelta(hours=23)  # the daily rebuilds of all users start spread across this window
 BOOST_PERSON, BOOST_PROJECT, BOOST_CAP = 0.2, 0.1, 0.3
 
 SYSTEM = """You write the personal profile that {agent}, a personal assistant, keeps about {name}.
@@ -129,18 +131,23 @@ class Checked:
 def make_line(section: str, text: str, cited: list[Evidence], *, pinned: bool = False) -> dict[str, Any]:
     ids = [e.id for e in cited]
     tier = min((e.tier for e in cited), key=lambda t: TIER_RANK[t])
+    # a statement extracted from a record can quote or forward other people's words: it is confirmed only when
+    # the user's own words (user-trust evidence) back the line; counts and patterns computed in code stay confirmed
+    quoted = any(e.free_text for e in cited) and not any(e.tier == personal.TIER_USER for e in cited)
     sources: list[str] = []
     for e in cited:
         sources += [s for s in e.sources if s and s not in sources]
     return {"id": itemids.layer_id(section, ids), "section": section, "text": clean(text)[:LINE_CAP],
-            "evidence": ids, "sources": sources[:4], "tier": tier, "confirmed": tier != TIER_THIRD,
+            "evidence": ids, "sources": sources[:4], "tier": tier, "confirmed": tier != TIER_THIRD and not quoted,
             "pinned": pinned, "evh": stamp(cited)}
 
 
 def stamp(cited: list[Evidence]) -> str:
     """What the cited evidence said when the line was written: a line whose evidence has since changed or
-    gone is stale (see vault.prune)."""
-    return itemids.digest(*sorted(f"{e.id}|{e.tier}|{e.text}" for e in cited))
+    gone is stale (see vault.prune). Counts, dates and patterns move with every record, so for those kinds
+    the evidence identity (id and trust) is what counts, not the wording; a fact or profile entry also
+    carries its text, so a correction under the same id is seen."""
+    return itemids.digest(*sorted(f"{e.id}|{e.tier}|{'' if e.kind in VOLATILE_KINDS else e.text}" for e in cited))
 
 
 def check_draft(draft: LayerDraft, aliases: dict[str, Evidence]) -> Checked:
@@ -194,7 +201,7 @@ def _prompt(evidence: list[Evidence]) -> tuple[str, dict[str, Evidence]]:
     for i, e in enumerate(evidence, 1):
         alias = f"E{i}"
         aliases[alias] = e
-        text = wrap_untrusted(e.text, e.id) if e.tier == TIER_THIRD else e.text
+        text = wrap_untrusted(e.text, e.id) if e.tier == TIER_THIRD or (e.free_text and e.tier != personal.TIER_USER) else e.text
         rows.append(f"{alias} [{e.section}, {e.tier}]: {text}")
     return "\n".join(rows), aliases
 
@@ -270,7 +277,8 @@ async def _store(user_id: int, lines: list[dict[str, Any]], digest: str, phrased
 
 
 async def patch(user_id: int, *, keep: list[dict[str, Any]] | None = None,
-                add: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                add: list[dict[str, Any]] | None = None,
+                entities: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Save a new version of the stored layer with `keep` as its lines (default: all) plus `add`, without a
     rebuild: how a correction or a removal shows at once, before the scheduled rebuild runs."""
     layer = await current(user_id)
@@ -281,6 +289,8 @@ async def patch(user_id: int, *, keep: list[dict[str, Any]] | None = None,
     lines.sort(key=lambda ln: (order[ln["section"]], not ln["pinned"], -TIER_RANK[ln["tier"]]))
     content = {k: v for k, v in layer.items() if k != "version"}
     content["lines"] = lines
+    if entities is not None:
+        content["entities"] = entities
     content["version"] = await personal_repo.save_layer(user_id, content)
     return content
 
@@ -385,12 +395,17 @@ async def centrality(user_id: int, text: str) -> float:
 # --- scheduling ----------------------------------------------------------------------------------------
 
 
-async def schedule(user_id: int, *, soon: bool = True) -> None:
+def jitter(user_id: int) -> timedelta:
+    """A fixed offset in [0, SPREAD) for this user, so rebuilds do not all fall due at once."""
+    return timedelta(seconds=int(itemids.digest("layer-jitter", str(user_id)), 16) % int(SPREAD.total_seconds()))
+
+
+async def schedule(user_id: int, *, soon: bool = True, spread: bool = False) -> None:
     """Ask for a (re)build: coalesced, so any number of requests before it runs make one run. `soon`: in
     a few minutes (after a first sync or a correction); otherwise the daily one."""
     from mavis.timers.service import WakeupService  # lazy: timers import the store
 
-    delay = SOON if soon else DAILY
+    delay = SOON if soon else (timedelta(hours=1) + jitter(user_id) if spread else DAILY)
     kind = "soon" if soon else "daily"
     try:
         await WakeupService().wake_me(
@@ -471,7 +486,7 @@ async def ensure_scheduled() -> None:
     """Startup: every user has a daily rebuild pending (users from before the layer existed included).
     Coalesced by the wakeup's dedupe key, so running it on every start is harmless."""
     for user_id in await users.all_ids():
-        await schedule(user_id, soon=False)
+        await schedule(user_id, soon=False, spread=True)
 
 
 def register() -> None:

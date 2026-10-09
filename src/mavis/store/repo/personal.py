@@ -40,6 +40,19 @@ async def save_layer(user_id: int, content: dict[str, Any]) -> int:
         return version
 
 
+async def keep_only_latest_layer(user_id: int) -> int:
+    """Drop every stored version but the newest: what was forgotten must not survive in history."""
+    async with dbm.Session() as s:
+        latest = await s.scalar(
+            select(func.max(PersonalLayerRow.version)).where(PersonalLayerRow.user_id == user_id))
+        if latest is None:
+            return 0
+        res = await s.execute(delete(PersonalLayerRow).where(
+            PersonalLayerRow.user_id == user_id, PersonalLayerRow.version < latest))
+        await s.commit()
+        return res.rowcount or 0
+
+
 async def delete_layers(user_id: int) -> None:
     async with dbm.Session() as s:
         await s.execute(delete(PersonalLayerRow).where(PersonalLayerRow.user_id == user_id))
