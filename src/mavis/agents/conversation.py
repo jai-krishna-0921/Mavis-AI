@@ -82,7 +82,7 @@ CHAT_TOOL_LIMIT = 18
 CHAT_QUERY_TURNS = 2
 DISCOVER_LIMIT = 4  # tools find_tools adds per call
 # each only when available; track_loop and wake_me carry agreements and reminders (LEARN does not)
-CHAT_ALWAYS = ("start_task", "pending", "web_search", "track_loop", "wake_me", "complete_item",
+CHAT_ALWAYS = ("start_task", "pending", "web_search", "track_loop", "wake_me", "complete_item", "remember",
                # the core reads, whenever their account is linked: a question about mail or the calendar never
                # depends on how a ranking scored the words around it (10 Oct: "any emails today?" lost them)
                "mail_search", "mail_read", "calendar_list", "drive_search")
@@ -146,6 +146,8 @@ TOOL_RULES = (
     "- When they agree to something you suggested (\"yes\", \"do that\", \"the second one\") or ask you "
     "to remember or remind them of something, call track_loop or wake_me in this same turn with the "
     "concrete item from the conversation, written out in full. Nothing else saves it for them.\n"
+    "- A fact or preference about them or their people (\"I never take meetings before 11\", \"my sister "
+    "is Asha\") is not a to-do: save it with remember, in their words, and apply it from then on.\n"
     "- For any question about what is pending, open, due, on their radar, on their to-do list or left to "
     "do, call pending and answer only from its result (open items and reminders). Your earlier messages "
     "and the conversation summary may be outdated: they are claims, not facts.\n"
