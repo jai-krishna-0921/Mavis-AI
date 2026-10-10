@@ -58,7 +58,7 @@ async def create_invite(body: CreateBody, active: Active = Depends(common.authed
                             "You have used all your invite links. Revoke one to make another.") from None
         raise DashError(409, "invite_cap", "Mavis has too many open invites right now. "
                                            "Try again later.") from None
-    link = f"{s.public_base_url.rstrip('/')}/?invite={deep_link_param(plain)}"
+    link = f"{s.public_base_url.rstrip('/')}/login?invite={deep_link_param(plain)}"
     return _row(row, link=link, code=str(row.id))
 
 

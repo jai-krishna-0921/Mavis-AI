@@ -119,7 +119,7 @@ export const handlers = [
     const d = db()
     if (d.me.invites_left !== null && d.me.invites_left <= 0) return err(409, 'invite_cap', 'You have used all your invite links. Revoke one to make another.')
     const code = Math.random().toString(36).slice(2, 8)
-    const inv = { code, link: `${location.origin}/?invite=${code}`, name: body.name ?? null, uses: 0, max_uses: 5 }
+    const inv = { code, link: `${location.origin}/login?invite=${code}`, name: body.name ?? null, uses: 0, max_uses: 5 }
     d.invites.push(inv)
     if (d.me.invites_left !== null) d.me.invites_left -= 1
     return HttpResponse.json(inv, { status: 201 })

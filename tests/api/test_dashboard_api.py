@@ -282,7 +282,7 @@ async def test_invites_are_capped_by_tier_and_revocable(app):
             r = await c.post(f"{API}/invites", headers=csrf, json={"name": f"Friend {n}"})
             assert r.status_code == 201
             made.append(r.json())
-        assert made[0]["link"].startswith("https://mavis.test/?invite=MAV") and made[0]["max_uses"] == 5
+        assert made[0]["link"].startswith("https://mavis.test/login?invite=MAV") and made[0]["max_uses"] == 5
         assert (await c.get(f"{API}/me")).json()["invites_left"] == 0
         full = await c.post(f"{API}/invites", headers=csrf, json={})
         assert full.status_code == 409 and full.json()["error"] == "invite_cap"

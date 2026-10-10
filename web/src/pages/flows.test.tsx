@@ -289,3 +289,10 @@ describe('legal pages', () => {
     expect(s.getByRole('heading', { level: 1, name: 'Terms of Service' })).toBeInTheDocument()
   })
 })
+
+describe('invite links', () => {
+  it('forwards an invite that lands on the home page straight to sign-in, keeping the code', async () => {
+    renderApp('/?invite=MAV-ABCDE-FGHJK')
+    expect(await screen.findByRole('heading', { level: 1, name: /sign in/i })).toBeInTheDocument()
+  })
+})

@@ -199,7 +199,7 @@ async def test_owner_makes_an_invite_on_the_dashboard_and_the_landing_link_signs
     r = await c.post("/api/v1/invites", json={"name": "Aiko"}, headers=h)
     assert r.status_code == 201
     link = r.json()["link"]
-    assert link.startswith(f"{BASE}/?invite=MAV")  # the landing page forwards ?invite= to /login?invite=
+    assert link.startswith(f"{BASE}/login?invite=MAV")  # old /?invite= links are forwarded by the landing page
     param = parse_qs(urlsplit(link).query)["invite"][0]
     c2, h2 = await j.web_signin(7001, "Aiko", param)
     me = (await c2.get("/api/v1/me", headers=h2)).json()
