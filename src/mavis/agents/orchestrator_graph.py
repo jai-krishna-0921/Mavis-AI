@@ -60,8 +60,12 @@ from mavis.tools.registry import current_task_id, excluded_capabilities, get_reg
 log = structlog.get_logger()
 
 MAX_REVISIONS = 2
+DELIVERING_AGENTS = frozenset({"studio"})  # step agents whose success is a file already sent to the user
 MAX_STEPS = 12
-_STEP_DIGEST_CHARS = 3000
+_STEP_DIGEST_CHARS = 3000  # each step's output in the critic's and responder's digest
+# what a step hands the steps that depend on it: the findings themselves (a research step covering three
+# products ran past 3000 and the deck got only the first one's pricing)
+_HANDOFF_CHARS = 12_000
 _BG = {"priority": "background", "fallback": True}
 # Waits before retrying a planner, critic or responder call that failed (a deadline under load, a blip).
 LLM_RETRY_DELAYS_S: tuple[float, ...] = (2.0, 6.0)
@@ -369,17 +373,17 @@ async def _run_step_without_unrequested(step: PlanStep, inp: StepInput, skipped:
         excluded_capabilities.reset(token)
 
 
-def _result_body(step_id: str, res: dict) -> str:
+def _result_body(step_id: str, res: dict, limit: int = _STEP_DIGEST_CHARS) -> str:
     if res.get("ok"):
-        body = str(res.get("text") or "")[:_STEP_DIGEST_CHARS]
+        body = str(res.get("text") or "")[:limit]
         return wrap_untrusted(body, f"step_{step_id}") if res.get("tainted") else body
-    return f"FAILED: {str(res.get('error') or '')[:_STEP_DIGEST_CHARS]}"
+    return f"FAILED: {str(res.get('error') or '')[:limit]}"
 
 
 def _step_context(inp: StepInput) -> str:
     parts = [f"Overall goal: {inp['goal']}"]
     for dep_id, res in inp["dep_results"].items():
-        parts.append(f"Output of {dep_id}:\n{_result_body(dep_id, res)}")
+        parts.append(f"Output of {dep_id}:\n{_result_body(dep_id, res, _HANDOFF_CHARS)}")
     if inp["feedback"]:
         fb = inp["feedback"]
         if inp.get("tainted"):
@@ -503,7 +507,11 @@ async def critic(state: OrchestratorState) -> dict:
     except LLMError as exc:  # review is optional: what was gathered goes out as it is
         log.warning("critic.skipped", error=_err(exc))
         return {"todo": []}
-    step_ids = {s["id"] for s in steps}
+    results = state.get("results", {})
+    # A studio step that succeeded has already sent its file to the chat and Drive: redoing it sends a
+    # second copy (evals 2026-10-10: the deck and the summary arrived twice), so it is final.
+    step_ids = {s["id"] for s in steps
+                if not (s["agent"] in DELIVERING_AGENTS and results.get(s["id"], {}).get("ok"))}
     redo = [s for s in verdict.revise_steps if s in step_ids]
     if verdict.accept or not redo:
         return {"todo": []}

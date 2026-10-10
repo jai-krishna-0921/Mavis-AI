@@ -214,3 +214,17 @@ def test_dispatch_and_cli(tmp_path: Path, capsys) -> None:
     assert capsys.readouterr().out.strip() == str(target) and target.exists()
     assert main("doc", [str(tmp_path / "missing.json"), str(target)]) == 1
     assert main("doc", [str(spec_path)]) == 1
+
+
+def test_column_text_shrinks_to_fit_its_count_and_wrapping():
+    """Evals 2026-10-10: six two-line bullets overflowed a card at the size one bullet fits."""
+    from mavis.studio.render_pptx import _fit_block
+
+    one = ["Free $0, unlimited text, ads in US and most markets"]
+    six = one * 6
+    assert _fit_block(one, 5.3, 3.4, 20, 11, after_pt=10) == 20
+    small = _fit_block(six, 5.3, 3.4, 20, 11, after_pt=10)
+    assert 11 <= small < 20
+    per_line = int(5.3 * 72 / (small * 0.52))
+    lines = sum(-(-len(t) // per_line) for t in six)
+    assert (lines * small * 1.2 + 50) / 72 <= 3.4
