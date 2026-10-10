@@ -211,9 +211,13 @@ describe('invites', () => {
     expect(await within(dlg).findByText('1 of 5 uses')).toBeInTheDocument()
     await user.type(within(dlg).getByLabelText('Name (optional)'), 'Anjali')
     await user.click(within(dlg).getByRole('button', { name: 'Create link' }))
+    // the full link is shown once, from the create response, even after the list reloads without it
+    const fresh = await within(dlg).findByRole('status')
+    expect((within(fresh).getByLabelText('New invite link') as HTMLInputElement).value).toContain('?invite=')
     const row = (await within(dlg).findByText('Anjali')).closest('li')!
     expect(within(row).getByText('0 of 5 uses')).toBeInTheDocument()
-    await user.click(within(row).getByRole('button', { name: /Copy link/ }))
+    expect(within(row).queryByRole('button', { name: /Copy link/ })).not.toBeInTheDocument()
+    await user.click(within(fresh).getByRole('button', { name: /Copy link/ }))
     expect(await navigator.clipboard.readText()).toContain('?invite=')
     await user.click(within(row).getByRole('button', { name: 'Revoke link Anjali' }))
     await waitFor(() => expect(within(dlg).queryByText('Anjali')).not.toBeInTheDocument())

@@ -111,7 +111,8 @@ export const handlers = [
     return HttpResponse.json(db().preferences)
   }),
 
-  http.get(`${B}/invites`, () => HttpResponse.json(db().invites)),
+  // like the real API: the list never returns a full link (only a hint); the full link comes once, from create
+  http.get(`${B}/invites`, () => HttpResponse.json(db().invites.map((i) => ({ ...i, link: null, hint: i.hint ?? String(i.code).slice(-4) })))),
   http.post(`${B}/invites`, async ({ request }) => {
     const bad = needCsrf(request); if (bad) return bad
     const body = (await request.json().catch(() => ({}))) as { name?: string }
