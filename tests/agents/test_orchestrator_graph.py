@@ -833,3 +833,35 @@ async def test_an_account_named_only_by_the_planner_is_not_requested_and_reruns_
     final = await _run(tid)
     assert seen == [frozenset(), frozenset({Capability.NOTION})]  # one re-run, then it gives up
     assert "__interrupt__" in final  # still failing after the skip: the old connect pause, not a loop
+
+
+def test_a_step_hands_its_whole_findings_to_the_steps_that_depend_on_it():
+    """Evals 2026-10-10: research on three products was cut at 3000 characters before the deck step, so
+    the deck had only the first product's pricing. The handoff carries the findings; the digest for the
+    critic and responder stays short."""
+    research = "ChatGPT pricing. " * 200 + "Copilot pricing: $30 per seat."
+    res = {"ok": True, "text": research, "tainted": False}
+    inp = {"goal": "compare", "dep_results": {"s1": res}, "feedback": "", "tainted": False}
+    assert "Copilot pricing: $30 per seat." in og._step_context(inp)
+    assert "Copilot" not in og._result_body("s1", res)
+
+
+async def test_a_delivered_studio_file_is_never_redone_by_the_critic(user, fake_llm, rec_bus, monkeypatch):
+    """Evals 2026-10-10: the critic asked to redo every step and the deck and summary arrived twice. A
+    studio step that succeeded already sent its file; research can still be redone."""
+    calls: list[str] = []
+
+    async def _fake_step(step, user_id, context):
+        calls.append(step.id)
+        return StepOutcome(ok=True, text=f"r-{step.id}")
+
+    monkeypatch.setattr(og, "run_step_agent", _fake_step)
+    fake_llm.push_structured(_plan(PlanStep(id="s1", agent="research", instruction="research"),
+                                   PlanStep(id="s2", agent="studio", instruction="deck", depends_on=["s1"])))
+    fake_llm.push_structured(CriticVerdict(accept=False, revise_steps=["s1", "s2"], feedback="more prices"))
+    fake_llm.push_structured(CriticVerdict(accept=True))
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["done"]))
+    tid = await tasks.create(user.id, goal="g")
+    await _run(tid)
+    assert calls.count("s1") == 2
+    assert calls.count("s2") == 1

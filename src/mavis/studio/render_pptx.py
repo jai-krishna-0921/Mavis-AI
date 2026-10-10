@@ -80,6 +80,18 @@ def _fit(text: str, width_in: float, max_pt: int, min_pt: int) -> int:
     return max(min_pt, min(max_pt, int(width_in / need)))
 
 
+def _fit_block(items: list[str], width_in: float, height_in: float, max_pt: int, min_pt: int,
+               after_pt: int = 0) -> int:
+    """Largest size (pt) at which these paragraphs, wrapped to the width, fit the height: the count and
+    the wrapping matter, not only the longest line (six two-line bullets overflow at a size one fits)."""
+    for size in range(max_pt, min_pt - 1, -1):
+        per_line = max(1, int(width_in * 72 / (size * 0.52)))  # average glyph is about half an em
+        lines = sum(max(1, -(-len(t) // per_line)) for t in items)
+        if (lines * size * 1.2 + after_pt * max(len(items) - 1, 0)) / 72 <= height_in:
+            return size
+    return min_pt
+
+
 def _palette(theme: Theme, n: int) -> list[str]:
     """n series colours: the theme palette, then lighter tints of it."""
     base = theme.palette()
@@ -245,14 +257,15 @@ def _two_column_slide(ctx: _Ctx, slide, s: Slide) -> None:
     w = (CW - gap) / 2
     cols = [(s.left_heading, s.left, t.primary), (s.right_heading, s.right, t.secondary)]
     longest = max((len(b) for _, items, _ in cols for b in items), default=0)
-    size = _tier(longest, [(60, 20), (100, 18)], 16)
-    for i, (heading, items, color) in enumerate(cols):
+    bodies = [[_clip(b, 160) for b in items if b.strip()][:6] for _, items, _ in cols]
+    size = min([_tier(longest, [(60, 20), (100, 18)], 16)] +
+               [_fit_block(b, w - 0.7, 3.4, 20, 11, after_pt=10) for b in bodies if b])
+    for i, ((heading, _, color), body) in enumerate(zip(cols, bodies, strict=True)):
         x = M + i * (w + gap)
         _rect(slide, x, TOP, w, 4.7, t.surface)
         _rect(slide, x, TOP, w, 0.08, color)
         _text(slide, x + 0.35, TOP + 0.35, w - 0.7, 0.6, _clip(heading, 60), font=t.heading_font, size=22,
               color=color if color != t.secondary else t.text, bold=True)
-        body = [_clip(b, 160) for b in items if b.strip()][:6]
         if body:
             _text(slide, x + 0.35, TOP + 1.15, w - 0.7, 3.4, body, font=t.body_font, size=size, color=t.text,
                   after=10, bullet=color)
