@@ -97,7 +97,44 @@ async def test_parallel_steps_then_dependent(settings, user, fake_llm, rec_bus, 
     assert ev.payload["task_id"] == tid
 
 
-async def test_sequential_by_default(user, fake_llm, rec_bus, monkeypatch):
+async def test_ten_independent_sub_agents_run_at_once_by_default(user, fake_llm, rec_bus, monkeypatch):
+    """The planner may fan out as many sub-agents as the work needs; independent ones run in parallel."""
+    timeline: list[tuple[str, str]] = []
+    monkeypatch.setattr(og, "run_step_agent", _timed_step(timeline))
+    steps = [PlanStep(id=f"s{i}", agent="research", instruction=f"topic {i}") for i in range(1, 11)]
+    fake_llm.push_structured(_plan(*steps))
+    fake_llm.push_structured(CriticVerdict(accept=True))
+    fake_llm.push_structured(ComposedMessage(send=True, messages=["ok"]))
+    tid = await tasks.create(user.id, goal="g")
+    out = await _run(tid)
+    starts = [i for i, e in enumerate(timeline) if e[0] == "start"]
+    first_end = next(i for i, e in enumerate(timeline) if e[0] == "end")
+    assert len(starts) == 10 and max(starts) < first_end and len(out["results"]) == 10
+
+
+def test_a_studio_step_is_a_valid_sub_agent():
+    og.validate_plan(_plan(PlanStep(id="s1", agent="research", instruction="find facts"),
+                           PlanStep(id="s2", agent="studio", instruction="deck from s1", depends_on=["s1"])))
+    assert "studio" in og._planner_system()
+
+
+async def test_studio_steps_dispatch_to_the_studio_with_their_handoff(monkeypatch):
+    from mavis.studio import agent as studio
+
+    seen = []
+
+    async def fake_run_step(user_id, step_id, instruction, context, *, tainted):
+        seen.append((user_id, step_id, instruction, context, tainted))
+        return StepOutcome(ok=True, text="Made it")
+
+    monkeypatch.setattr(studio, "run_step", fake_run_step)
+    out = await og.run_step_agent(PlanStep(id="s3", agent="studio", instruction="deck"), 7, "facts from s1",
+                                  tainted=False)
+    assert out.ok and seen == [(7, "s3", "deck", "facts from s1", False)]
+
+
+async def test_sequential_when_parallelism_is_one(settings, user, fake_llm, rec_bus, monkeypatch):
+    monkeypatch.setattr(settings, "task_step_parallelism", 1)
     timeline: list[tuple[str, str]] = []
     monkeypatch.setattr(og, "run_step_agent", _timed_step(timeline))
     fake_llm.push_structured(_plan(PlanStep(id="s1", agent="research", instruction="flights"),

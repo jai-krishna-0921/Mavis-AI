@@ -319,7 +319,7 @@ async def test_meta_and_permissions_feed_the_ownership_rule():
     meta = {**drive_file("f1", "Plan"), "ownedByMe": True}
     perms = {
         "permissions": [
-            {"id": "1", "type": "user", "role": "owner", "emailAddress": "me@kripya.com"},
+            {"id": "1", "type": "user", "role": "owner", "emailAddress": "me@orbit.test"},
             {"id": "2", "type": "user", "role": "reader", "emailAddress": "x@y.com"},
         ]
     }
@@ -329,7 +329,7 @@ async def test_meta_and_permissions_feed_the_ownership_rule():
     m = await ex.execute(USER, "drive.meta", {"file_id": "f1"})
     p = await ex.execute(USER, "drive.permissions", {"file_id": "f1"})
     assert m.data["name"] == "Plan" and m.data["mimeType"] == DOC_MIME
-    assert ownership(extract_list(p.data, "permissions"), "me@kripya.com") == (True, True)
+    assert ownership(extract_list(p.data, "permissions"), "me@orbit.test") == (True, True)
     assert "emailAddress" in fake.requests[-1].url.params["fields"]
 
 

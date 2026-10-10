@@ -60,7 +60,7 @@ from mavis.tools.registry import current_task_id, excluded_capabilities, get_reg
 log = structlog.get_logger()
 
 MAX_REVISIONS = 2
-MAX_STEPS = 8
+MAX_STEPS = 12
 _STEP_DIGEST_CHARS = 3000
 _BG = {"priority": "background", "fallback": True}
 # Waits before retrying a planner, critic or responder call that failed (a deadline under load, a blip).
@@ -69,14 +69,19 @@ PARTIAL_LEAD = "I ran out of time before wrapping this up, so this is what I had
 EXPIRED_LEAD = "I couldn't get what I was waiting on, so I'm sending what I'd finished so far:"
 _PARTIAL_BUBBLE_CHARS = 3500
 
-PLANNER_PROMPT = """You are Mavis's planner. Break the user's goal into 1-6 steps for specialist agents.
-Run independent steps in parallel by leaving depends_on empty; add depends_on only when a step needs another
-step's output. Use short ids s1, s2, ...
+PLANNER_PROMPT = """You are Mavis's planner. Break the user's goal into steps, each run by its own sub-agent.
+Use as many sub-agents as the work needs (1 to 12): one per independent piece (each person, company, file,
+topic or deliverable). Independent steps run in parallel: leave their depends_on empty. A step that needs
+others' results lists them in depends_on and receives their output (the handoff). Use short ids s1, s2, ...
 Give every step a short plain "title" (at most 8 words, no links), for example "Search for standing desks".
 
 Available agents:
 {specialists}
 - spawn: a generic worker for anything else. Set `tools` to a subset of: {spawn_tools}
+- studio: designs one polished deck, document or spreadsheet with the design skills, in the user's brand,
+  saves it to their Drive and sends it in chat. Its instruction is the full brief (purpose, audience, the
+  points, the format: pptx, docx, xlsx, pdf or google). Put research steps before it in depends_on; use
+  one studio step per file.
 
 Set deliverable to "message" unless the user asked for a file (pptx, pdf, docx, xlsx, chart).
 Prefer the fewest steps that do the job well."""
@@ -192,7 +197,7 @@ def validate_plan(plan: Plan) -> None:
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate step ids")
     for s in plan.steps:
-        if s.agent != "spawn" and s.agent not in SPECIALISTS:
+        if s.agent not in ("spawn", "studio") and s.agent not in SPECIALISTS:
             raise ValueError(f"unknown agent {s.agent!r} in step {s.id}")
         for d in s.depends_on:
             if d not in ids:
@@ -325,6 +330,10 @@ async def run_step_agent(
     if step.agent == "spawn":
         return await spawn_agent(user_id, role=f"worker {step.id}", goal=step.instruction,
                                  tools=step.tools, context=context, tainted=taint)
+    if step.agent == "studio":
+        from mavis.studio.agent import run_step  # lazy: the studio imports the integrations
+
+        return await run_step(user_id, step.id, step.instruction, context, tainted=taint)
     return await run_specialist(get_specialist(step.agent), user_id, step.instruction, context, tainted=taint)
 
 

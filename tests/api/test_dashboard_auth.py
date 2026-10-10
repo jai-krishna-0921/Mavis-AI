@@ -329,17 +329,17 @@ async def test_google_start_uses_openid_email_profile_pkce_and_its_own_redirect(
 
 
 async def test_google_signs_in_the_user_whose_email_is_confirmed(app, google):
-    assert await emails.confirm(5, "Me@Kripya.com", "telegram_link")
+    assert await emails.confirm(5, "Me@Orbit.test", "telegram_link")
     async with new_client(app) as c:
         q = await begin_google(c)
         r = await google_callback(c, google, q)
         assert r.status_code == 302 and r.headers["location"] == "/workspace"
         assert (await c.get(f"{API}/me")).json()["user_id"] == "5"
-        assert (await c.get(f"{API}/me")).json()["email"] == "me@kripya.com"
+        assert (await c.get(f"{API}/me")).json()["email"] == "me@orbit.test"
 
 
 async def test_a_native_google_grant_alone_never_signs_anyone_in(app, google, tokens):
-    await tokens.save(6, NativeProvider.GOOGLE, account={"email": "me@kripya.com", "scopes": []},
+    await tokens.save(6, NativeProvider.GOOGLE, account={"email": "me@orbit.test", "scopes": []},
                       access_token="a", refresh_token="r", expires_at=None)
     async with new_client(app) as c:
         r = await google_callback(c, google, await begin_google(c))
@@ -358,14 +358,14 @@ async def test_unknown_email_never_creates_a_user_and_goes_to_link_telegram(app,
 
 async def test_completing_telegram_after_google_confirms_that_email(app, google):
     async with new_client(app) as c:
-        r = await google_callback(c, google, await begin_google(c), email="new@kripya.com")
+        r = await google_callback(c, google, await begin_google(c), email="new@orbit.test")
         link_id = r.headers["location"].split("?i=")[1]
         nonce = (await start_login(c, link_id=link_id))["nonce"]
         await approve_in_bot(nonce, 7)
         assert (await c.get(f"{API}/auth/telegram/poll", params={"nonce": nonce})).json()["status"] == "ok"
-    assert await emails.user_for("new@kripya.com") == 7
+    assert await emails.user_for("new@orbit.test") == 7
     async with new_client(app) as c2:  # next time Google alone signs them in
-        r = await google_callback(c2, google, await begin_google(c2), email="new@kripya.com")
+        r = await google_callback(c2, google, await begin_google(c2), email="new@orbit.test")
         assert r.headers["location"] == "/workspace"
 
 
@@ -379,7 +379,7 @@ async def test_an_unknown_link_id_is_refused(app):
     {"aud": "someone-else"}, {"iss": "https://evil.example"}, {"exp": 1}, {"email_verified": False},
     {"nonce": "not-mine"}, {"kid": "unknown-key"}, {"sub": ""}])
 async def test_bad_id_tokens_are_refused(app, google, claims):
-    await emails.confirm(5, "me@kripya.com", "telegram_link")
+    await emails.confirm(5, "me@orbit.test", "telegram_link")
     async with new_client(app) as c:
         q = await begin_google(c)
         claims = {"nonce": q["nonce"], **claims}
@@ -390,7 +390,7 @@ async def test_bad_id_tokens_are_refused(app, google, claims):
 
 
 async def test_wrong_state_denied_and_forged_signature_are_refused(app, google):
-    await emails.confirm(5, "me@kripya.com", "telegram_link")
+    await emails.confirm(5, "me@orbit.test", "telegram_link")
     async with new_client(app) as c:
         q = await begin_google(c)
         r = await c.get(f"{API}/auth/google/callback", params={"code": "c", "state": "other"})
@@ -403,7 +403,7 @@ async def test_a_token_signed_by_another_key_is_refused(app, google):
     import httpx
     from cryptography.hazmat.primitives.asymmetric import rsa
 
-    await emails.confirm(5, "me@kripya.com", "telegram_link")
+    await emails.confirm(5, "me@orbit.test", "telegram_link")
     other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     async with new_client(app) as c:
         q = await begin_google(c)
@@ -415,7 +415,7 @@ async def test_a_token_signed_by_another_key_is_refused(app, google):
 
 
 async def test_jwks_is_cached(app, google):
-    await emails.confirm(5, "me@kripya.com", "telegram_link")
+    await emails.confirm(5, "me@orbit.test", "telegram_link")
     for _ in range(2):
         async with new_client(app) as c:
             await google_callback(c, google, await begin_google(c))
@@ -426,13 +426,13 @@ async def test_confirming_an_email_in_preferences_needs_the_same_session(app, go
     c, _ = await signed_in(app, 8)
     async with c:
         q = await begin_google(c, confirm=True)
-        r = await google_callback(c, google, q, email="mine@kripya.com")
+        r = await google_callback(c, google, q, email="mine@orbit.test")
         assert r.headers["location"] == "/preferences?email=confirmed"
-    assert await emails.user_for("mine@kripya.com") == 8
+    assert await emails.user_for("mine@orbit.test") == 8
     # an address that belongs to someone else cannot be taken
     c2, _ = await signed_in(app, 9)
     async with c2:
-        r = await google_callback(c2, google, await begin_google(c2, confirm=True), email="mine@kripya.com")
+        r = await google_callback(c2, google, await begin_google(c2, confirm=True), email="mine@orbit.test")
         assert r.headers["location"] == "/preferences?email=taken"
     async with new_client(app) as anon:  # no session: confirm mode is not available
         assert (await anon.get(f"{API}/auth/google/start", params={"confirm": "1"})).headers["location"] == "/login"
@@ -547,7 +547,7 @@ async def test_the_session_cookie_is_a_host_cookie(app):
 # --- linking a Google address through Telegram -----------------------------------------------------------
 
 
-async def stash(c, google, email="new@kripya.com"):
+async def stash(c, google, email="new@orbit.test"):
     r = await google_callback(c, google, await begin_google(c), email=email)
     return r.headers["location"].split("?i=")[1]
 
@@ -555,8 +555,8 @@ async def stash(c, google, email="new@kripya.com"):
 async def test_the_link_url_carries_no_address_and_only_its_browser_can_use_it(app, google):
     async with new_client(app) as c, new_client(app) as other:
         link_id = await stash(c, google)
-        assert "kripya" not in link_id and "@" not in link_id
-        assert (await c.get(f"{API}/auth/telegram/link", params={"i": link_id})).json() == {"email": "new@kripya.com"}
+        assert "orbit" not in link_id and "@" not in link_id
+        assert (await c.get(f"{API}/auth/telegram/link", params={"i": link_id})).json() == {"email": "new@orbit.test"}
         # the same URL in another browser (forwarded) is useless
         assert (await other.get(f"{API}/auth/telegram/link", params={"i": link_id})).status_code == 404
         r = await other.post(f"{API}/auth/telegram/start", json={"link_id": link_id})
@@ -571,7 +571,7 @@ async def test_the_link_is_spent_once_approved_and_expires(app, google, clock):
         await approve_in_bot(nonce, 7)
         assert (await c.post(f"{API}/auth/telegram/start", json={"link_id": link_id})).status_code == 400
     async with new_client(app) as c2:
-        link2 = await stash(c2, google, email="later@kripya.com")
+        link2 = await stash(c2, google, email="later@orbit.test")
         clock.advance(minutes=16)
         assert (await c2.post(f"{API}/auth/telegram/start", json={"link_id": link2})).status_code == 400
 

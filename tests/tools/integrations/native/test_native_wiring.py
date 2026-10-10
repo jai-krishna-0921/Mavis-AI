@@ -140,7 +140,7 @@ async def test_the_router_reports_native_use_only_for_an_active_covering_grant(t
                           client)
     assert not await router.uses_native(a.id, Capability.SLACK)
     await grant_slack(tokens, a.id)
-    await grant_google(tokens, a.id, "me@kripya.com")
+    await grant_google(tokens, a.id, "me@orbit.test")
     assert await router.uses_native(a.id, Capability.SLACK)
     assert await router.uses_native(a.id, Capability.GMAIL) and await router.uses_native(a.id, Capability.CALENDAR)
     assert not await router.uses_native(a.id, Capability.DRIVE)  # drive.readonly was not granted here

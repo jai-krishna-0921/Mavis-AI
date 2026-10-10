@@ -13,7 +13,7 @@ from .gfake import FakeGoogle, Tokens, error
 
 USER = UserRef(user_id=3)
 PROFILE = r"/profile$"
-OK = httpx.Response(200, json={"emailAddress": "me@kripya.com"})
+OK = httpx.Response(200, json={"emailAddress": "me@orbit.test"})
 
 
 async def run(fake: FakeGoogle, tokens: Tokens | None = None, action="mail.profile", args=None):

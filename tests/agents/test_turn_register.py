@@ -54,7 +54,7 @@ async def test_chat_reply_slurs_are_masked(db, channel, fake_llm, memory, bus):
 
 @pytest.mark.parametrize("texts", [
     ["lol this week is shit", "fuck. my dog died this morning"],  # upset: swearing off
-    ["this shit is broken lol", "Good afternoon. Could you please summarise the budget discussion?"],
+    ["this shit is broken lol", "Good afternoon. I trust the week has treated you well."],  # formal now
     ["can u check my mail", "cool thx"],  # never swore
 ])
 async def test_unmirrored_swearing_is_rewritten_once(db, channel, fake_llm, memory, bus, texts):

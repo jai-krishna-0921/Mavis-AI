@@ -142,10 +142,10 @@ async def test_connect_returns_the_native_url_and_the_callback_returns_to_the_wo
         vendor.routes[GOOGLE_TOKEN_URL] = lambda req: httpx.Response(200, json={
             "access_token": "ya29", "refresh_token": "1//r", "expires_in": 3600,
             "scope": "openid email https://www.googleapis.com/auth/gmail.readonly"})
-        vendor.routes[GOOGLE_USERINFO_URL] = lambda req: httpx.Response(200, json={"sub": "9", "email": "Me@Kripya.com"})
+        vendor.routes[GOOGLE_USERINFO_URL] = lambda req: httpx.Response(200, json={"sub": "9", "email": "Me@Orbit.test"})
         cb = await c.get("/oauth/google/callback", params={"code": "c", "state": query(url)["state"]})
         assert cb.status_code == 303 and cb.headers["location"] == "/workspace?connected=google"
-    assert await emails.user_for("me@kripya.com") is None  # a grant never becomes a sign-in identity
+    assert await emails.user_for("me@orbit.test") is None  # a grant never becomes a sign-in identity
 
 
 async def test_a_failed_web_connect_also_returns_to_the_workspace(app, oauth):
@@ -318,7 +318,7 @@ async def test_concurrent_invite_creates_cannot_exceed_the_cap(app):
 # --- connector consent is bound to the session that began it ----------------------------------------------
 
 
-def google_grant_routes(vendor, email="victim@kripya.com"):
+def google_grant_routes(vendor, email="victim@orbit.test"):
     vendor.routes[GOOGLE_TOKEN_URL] = lambda req: httpx.Response(200, json={
         "access_token": "ya29", "refresh_token": "1//r", "expires_in": 3600,
         "scope": "openid email https://www.googleapis.com/auth/gmail.readonly"})
@@ -351,7 +351,7 @@ async def test_a_web_connect_finishes_in_the_session_that_began_it_and_never_con
         url = (await c.post(f"{API}/connectors/google/connect", headers=csrf, json={})).json()["url"]
         r = await c.get("/oauth/google/callback", params={"code": "c", "state": query(url)["state"]})
         assert r.status_code == 303 and await tokens.grant(1, NativeProvider.GOOGLE) is not None
-    assert await emails.user_for("victim@kripya.com") is None
+    assert await emails.user_for("victim@orbit.test") is None
 
 
 async def test_a_telegram_started_connect_link_still_works_without_a_session(app, oauth, vendor, tokens):
@@ -359,9 +359,9 @@ async def test_a_telegram_started_connect_link_still_works_without_a_session(app
     state = query(await oauth.authorize_url(1, NativeProvider.GOOGLE))["state"]
     async with new_client(app) as c:
         r = await c.get("/oauth/google/callback", params={"code": "c", "state": state})
-        assert r.status_code == 200 and "victim@kripya.com" in r.text
+        assert r.status_code == 200 and "victim@orbit.test" in r.text
     assert await tokens.grant(1, NativeProvider.GOOGLE) is not None
-    assert await emails.user_for("victim@kripya.com") is None  # and it is not a sign-in identity
+    assert await emails.user_for("victim@orbit.test") is None  # and it is not a sign-in identity
 
 
 # --- account deletion -------------------------------------------------------------------------------------

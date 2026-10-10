@@ -41,7 +41,7 @@ async def test_google_success_enqueues_the_connection_check(web, oauth, vendor):
     google_vendor(vendor)
     state = query(await oauth.authorize_url(5, G, 12))["state"]
     r = await c.get("/oauth/google/callback", params={"code": "c", "state": state})
-    assert r.status_code == 200 and "me@kripya.com is now linked" in r.text
+    assert r.status_code == 200 and "me@orbit.test is now linked" in r.text
     [job] = bus.jobs
     assert job.kind is JobKind.CONNECTION_CHECK and job.user_id == 5 and job.payload == {"pending_id": 12}
 
@@ -61,7 +61,7 @@ async def test_slack_success_without_a_pending_tells_the_user_and_still_activate
     [pending] = await connections.open_for(5, Capability.SLACK)
     assert job.kind is JobKind.CONNECTION_CHECK and job.payload == {"pending_id": pending.id}
     [text] = await outbox()
-    assert text.startswith("Slack is connected") and "Kripya" in text
+    assert text.startswith("Slack is connected") and "Orbit" in text
 
 
 async def test_denied_says_so_plainly_and_echoes_nothing(web, oauth):
@@ -126,24 +126,24 @@ async def named_user(name):
 
 async def test_the_success_page_names_the_mavis_account_and_the_google_account(web, oauth, vendor, db):
     c, _ = web
-    google_vendor(vendor, email="victim@kripya.com")
+    google_vendor(vendor, email="victim@orbit.test")
     u = await named_user("Priya <b>Nair</b>")
     state = query(await oauth.authorize_url(u.id, G))["state"]
     r = await c.get("/oauth/google/callback", params={"code": "c", "state": state})
     assert r.status_code == 200
-    assert "victim@kripya.com" in r.text and "Priya &lt;b&gt;Nair&lt;/b&gt;" in r.text
+    assert "victim@orbit.test" in r.text and "Priya &lt;b&gt;Nair&lt;/b&gt;" in r.text
     assert "<b>" not in r.text  # the display name is escaped, it is the other person's text
     assert "not you" in r.text  # tells a mistaken consenter what to do
 
 
 async def test_the_telegram_confirmation_names_the_google_account(web, oauth, vendor, db):
     c, _ = web
-    google_vendor(vendor, email="me@kripya.com")
+    google_vendor(vendor, email="me@orbit.test")
     u = await named_user("Priya")
     state = query(await oauth.authorize_url(u.id, G, 4))["state"]  # even with a pending connect
     await c.get("/oauth/google/callback", params={"code": "c", "state": state})
     [text] = await outbox()
-    assert "me@kripya.com" in text and "—" not in text and "–" not in text
+    assert "me@orbit.test" in text and "—" not in text and "–" not in text
 
 
 async def test_the_slack_page_and_confirmation_name_the_workspace(web, oauth, vendor, db):
@@ -152,9 +152,9 @@ async def test_the_slack_page_and_confirmation_name_the_workspace(web, oauth, ve
     u = await named_user("Priya")
     state = query(await oauth.authorize_url(u.id, S))["state"]
     r = await c.get("/oauth/slack/callback", params={"code": "c", "state": state})
-    assert "Kripya" in r.text and "Priya" in r.text
+    assert "Orbit" in r.text and "Priya" in r.text
     [text] = await outbox()
-    assert "Kripya" in text
+    assert "Orbit" in text
 
 
 async def test_a_user_without_a_name_is_still_identified(web, oauth, vendor, db):
@@ -184,10 +184,10 @@ async def test_a_google_connect_teaches_the_users_address(web, oauth, vendor, us
     from mavis.attention.connector_ingest import load_identities
 
     c, _ = web
-    google_vendor(vendor, email="Jai.K@Kripya.com")
+    google_vendor(vendor, email="Jai.K@Orbit.test")
     state = query(await oauth.authorize_url(user.id, G, 12))["state"]
     assert (await c.get("/oauth/google/callback", params={"code": "c", "state": state})).status_code == 200
-    assert (await load_identities(user.id))["emails"] == ["jai.k@kripya.com"]
+    assert (await load_identities(user.id))["emails"] == ["jai.k@orbit.test"]
 
 
 async def test_a_slack_connect_teaches_the_users_slack_id_and_workspace(web, oauth, vendor, user):

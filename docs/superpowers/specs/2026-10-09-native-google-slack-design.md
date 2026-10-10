@@ -24,7 +24,7 @@ generic connectors framework, multi-user, revenue intelligence) is parked until 
 1. **Transport only changes.** A `NativeRouter` implements `IntegrationProvider`. Per capability it uses the native
    executor when native is configured and the user has an ACTIVE native grant, else Composio (fallback while we
    verify). `INTEGRATION_PROVIDER=native` selects the router. Composio removal is a later one-line change.
-2. **Google OAuth app is External, published "In production", unverified.** kripya.com mail is Microsoft 365, so
+2. **Google OAuth app is External, published "In production", unverified.** the owner's company mail is on Microsoft 365, so
    an Internal Workspace app is not available. Testing status would expire Gmail refresh tokens every 7 days;
    production does not. Unverified means a one-time "Google hasn't verified this app" screen (Advanced, then
    continue) and a lifetime cap of 100 users. Verification (restricted Gmail scopes need a security assessment) is

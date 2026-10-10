@@ -19,7 +19,6 @@ What Mavis can and cannot do today, what it costs, and what would lift each limi
 | API cost | Free | Gmail, Calendar, Drive, Docs, Sheets, People, Tasks, Meet APIs are free within per-user quotas a personal assistant stays far below. |
 | Users | 100 people, ever (lifetime cap for the project) | Applies while the app is unverified. Each person sees a one-time "Google hasn't verified this app" screen. |
 | Lift the cap | Google verification | Gmail and full Drive are "restricted" scopes: verification needs an annual paid third-party security assessment and takes weeks. |
-| Company mail | kripya.com is on Microsoft 365, not Google | Outlook and Teams are not connected (deferred by owner decision). |
 | New mail delay | Up to about 2 minutes | Gmail is polled, not pushed. Push (Pub/Sub) can come later if needed. |
 | First sync | Last 14 days of mail, calendar 7 days back to 30 ahead | Older data is searchable on demand, not pre-learned. |
 | Writes | Docs, Sheets, Slides, Tasks, Contacts, calendar events (with location), Drive folders and moves, all from chat | Sharing, sending mail and inviting guests always ask first. A self-only write (a new Doc) asks for one tap when the chat has just read mail or files, because that content could carry hidden instructions. |

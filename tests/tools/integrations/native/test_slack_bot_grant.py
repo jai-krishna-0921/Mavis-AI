@@ -17,7 +17,7 @@ BOT_TOKEN = "xoxb-bot-secret-token"
 
 
 def install(vendor, *, bot=True, dm="D0DM00001"):
-    body = {"ok": True, "team": {"id": "T1", "name": "Kripya"},
+    body = {"ok": True, "team": {"id": "T1", "name": "Orbit"},
             "authed_user": {"id": "U1", "scope": "channels:history,chat:write", "access_token": "xoxp-user"}}
     if bot:
         body |= {"access_token": BOT_TOKEN, "bot_user_id": "UBOT01", "scope": "chat:write,im:history"}

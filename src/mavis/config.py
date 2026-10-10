@@ -203,8 +203,10 @@ class Settings(BaseSettings):
     # it, but only when that previous turn came within this many minutes (older turns are unrelated).
     failed_turn_link_minutes: int = 30
     tool_timeout_s: float = 45  # per tool call inside react_loop; a tool may override via metadata
-    task_step_parallelism: int = 1
-    spawn_max_per_step: int = 3  # spawned workers one model step may start
+    # sub-agents a background task runs at once (steps and workers); every one of their model calls is
+    # background priority, so a chat reply still gets the next model slot
+    task_step_parallelism: int = 10
+    spawn_max_per_step: int = 10  # spawned workers one model step may start
     initiative_act_enabled: bool = True
     task_await_ttl_s: float = 86400  # a task waiting on a connection or approval ends after this long
     task_timeout_max_s: float = 1200  # no task clock is ever extended past this
