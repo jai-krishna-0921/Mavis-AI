@@ -35,12 +35,11 @@ from typing import Any
 import httpx
 from sqlalchemy import select
 
-from mavis.domain.tasks import ApprovalStatus
-
 from mavis.channels.test_sink import active_test_chat, read_sink
 from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.integrations import UserRef
+from mavis.domain.tasks import ApprovalStatus
 from mavis.store.db import Session
 from mavis.store.models import Message, PendingApproval, User
 from mavis.tools.integrations.normalize import extract_calendar_items, extract_list, extract_messages
