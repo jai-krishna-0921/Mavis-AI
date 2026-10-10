@@ -7,7 +7,7 @@ from datetime import date
 
 import pytest
 
-from mavis.domain.errors import ActionFailed, ApprovalRequired
+from mavis.domain.errors import ActionFailed
 from mavis.domain.integrations import ConnectionState, ToolResult
 from mavis.domain.policy import Capability, RiskClass
 from mavis.tools.integrations import actions as a
@@ -69,13 +69,17 @@ def test_risk_classes():
     assert ACTIONS["tasks.delete"].risk is RiskClass.DESTRUCTIVE
     for name in ("drive.create_folder", "drive.move", "docs.create", "sheets.create", "tasks.add",
                  "tasks.complete", "tasks.update", "meet.create"):
-        assert ACTIONS[name].risk is RiskClass.WRITE_SELF and ACTIONS[name].taint_approve, name
+        assert ACTIONS[name].risk is RiskClass.WRITE_SELF, name
 
 
-def test_every_workspace_write_self_action_needs_approval_when_tainted():
-    for spec in ACTIONS.values():
-        if spec.capability in WORKSPACE_CAPABILITIES and spec.risk is RiskClass.WRITE_SELF and spec.agents:
-            assert spec.taint_approve, spec.name
+def test_only_contact_changes_need_a_tap_after_third_party_content():
+    """Owner decision (2026-10-10): self-only Workspace writes run without a card. A contact change still
+    asks after mail or file content was read: an injected edit could swap an address for an attacker's,
+    and later mail would go there. Shared files are escalated to OUTWARD by their own pre-steps."""
+    tapped = {spec.name for spec in ACTIONS.values()
+              if spec.capability in WORKSPACE_CAPABILITIES and spec.risk is RiskClass.WRITE_SELF
+              and spec.agents and spec.taint_approve}
+    assert tapped == {"contacts.create", "contacts.update"}
 
 
 def test_chat_exposure_is_reads_plus_the_self_only_writes():
@@ -92,18 +96,12 @@ def test_chat_exposure_is_reads_plus_the_self_only_writes():
         assert spec.risk is RiskClass.OUTWARD or spec.taint_approve or spec.risk is RiskClass.WRITE_SELF, name
 
 
-async def test_tainted_run_queues_docs_create_for_approval(workspace_on, user):
+async def test_tainted_run_creates_a_doc_without_a_card(workspace_on, user):
     registry = ToolRegistry()
     register_integration_tools(registry)
     tool = registry.get("docs_create")
-    assert tool.on_taint is TaintPolicy.APPROVE
-    token = current_run.set(ToolRun(tainted=True))
-    try:
-        with pytest.raises(ApprovalRequired) as exc:
-            await registry.invoke(tool, user.id, a.DocCreateArgs(title="Notes", markdown="hi"))
-    finally:
-        current_run.reset(token)
-    assert exc.value.preview.startswith("📄 New Google Doc: Notes")
+    assert tool.on_taint is TaintPolicy.ALLOW
+    assert registry.get("contacts_update").on_taint is TaintPolicy.APPROVE
 
 
 async def test_untainted_docs_create_runs_without_approval(workspace_on, user):
@@ -204,21 +202,18 @@ async def test_prepare_task_notes_the_verified_title_or_refuses(gtasks, user):
     assert refused.refusal == TASK_UNKNOWN
 
 
-async def test_tainted_task_previews_show_the_real_title(workspace_on, gtasks, user):
+async def test_task_previews_show_the_real_title(workspace_on, gtasks, user):
     registry = ToolRegistry()
     register_integration_tools(registry)
-    token = current_run.set(ToolRun(tainted=True))
-    try:
-        with pytest.raises(ApprovalRequired) as done:
-            await registry.invoke(registry.get("tasks_complete"), user.id, a.TaskCompleteArgs(task_id="t1"))
-        with pytest.raises(ApprovalRequired) as edit:
-            await registry.invoke(registry.get("tasks_update"), user.id,
-                                  a.TaskUpdateArgs(task_id="t1", title="Rent", due=date(2026, 10, 9)))
-    finally:
-        current_run.reset(token)
-    assert done.value.preview == "✅ Mark a task done\nTask: Pay rent"
-    assert edit.value.preview == "✅ Update a task\nNew title: Rent\nDue: Fri 09 Oct\nTask: Pay rent"
-    assert "tasks.patch" not in [e[1] for e in gtasks.executed]
+    ctx = ToolContext(user_id=user.id)
+    done_args = a.TaskCompleteArgs(task_id="t1")
+    edit_args = a.TaskUpdateArgs(task_id="t1", title="Rent", due=date(2026, 10, 9))
+    done = registry.get("tasks_complete")
+    edit = registry.get("tasks_update")
+    done_preview = done.render_preview(done_args, ctx) + "\n" + (await done.prepare(ctx, done_args)).note
+    edit_preview = edit.render_preview(edit_args, ctx) + "\n" + (await edit.prepare(ctx, edit_args)).note
+    assert done_preview == "✅ Mark a task done\nTask: Pay rent"
+    assert edit_preview == "✅ Update a task\nNew title: Rent\nDue: Fri 09 Oct\nTask: Pay rent"
 
 
 async def test_a_second_task_edit_in_one_run_sees_the_first(gtasks, user):
@@ -261,3 +256,9 @@ async def test_creating_with_send_as_exports_the_new_file_on_the_same_approval(p
 def test_the_card_says_the_file_will_be_sent():
     preview = a.ACTIONS["docs.create"].preview(a.DocCreateArgs(title="Agenda", send_as="pdf"), "UTC")
     assert preview.startswith("📄 New Google Doc: Agenda\nThen sent to you here as a PDF file.")
+
+
+def test_doc_cards_show_plain_text_not_markdown_marks():
+    preview = ACTIONS["docs.create"].preview(
+        a.DocCreateArgs(title="Agenda", markdown="# Agenda\n**Date:** Sat\n## Goal\nShip `it`"), "UTC")
+    assert preview == "📄 New Google Doc: Agenda\nAgenda\nDate: Sat\nGoal\nShip it"
