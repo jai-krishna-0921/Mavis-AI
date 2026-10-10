@@ -115,21 +115,34 @@ def test_render_result_error_keeps_closing_tag_when_truncated():
     assert out.endswith("</untrusted>") and len(out) <= MAX_RESULT_CHARS
 
 
-def test_calendar_update_is_always_outward():
-    """I7: any update can notify or remove existing guests, which the arguments cannot show."""
-    from mavis.tools.integrations.tools import _make_tool
-
+def test_calendar_update_risk_follows_the_guests():
+    """A guest change is OUTWARD by its arguments; any other edit is the user's own unless the live event
+    has guests, which the pre-step reads (test_event_update_pre_step_escalates_an_event_with_guests)."""
     spec = ACTIONS["calendar.update_event"]
-    cases = [
-        CalendarUpdateArgs(event_id="e1", attendees=[]),  # removes every guest
-        CalendarUpdateArgs(event_id="e1", attendees=["a@example.com"]),
-        CalendarUpdateArgs(event_id="e1", description="private notes"),
-        CalendarUpdateArgs(event_id="e1", start=START, duration_minutes=30),
-    ]
-    tool = _make_tool(spec)
-    for args in cases:
-        assert spec.risk_for(args) is RiskClass.OUTWARD
-        assert tool.effective_risk(args).needs_approval
+    assert spec.risk_for(CalendarUpdateArgs(event_id="e1", attendees=[])) is RiskClass.OUTWARD  # cancels all
+    assert spec.risk_for(CalendarUpdateArgs(event_id="e1", attendees=["a@example.com"])) is RiskClass.OUTWARD
+    assert spec.risk_for(CalendarUpdateArgs(event_id="e1", description="notes")) is RiskClass.WRITE_SELF
+    assert spec.risk_for(CalendarUpdateArgs(event_id="e1", start=START, duration_minutes=30)) \
+        is RiskClass.WRITE_SELF
+
+
+@pytest.mark.parametrize(("attendees", "risk"), [
+    ([{"email": "me@x.io", "self": True}, {"email": "raj@x.io"}], RiskClass.OUTWARD),
+    ([{"email": "me@x.io", "self": True}], None),
+    ([], None),
+])
+async def test_event_update_pre_step_escalates_an_event_with_guests(monkeypatch, attendees, risk):
+    from mavis.tools.integrations import workspace_tools
+    from mavis.tools.registry import ToolContext
+
+    async def fake_get(ctx, action, args, **kw):
+        assert action == "calendar.get" and args.event_id == "e1"
+        return {"summary": "Gym", "attendees": attendees}
+
+    monkeypatch.setattr(workspace_tools, "action_data", fake_get)
+    out = await workspace_tools.prepare_event_update(ToolContext(user_id=1),
+                                                     CalendarUpdateArgs(event_id="e1", location="Home"))
+    assert out.risk is risk and out.note.startswith("Event: Gym")
 
 
 def test_calendar_update_preview_shows_exact_times_and_that_the_rest_stays():

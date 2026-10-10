@@ -153,6 +153,7 @@ async def _card(user_id, tool, args, *, tainted=False, task_status=None):
                                   tainted=tainted)
 
 
+G = "r@x.io"
 CASES = [  # tool, executed args, exact twin (formatting only), same target but other content, unrelated
     ("calendar_create_event", _invite(), _invite(attendees=("JK@example.com",), description="see you"),
      _invite(summary="Interview (rescheduled)"), _invite(start="2026-10-10T15:00:00+05:30")),
@@ -160,11 +161,12 @@ CASES = [  # tool, executed args, exact twin (formatting only), same target but 
      {"to": ["RAJ@x.io"], "subject": "offer", "body": " Hi "},
      {"to": ["raj@x.io"], "subject": "Offer", "body": "Hello Raj, v2"},
      {"to": ["raj@x.io"], "subject": "Contract", "body": "Hi"}),
+    # a guest change: OUTWARD by its arguments (a guest-less edit runs without a card since 2026-10-10)
     ("calendar_update_event",
-     {"event_id": "e1", "start": "2026-10-09T15:00:00+05:30", "duration_minutes": 30},
-     {"event_id": " e1", "start": "2026-10-09T15:00:00+05:30", "duration_minutes": 30},
-     {"event_id": "e1", "start": "2026-10-09T17:00:00+05:30", "duration_minutes": 30},
-     {"event_id": "e2", "start": "2026-10-09T15:00:00+05:30", "duration_minutes": 30}),
+     {"event_id": "e1", "start": "2026-10-09T15:00:00+05:30", "duration_minutes": 30, "attendees": [G]},
+     {"event_id": " e1", "start": "2026-10-09T15:00:00+05:30", "duration_minutes": 30, "attendees": [G]},
+     {"event_id": "e1", "start": "2026-10-09T17:00:00+05:30", "duration_minutes": 30, "attendees": [G]},
+     {"event_id": "e2", "start": "2026-10-09T15:00:00+05:30", "duration_minutes": 30, "attendees": [G]}),
     ("pay_bill", {"account": "A1", "amount": 50, "memo": "rent"}, {"account": "a1", "amount": 50},
      {"account": "A1", "amount": 75}, {"account": "B2", "amount": 50}),
 ]

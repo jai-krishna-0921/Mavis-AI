@@ -578,11 +578,11 @@ def _attendee_risk(args: BaseModel) -> RiskClass:
 
 
 def _update_risk(args: BaseModel) -> RiskClass:
-    """An update is OUTWARD whatever it changes. The arguments cannot show whether the event already has
-    guests, and Google tells every guest about a change (time, title, description) or a removal; an
-    empty `attendees` list removes them all and sends cancellations. Checking the live event would need a
-    read before the risk decision, so every update waits for the user's OK."""
-    return RiskClass.OUTWARD
+    """Changing the guests (adding, replacing, or an empty list that cancels them all) is OUTWARD. Any
+    other change is the user's own business unless the event already has guests, whom Google tells about
+    it: the pre-step (workspace_tools.prepare_event_update) reads the live event and escalates then, and
+    a failed read escalates too."""
+    return RiskClass.OUTWARD if getattr(args, "attendees", None) is not None else RiskClass.WRITE_SELF
 
 
 def _preview_mail(args: MailComposeArgs, tz: str) -> str:
@@ -606,7 +606,7 @@ def _preview_create(args: CalendarCreateArgs, tz: str) -> str:
 
 
 def _preview_update(args: CalendarUpdateArgs, tz: str) -> str:
-    lines = [f"📅 Update event {args.event_id}"]
+    lines = ["📅 Change an event"]
     if args.summary:
         lines.append(f"Title: {args.summary}")
     if args.start and args.duration_minutes:
