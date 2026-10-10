@@ -29,6 +29,10 @@ KINDS = {
     "application/vnd.google-apps.folder": "Folder",
     "application/vnd.google-apps.form": "Form",
     "application/pdf": "PDF",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "Excel",
+    "application/vnd.ms-excel.sheet.macroEnabled.12": "Excel",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "Word",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "PowerPoint",
 }
 
 
