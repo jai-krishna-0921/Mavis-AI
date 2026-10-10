@@ -40,9 +40,10 @@ _LINK_PATHS = {
     "application/vnd.google-apps.folder": "https://drive.google.com/drive/folders/{}",
 }
 _FILE_ID = re.compile(r"[A-Za-z0-9_-]{10,200}")
-_CREATED_MIME = {"documentId": "application/vnd.google-apps.document",
-                 "spreadsheetId": "application/vnd.google-apps.spreadsheet",
-                 "presentationId": "application/vnd.google-apps.presentation"}
+_APPS = "application/vnd.google-apps."
+_DOC, _SHEET, _DECK = f"{_APPS}document", f"{_APPS}spreadsheet", f"{_APPS}presentation"
+_CREATED_MIME = {"documentId": _DOC, "document_id": _DOC, "spreadsheetId": _SHEET, "spreadsheet_id": _SHEET,
+                 "presentationId": _DECK}
 
 
 def file_link(file_id: Any, mime: str = "") -> str | None:
@@ -404,6 +405,17 @@ def render_created(data: Any) -> str:
             found["link"] = link
             break
     return "Done. " + json.dumps(found, ensure_ascii=False) if found else "Done."
+
+
+def created_receipt(data: Any) -> str:
+    """What the user reads after an approved create: its title and a link built from its id ("" if none)."""
+    if not isinstance(data, dict):
+        return ""
+    title = one_line(pick(data, "title", "name", "properties.title", "data.title", default=""))
+    for key, mime in _CREATED_MIME.items():
+        if (link := file_link(pick(data, key, f"data.{key}"), mime)) is not None:
+            return f"Created {title or 'it'}: {link}"
+    return ""
 
 
 MEET_PREFIX = "https://meet.google.com/"

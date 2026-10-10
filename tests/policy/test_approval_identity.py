@@ -422,3 +422,18 @@ async def test_correction_that_loses_a_race_is_not_reported_as_updated(user, rec
     [lc] = [t for t in tools.for_agent("conversation", user.id) if t.name == "pay_bill"]
     out = await lc.ainvoke({"account": "A1", "amount": 80})
     assert out.startswith(f"ALREADY_AWAITING_APPROVAL #{existing}") and "UPDATED" not in out
+
+
+async def test_the_approve_button_says_send_only_for_outward_actions(user):
+    from types import SimpleNamespace
+
+    from mavis.policy.approvals import approval_buttons
+
+    def label(tool, args):
+        return approval_buttons(1, SimpleNamespace(tool=tool, arguments=args))[0][0].label
+
+    start = "2026-10-11T15:00:00+05:30"
+    assert label("calendar_create_event", {"summary": "Gym", "start": start}) == "✅ Approve"
+    assert label("calendar_create_event", {"summary": "Sync", "start": start,
+                                           "attendees": ["a@example.com"]}) == "✅ Send"
+    assert label("no_such_tool", {}) == "✅ Approve" and approval_buttons(1)[0][0].label == "✅ Approve"

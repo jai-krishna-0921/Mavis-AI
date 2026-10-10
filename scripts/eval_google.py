@@ -330,6 +330,50 @@ def task_exists(fragment: str):
     return check
 
 
+def event_absent(query: str):
+    async def check(ctx: Ctx) -> tuple[bool, str]:
+        items = extract_calendar_items(await act(ctx.uid, "calendar.find", {"query": query}))
+        return not items, f"no event '{query}' ({len(items)} found)"
+
+    return check
+
+
+def contact_has(query: str, *needles: str):
+    async def check(ctx: Ctx) -> tuple[bool, str]:
+        blob = json.dumps(await act(ctx.uid, "contacts.search", {"query": query})).lower()
+        missing = [n for n in needles if n.lower() not in blob]
+        return not missing, f"contact '{query}' with {needles}" + (f" (missing {missing})" if missing else "")
+
+    return check
+
+
+def doc_contains(name: str, text: str):
+    async def check(ctx: Ctx) -> tuple[bool, str]:
+        files = await drive_files(ctx.uid, name)
+        if not files:
+            return False, f"no doc '{name}'"
+        data = await act(ctx.uid, "drive.read", {"file_id": files[0]["id"]})
+        return text.lower() in json.dumps(data).lower(), f"doc '{name}' contains '{text}'"
+
+    return check
+
+
+def task_done(fragment: str):
+    async def check(ctx: Ctx) -> tuple[bool, str]:
+        data = await act(ctx.uid, "tasks.list", {"show_completed": False})
+        return fragment.lower() not in json.dumps(data).lower(), f"task '{fragment}' no longer open"
+
+    return check
+
+
+def mail_absent(query: str):
+    async def check(ctx: Ctx) -> tuple[bool, str]:
+        found = extract_messages(await act(ctx.uid, "mail.search", {"query": query, "max_results": 5}))
+        return not found, f"no mail matching {query} ({len(found)})"
+
+    return check
+
+
 def mail_exists(query: str):
     async def check(ctx: Ctx) -> tuple[bool, str]:
         found = extract_messages(await act(ctx.uid, "mail.search", {"query": query, "max_results": 5}))
@@ -621,6 +665,115 @@ SCENARIOS: list[Scenario] = [
         ],
         [no_denial()],
     ),
+    # --- every other Workspace action (2026-10-10, after the owner asked for all of them) -----------------
+    sc("X1", "calendar.free_slots", [Turn("When am I free tomorrow between 10am and 7pm?")], [no_denial()]),
+    sc(
+        "X2",
+        "calendar.update",
+        [Turn(f"Move my '{TAG} Deep work' block tomorrow to 5 to 6 pm and set its location to Home."), YES],
+        [event_exists(f"{TAG} Deep work", "Home"), no_denial()],
+    ),
+    sc("X3", "calendar.calendars", [Turn("Which calendars do I have in Google Calendar?")], [no_denial()]),
+    sc(
+        "X4",
+        "contacts.create",
+        [Turn("Add a contact: Pranav Kumar, pranav.eval@example.com, AI Engineer candidate."), YES],
+        [contact_has("Pranav Kumar", "pranav.eval@example.com"), no_denial()],
+    ),
+    sc(
+        "X5",
+        "contacts.update",
+        [Turn("Add the phone number +91 90000 12345 to Pranav Kumar's contact."), YES],
+        [contact_has("Pranav Kumar", "90000"), no_denial()],
+    ),
+    sc(
+        "X6",
+        "docs.append",
+        [Turn(f"Add a line 'Round 2: system design' at the end of my '{TAG} Interview questions' doc."), YES],
+        [doc_contains(f"{TAG} Interview questions", "Round 2: system design"), no_denial()],
+    ),
+    sc(
+        "X7",
+        "drive.folder_move",
+        [
+            Turn(
+                f"Create a Drive folder '{TAG} Hiring' and move my '{TAG} Interview questions' doc into it."
+            ),
+            YES,
+            YES,
+        ],
+        [drive_has(f"{TAG} Hiring"), no_denial()],
+    ),
+    sc(
+        "X8",
+        "tasks.complete",
+        [Turn("Mark my Google task 'Review Falcon budget' as done."), YES],
+        [task_done("Review Falcon budget"), no_denial()],
+    ),
+    sc(
+        "X9",
+        "meet.create",
+        [Turn("Give me a Google Meet link for a quick call.")],
+        [reply_has(r"meet\.google\.com/", label="a Meet link"), no_denial()],
+    ),
+    sc(
+        "X10",
+        "sheets.append_row",
+        [Turn(f"Add a row to my '{TAG} Candidates' sheet: Riya, Data Scientist, Applied."), YES],
+        [sheet_row(f"{TAG} Candidates", "Riya", "Data Scientist"), no_denial()],
+    ),
+    sc(
+        "X11",
+        "sheets.update_range",
+        [Turn(f"In my '{TAG} Candidates' sheet, change Pranav's status to Offer."), YES],
+        [sheet_row(f"{TAG} Candidates", "Offer"), no_denial()],
+    ),
+    sc(
+        "X12",
+        "slides.read",
+        [Turn(f"What's on slide 2 of my '{TAG} Falcon kickoff' deck?")],
+        [reply_has(r"budget|team|timeline|pilot|risk", label="slide content"), no_denial()],
+    ),
+    sc("X13", "forms.read", [Turn("Do I have any Google Forms, and any responses to them?")], [no_denial()]),
+    sc(
+        "X14",
+        "mail.triage",
+        [Turn("Mark my Acme verification code email as read and archive it."), YES, YES],
+        [mail_absent(f'in:inbox subject:"{OTP_SUBJECT}"'), no_denial()],
+    ),
+    sc(
+        "X15",
+        "mail.trash",
+        [Turn("Now move that Acme code email to the trash."), YES],
+        [mail_exists(f'in:trash subject:"{OTP_SUBJECT}"'), no_denial()],
+    ),
+    sc(
+        "X16",
+        "mail.untrash",
+        [Turn("Actually, restore the Acme code email from the trash."), YES],
+        [mail_absent(f'in:trash subject:"{OTP_SUBJECT}"'), no_denial()],
+    ),
+    sc(
+        "X17",
+        "mail.reply",
+        [
+            Turn(f"Reply to the '{TAG} Questions link' email saying 'Got it, thanks'."),
+            Turn("Yes, send it.", 90),
+        ],
+        [mail_exists(f'subject:"Re: {TAG} Questions link"'), no_denial()],
+    ),
+    sc(
+        "X18",
+        "docs.comment",
+        [Turn("Add a comment on my Falcon brief doc: 'check the budget number'."), YES],
+        [no_denial()],
+    ),
+    sc(
+        "X19",
+        "calendar.delete",
+        [Turn(f"Delete the '{TAG} Deep work' event."), YES],
+        [event_absent(f"{TAG} Deep work"), no_denial()],
+    ),
 ]
 
 
@@ -758,6 +911,18 @@ async def cleanup() -> None:
                     f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{m['id']}/trash", headers=h
                 )
                 print(f"trashed mail {m['id']}")
+        found = (
+            await c.get(
+                "https://people.googleapis.com/v1/people:searchContacts",
+                headers=h,
+                params={"query": "pranav.eval", "readMask": "emailAddresses"},
+            )
+        ).json()
+        for hit in found.get("results", []):
+            name = hit.get("person", {}).get("resourceName", "")
+            if name.startswith("people/"):
+                await c.delete(f"https://people.googleapis.com/v1/{name}:deleteContact", headers=h)
+                print(f"deleted contact {name}")
 
 
 if __name__ == "__main__":

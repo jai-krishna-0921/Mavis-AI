@@ -605,8 +605,8 @@ async def _approval_reply(event: Event, user_id: int, text: str, history: list[M
     if (interp.decision == "approve" and not on_card and len(waiting) == 1  # several: apply_reply asks which
             and not _plain_yes_may_approve(approval, history)):
         log.info("conversation.yes_needs_tap", approval_id=approval.id)
-        await approval_flow.say(user_id, TAP_TO_APPROVE, approval_flow.approval_buttons(approval.id),
-                                dedupe_key=f"reply:{event.id}:tap")
+        buttons = approval_flow.approval_buttons(approval.id, approval)
+        await approval_flow.say(user_id, TAP_TO_APPROVE, buttons, dedupe_key=f"reply:{event.id}:tap")
         current_route.set("APPROVAL_REPLY")
         return True
     ack = await approval_flow.apply_reply(approval, interp)
