@@ -553,3 +553,14 @@ async def test_learn_after_the_delivery_creates_a_done_loop(user, at_now, rec_bu
     assert by_title == {"Create one-page interview agenda as a Google Doc": LoopStatus.DONE,
                         "Renew passport": LoopStatus.OPEN,
                         "Share the interview agenda with Asha": LoopStatus.OPEN}
+
+
+async def test_a_delivered_file_leaves_another_file_asked_in_the_same_turn_open(user, at_now, rec_bus):
+    """Evals 2026-10-10: delivering "October Spending Analysis" closed "Deliver the India AI assistant
+    market analysis report" from the same message, because both said "analysis"."""
+    await _turns(user.id, "tg:1")
+    market = await _ask(user.id, "Deliver deep analysis report on the India AI assistant market", "tg:1")
+    spend = await _ask(user.id, "Produce Word doc analysis of October spending", "tg:1")
+    assert await outcomes.delivered(user.id, "tg:1", "October 2026 Spending Analysis doc document") == 1
+    assert (await loops_repo.get(market.id)).status is LoopStatus.OPEN
+    assert (await loops_repo.get(spend.id)).status is LoopStatus.DONE

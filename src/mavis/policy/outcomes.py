@@ -232,13 +232,24 @@ FILE_WORDS = frozenset("deck slides slide presentation powerpoint pptx doc docs 
                        "agenda notes sheet sheets spreadsheet excel xlsx tracker budget pdf file".split())
 
 
+# words every ask for a file shares, so they never show which file a loop is about
+_GENERIC_ASK = FILE_WORDS | frozenset(
+    "analysis analyse analyze report reports make create produce deliver build send write draft proper word "
+    "google with charts chart key numbers recommendations".split())
+
+
+def _content(text: str) -> set[str]:
+    return {t for t in loops_repo.title_tokens(text) if t not in _GENERIC_ASK}
+
+
 def _about(loop, what: str) -> bool:
-    """Is `loop` about the file described by `what`? It shares a word with it (the turn link already says
-    they are related; this keeps "buy milk" from the same turn open), and it is not due later."""
+    """Is `loop` about the file described by `what`? A content word in common, beyond the words every file
+    ask shares (evals 2026-10-10: a shared "analysis" closed "deliver the market analysis report" when a
+    spending analysis from the same turn was delivered), and it is not due later."""
     due = timeutil.ensure_utc(loop.due_at) if loop.due_at else None
     if due is not None and due > timeutil.now():
         return False  # "review the deck on Friday" is still ahead
-    return bool(set(loops_repo.title_tokens(loop.title)) & set(loops_repo.title_tokens(what)))
+    return bool(_content(loop.title) & _content(what))
 
 
 async def delivered(user_id: int, turn_ref: str | None, what: str) -> int:

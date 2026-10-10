@@ -77,6 +77,24 @@ async def _reap_stale(user_id: int) -> None:
         await _fail(stale.id, user_id, "that task stalled and was stopped")
 
 
+MAX_RESTART_RESUMES = 1  # a task that dies again after one resume is failed as before
+
+
+async def _resume_after_restart(task: Any) -> bool:
+    """A planned task cut off by a worker restart (every deploy restarts the worker) goes back to the queue
+    to continue from its LangGraph checkpoint: the steps that finished are not run again, so nothing
+    is sent twice. Before, it was failed and the user had to ask again. Once per task."""
+    plan = dict(task.plan or {})
+    if not plan.get("steps") or int(plan.get("restart_resumes", 0)) >= MAX_RESTART_RESUMES:
+        return False
+    if not await tasks.claim(task.id, TaskStatus.RUNNING, TaskStatus.QUEUED):
+        return False
+    plan.update(restart_resumes=int(plan.get("restart_resumes", 0)) + 1, resume_from_checkpoint=True)
+    await tasks.save_plan(task.id, plan)
+    log.info("task.resumed_after_restart", task_id=task.id)
+    return True
+
+
 async def recover_tasks(user_id: int | None = None, *, restarted_at: datetime | None = None) -> int:
     """Self-heal the task queue so a lost worker can never block a user's tasks. Safe to run repeatedly.
 
@@ -95,6 +113,8 @@ async def recover_tasks(user_id: int | None = None, *, restarted_at: datetime | 
     for stale in await tasks.running_started_before(cutoff, user_id):
         if restarted_at is None and _still_within_clock(stale, now):
             continue  # its clock was extended and is still running
+        if restarted_at is not None and await _resume_after_restart(stale):
+            continue  # picked up again below, from its last checkpoint
         log.warning("task.recovered_stuck_running", task_id=stale.id, restart=restarted_at is not None)
         reason = ("I was restarted partway through it" if restarted_at is not None
                   else "that task stalled and was stopped")
@@ -199,6 +219,11 @@ async def run_task(task_id: int) -> None:
             return
         if not await tasks.claim(task_id, TaskStatus.QUEUED, TaskStatus.RUNNING):
             return
+    plan = dict(task.plan or {})
+    if plan.pop("resume_from_checkpoint", False):  # cut off by a restart: continue where it stopped
+        await tasks.save_plan(task_id, plan)
+        await _drive(task_id, task.user_id, None)
+        return
     await _drive(task_id, task.user_id, initial_state(task))
 
 

@@ -564,3 +564,31 @@ async def test_no_progress_line_for_an_approval_task(user, rec_bus):
     await tasks.claim(tid, TaskStatus.QUEUED, TaskStatus.RUNNING)
     await orchestrator._progress_after(tid, user.id, 0)
     assert not [e for e in rec_bus.events if e.type == EventType.TASK_PROGRESS]
+
+
+async def test_a_planned_task_cut_off_by_a_restart_resumes_once_from_its_checkpoint(user, rec_bus, sent,
+                                                                                   monkeypatch):
+    """Every deploy restarts the worker: a research and report task in flight was failed ("I was restarted
+    partway through it") and the user had to ask again. A task with a plan goes back to the queue and
+    continues from its checkpoint (graph input None), once; a second restart fails it as before."""
+    a = await tasks.create(user.id, goal="research then report")
+    await tasks.claim(a, TaskStatus.QUEUED, TaskStatus.RUNNING)
+    await tasks.save_plan(a, {"steps": [{"id": "s1", "agent": "research", "instruction": "x"}]})
+    await orchestrator.recover_tasks_on_start()
+    task_a = await tasks.get(a)
+    assert task_a.status == TaskStatus.QUEUED and task_a.plan["resume_from_checkpoint"] is True
+    assert not any(m.dedupe_key == f"task:{a}:failed" for m in sent)
+    assert a in [j.payload["task_id"] for j in rec_bus.jobs if j.kind == JobKind.RUN_TASK]
+
+    driven: list = []
+
+    async def fake_drive(task_id, user_id, graph_input):
+        driven.append(graph_input)
+
+    monkeypatch.setattr(orchestrator, "_drive", fake_drive)
+    await orchestrator.run_task(a)
+    assert driven == [None]  # continue from the checkpoint, not a fresh start
+    assert "resume_from_checkpoint" not in (await tasks.get(a)).plan
+    await orchestrator.recover_tasks_on_start()  # cut off again
+    task_a = await tasks.get(a)
+    assert task_a.status == TaskStatus.FAILED and "restarted" in task_a.error
