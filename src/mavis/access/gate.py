@@ -191,6 +191,13 @@ async def access_gate(event: Event) -> bool:
         return False
     if s.access_mode == "allowlist" or is_test_chat(user.telegram_chat_id, s):
         return True
+    if user.inactive_since is not None:
+        # They blocked the bot (my_chat_member "kicked") or their chat is gone (the outbox could not deliver):
+        # nothing Mavis starts by itself reaches them, so it is not made. Writing again means they are back.
+        if event.type not in (EventType.USER_MESSAGE, EventType.BUTTON_PRESSED):
+            log.info("gate.inactive_dropped", user_id=user.id, event_type=event.type)
+            return False
+        await users.update(user.id, inactive_since=None)
     if user.telegram_chat_id in s.owner_telegram_chat_ids:
         if s.access_mode == "invite":
             await _grandfather_owner(user, event.occurred_at)

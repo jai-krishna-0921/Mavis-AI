@@ -106,15 +106,15 @@ class QdrantVectorStore:
         await self._ensure_tenant_index()
 
     async def _ensure_tenant_index(self) -> None:
-        """user_id is the tenant key: Qdrant co-locates one user's vectors (spec 6.1). A no-op in embedded
-        mode; if the server cannot change an existing index the old one stays and the filter isolates."""
+        """An exact-match index on user_id, the key every query filters by (spec 6.1). Qdrant's tenant
+        co-location (is_tenant) exists only for keyword and uuid fields, and this integer index never took
+        it: the call failed on every start. A no-op in embedded mode."""
         if not self._remote:  # payload indexes are a no-op (with a warning) in embedded mode
             return
         try:
             await self._client.create_payload_index(
                 COLLECTION, "user_id",
-                models.IntegerIndexParams(type=models.IntegerIndexType.INTEGER, is_tenant=True, lookup=True,
-                                          range=False))
+                models.IntegerIndexParams(type=models.IntegerIndexType.INTEGER, lookup=True, range=False))
         except Exception as exc:  # noqa: BLE001
             log.warning("vector.tenant_index_unsupported", error=type(exc).__name__)
 
