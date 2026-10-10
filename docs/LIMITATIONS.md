@@ -1,4 +1,4 @@
-# Mavis AI: current limitations (2026-10-09)
+# Mavis AI: current limitations (2026-10-10)
 
 What Mavis can and cannot do today, what it costs, and what would lift each limit. Updated as things ship.
 
@@ -22,7 +22,8 @@ What Mavis can and cannot do today, what it costs, and what would lift each limi
 | Company mail | kripya.com is on Microsoft 365, not Google | Outlook and Teams are not connected (deferred by owner decision). |
 | New mail delay | Up to about 2 minutes | Gmail is polled, not pushed. Push (Pub/Sub) can come later if needed. |
 | First sync | Last 14 days of mail, calendar 7 days back to 30 ahead | Older data is searchable on demand, not pre-learned. |
-| Writes | Docs, Sheets, Drive, Tasks, Meet writes moving in house today | Sharing, commenting on others' files, sending mail and inviting guests always ask first. |
+| Writes | Docs, Sheets, Slides, Tasks, Contacts, calendar events (with location), Drive folders and moves, all from chat | Sharing, sending mail and inviting guests always ask first. A self-only write (a new Doc) asks for one tap when the chat has just read mail or files, because that content could carry hidden instructions. |
+| Files in chat | PDF, Word (docx), Excel (xlsx), PowerPoint (pptx), CSV | Made by creating the Google Doc, Sheet or deck and exporting it (no code sandbox needed). Up to 10 MB each. |
 
 ## 3. Slack (in-house connector)
 
@@ -47,7 +48,7 @@ What Mavis can and cannot do today, what it costs, and what would lift each limi
 | Item | State | Notes |
 |---|---|---|
 | Visible progress (Slice A) | Live | Progress cards, Cancel button, file delivery. |
-| Code machine (Slice B) | Not built | Mavis cannot write and run code, do data analysis on files, or build decks and spreadsheets in a sandbox yet. |
+| Code machine (Slice B) | Built, switched off (`MACHINE_ENABLED=false`) | Until it is on, Mavis cannot run code or analyse uploaded files. Turning it on needs the instance metadata guard and hop limit applied first (`deploy/aws/iam-role.sh`). Office files are covered without it, through Google exports. |
 | Browser (Slice C) | Not built | Mavis cannot operate websites (forms, logins, bookings). It can search and read web pages. |
 | Watch live, usage digest (Slice D) | Not built | |
 | Cost when built | About $2 a month for the owner, about $16 a month for 10 active users | AWS AgentCore, billed only while code runs. Per-user caps: 60 machine minutes a day, $5 a month. |
@@ -82,7 +83,7 @@ What Mavis can and cannot do today, what it costs, and what would lift each limi
 - Telegram only. In Slack, `/clear` replies that clearing is Telegram only (Mavis keeps Slack messages).
 - "Clear this chat" deletes messages from the last 47 hours (Telegram refuses deletes at 48 hours). Bots can delete their own messages and the user's messages in private chats. Older messages stay until the user taps the chat name, then Clear history.
 - Mavis deletes the message ids it noted (stored from release 0019 on), plus a sliding range of up to `CLEAR_FALLBACK_SPAN` ids below the newest known one for messages it never saw. Undeletable messages are skipped quietly.
-- `/clear` is limited to `CLEAR_MAX_PER_HOUR` asks per user per hour. The command menu is not managed by the repo (no setMyCommands), so `/clear` is listed in `/settings` instead.
+- `/clear` is limited to `CLEAR_MAX_PER_HOUR` asks per user per hour. The api sets the Telegram command menu (including `/clear`) at startup.
 - Operators can reset one user on the server with `uv run python scripts/reset_user.py <user id>`; it logs per-table row counts first and keeps no backup.
 
 ## 9. Not built yet (parked by owner decision)
