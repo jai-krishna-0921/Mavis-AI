@@ -42,3 +42,31 @@ async def test_set_commands_publishes_the_menu(monkeypatch):
     method, payload = sent[0]
     assert method == "setMyCommands"
     assert [c["command"] for c in payload["commands"]] == [c for c, _ in telegram_webhook.BOT_COMMANDS]
+
+
+def test_profile_text_meets_telegram_limits_and_house_style():
+    assert 1 <= len(telegram_webhook.BOT_NAME) <= 64
+    assert 1 <= len(telegram_webhook.BOT_SHORT_DESCRIPTION) <= 120
+    assert 1 <= len(telegram_webhook.BOT_DESCRIPTION) <= 512
+    for text in (telegram_webhook.BOT_SHORT_DESCRIPTION, telegram_webhook.BOT_DESCRIPTION):
+        assert "—" not in text and "–" not in text
+    assert telegram_webhook.AVATAR.read_bytes()[:3] == b"\xff\xd8\xff"  # a JPG, as Telegram requires
+
+
+async def test_set_profile_sends_only_what_differs(monkeypatch):
+    sent: list[str] = []
+    menu = [{"command": c, "description": d} for c, d in telegram_webhook.BOT_COMMANDS]
+    current = {"getMyName": {"name": telegram_webhook.BOT_NAME},
+               "getMyShortDescription": {"short_description": "old"},
+               "getMyDescription": {"description": telegram_webhook.BOT_DESCRIPTION}, "getMyCommands": menu}
+
+    async def fake_call(method, payload=None):
+        if method.startswith("get"):
+            return current[method]
+        sent.append(method)
+        return True
+
+    monkeypatch.setattr(telegram_webhook, "_call", fake_call)
+    changed = await telegram_webhook.set_profile()
+    assert sent == ["setMyShortDescription"]
+    assert changed == {"name": False, "short_description": True, "description": False, "commands": False}

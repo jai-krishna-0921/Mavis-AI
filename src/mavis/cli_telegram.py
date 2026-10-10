@@ -1,4 +1,4 @@
-"""`mavis telegram set-webhook|delete-webhook|info`."""
+"""`mavis telegram set-webhook|delete-webhook|info|set-profile|set-photo`."""
 
 from __future__ import annotations
 
@@ -37,3 +37,15 @@ def delete_webhook() -> None:
 def info() -> None:
     """Show Telegram's current webhook state."""
     _run(tw.webhook_info())
+
+
+@app.command("set-profile")
+def set_profile() -> None:
+    """Publish the bot's name, descriptions and command menu (only what differs)."""
+    _run(tw.set_profile())
+
+
+@app.command("set-photo")
+def set_photo() -> None:
+    """Upload the Mavis avatar as the bot's profile photo (each run adds a new photo)."""
+    _run(tw.set_photo())
