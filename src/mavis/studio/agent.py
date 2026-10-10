@@ -1,9 +1,10 @@
 """The studio sub-agent: the chat agent hands it a brief (create_document), and it runs as a background job
 on the worker so a deck never races the chat turn's deadline.
 
-1. Plan: a research loop loads the skills that fit (load_skill), then one structured call (FAST tier: the
-   reasoning tier timed out on whole decks) writes the spec, with the kind's skill and the always-on skills (anti-slop, brand-personalisation) in its prompt, plus who the user is (profile,
-   personal layer, memory) and the text of any source files.
+1. Plan: a research loop loads the skills that fit (load_skill, progressive disclosure) and reads the
+   source files; then one structured call (FAST tier: the reasoning tier timed out on whole decks) writes
+   the spec under the kind's skill and the always-on skills (anti-slop, brand-personalisation), knowing who
+   the user is (profile, personal layer, memory).
 2. Render: the skill's renderer draws the spec in the user's theme (brand.py), never the model.
 3. Deliver: the file goes to the user's Drive (converted to Google Slides, Docs or Sheets when they asked
    for Google or PDF) and to their chat, with its link. A failure is told in plain words.
