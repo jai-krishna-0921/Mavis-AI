@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 import structlog
@@ -31,9 +31,24 @@ from mavis.timers import service as timers_service
 log = structlog.get_logger()
 
 
-def approval_buttons(approval_id: int) -> list[list[Button]]:
+def _approve_label(approval: Any) -> str:
+    """"Send" only for an action that reaches someone else (outward); anything else is "Approve"."""
+    if approval is None:
+        return "✅ Approve"
+    try:
+        from mavis.domain.policy import RiskClass
+        from mavis.tools.registry import get_registry  # lazy: the registry loads every tool module
+
+        tool = get_registry().get(approval.tool)
+        risk = tool.effective_risk(tool.args_model.model_validate(approval.arguments or {}))
+        return "✅ Send" if risk is RiskClass.OUTWARD else "✅ Approve"
+    except Exception:  # noqa: BLE001 - a label must never block the card
+        return "✅ Approve"
+
+
+def approval_buttons(approval_id: int, approval: Any = None) -> list[list[Button]]:
     return [[
-        Button(label="✅ Send", data=f"ap:{approval_id}:ok"),
+        Button(label=_approve_label(approval), data=f"ap:{approval_id}:ok"),
         Button(label="✏️ Edit", data=f"ap:{approval_id}:edit"),
         Button(label="❌ Cancel", data=f"ap:{approval_id}:no"),
     ]]
@@ -114,7 +129,7 @@ async def send_approval_prompt(user_id: int, payload: dict) -> None:
         return
     # the card shows the preview verbatim: what the user approves is exactly what the action does
     text = f"Ready when you are. Want me to go ahead?\n\n{verbatim(approval.preview)}"
-    await say(user_id, text, approval_buttons(approval.id),
+    await say(user_id, text, approval_buttons(approval.id, approval),
               dedupe_key=f"approval:{approval.id}:{int(utcnow().timestamp() * 1000)}",
               tainted=await _task_tainted(approval))
     if await approvals.mark_prompted(approval.id):
@@ -285,7 +300,7 @@ async def _note_versions_sent(decided) -> None:
             decided.user_id, decided.tool, decided.arguments or {}, target=tool.target if tool else (),
             tainted=None, statuses=[ApprovalStatus.PENDING], exclude_id=decided.id):
         await say(card.user_id, VERSION_SENT_TEXT.format(preview=verbatim(card.preview)),
-                  approval_buttons(card.id), dedupe_key=f"approval:{card.id}:version_sent:{decided.id}",
+                  approval_buttons(card.id, card), dedupe_key=f"approval:{card.id}:version_sent:{decided.id}",
                   tainted=bool(card.tainted))
 
 
@@ -410,8 +425,8 @@ async def remind(user_id: int, approval_id: int) -> None:
         return
     text = ("Still want me to go ahead with this? It expires in about 2 hours.\n\n"
             f"{verbatim(approval.preview)}")
-    await say(user_id, text, approval_buttons(approval_id), dedupe_key=f"approval:{approval_id}:remind",
-              tainted=await _task_tainted(approval))
+    await say(user_id, text, approval_buttons(approval_id, approval),
+              dedupe_key=f"approval:{approval_id}:remind", tainted=await _task_tainted(approval))
 
 
 async def expire(user_id: int, approval_id: int) -> None:

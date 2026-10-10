@@ -127,7 +127,8 @@ async def test_creating_records_ids_for_the_task(provider, cache):
     out = await creating("docs.create", provider=provider, cache=cache)(
         ToolContext(user_id=1, task_id=42), a.DocCreateArgs(title="Notes")
     )
-    assert out == 'Done. {"document_id": "doc-new"}'
+    assert out.model_note == 'Done. {"document_id": "doc-new"}'
+    assert out.user_text == ""  # "doc-new" is not a Drive id, so no link is built for it
     assert await workspace_guard.created_by(42) == {"doc-new"}
     assert await workspace_guard.created_by(43) == set()
 
@@ -236,3 +237,27 @@ async def test_a_second_task_edit_in_one_run_sees_the_first(gtasks, user):
                     ("New", "completed")]  # never reopened, rename kept
     assert note == "Task: New"
     assert [e[1] for e in gtasks.executed].count("tasks.get") == 1
+
+
+async def test_creating_with_send_as_exports_the_new_file_on_the_same_approval(provider, cache, db, sent,
+                                                                               settings):
+    import base64
+
+    fid = "1AbCdEfGhIjKlMn"
+    provider.set_state(1, Capability.DOCS, ConnectionState.ACTIVE)
+    provider.set_state(1, Capability.DRIVE, ConnectionState.ACTIVE)
+    provider.results["docs.create"] = ToolResult(ok=True, data={"documentId": fid, "title": "Agenda"})
+    provider.results["drive.meta"] = ToolResult(ok=True, data={
+        "name": "Agenda", "mimeType": "application/vnd.google-apps.document"})
+    provider.results["drive.export_file"] = ToolResult(ok=True, data={
+        "content_b64": base64.b64encode(b"%PDF").decode()})
+    out = await creating("docs.create", provider=provider, cache=cache)(
+        ToolContext(user_id=1, task_id=7), a.DocCreateArgs(title="Agenda", send_as="pdf"))
+    assert out.user_text == f"Created Agenda: https://docs.google.com/document/d/{fid}/edit"
+    assert "SENT: Agenda.pdf" in out.model_note
+    assert [m.text for m in sent] == ["Agenda.pdf"]
+
+
+def test_the_card_says_the_file_will_be_sent():
+    preview = a.ACTIONS["docs.create"].preview(a.DocCreateArgs(title="Agenda", send_as="pdf"), "UTC")
+    assert preview.startswith("📄 New Google Doc: Agenda\nThen sent to you here as a PDF file.")

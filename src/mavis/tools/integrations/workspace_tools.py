@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed
 from mavis.domain.messages import Outbound
+from mavis.domain.results import ToolOutput
 from mavis.store import artifacts
 from mavis.store.repo import outbox, users
 from mavis.store.repo import tasks as tasks_repo
@@ -62,6 +63,7 @@ from mavis.tools.integrations.workspace_guard import (
 )
 from mavis.tools.integrations.workspace_render import (
     clip_body,
+    created_receipt,
     doc_end_index,
     kind_of,
     one_line,
@@ -377,10 +379,23 @@ def creating(
 ) -> CustomFn:
     """A create action: run it, remember what this task made (allowlist source), return only the ids."""
 
-    async def fn(ctx: ToolContext, args: BaseModel) -> str:
+    async def fn(ctx: ToolContext, args: BaseModel) -> ToolOutput:
         data = await action_data(ctx, action, args, provider=provider, cache=cache)
-        await record_created(ctx.task_id, created_ids(data))
-        return render_created(data)
+        made = created_ids(data)
+        await record_created(ctx.task_id, made)
+        note = render_created(data)
+        receipt = created_receipt(data)
+        fmt = getattr(args, "send_as", None)
+        if fmt and made:  # the file they asked for rides on the same approval: nothing waits for a later turn
+            try:
+                sent = await drive_export(ctx, DriveExportArgs(file_id=made[0], format=fmt),
+                                          provider=provider, cache=cache)
+            except ActionFailed as exc:
+                sent = f"Made it, but sending it as {fmt} failed: {exc.reason}"
+            note = f"{note}\n{sent}"
+            if not sent.startswith("SENT:"):
+                receipt = f"{receipt}\n{sent}" if receipt else sent
+        return ToolOutput(user_text=receipt, model_note=note)
 
     return fn
 

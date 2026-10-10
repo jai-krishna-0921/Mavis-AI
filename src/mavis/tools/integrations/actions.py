@@ -267,9 +267,14 @@ class DriveDownloadArgs(ToolArgs):
     mime_type: str = Field(default="", description="Export type for Google Docs, Sheets and Slides")
 
 
+ExportFormat = Literal["pdf", "docx", "xlsx", "pptx", "csv", "txt"]
+SEND_AS_HELP = ("Also send the new file in this chat as this format once it is made (pdf, docx for a Doc, "
+                "xlsx or csv for a Sheet, pptx for Slides). Leave empty to only create it.")
+
+
 class DriveExportArgs(ToolArgs):
     file_id: str = Field(min_length=1, description="The Google Doc, Sheet or Slides file id")
-    format: Literal["pdf", "docx", "xlsx", "pptx", "csv", "txt"] = Field(
+    format: ExportFormat = Field(
         default="pdf", description="pdf; docx for a Doc; xlsx or csv for a Sheet; pptx for Slides")
 
 
@@ -330,6 +335,7 @@ class DriveShareArgs(ToolArgs):
 class DocCreateArgs(ToolArgs):
     title: str = Field(min_length=1, max_length=200)
     markdown: str = Field(default="", description="The document body as Markdown")
+    send_as: ExportFormat | None = Field(default=None, description=SEND_AS_HELP)
 
 
 class DocCommentArgs(ToolArgs):
@@ -342,6 +348,7 @@ class SheetCreateArgs(ToolArgs):
     rows: list[list[CellValue]] = Field(
         default_factory=list, max_length=200,
         description="Cells to fill from A1, one list per row, header first (empty for a blank sheet)")
+    send_as: ExportFormat | None = Field(default=None, description=SEND_AS_HELP)
 
 
 class TaskAddArgs(ToolArgs):
@@ -533,6 +540,7 @@ class SlidesCreateArgs(ToolArgs):
         default="", max_length=30000,
         description="Markdown outline: each '# ' or '## ' heading starts a slide (its title); the lines "
                     "under it are that slide's body")
+    send_as: ExportFormat | None = Field(default=None, description=SEND_AS_HELP)
 
 
 class FormArgs(ToolArgs):
@@ -635,8 +643,13 @@ def _preview_share(args: DriveShareArgs, tz: str) -> str:
     return f"🔗 Share file {args.file_id} with {args.email} as {args.role}. Google emails them a link."
 
 
+def _then_sent(args: BaseModel) -> str:
+    fmt = getattr(args, "send_as", None)
+    return f"\nThen sent to you here as a {fmt.upper()} file." if fmt else ""
+
+
 def _preview_doc(args: DocCreateArgs, tz: str) -> str:
-    return f"📄 New Google Doc: {args.title}\n{args.markdown[:400]}"
+    return f"📄 New Google Doc: {args.title}{_then_sent(args)}\n{args.markdown[:400]}"
 
 
 def _preview_comment(args: DocCommentArgs, tz: str) -> str:
@@ -644,7 +657,7 @@ def _preview_comment(args: DocCommentArgs, tz: str) -> str:
 
 
 def _preview_sheet(args: SheetCreateArgs, tz: str) -> str:
-    head = f"📊 New Google Sheet: {args.title}"
+    head = f"📊 New Google Sheet: {args.title}{_then_sent(args)}"
     if not args.rows:
         return head
     shown = "\n".join(" | ".join(str(c) for c in row) for row in args.rows[:6])
@@ -764,7 +777,7 @@ def _preview_contact_update(args: ContactUpdateArgs, tz: str) -> str:
 
 
 def _preview_slides(args: SlidesCreateArgs, tz: str) -> str:
-    return f"🖼️ New Google Slides deck: {args.title}\n{args.outline[:400]}"
+    return f"🖼️ New Google Slides deck: {args.title}{_then_sent(args)}\n{args.outline[:400]}"
 
 
 # --- catalog --------------------------------------------------------------------------------------
