@@ -5,6 +5,7 @@ Adding a provider means mapping these names; adding an action means one entry he
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -643,13 +644,22 @@ def _preview_share(args: DriveShareArgs, tz: str) -> str:
     return f"🔗 Share file {args.file_id} with {args.email} as {args.role}. Google emails them a link."
 
 
+_MD_MARKS = re.compile(r"(\*\*|__|`)|^(#{1,6}\s+)", re.M)
+
+
+def _plain(md: str, limit: int = 400) -> str:
+    """Markdown shown on a card as plain text: cards are verbatim (never formatted), so ** and # would show
+    as typed."""
+    return _MD_MARKS.sub("", md)[:limit]
+
+
 def _then_sent(args: BaseModel) -> str:
     fmt = getattr(args, "send_as", None)
     return f"\nThen sent to you here as a {fmt.upper()} file." if fmt else ""
 
 
 def _preview_doc(args: DocCreateArgs, tz: str) -> str:
-    return f"📄 New Google Doc: {args.title}{_then_sent(args)}\n{args.markdown[:400]}"
+    return f"📄 New Google Doc: {args.title}{_then_sent(args)}\n{_plain(args.markdown)}"
 
 
 def _preview_comment(args: DocCommentArgs, tz: str) -> str:
@@ -697,7 +707,7 @@ def _preview_upload(args: DriveUploadArgs, tz: str) -> str:
 
 
 def _preview_append(args: DocAppendArgs, tz: str) -> str:
-    return f"📄 Add to the end of doc {args.document_id}:\n{args.text[:400]}"
+    return f"📄 Add to the end of doc {args.document_id}:\n{_plain(args.text)}"
 
 
 def _preview_row(args: SheetAppendArgs, tz: str) -> str:
@@ -777,7 +787,7 @@ def _preview_contact_update(args: ContactUpdateArgs, tz: str) -> str:
 
 
 def _preview_slides(args: SlidesCreateArgs, tz: str) -> str:
-    return f"🖼️ New Google Slides deck: {args.title}{_then_sent(args)}\n{args.outline[:400]}"
+    return f"🖼️ New Google Slides deck: {args.title}{_then_sent(args)}\n{_plain(args.outline)}"
 
 
 # --- catalog --------------------------------------------------------------------------------------
@@ -959,48 +969,47 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
                FormResponsesArgs, RiskClass.READ, _CHAT),
     # writes: every Google WRITE_SELF needs approval after untrusted output in the run (spec 4.3)
     ActionSpec("drive.create_folder", Capability.DRIVE, "Create a folder in the user's Google Drive.",
-               FolderCreateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_folder, taint_approve=True),
+               FolderCreateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_folder),
     ActionSpec("drive.move", Capability.DRIVE, "Move a Drive file into another folder.",
-               DriveMoveArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_move, taint_approve=True),
+               DriveMoveArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_move),
     ActionSpec("drive.share", Capability.DRIVE,
                "Share a Drive file with a person (reader, commenter or writer). The user approves first.",
                DriveShareArgs, RiskClass.OUTWARD, _CHAT, preview=_preview_share),
     ActionSpec("docs.create", Capability.DOCS, "Create a new Google Doc from a title and Markdown text.",
-               DocCreateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_doc, taint_approve=True),
+               DocCreateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_doc),
     ActionSpec("docs.comment", Capability.DOCS,
                "Add a comment to a Doc, Sheet or Slides file. Collaborators see it; the user approves first.",
                DocCommentArgs, RiskClass.OUTWARD, _WORKERS, preview=_preview_comment),
     ActionSpec("sheets.create", Capability.SHEETS, "Create a new, empty Google Sheet.",
-               SheetCreateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_sheet, taint_approve=True),
+               SheetCreateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_sheet),
     ActionSpec("tasks.add", Capability.TASKS, "Add a to-do to your Google Tasks to-do list.",
-               TaskAddArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_task, taint_approve=True),
+               TaskAddArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_task),
     ActionSpec("tasks.complete", Capability.TASKS,
                "Mark a to-do in your Google Tasks to-do list as done (task_id from tasks_list).",
-               TaskCompleteArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_task_done, taint_approve=True),
+               TaskCompleteArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_task_done),
     ActionSpec("tasks.update", Capability.TASKS,
                "Change a to-do in your Google Tasks to-do list: title, notes or due date.",
-               TaskUpdateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_task_update,
-               taint_approve=True),
+               TaskUpdateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_task_update),
     ActionSpec("tasks.delete", Capability.TASKS,
                "Delete a to-do from your Google Tasks to-do list. The user approves first.",
                TaskDeleteArgs, RiskClass.DESTRUCTIVE, _WORKERS, preview=_preview_task_delete),
     ActionSpec("drive.upload", Capability.DRIVE,
                "Upload a file this task produced (deck, report, spreadsheet) to the user's Google Drive.",
-               DriveUploadArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_upload, taint_approve=True),
+               DriveUploadArgs, RiskClass.WRITE_SELF, _WORKERS, preview=_preview_upload),
     ActionSpec("docs.append", Capability.DOCS,
                "Add text to the end of an existing Google Doc. The user approves first when the doc is "
                "shared or not theirs.",
-               DocAppendArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_append, taint_approve=True),
+               DocAppendArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_append),
     ActionSpec("sheets.append_row", Capability.SHEETS,
                "Add one row at the end of a Google Sheet (for example an expense in a budget sheet).",
-               SheetAppendArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_row, taint_approve=True),
+               SheetAppendArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_row),
     ActionSpec("sheets.update_range", Capability.SHEETS,
                "Write cells into a Google Sheet starting at a cell, overwriting what is there.",
-               SheetUpdateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_cells, taint_approve=True),
+               SheetUpdateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_cells),
     ActionSpec("slides.create", Capability.DOCS,
                "Make or build a Google Slides deck (presentation, slideshow) from a title and a Markdown "
                "outline: each heading is a slide title, the lines under it the slide's body.",
-               SlidesCreateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_slides, taint_approve=True),
+               SlidesCreateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_slides),
     ActionSpec("contacts.create", Capability.CONTACTS,
                "Save a new person in the user's Google Contacts (name plus an email or phone).",
                ContactCreateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_contact, taint_approve=True),
@@ -1010,7 +1019,7 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
                ContactUpdateArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_contact_update,
                taint_approve=True),
     ActionSpec("meet.create", Capability.MEET, "Create a standalone Google Meet link.",
-               NoArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_meet, taint_approve=True),
+               NoArgs, RiskClass.WRITE_SELF, _CHAT, preview=_preview_meet),
     # internal: file metadata and permissions (risk escalation, allowlist), downloads, task lookup, profile
     ActionSpec("drive.meta", Capability.DRIVE, "File name and type.", FileArgs, RiskClass.READ, _INTERNAL),
     ActionSpec("drive.permissions", Capability.DRIVE, "Who can access a file.", FileArgs, RiskClass.READ,

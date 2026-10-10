@@ -372,9 +372,10 @@ async def test_slides_create_is_sent_once_and_a_failed_fill_trashes_the_empty_de
     assert len(flaky.calls("POST", r":batchUpdate$")) == 1
 
 
-def test_slides_create_is_write_self_with_taint_approval():
+def test_slides_create_is_write_self_and_runs_without_a_card():
+    """A deck in the user's own Drive needs no tap, even after third-party content (owner, 2026-10-10)."""
     spec = ACTIONS["slides.create"]
-    assert spec.risk is RiskClass.WRITE_SELF and spec.taint_approve and spec.preview
+    assert spec.risk is RiskClass.WRITE_SELF and not spec.taint_approve and spec.preview
 
 
 # --- Forms -----------------------------------------------------------------------------------------------

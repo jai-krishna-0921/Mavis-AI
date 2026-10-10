@@ -422,7 +422,7 @@ TOOLS = [
     MavisTool("complete_item", "Close an open item (a to-do, tracked loop or reminder) the user says is "
               "done or wants dropped. Takes the ref shown by the pending tool.",
               CompleteItemArgs, RiskClass.WRITE_SELF, complete_item, _CONV, priority=58,
-              preview=lambda a: "Mark this done:", on_taint=TaintPolicy.APPROVE,
+              preview=lambda a: "Mark this done:",
               prepare=_prepare_complete),
     MavisTool("acknowledge_failure", "Stop listing a recently failed action or task once the user has "
               "seen it and decided (they said to leave it, or will handle it themselves).",
