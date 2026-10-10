@@ -211,6 +211,9 @@ class Settings(BaseSettings):
     task_await_ttl_s: float = 86400  # a task waiting on a connection or approval ends after this long
     task_timeout_max_s: float = 1200  # no task clock is ever extended past this
     machine_task_timeout_s: float = 900  # clock for a plan with a machine specialist (Phase 12)
+    # clock for a plan that makes files: each studio step researches its skills and writes a long spec, and
+    # 480 s ran out before the summary when the model was busy (evals 2026-10-10)
+    studio_task_timeout_s: float = 900
     machine_file_max_mb: int = 50  # Telegram's bot upload limit; bigger files are named, not attached
 
     # --- progress cards (Phase 12 slice A, spec 2026-10-08 section 8) ----------

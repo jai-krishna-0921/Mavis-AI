@@ -865,3 +865,37 @@ async def test_a_delivered_studio_file_is_never_redone_by_the_critic(user, fake_
     await _run(tid)
     assert calls.count("s1") == 2
     assert calls.count("s2") == 1
+
+
+def test_out_of_time_after_every_file_went_out_names_the_files_not_the_research():
+    plan = _plan(PlanStep(id="s1", agent="research", instruction="research"),
+                 PlanStep(id="s2", agent="studio", instruction="deck", depends_on=["s1"]),
+                 PlanStep(id="s3", agent="studio", instruction="doc", depends_on=["s1"]))
+    results = {"s1": {"ok": True, "text": "RAW FINDINGS " * 50},
+               "s2": {"ok": True, "text": "Made Notes apps (deck) and sent it to the chat. Drive link: L1"},
+               "s3": {"ok": True, "text": "Made Notes summary (doc) and sent it to the chat. Drive link: L2"}}
+    out = og.partial_messages({"plan": plan.model_dump(), "results": results})
+    assert out[0] == og.PARTIAL_LEAD
+    body = "\n".join(out[1:])
+    assert "L1" in body and "L2" in body and "RAW FINDINGS" not in body
+    results["s3"] = {"ok": False, "error": "busy"}  # a file is missing: what was found still goes out
+    assert "RAW FINDINGS" in "\n".join(og.partial_messages({"plan": plan.model_dump(), "results": results}))
+
+
+async def test_a_plan_that_makes_files_gets_the_longer_clock(user, fake_llm, rec_bus, monkeypatch):
+    from mavis.agents.task_clock import TaskClock, current_clock
+
+    class _T:
+        def reschedule(self, when):
+            pass
+
+    clock = TaskClock(_T(), 480, 1200, 0.0)
+    token = current_clock.set(clock)
+    try:
+        deck = PlanStep(id="s2", agent="studio", instruction="deck", depends_on=["s1"])
+        fake_llm.push_structured(_plan(PlanStep(id="s1", agent="research", instruction="r"), deck))
+        tid = await tasks.create(user.id, goal="g")
+        await og.planner({"task_id": tid, "user_id": user.id, "goal": "g", "context": "", "tainted": False})
+    finally:
+        current_clock.reset(token)
+    assert clock.total_s == 900
