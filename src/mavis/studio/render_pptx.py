@@ -460,7 +460,7 @@ def _chart_slide(ctx: _Ctx, slide, s: Slide) -> None:
 def _table_slide(ctx: _Ctx, slide, s: Slide) -> None:
     t = ctx.theme
     header = [_clip(h, 40) for h in s.table_header]
-    body = [[_clip(c, 60) for c in r] for r in s.table_rows[:8]]
+    body = [[_clip(c, 120) for c in r] for r in s.table_rows[:8]]
     ncols = max([len(header), *(len(r) for r in body)], default=0)
     if ncols == 0:
         return _bullets_slide(ctx, slide, s)
@@ -471,15 +471,17 @@ def _table_slide(ctx: _Ctx, slide, s: Slide) -> None:
     grid = ([header] if has_header else []) + body
     numeric = [bool(body) and all(_NUMERIC.match(r[c]) or not r[c] for r in body) for c in range(ncols)]
     longest = max((len(c) for r in grid for c in r), default=0)
-    size = 16 if ncols <= 4 and longest <= 40 else 14 if longest <= 40 else 12
-    row_h = 0.6 if len(grid) <= 7 else 0.5
+    note = _clip(s.takeaway, 160)
+    room = 6.75 - TOP - (0.85 if note else 0.0)  # down to the footer, leaving the takeaway its line
+    size, heights = _table_rows(grid, (CW / ncols) - 0.36,
+                                16 if ncols <= 4 and longest <= 40 else 14, room)
     shape = slide.shapes.add_table(len(grid), ncols, Inches(M), Inches(TOP), Inches(CW),
-                                   Inches(row_h * len(grid)))
+                                   Inches(sum(heights)))
     table = shape.table
     table.horz_banding = False
     table.first_row = False
     for r_i, row in enumerate(grid):
-        table.rows[r_i].height = Inches(row_h)
+        table.rows[r_i].height = Inches(heights[r_i])
         is_head = has_header and r_i == 0
         band = r_i - (1 if has_header else 0)
         for c_i, text in enumerate(row):
@@ -499,12 +501,25 @@ def _table_slide(ctx: _Ctx, slide, s: Slide) -> None:
             run.font.size = Pt(size)
             run.font.bold = is_head
             run.font.color.rgb = _rgb("#FFFFFF" if is_head else t.text)
-    note = _clip(s.takeaway, 160)
     if note:
-        y = TOP + row_h * len(grid) + 0.3
+        y = TOP + sum(heights) + 0.3
         _rect(slide, M, y, 0.08, 0.5, t.accent)
         _text(slide, M + 0.3, y, CW - 0.3, 0.5, note, font=t.body_font, size=18, color=t.text, bold=True,
               anchor=MSO_ANCHOR.MIDDLE)
+
+
+def _table_rows(grid: list[list[str]], cell_w: float, max_pt: int, room: float) -> tuple[int, list[float]]:
+    """The largest font (down to 10 pt) at which every cell wraps fully inside its row and the rows fit
+    `room`, and each row's height: cells are never cut to fit a fixed row (evals 2026-10-10)."""
+    def heights_at(size: int) -> list[float]:
+        per_line = max(1, int(cell_w * 72 / (size * 0.52)))
+        return [max(0.5, max(max(1, -(-len(c) // per_line)) for c in row) * size * 1.25 / 72 + 0.16)
+                for row in grid]
+
+    for size in range(max_pt, 9, -1):
+        if sum(heights := heights_at(size)) <= room:
+            return size, heights
+    return 10, heights_at(10)
 
 
 def _closing_slide(ctx: _Ctx, slide, s: Slide, deck: DeckSpec) -> None:
@@ -515,12 +530,13 @@ def _closing_slide(ctx: _Ctx, slide, s: Slide, deck: DeckSpec) -> None:
     _text(slide, M, 1.9, 11.5, 1.6, title, font=t.heading_font,
           size=_tier(len(title), [(30, 60), (55, 48), (80, 38)], 32), color="#FFFFFF", bold=True)
     sub = _clip(s.subtitle, 200)
-    if sub:
-        _text(slide, M, 3.6, 10.5, 0.9, sub, font=t.body_font, size=22, color=_light(t))
+    if sub:  # sized to its box: three lines at 22 pt ran into the list below
+        _text(slide, M, 3.6, 10.5, 0.9, sub, font=t.body_font, size=_fit_block([sub], 10.5, 0.9, 22, 13),
+              color=_light(t))
     steps = [_clip(b, 120) for b in s.bullets if b.strip()][:4]
     if steps:
-        _text(slide, M, 4.6, 11, 2.2, steps, font=t.body_font, size=20, color="#FFFFFF", after=8,
-              bullet=t.accent)
+        _text(slide, M, 4.6, 11, 2.2, steps, font=t.body_font, size=_fit_block(steps, 10.6, 2.2, 20, 12, 8),
+              color="#FFFFFF", after=8, bullet=t.accent)
     if t.company:
         _text(slide, M, 6.9, CW, 0.3, t.company, font=t.body_font, size=12, color=_light(t))
 
