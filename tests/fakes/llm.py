@@ -59,9 +59,11 @@ class FakeLLM:
 
     async def structured(
         self, schema: type[BaseModel], system: str, user: Any, tier: Any = None,
-        priority: str = "interactive", fallback: bool | None = None,
+        priority: str = "interactive", fallback: bool | None = None, deadline_s: float | None = None,
+        call_timeout_s: float | None = None,
     ) -> BaseModel:
-        self.structured_calls.append({"schema": schema, "system": system, "user": user, "tier": tier})
+        self.structured_calls.append({"schema": schema, "system": system, "user": user, "tier": tier,
+                                      "call_timeout_s": call_timeout_s})
         return self.pop_structured(schema)
 
 

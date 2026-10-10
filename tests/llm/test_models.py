@@ -1030,3 +1030,16 @@ async def test_best_effort_hold_release_keeps_the_counters_exact() -> None:
     lim.hold_background(30, best_effort=True)
     await asyncio.wait_for(chat, 0.5)
     assert lim._be_inflight == 0 and lim._free == 0
+
+
+def test_a_call_timeout_override_reaches_the_client_only_inside_its_call(settings):
+    """A full report spec takes minutes; the 30 s client timeout cut every attempt (evals 2026-10-10)."""
+    from mavis.llm import models
+
+    assert models.chat_model(models.Tier.FAST).request_timeout == settings.llm_timeout_fast_s
+    token = models._call_timeout.set(240.0)
+    try:
+        assert models.chat_model(models.Tier.FAST).request_timeout == 240.0
+    finally:
+        models._call_timeout.reset(token)
+    assert models.chat_model(models.Tier.FAST).request_timeout == settings.llm_timeout_fast_s

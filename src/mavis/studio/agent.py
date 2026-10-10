@@ -49,6 +49,8 @@ GOOGLE_MIME = {
 }
 SOURCE_CHARS = 24_000  # all source files together, after their own clipping
 SPEC_DEADLINE_S = 300.0  # a whole deck is a long output; the queue and 429 backoffs count too
+# one attempt may take minutes: a full analysis report spec timed out at the tier's 30 s on every try
+SPEC_CALL_TIMEOUT_S = 240.0
 
 STUDIO_PROMPT = """You are Mavis's studio: a senior designer and writer. Turn the brief into one {kind} spec.
 Follow the skills below exactly; they are the house rules. Today is {today}. The user is {who}.
@@ -219,7 +221,8 @@ async def plan(user_id: int, req: Request) -> tuple[BaseModel, str]:
         for attempt in range(2):  # one retry: a busy or rate-limited provider usually clears in a minute
             try:
                 out = await llm.structured(out_model, system, human, tier=llm.Tier.FAST,
-                                           priority="background", deadline_s=SPEC_DEADLINE_S)
+                                           priority="background", deadline_s=SPEC_DEADLINE_S,
+                                           call_timeout_s=SPEC_CALL_TIMEOUT_S)
                 break
             except LLMError:
                 if attempt:

@@ -13,6 +13,7 @@ import re
 import time
 import weakref
 from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from enum import StrEnum
 from functools import lru_cache
 from typing import Any, Literal
@@ -56,6 +57,16 @@ def _build(model: str, base_url: str, api_key: str, temperature: float, timeout:
     )
 
 
+# A longer per-call limit for one structured call (structured(call_timeout_s=...)): a long output such as a
+# whole report spec takes minutes to generate, and the tier's 30 s client timeout cut every attempt.
+_call_timeout: ContextVar[float | None] = ContextVar("llm_call_timeout", default=None)
+
+
+def _timeout_for(fast: bool) -> float:
+    s = get_settings()
+    return _call_timeout.get() or (s.llm_timeout_fast_s if fast else s.llm_timeout_smart_s)
+
+
 def chat_model(tier: Tier = Tier.FAST, temperature: float = 0.6, model: str | None = None) -> BaseChatModel:
     s = get_settings()
     fast = tier is Tier.FAST
@@ -65,7 +76,7 @@ def chat_model(tier: Tier = Tier.FAST, temperature: float = 0.6, model: str | No
         s.ollama_base_url,
         s.ollama_api_key,
         temperature,
-        s.llm_timeout_fast_s if fast else s.llm_timeout_smart_s,
+        _timeout_for(fast),
         # gpt-oss emits ~60% fewer tokens at "low": shorter calls hold the single slot for less time.
         # Only gpt-oss takes it; other models (gemma fallback) may reject an unknown parameter.
         s.llm_reasoning_effort_fast if fast and name.startswith(REASONING_EFFORT_PREFIX) else "",
@@ -81,7 +92,7 @@ def secondary_chat_model(tier: Tier = Tier.FAST, temperature: float = 0.6) -> Ba
         s.llm_secondary_base_url,
         s.llm_secondary_api_key,
         temperature,
-        s.llm_timeout_fast_s if fast else s.llm_timeout_smart_s,
+        _timeout_for(fast),
     )
 
 
@@ -776,15 +787,27 @@ async def structured[T: BaseModel](
     priority: Priority = "interactive",
     fallback: bool | None = None,
     deadline_s: float | None = None,
+    call_timeout_s: float | None = None,
 ) -> T:
     """Return a validated `schema` instance or raise LLMError. `deadline_s` overrides the chain-wide
-    budget (long outputs such as a studio spec need more than a chat call).
+    budget and `call_timeout_s` the per-call client timeout (long outputs such as a studio spec need more
+    than a chat call: the tier's default cut every attempt of a full report).
 
     Per model: 1) native tool-calling structured output; 2) up to two JSON-mode attempts validated
     locally. Only model-specific errors (404, 5xx) or invalid output move to the tier's next model;
     timeouts/429/connection errors retry the same model after cooldown/backoff, or go once to the
     secondary provider if configured (same tool-calling / JSON-mode path via ChatOpenAI).
     """
+    token = _call_timeout.set(call_timeout_s) if call_timeout_s else None
+    try:
+        return await _structured(schema, system, user, tier, priority, fallback, deadline_s)
+    finally:
+        if token is not None:
+            _call_timeout.reset(token)
+
+
+async def _structured[T: BaseModel](schema: type[T], system: str, user: str | list[BaseMessage], tier: Tier,
+                                    priority: Priority, fallback: bool | None, deadline_s: float | None) -> T:
     tier = await _budget_gate(tier, priority)
     messages = _messages(system, user)
     chain = _chain(tier, _use_fallback(priority, fallback))
