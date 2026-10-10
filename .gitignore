@@ -20,5 +20,5 @@ instinct_screenshots/
 .agents/
 .hermes/
 .claude/
-skills/
+/skills/
 skills-lock.json
