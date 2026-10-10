@@ -228,3 +228,14 @@ def test_column_text_shrinks_to_fit_its_count_and_wrapping():
     per_line = int(5.3 * 72 / (small * 0.52))
     lines = sum(-(-len(t) // per_line) for t in six)
     assert (lines * small * 1.2 + 50) / 72 <= 3.4
+
+
+def test_table_cells_are_never_cut_and_rows_fit_the_slide():
+    """Evals 2026-10-10: cells were clipped to 60 characters with an ellipsis at a fixed row height."""
+    from mavis.studio.render_pptx import _table_rows
+
+    long = "Typed notes, databases, templates; no handwriting or PDF annotation, AI meeting notes"
+    grid = [["App", "Lecture", "Exam"]] + [["Notion", long, long]] * 3
+    size, heights = _table_rows(grid, 3.68, 14, 3.95)
+    assert 10 <= size <= 14 and sum(heights) <= 3.95
+    assert heights[1] > heights[0]  # a wrapped row is taller than the one-line header
