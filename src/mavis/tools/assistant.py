@@ -279,12 +279,24 @@ async def pending(user_id: int, args: PendingArgs) -> str:
     user = await users.get(user_id)
     tz, now = user.timezone, timeutil.now()
     shown_untrusted: list[bool] = []
-    live = [lp for lp in await loops_repo.list_live(user_id) if lp.kind is not LoopKind.ROUTINE]
+    every = await loops_repo.list_live(user_id)
+    live = [lp for lp in every if lp.kind is not LoopKind.ROUTINE]
     ranked = sorted((_loop_line(lp, now, tz, shown_untrusted) + (lp.id,) for lp in live),
                     key=lambda r: (r[0], r[1], r[3]))
     sections: list[str] = []
     if ranked:
         sections.append("Open items:\n" + "\n".join(r[2] for r in ranked))
+    # Routines the user set up ("status update to Asha every Monday") are set, not to-dos: listed apart, so
+    # "is that set up?" is answered from here (evals 2026-10-10: hidden, the model said nothing was set).
+    # Mavis's own seeded routines (the morning check-in) stay out.
+    from mavis.initiative.routines import MORNING_TITLE  # lazy: initiative imports the tool registry
+
+    routines = sorted((_loop_line(lp, now, tz, shown_untrusted) for lp in every
+                       if lp.kind is LoopKind.ROUTINE and lp.origin is not LoopOrigin.ROUTINE
+                       and lp.title != MORNING_TITLE),  # older rows carry no origin
+                      key=lambda r: r[1])
+    if routines:
+        sections.append("Routines (set up, recurring):\n" + "\n".join(r[2] for r in routines))
     reminders = []
     for w in await wakeups_repo.list_pending(user_id, WakeupKind.AGENT):
         if not w.payload.get("reminder"):
