@@ -112,3 +112,17 @@ async def test_later_row_waits_for_earlier_retrying_row_of_same_user(db, channel
     assert await sender.run_once(now + timedelta(seconds=31)) == 2
     assert channel.texts == ["sam-1", "one", "two"]
     assert (await _row(r1)).status == "sent"
+
+
+async def test_a_blocked_or_gone_chat_fails_at_once_and_marks_the_user_inactive(db, channel) -> None:
+    """A user who blocked the bot (or a chat that does not exist) is not retried eight times, and is
+    marked inactive so nothing proactive is made for them (access.gate)."""
+    from mavis.channels.base import RecipientUnreachable
+
+    uid = await _user()
+    oid = await outbox.enqueue_now(Outbound(user_id=uid, text="morning brief"))
+    channel.fail_next.append(RecipientUnreachable("Forbidden: bot was blocked by the user"))
+    await OutboxSender(channel).run_once()
+    row = await _row(oid)
+    assert row.status == "failed" and row.attempts <= 1  # the claim, never a retry
+    assert (await users.get(uid)).inactive_since is not None

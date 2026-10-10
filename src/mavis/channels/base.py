@@ -13,6 +13,10 @@ class ChannelRateLimited(Exception):
         self.retry_after = retry_after
 
 
+class RecipientUnreachable(Exception):
+    """The chat can never receive this: it does not exist, or the user blocked the bot. Not retried."""
+
+
 class MessageGone(Exception):
     """The message to edit no longer exists (the user deleted it, or it is too old to edit)."""
 

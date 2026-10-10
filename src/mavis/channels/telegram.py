@@ -16,9 +16,9 @@ from telegram import (
     ReactionTypeEmoji,
 )
 from telegram.constants import ChatAction
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, Forbidden, RetryAfter
 
-from mavis.channels.base import ChannelRateLimited, MessageGone
+from mavis.channels.base import ChannelRateLimited, MessageGone, RecipientUnreachable
 from mavis.channels.formatting import to_plain, to_telegram_html
 from mavis.channels.sent_log import note_sent
 from mavis.channels.text import TELEGRAM_LIMIT, split_text
@@ -32,6 +32,14 @@ _NOT_MODIFIED = "not modified"
 _GONE = ("message to edit not found", "message can't be edited", "message_id_invalid")
 
 log = structlog.get_logger(__name__)
+
+
+_GONE = ("chat not found", "user is deactivated", "bot was blocked", "bot was kicked", "peer_id_invalid")
+
+
+def _unreachable(exc: Exception) -> bool:
+    """Telegram's answer means the chat can never receive a message (blocked, deleted, never existed)."""
+    return isinstance(exc, Forbidden) or any(g in str(exc).lower() for g in _GONE)
 
 
 def _seconds(value: int | float | timedelta) -> float:
@@ -87,6 +95,10 @@ class TelegramChannel:
                 ids.extend(await self._send_markdown(chat_id, chunk, markup))
             except RetryAfter as exc:
                 raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
+            except (Forbidden, BadRequest) as exc:
+                if _unreachable(exc):
+                    raise RecipientUnreachable(str(exc)) from exc
+                raise
         await note_sent(chat_id, ids)
         return ids
 
@@ -138,6 +150,10 @@ class TelegramChannel:
                 )
         except RetryAfter as exc:
             raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
+        except (Forbidden, BadRequest) as exc:
+            if _unreachable(exc):
+                raise RecipientUnreachable(str(exc)) from exc
+            raise
         await note_sent(chat_id, [msg.message_id])
         return msg.message_id
 
@@ -167,6 +183,10 @@ class TelegramChannel:
                 msg = await self._bot.send_photo(chat_id=chat_id, photo=fh, caption=caption[:1024] or None)
         except RetryAfter as exc:
             raise ChannelRateLimited(_seconds(exc.retry_after)) from exc
+        except (Forbidden, BadRequest) as exc:
+            if _unreachable(exc):
+                raise RecipientUnreachable(str(exc)) from exc
+            raise
         await note_sent(chat_id, [msg.message_id])
         return msg.message_id
 

@@ -236,3 +236,15 @@ async def test_startup_purge_drops_stale_strangers(pending, monkeypatch):
     assert await gate.purge_strangers() == 1
     assert await users.get_by_chat(6401) is None and await users.get_by_chat(6402) is not None
     assert fresh
+
+
+async def test_an_inactive_user_gets_nothing_proactive_until_they_write_again(pending):
+    """inactive_since (they blocked the bot, or their chat is gone) was written and never read: briefs and
+    pings were still made for people who could not receive them."""
+    u = await pending(6060, "Noor")
+    await users.update(u.id, status="active", inactive_since=utcnow())
+    assert await gate.access_gate(_ev(u.id, "", 1, etype=EventType.WAKEUP)) is False
+    assert await gate.access_gate(_ev(u.id, "", 2, etype=EventType.EMAIL_RECEIVED)) is False
+    assert await gate.access_gate(_ev(u.id, "I'm back", 3)) is True
+    assert (await users.get(u.id)).inactive_since is None
+    assert await gate.access_gate(_ev(u.id, "", 4, etype=EventType.WAKEUP)) is True

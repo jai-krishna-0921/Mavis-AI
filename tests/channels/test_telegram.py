@@ -102,8 +102,17 @@ async def test_bad_request_parse_error_falls_back_to_plain() -> None:
 
 async def test_other_bad_request_is_not_swallowed() -> None:
     bot = StubBot()
-    bot.raise_on_send = BadRequest("Chat not found")
+    bot.raise_on_send = BadRequest("Message text is empty")
     with pytest.raises(BadRequest):
+        await TelegramChannel("token", bot=bot).send_text(5, "hi")
+
+
+async def test_a_chat_that_cannot_receive_is_reported_as_unreachable() -> None:
+    from mavis.channels.base import RecipientUnreachable
+
+    bot = StubBot()
+    bot.raise_on_send = BadRequest("Chat not found")
+    with pytest.raises(RecipientUnreachable):
         await TelegramChannel("token", bot=bot).send_text(5, "hi")
 
 
