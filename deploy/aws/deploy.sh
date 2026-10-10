@@ -119,9 +119,9 @@ set_key NATIVE_TOKEN_KEK "$(openssl rand -base64 32)"
 # --- ship code ----------------------------------------------------------------
 log "rsync repo -> $MAVIS_EIP:$MAVIS_REMOTE_DIR"
 rsync_box -az --delete \
-  --exclude '.git' --exclude '.venv/' --exclude 'data/' --exclude '.env' --exclude '.env.*' \
+  --exclude '.git' --exclude '.venv/' --exclude '/data/' --exclude '.env' --exclude '.env.*' \
   --exclude 'deploy/aws/state.env' --exclude '*.pem' --exclude '__pycache__/' --exclude '.pytest_cache/' \
-  --exclude '.ruff_cache/' --exclude '.superpowers/' --exclude '.mcp.json' --exclude 'docs/' --exclude 'tests/' \
+  --exclude '.ruff_cache/' --exclude '.superpowers/' --exclude '.mcp.json' --exclude '/docs/' --exclude '/tests/' \
   --exclude '.worktrees/' --exclude 'instinct_screenshots/' --exclude 'node_modules/' \
   "$REPO_ROOT/" "$MAVIS_SSH_USER@$MAVIS_EIP:$MAVIS_REMOTE_DIR/"
 
