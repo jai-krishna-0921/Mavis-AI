@@ -186,6 +186,17 @@ if [[ "$LEGACY" == 1 ]]; then
   ssh_box "sudo shred -u $REMOTE_ENV 2>/dev/null || sudo rm -f $REMOTE_ENV"
 fi
 ssh_box "sudo rm -f $MAVIS_REMOTE_DIR/.env.new"
+if [[ -n "${MAVIS_BACKUP_BUCKET:-}" ]]; then
+  # keep the off-box backup job current (a rebuilt box gets bootstrap.sh's local-only one)
+  log "installing the nightly off-box backup job"
+  scp_box "$REPO_ROOT/deploy/aws/box-backup.sh" /tmp/box-backup.sh
+  scp_box "$REPO_ROOT/deploy/aws/graph_export.py" /tmp/graph_export.py
+  ssh_box "sudo install -m 700 -o root /tmp/box-backup.sh /usr/local/bin/mavis-backup.sh \
+    && sudo install -m 600 -o root /tmp/graph_export.py /usr/local/lib/mavis-graph_export.py \
+    && printf 'BACKUP_BUCKET=%s\nMAVIS_DIR=%s\n' '$MAVIS_BACKUP_BUCKET' '$MAVIS_REMOTE_DIR' \
+       | sudo tee /etc/mavis-backup.env >/dev/null && sudo chmod 600 /etc/mavis-backup.env \
+    && rm -f /tmp/box-backup.sh /tmp/graph_export.py"
+fi
 log "pruning dangling images and old build cache"
 ssh_box "docker image prune -f >/dev/null && docker builder prune -f --keep-storage 1GB >/dev/null"
 compose_remote ps
