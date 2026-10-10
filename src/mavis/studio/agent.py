@@ -1,7 +1,7 @@
 """The studio sub-agent: the chat agent hands it a brief (create_document), and it runs as a background job
 on the worker so a deck never races the chat turn's deadline.
 
-1. Plan: one structured call (SMART tier) writes the spec for the kind, with the kind's skill and the
+1. Plan: one structured call (FAST tier: the reasoning tier timed out on a whole deck) writes the spec for the kind, with the kind's skill and the
    always-on skills (anti-slop, brand-personalisation) in its prompt, plus who the user is (profile,
    personal layer, memory) and the text of any source files.
 2. Render: the skill's renderer draws the spec in the user's theme (brand.py), never the model.
@@ -206,7 +206,7 @@ async def plan(user_id: int, req: Request) -> tuple[BaseModel, str]:
         out = None
         for attempt in range(2):  # one retry: a busy or rate-limited provider usually clears in a minute
             try:
-                out = await llm.structured(out_model, system, human, tier=llm.Tier.SMART,
+                out = await llm.structured(out_model, system, human, tier=llm.Tier.FAST,
                                            priority="background", deadline_s=SPEC_DEADLINE_S)
                 break
             except LLMError:
