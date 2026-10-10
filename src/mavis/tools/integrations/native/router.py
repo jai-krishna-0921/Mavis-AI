@@ -272,7 +272,8 @@ class NativeRouter:
         pending = parse_qs(urlsplit(callback_url).query).get("p", [""])[0]
         pending_id = int(pending) if pending.isascii() and pending.isdigit() else None
         try:
-            return await self.oauth.authorize_url(user.user_id, provider, pending_id)
+            url = await self.oauth.authorize_url(user.user_id, provider, pending_id)
+            return await oauth_mod.handoff_link(url, user.user_id, provider)  # a confirmation page first
         except oauth_mod.OAuthError:
             raise IntegrationError(f"{provider.value} sign-in is not available right now") from None
 

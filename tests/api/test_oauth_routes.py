@@ -213,3 +213,29 @@ async def test_a_failure_teaching_the_identity_keeps_the_connection(web, oauth, 
     state = query(await oauth.authorize_url(user.id, G, 12))["state"]
     r = await c.get("/oauth/google/callback", params={"code": "c", "state": state})
     assert r.status_code == 200 and len(bus.jobs) == 1
+
+
+async def test_a_chat_consent_link_shows_whose_mavis_it_links_before_google(web, oauth, fake_redis, settings,
+                                                                             monkeypatch):
+    """A consent link sent in Telegram is not bound to a browser: forwarded, it linked the opener's Google
+    to the sender's Mavis. It now opens our own page naming the Mavis account; only "yes" goes on, once."""
+    from mavis.store.repo import users
+    from mavis.tools.integrations.native import oauth as oauth_mod
+
+    c, _ = web
+    monkeypatch.setattr(settings, "public_base_url", "https://mavis.test")
+    user, _ = await users.get_or_create_by_chat(9191, "Jai Krishna")
+    google_url = await oauth.authorize_url(user.id, G, None)
+    link = await oauth_mod.handoff_link(google_url, user.id, G)
+    assert link.startswith("https://mavis.test/oauth/google/go?t=") and "accounts.google.com" not in link
+    token = link.split("t=")[1]
+
+    page = await c.get("/oauth/google/go", params={"t": token})
+    assert page.status_code == 200 and "Jai" in page.text and "accounts.google.com" not in page.text
+    assert "If someone sent you this link" in page.text
+    assert (await c.get("/oauth/slack/go", params={"t": token})).status_code == 410  # another provider
+    go = await c.get("/oauth/google/go", params={"t": token, "ok": "1"})
+    assert go.status_code == 302 and go.headers["location"] == google_url
+    again = await c.get("/oauth/google/go", params={"t": token, "ok": "1"})
+    assert again.status_code == 410  # single use
+    assert (await c.get("/oauth/google/go", params={"t": "nope"})).status_code == 410

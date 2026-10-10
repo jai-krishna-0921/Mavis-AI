@@ -129,6 +129,44 @@ async def _remember_identity(user_id: int, provider: NativeProvider, account: di
         log.warning("oauth.identity_failed", provider=provider.value, error=type(exc).__name__)
 
 
+_CONFIRM = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Connect {service} to Mavis</title>
+<style>body{{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;
+background:#0f1115;color:#e8e8e8}}main{{max-width:420px;padding:24px;text-align:center}}h1{{font-size:22px}}
+a.b{{display:inline-block;margin-top:12px;padding:12px 20px;border-radius:10px;background:#E8572A;color:#fff;
+text-decoration:none;font-weight:600}}p.s{{color:#a0a0a0;font-size:14px}}</style></head>
+<body><main><h1>Connect {service} to Mavis</h1>
+<p>This link connects your {service} account to the Mavis account of <b>{name}</b> on Telegram.</p>
+<p>Continue only if that is you.</p>
+<a class="b" href="{href}">Yes, that's my Mavis</a>
+<p class="s">If someone sent you this link, close this page: continuing would let their Mavis read your
+{service}.</p></main></body></html>"""
+
+
+@router.get("/oauth/{provider}/go", response_class=HTMLResponse, response_model=None)
+async def oauth_go(provider: str, t: str = "", ok: str = "") -> HTMLResponse | RedirectResponse:
+    """The confirmation page in front of a consent link sent in chat (native.oauth.handoff_link)."""
+    from mavis.tools.integrations.native import oauth as oauth_mod
+
+    try:
+        native = NativeProvider(provider)
+    except ValueError:
+        return _page("Not found", "This sign-in link is not valid.", 404)
+    name = _NAMES[native]
+    parked = await oauth_mod.handoff(t, native, consume=ok == "1")
+    if parked is None:
+        return _page("Link expired", f"This {name} link expired or was already used. Ask Mavis to connect "
+                                     f"{name} again for a new one.", 410)
+    headers = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+    if ok == "1":
+        return RedirectResponse(parked["url"], status_code=302, headers=headers)
+    who = (await _mavis_name(int(parked["user_id"]))).split(" ")[0]
+    body = _CONFIRM.format(service=name, name=html.escape(who),
+                           href=html.escape(f"/oauth/{native.value}/go?t={t}&ok=1"))
+    return HTMLResponse(body, headers=headers)
+
+
 @router.get("/oauth/{provider}/callback", response_class=HTMLResponse)
 async def oauth_callback(
     provider: str, request: Request, code: str | None = None, state: str | None = None,

@@ -168,6 +168,46 @@ def redirect_uri(provider: NativeProvider) -> str:
     return f"{get_settings().public_base_url.rstrip('/')}/oauth/{provider.value}/callback"
 
 
+# --- the confirmation step in front of a chat-issued consent link ---------------------------------------
+# A link sent in Telegram is not bound to a browser, so whoever opens it would consent for the account that
+# asked (a forwarded link attached the opener's Google to the sender's Mavis). The chat gets a link to our
+# own page instead; it names the Mavis account being linked, and only "yes, that's me" continues to the
+# provider. Single use, same lifetime as the consent state.
+HANDOFF_PREFIX = "mavis:oauth:go:"
+
+
+def handoff_url(provider: NativeProvider, token: str) -> str:
+    return f"{get_settings().public_base_url.rstrip('/')}/oauth/{provider.value}/go?t={token}"
+
+
+async def handoff_link(url: str, user_id: int, provider: NativeProvider) -> str:
+    """Park the provider's consent URL behind the confirmation page; returns the page's link."""
+    from mavis import bus
+
+    client = bus.get_redis()
+    if client is None:  # tests and local dev without Redis: the consent URL itself
+        return url
+    token = secrets.token_urlsafe(24)
+    await client.set(HANDOFF_PREFIX + token, json.dumps({"url": url, "user_id": user_id,
+                                                         "provider": provider.value}), ex=STATE_TTL_S)
+    return handoff_url(provider, token)
+
+
+async def handoff(token: str, provider: NativeProvider, *, consume: bool) -> dict | None:
+    """The parked consent for `token` ({url, user_id}), or None when unknown, expired or used."""
+    from mavis import bus
+
+    client = bus.get_redis()
+    if client is None or not token or len(token) > 64:
+        return None
+    key = HANDOFF_PREFIX + token
+    raw = await (client.getdel(key) if consume else client.get(key))
+    if not raw:
+        return None
+    data = json.loads(raw)
+    return data if data.get("provider") == provider.value else None
+
+
 def configured(provider: NativeProvider) -> bool:
     s = get_settings()
     if not s.native_token_kek:
