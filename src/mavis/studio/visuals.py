@@ -40,6 +40,11 @@ def gradient_band(stops: list[str], angle: int, width: int = 1950, height: int =
     return out.getvalue()
 
 
+def _luma(color: str) -> float:
+    r, g, b = _rgb(color)
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+
+
 def _fmt(value: float, number_format: str) -> str:
     fmt = number_format or ""
     prefix = "".join(ch for ch in fmt.split("#")[0].split("0")[0] if not ch.isspace() and ch not in "\"'")
@@ -59,6 +64,8 @@ def chart_png(chart: Chart, theme: Theme, width_in: float = 6.4) -> bytes:
     palette = theme.palette()
     if theme.gradient:
         palette = [theme.gradient[-1], theme.primary, theme.secondary, theme.accent]
+    # a near-black primary (minimal, editorial) reads as ink, not data: lead with the colours instead
+    palette = [c for c in palette if _luma(c) > 0.18] + [c for c in palette if _luma(c) <= 0.18]
     family = [theme.body_font, "DejaVu Sans"]
     with plt.rc_context({"font.family": "sans-serif", "font.sans-serif": family, "font.size": 9,
                          "axes.edgecolor": theme.muted, "axes.labelcolor": theme.text,

@@ -37,6 +37,8 @@ answer first, then prove it.
 - Separate fact from judgement: "Revenue grew 22% (Q3 report)" vs "This suggests referrals scale".
 
 ## Style
-Pick `executive` for leadership and investors, `ocean` for research and data analysis, `corporate` for a
-client. Decks from the same analysis follow deck-design: one finding per slide, `stats` for the headline
+Always a gradient style, whatever the brand-personalisation defaults say: `executive` for leadership and
+investors, `ocean` for research, data and personal or financial analysis, `corporate` for a client. Never
+`minimal` or `bold` for an analysis report (unless the user chose a style).
+Decks from the same analysis follow deck-design: one finding per slide, `stats` for the headline
 metrics, a `chart` per finding, `closing` with the recommendation.
