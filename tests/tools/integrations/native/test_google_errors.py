@@ -196,7 +196,7 @@ def test_every_handled_action_exists_in_the_catalog_and_the_rest_stay_on_the_fal
     ex, _ = FakeGoogle().executor()
     handled = set(ex._handlers)
     assert handled <= set(ACTIONS)
-    assert all(ex.handles(a) for a in handled) and len(handled) == 57
+    assert all(ex.handles(a) for a in handled) and len(handled) == 58
     for other in (
         "slack.send",
         "slack.history",

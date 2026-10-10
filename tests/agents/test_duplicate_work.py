@@ -98,9 +98,21 @@ async def test_start_task_refers_to_the_existing_task(user, rec_bus) -> None:
 # --- approval dedupe -------------------------------------------------------------------------------
 
 
-def _invite(summary: str = "Interview: Jane", description: str = "Looking forward") -> dict:
+def _invite(summary: str = "Interview: Jane", description: str = "Looking forward",
+            location: str = "") -> dict:
+    """Arguments as the registry stores them (CalendarCreateArgs.model_dump: every field present)."""
     return {"summary": summary, "start": "2026-10-09T15:00:00+05:30", "duration_minutes": 30,
-            "attendees": ["jane@example.com"], "description": description}
+            "attendees": ["jane@example.com"], "description": description, "location": location}
+
+
+def test_a_new_location_is_a_different_invite_not_a_twin():
+    """"Make the location Chennai" changes the action: the waiting card is corrected, not reported as a
+    duplicate of itself (2026-10-10 evals). An absent location equals an empty one (older rows)."""
+    ident = _identity("calendar_create_event")
+    assert not approvals.equivalent(_invite(), _invite(location="Chennai"), ident)
+    assert approvals.equivalent(_invite(location=" chennai"), _invite(location="Chennai "), ident)
+    no_key = {k: v for k, v in _invite(description="other words").items() if k != "location"}
+    assert approvals.equivalent(_invite(), no_key, ident)
 
 
 def _identity(tool: str) -> tuple[str, ...]:

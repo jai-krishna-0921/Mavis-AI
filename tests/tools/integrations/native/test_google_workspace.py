@@ -146,6 +146,27 @@ async def test_create_event_without_guests_sends_no_updates_and_no_empty_fields(
     assert set(body_of(req)) == {"summary", "start", "end"}
 
 
+async def test_event_location_is_set_on_create_and_update():
+    fake = (FakeGoogle().on("POST", EVENTS, httpx.Response(200, json={"id": "new"}))
+            .on("PATCH", EVENT, httpx.Response(200, json=event("e1"))))
+    ex, _ = fake.executor()
+    await ex.execute(USER, "calendar.create_event", {
+        "summary": "Interview", "start": "2026-10-11T15:00:00+05:30", "location": "Chennai"})
+    await ex.execute(USER, "calendar.update_event", {"event_id": "e1", "location": "Bengaluru office"})
+    assert body_of(fake.requests[0])["location"] == "Chennai"
+    assert body_of(fake.requests[1]) == {"location": "Bengaluru office"}
+
+
+def test_event_previews_show_the_location():
+    from mavis.tools.integrations.actions import ACTIONS, CalendarCreateArgs, CalendarUpdateArgs
+
+    made = CalendarCreateArgs(summary="Interview", start="2026-10-11T15:00:00+05:30", location="Chennai",
+                              attendees=["p@example.com"])
+    assert "Where: Chennai" in ACTIONS["calendar.create_event"].preview(made, "Asia/Kolkata")
+    moved = CalendarUpdateArgs(event_id="e1", location="Chennai")
+    assert "Where: Chennai" in ACTIONS["calendar.update_event"].preview(moved, "Asia/Kolkata")
+
+
 async def test_update_event_patches_only_the_changed_fields():
     fake = FakeGoogle().on("PATCH", EVENT, httpx.Response(200, json=event("e1", "New")))
     ex, _ = fake.executor()
@@ -330,6 +351,24 @@ async def test_download_exports_google_files_to_text(mime, default_export, conte
             res.ok and res.data["text"] == expected and res.data["name"] == "N" and not res.data["truncated"]
         )
         assert fake.calls("GET", r"/export$")[-1].url.params["mimeType"] == default_export
+
+
+async def test_export_file_returns_the_exported_bytes_and_refuses_non_google_files():
+    import base64
+
+    pdf = "application/pdf"
+    fake = FakeGoogle().on("GET", FILE, httpx.Response(200, json=drive_file("f", "Deck",
+                                                                       "application/vnd.google-apps.presentation")))
+    fake.on("GET", r"/export$", httpx.Response(200, content=b"%PDF-1.7 bytes", headers={"content-type": pdf}))
+    ex, _ = fake.executor()
+    res = await ex.execute(USER, "drive.export_file", {"file_id": "f", "mime_type": pdf})
+    assert res.ok and base64.b64decode(res.data["content_b64"]) == b"%PDF-1.7 bytes"
+    assert res.data["name"] == "Deck" and fake.calls("GET", r"/export$")[0].url.params["mimeType"] == pdf
+
+    plain = FakeGoogle().on("GET", FILE, httpx.Response(200, json=drive_file("g", "scan.pdf", pdf)))
+    ex, _ = plain.executor()
+    res = await ex.execute(USER, "drive.export_file", {"file_id": "g", "mime_type": pdf})
+    assert not res.ok and not plain.calls("GET", r"/export$")
 
 
 async def test_download_honours_the_requested_export_type():

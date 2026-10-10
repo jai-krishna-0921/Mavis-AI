@@ -8,6 +8,9 @@ third-party content: tools.py registers these tools with untrusted_output=True.
 from __future__ import annotations
 
 import asyncio
+import base64
+import re
+import time
 from collections.abc import Awaitable, Callable
 from datetime import date
 from pathlib import Path
@@ -18,15 +21,17 @@ from pydantic import BaseModel
 
 from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed
+from mavis.domain.messages import Outbound
 from mavis.store import artifacts
+from mavis.store.repo import outbox, users
 from mavis.store.repo import tasks as tasks_repo
-from mavis.store.repo import users
 from mavis.tools import web
 from mavis.tools.integrations.actions import (
     DocAppendArgs,
     DocArgs,
     DocInsertArgs,
     DriveDownloadArgs,
+    DriveExportArgs,
     DriveMoveArgs,
     DriveShareArgs,
     DriveUploadArgs,
@@ -71,6 +76,19 @@ EXPORTS = {
     "application/vnd.google-apps.document": "text/plain",
     "application/vnd.google-apps.spreadsheet": "text/csv",  # the first sheet only
     "application/vnd.google-apps.presentation": "text/plain",
+}
+# What each Google file type exports as (Drive's export formats), by the format names drive.export takes.
+_PDF = "application/pdf"
+EXPORT_FORMATS = {
+    "application/vnd.google-apps.document": {
+        "pdf": _PDF, "txt": "text/plain",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    "application/vnd.google-apps.spreadsheet": {
+        "pdf": _PDF, "csv": "text/csv",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    "application/vnd.google-apps.presentation": {
+        "pdf": _PDF, "txt": "text/plain",
+        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
 }
 UPLOAD_LIMIT = 5 * 1024 * 1024  # googlesuper UPLOAD_FILE takes at most 5 MB
 TEXT_MIMES = ("text/", "application/json", "application/xml")
@@ -122,6 +140,56 @@ async def drive_read(
 async def _drive_read(ctx: ToolContext, args: BaseModel) -> str:
     args = _expect(args, FileArgs)
     return await drive_read(ctx, args)
+
+
+def _export_name(name: str, fmt: str) -> str:
+    stem = re.sub(r"[^\w .()-]+", "", name).strip(" .")[:80] or "file"
+    return f"{stem}.{fmt}"
+
+
+async def drive_export(
+    ctx: ToolContext,
+    args: DriveExportArgs,
+    *,
+    provider: IntegrationProvider | None = None,
+    cache: ConnectionCache | None = None,
+) -> str:
+    """Metadata -> export to the asked format -> the user's artifacts dir -> a file message in their chat.
+    The file goes only to the user who owns the Google account (their own chat), never anywhere else."""
+    ref = FileArgs(file_id=args.file_id)
+    meta = await action_data(ctx, "drive.meta", ref, provider=provider, cache=cache)
+    mime = str(pick(meta, "mimeType", "data.mimeType", default=""))
+    name = one_line(pick(meta, "name", "data.name", default="file"))
+    formats = EXPORT_FORMATS.get(mime)
+    if not formats:
+        return f"{name} is a {kind_of(mime)} file: only Google Docs, Sheets and Slides can be exported."
+    target = formats.get(args.format)
+    if target is None:
+        return f"A {kind_of(mime)} exports as {', '.join(formats)}, not {args.format}."
+    export = DriveDownloadArgs(file_id=args.file_id, mime_type=target)
+    data = await action_data(ctx, "drive.export_file", export, provider=provider, cache=cache)
+    blob = pick(data, "content_b64")
+    if not isinstance(blob, str) or not blob:
+        raise ActionFailed("drive.export failed: no file came back", reason="the export returned no file")
+    raw = base64.b64decode(blob)
+    folder = artifacts.user_dir(ctx.user_id) / "exports"
+    path = folder / _export_name(name, args.format)
+
+    def write() -> None:
+        folder.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+
+    await asyncio.to_thread(write)
+    minute = int(time.time() // 60)  # a retry of the same call within the minute sends it once
+    await outbox.enqueue_now(Outbound(user_id=ctx.user_id, text=path.name, document_path=str(path),
+                                      dedupe_key=f"export:{ctx.user_id}:{args.file_id}:{args.format}:{minute}"))
+    size = max(1, len(raw) // 1024)
+    return (f"SENT: {path.name} ({size} KB) goes to them as a file in this chat by itself. "
+            "Don't paste its contents or a link to it.")
+
+
+async def _drive_export(ctx: ToolContext, args: BaseModel) -> str:
+    return await drive_export(ctx, _expect(args, DriveExportArgs))
 
 
 def _artifact_file(raw: str, user_id: int, legacy_ok: bool = False) -> tuple[Path, int | None]:
@@ -317,7 +385,8 @@ def creating(
 CREATES = ("drive.create_folder", "docs.create", "sheets.create", "tasks.add", "slides.create",
            "contacts.create")
 CUSTOM_FNS: dict[str, CustomFn] = {
-    "drive.read": _drive_read, "drive.upload": _drive_upload, "docs.append": _docs_append,
+    "drive.read": _drive_read, "drive.export": _drive_export, "drive.upload": _drive_upload,
+    "docs.append": _docs_append,
     "drive.share": _drive_share, "drive.move": _drive_move,
     "tasks.complete": _tasks_complete, "tasks.update": _tasks_update,
     **{name: creating(name) for name in CREATES},

@@ -183,3 +183,19 @@ async def test_web_search_and_its_rule_reach_the_turn(user, channel, fake_llm, f
     names = await _turn(user, fake_llm, bound, text, 1)
     assert "web_search" in names and "web_extract" not in names
     assert conversation.WEB_RULE in fake_llm.calls[-1][0].content
+
+
+def test_tool_query_carries_the_request_a_follow_up_continues():
+    from types import SimpleNamespace
+
+    from mavis.agents.conversation import CHAT_QUERY_TURNS, tool_query
+
+    def m(role: str, text: str):
+        return SimpleNamespace(role=role, content=text)
+
+    history = [m("user", "what's the weather"), m("user", "send an invite to ravi for 3pm tomorrow"),
+               m("assistant", "Sure, 3 to 4 PM. Any location?"), m("user", "make the location Chennai")]
+    q = tool_query("make the location Chennai", "Sure, 3 to 4 PM. Any location?", history)
+    assert "invite to ravi" in q and "Any location?" in q
+    assert q.count("make the location Chennai") == 1  # the newest message is not repeated
+    assert CHAT_QUERY_TURNS == 2 and "weather" in q

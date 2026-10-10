@@ -38,6 +38,8 @@ def test_catalog_covers_spec_actions():
         "calendar.calendars", "calendar.get", "calendar.delete_event", "calendar.respond",
         "contacts.create", "contacts.update", "slides.read", "slides.create", "forms.read",
         "forms.responses", "meet.recent",
+        # Docs, Sheets and Slides sent to the user as files (2026-10-10)
+        "drive.export", "drive.export_file",
     }
     assert set(ACTIONS) == expected
 

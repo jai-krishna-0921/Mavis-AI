@@ -32,6 +32,26 @@ KINDS = {
 }
 
 
+# Links are built here from the file id, never taken from content: they can only open the user's own file.
+_LINK_PATHS = {
+    "application/vnd.google-apps.document": "https://docs.google.com/document/d/{}/edit",
+    "application/vnd.google-apps.spreadsheet": "https://docs.google.com/spreadsheets/d/{}/edit",
+    "application/vnd.google-apps.presentation": "https://docs.google.com/presentation/d/{}/edit",
+    "application/vnd.google-apps.folder": "https://drive.google.com/drive/folders/{}",
+}
+_FILE_ID = re.compile(r"[A-Za-z0-9_-]{10,200}")
+_CREATED_MIME = {"documentId": "application/vnd.google-apps.document",
+                 "spreadsheetId": "application/vnd.google-apps.spreadsheet",
+                 "presentationId": "application/vnd.google-apps.presentation"}
+
+
+def file_link(file_id: Any, mime: str = "") -> str | None:
+    """The Google link to a Drive file, built from its id and type (None for an id that is not one)."""
+    if not isinstance(file_id, str) or not _FILE_ID.fullmatch(file_id):
+        return None
+    return _LINK_PATHS.get(mime, "https://drive.google.com/file/d/{}/view").format(file_id)
+
+
 def kind_of(mime: str) -> str:
     mime = str(mime or "")
     if mime in KINDS:
@@ -71,6 +91,8 @@ def file_line(f: dict) -> str:
         f"file_id={f.get('id', '')}", one_line(f.get("name") or "(untitled)"), kind_of(f.get("mimeType")),
         f"owner: {owners}", f"modified: {_date(f.get('modifiedTime'))}",
     ]
+    if link := file_link(f.get("id"), str(f.get("mimeType") or "")):
+        parts.append(f"link: {link}")
     if f.get("sharedWithMeTime"):
         sharer = _person(f.get("sharingUser")) or owners
         parts.append(f"shared with you {_date(f['sharedWithMeTime'])} by {sharer}")
@@ -377,6 +399,10 @@ def render_created(data: Any) -> str:
         return "Done."
     found = {k: v for k in (*ID_KEYS, "name", "title")
              if isinstance(v := pick(data, k, f"response_data.{k}", f"data.{k}"), (str, int))}
+    for key, mime in _CREATED_MIME.items():
+        if (link := file_link(found.get(key), mime)) is not None:
+            found["link"] = link
+            break
     return "Done. " + json.dumps(found, ensure_ascii=False) if found else "Done."
 
 

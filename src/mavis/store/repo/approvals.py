@@ -64,10 +64,13 @@ def equivalence_key(arguments: dict, identity: Sequence[str] = ()) -> str:
     """Canonical identity of an action for duplicate detection: whitespace and case folded, lists
     sorted, ISO datetimes in UTC. `identity` is the tool's declared identifying arguments; when it is
     empty, or any of those arguments is empty in this call (an invite with no guests), the action is
-    identified by all of its canonical arguments."""
+    identified by all of its canonical arguments. A field written "?name" is optional: part of the identity
+    when set, compared as empty when not (a location), and never a reason to fall back to all arguments."""
     canon = _canon(arguments or {})
-    if identity and all(field in canon for field in identity):
-        canon = {field: canon[field] for field in identity}
+    required = [f for f in identity if not f.startswith("?")]
+    optional = [f[1:] for f in identity if f.startswith("?")]
+    if required and all(field in canon for field in required):
+        canon = {**{f: canon[f] for f in required}, **{f: canon.get(f, "") for f in optional}}
     return json.dumps(canon, sort_keys=True, default=str, ensure_ascii=False)
 
 

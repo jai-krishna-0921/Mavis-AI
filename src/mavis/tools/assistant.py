@@ -31,7 +31,14 @@ from mavis.store.repo import approvals, policy_rules, tasks, users
 from mavis.store.repo import loops as loops_repo
 from mavis.store.repo import wakeups as wakeups_repo
 from mavis.timers import service as timers_service
-from mavis.tools.registry import MavisTool, TaintPolicy, ToolContext, call_untrusted, current_run
+from mavis.tools.registry import (
+    MavisTool,
+    Prepared,
+    TaintPolicy,
+    ToolContext,
+    call_untrusted,
+    current_run,
+)
 
 
 def _local_tz(name: str) -> ZoneInfo:
@@ -334,6 +341,23 @@ class CompleteItemArgs(ToolArgs):
         "Ref of the item from the pending tool, e.g. loop:12 or reminder:5. Call pending first to find it"))
 
 
+async def _prepare_complete(ctx: ToolContext, args: CompleteItemArgs) -> Prepared:
+    """The card names the item by its stored title, never by its ref; an unknown ref is refused first."""
+    kind, _, raw = args.ref.strip().partition(":")
+    kind = kind.strip().lower()
+    if not raw.strip().isdigit() or kind not in ("loop", "reminder"):
+        return Prepared(refusal="Unknown ref; call pending and use a ref like loop:12 or reminder:5.")
+    if kind == "loop":
+        loop = await loops_repo.get(int(raw))
+        if loop is None or loop.user_id != ctx.user_id:
+            return Prepared(refusal="No open item with that ref; call pending to see the current list.")
+        return Prepared(note=loop.title)
+    wake = {w.id: w for w in await wakeups_repo.list_pending(ctx.user_id)}.get(int(raw))
+    if wake is None or not wake.payload.get("reminder"):
+        return Prepared(refusal="No pending reminder with that ref; call pending to see the current list.")
+    return Prepared(note=f"Reminder: {wake.reason.removeprefix(REMINDER_PREFIX)}")
+
+
 async def complete_item(user_id: int, args: CompleteItemArgs) -> ToolOutput:
     """Close one open item the user is done with (or wants dropped): a to-do or tracked loop is marked
     done, a reminder is cancelled. Only the user's own items."""
@@ -398,7 +422,8 @@ TOOLS = [
     MavisTool("complete_item", "Close an open item (a to-do, tracked loop or reminder) the user says is "
               "done or wants dropped. Takes the ref shown by the pending tool.",
               CompleteItemArgs, RiskClass.WRITE_SELF, complete_item, _CONV, priority=58,
-              preview=lambda a: f"Mark done: {a.ref}", on_taint=TaintPolicy.APPROVE),
+              preview=lambda a: "Mark this done:", on_taint=TaintPolicy.APPROVE,
+              prepare=_prepare_complete),
     MavisTool("acknowledge_failure", "Stop listing a recently failed action or task once the user has "
               "seen it and decided (they said to leave it, or will handle it themselves).",
               AcknowledgeArgs, RiskClass.WRITE_SELF, acknowledge_failure, _CONV, priority=30,

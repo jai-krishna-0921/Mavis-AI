@@ -223,3 +223,21 @@ def test_legacy_stored_title_renders_sensibly():
     now = timeutil.now()
     text = reminder_text(clean_what("Remind Test to stretch", "Test"), now, now, "UTC")
     assert text == "⏰ Reminder: stretch" and "Test" not in text
+
+
+
+async def test_complete_item_card_names_the_item_never_its_ref(db, fake_llm, memory, bus, integ):
+    from mavis.tools.assistant import CompleteItemArgs, _prepare_complete
+    from mavis.tools.registry import ToolContext, get_registry
+
+    user = await _user(integ, linked=False)
+    groceries, _, wake = await _seed(user)
+    ctx = ToolContext(user_id=user.id)
+    assert (await _prepare_complete(ctx, CompleteItemArgs(ref=f"loop:{groceries.id}"))).note == "Buy groceries"
+    assert (await _prepare_complete(ctx, CompleteItemArgs(ref=f"reminder:{wake}"))).note == "Reminder: Call mom"
+    assert (await _prepare_complete(ctx, CompleteItemArgs(ref="loop:999999"))).refusal
+    other = await users.get_or_create_by_chat(4242, "Other")
+    assert (await _prepare_complete(ToolContext(user_id=other[0].id),
+                                    CompleteItemArgs(ref=f"loop:{groceries.id}"))).refusal
+    preview = get_registry().get("complete_item").render_preview(CompleteItemArgs(ref=f"loop:{groceries.id}"))
+    assert "loop:" not in preview

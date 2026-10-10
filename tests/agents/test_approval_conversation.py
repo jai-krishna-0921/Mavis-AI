@@ -57,10 +57,38 @@ async def test_an_unrelated_message_is_never_taken_for_an_edit_of_a_pending_card
     user, channel, fake_llm, fake_memory, jobs, tools, text
 ):
     aid = await _prompted(user.id)
-    # a model that would call it an edit, as it did live: it must not even be asked
+    # a model that would call it an edit, as it did live: off the card, only a cancel is taken from it
     fake_llm.push_structured(ApprovalReplyInterpretation(decision="edit", instructions=text))
     fake_llm.push_text("Sure thing.")
     await run_turn(_event(user.id, text))
+    assert jobs(JobKind.RESUME_TASK) == [] and await _texts() == ["Sure thing."]
+    assert (await approvals.get(aid)).status == ApprovalStatus.PENDING
+
+
+@pytest.mark.parametrize("text", ["No, cancel that. Don't send anything.",
+                                  "actually scrap the invite, not needed"])
+async def test_a_longer_cancel_after_the_card_cancels_it(user, channel, fake_llm, fake_memory, jobs, tools,
+                                                          text):
+    aid = await _prompted(user.id)
+    fake_llm.push_structured(ApprovalReplyInterpretation(decision="cancel"))
+    await run_turn(_event(user.id, text))
+    [resume] = jobs(JobKind.RESUME_TASK)
+    assert resume.payload["approval_id"] == aid and resume.payload["decision"] == "no"
+
+
+async def test_a_failed_interpretation_leaves_the_card_and_answers_normally(user, channel, fake_llm,
+                                                                           fake_memory, jobs, tools,
+                                                                           monkeypatch):
+    from mavis.domain.errors import LLMError
+    from mavis.policy import approvals as approval_flow
+
+    async def broken(approval, text):
+        raise LLMError("down")
+
+    monkeypatch.setattr(approval_flow, "interpret_reply", broken)
+    aid = await _prompted(user.id)
+    fake_llm.push_text("Sure thing.")
+    await run_turn(_event(user.id, "please drop that one, I changed my mind about it"))
     assert jobs(JobKind.RESUME_TASK) == [] and await _texts() == ["Sure thing."]
     assert (await approvals.get(aid)).status == ApprovalStatus.PENDING
 
@@ -79,6 +107,7 @@ async def test_a_change_sent_as_a_reply_to_the_card_is_an_edit(user, channel, fa
 async def test_a_reply_to_some_other_message_is_not_an_edit(user, channel, fake_llm, fake_memory, jobs,
                                                             tools):
     await _prompted(user.id, "hi")
+    fake_llm.push_structured(ApprovalReplyInterpretation(decision="edit", instructions="say hello"))
     fake_llm.push_text("Noted.")
     event = _event(user.id, "say hello")
     event.payload["reply_to_text"] = "Here is your summary of the week."

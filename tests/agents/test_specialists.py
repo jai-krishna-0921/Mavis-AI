@@ -63,6 +63,10 @@ def test_tool_sets_per_specialist():
         "slides.read", "forms.read", "forms.responses",
         # and the self-only chat writes (spec 4.3)
         "docs.create", "tasks.add", "tasks.complete", "slides.create", "contacts.create", "contacts.update",
+        # writes a request finishes in one turn (2026-10-10 evals); sharing waits for the user's OK
+        "docs.append", "tasks.update", "sheets.create", "sheets.append_row", "sheets.update_range",
+        "drive.create_folder", "drive.move", "drive.share", "meet.create", "calendar.update_event",
+        "drive.export",
         # mail organising and calendar housekeeping; trash and delete wait for the user's OK
         "mail.archive", "mail.mark_read", "mail.mark_unread", "mail.label", "mail.trash", "mail.untrash",
         "calendar.calendars", "calendar.delete_event", "calendar.respond",

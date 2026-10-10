@@ -82,8 +82,14 @@ def test_chat_exposure_is_reads_plus_the_self_only_writes():
     chat_writes = {n for n, s in ACTIONS.items()
                    if "conversation" in s.agents and s.capability in WORKSPACE_CAPABILITIES
                    and s.risk is not RiskClass.READ}
-    assert chat_writes == {"docs.create", "tasks.add", "tasks.complete", "slides.create", "contacts.create",
-                           "contacts.update"}
+    # chat can do what the user asks in one turn; self-only writes need a tap when tainted, the rest always
+    assert chat_writes == {"docs.create", "docs.append", "tasks.add", "tasks.complete", "tasks.update",
+                           "slides.create", "contacts.create", "contacts.update", "sheets.create",
+                           "sheets.append_row", "sheets.update_range", "drive.create_folder", "drive.move",
+                           "drive.share", "meet.create"}
+    for name in chat_writes:
+        spec = ACTIONS[name]
+        assert spec.risk is RiskClass.OUTWARD or spec.taint_approve or spec.risk is RiskClass.WRITE_SELF, name
 
 
 async def test_tainted_run_queues_docs_create_for_approval(workspace_on, user):
