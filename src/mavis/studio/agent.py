@@ -20,6 +20,7 @@ from typing import Literal
 import structlog
 from pydantic import BaseModel, Field, create_model
 
+from mavis.channels.formatting import normalize_dashes
 from mavis.domain import timeutil
 from mavis.domain.errors import ActionFailed, LLMError
 from mavis.domain.events import Job
@@ -289,11 +290,28 @@ async def _deliver(user_id: int, job_id: str, req: Request, path, theme_style: s
     return link
 
 
+def _undash(value):
+    if isinstance(value, str):
+        return normalize_dashes(value)
+    if isinstance(value, list):
+        return [_undash(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _undash(v) for k, v in value.items()}
+    return value
+
+
+def undashed(spec: BaseModel) -> BaseModel:
+    """Every text in the spec through the chat's dash rule (house style: no em or en dashes), so a dash the
+    model wrote never reaches a file, as it never reaches a message."""
+    return type(spec).model_validate(_undash(spec.model_dump()))
+
+
 async def make(user_id: int, job_id: str, req: Request) -> str:
     """Plan, render and deliver one artifact; returns its Drive link ("" if none). Raises on failure."""
     from mavis.studio.render import render
 
     spec, style = await plan(user_id, req)
+    spec = undashed(spec)
     # A style the user chose (the brand tool) wins; otherwise each artifact gets the style that fits it.
     # Their colours, fonts and company name still apply on top either way (brand.theme_of).
     brand = await brand_store.get_brand(user_id)

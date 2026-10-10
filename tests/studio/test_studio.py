@@ -179,3 +179,13 @@ async def test_an_analysis_report_gets_a_gradient_style_unless_the_user_chose_on
     assert (await agent.plan(user.id, req))[1] == "ocean"
     await brand.set_brand(user.id, style="minimal")
     assert (await agent.plan(user.id, req))[1] == "minimal"
+
+
+def test_a_dash_the_model_wrote_never_reaches_a_file():
+    spec = DocSpec(title="Q3 \u2014 review", summary="Revenue grew 10\u201312%; see https://a.example/x\u2014y",
+                   sections=[Section(heading="Costs \u2013 flat")])
+    out = agent.undashed(spec)
+    text = out.model_dump_json()
+    assert "\u2014" not in out.title and "\u2013" not in out.sections[0].heading
+    assert "10 to 12%" in out.summary or "10-12%" in out.summary
+    assert isinstance(out, DocSpec) and "Q3" in text
