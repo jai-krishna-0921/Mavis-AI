@@ -321,3 +321,33 @@ async def test_chat_learn_markers_go_with_the_messages(db, memory, provider):
     await events.record(f"learn:d:{other}:0")
     await deletion.run_steps(uid)
     assert not await events.seen(f"learn:d:{uid}:0") and await events.seen(f"learn:d:{other}:0")
+
+
+@pytest.mark.parametrize("reset", [False, True])
+async def test_a_deletion_whose_job_was_lost_is_resumed_at_worker_start(db, memory, provider, recording_bus,
+                                                                        monkeypatch, reset):
+    """Evals 2026-10-10: a reset stopped after five of ten steps (the worker restarted mid-erase) and the
+    account sat in deleting, half erased, with no job left to finish it."""
+    from mavis.domain.events import JobKind
+
+    monkeypatch.setattr(deletion.bus, "get_bus", lambda: recording_bus)
+    uid = await _seed(4242, "Ira")
+    await deletion.mark_deleting(uid, reset=reset)
+    other = await _seed(4343, "Ola")  # active: not touched
+    assert await deletion.resume_deletions() == 1
+    [job] = [j for j in recording_bus.jobs if j.kind is JobKind.DELETE_USER]
+    assert job.user_id == uid and job.user_id != other
+    assert bool(job.payload.get("reset")) is reset
+    await deletion.run_deletion(job)
+    assert (await users.get(uid)).status == ("active" if reset else "deleted")
+    assert await messages.recent(uid, 10) == []
+
+
+async def test_a_lost_deletion_marked_before_the_flag_reads_the_request_from_the_audit_log(
+        db, memory, provider, recording_bus, monkeypatch):
+    monkeypatch.setattr(deletion.bus, "get_bus", lambda: recording_bus)
+    uid = await _seed(4545, "Uma")
+    await deletion.mark_deleting(uid, reset=True)
+    await users.modify_nested(uid, "deletion", lambda cur: {k: v for k, v in cur.items() if k != "reset"})
+    await deletion.resume_deletions()
+    assert recording_bus.jobs[-1].payload.get("reset") is True

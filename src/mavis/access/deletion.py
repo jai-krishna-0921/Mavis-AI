@@ -46,6 +46,8 @@ async def confirm(user_id: int, data: str) -> bool:
 
 async def mark_deleting(user_id: int, *, by_owner: bool = False, reset: bool = False) -> None:
     await users.update(user_id, status="deleting")  # the gate now drops every event for this user
+    # kept on the row, not only in the job, so a deletion resumed after a restart is still a reset
+    await users.modify_nested(user_id, "deletion", lambda cur: {**cur, "reset": reset})
     from mavis.web import sessions
 
     await sessions.delete_all(user_id)  # and no browser stays signed in
@@ -267,6 +269,37 @@ async def _readmit(before) -> None:
                        currency=None, country=None, timezone=s.default_timezone, onboarded=False)
 
 
+async def resume_deletions() -> int:
+    """Worker start: an account still marked deleting lost its job (a deploy or crash mid-erase, or the job
+    ran out of attempts), which left it half erased and locked out (evals 2026-10-10: a reset stopped after
+    five of ten steps). Each is enqueued again; the steps record what is done, so they pick up where they
+    stopped."""
+    from sqlalchemy import select
+
+    from mavis.store.db import Session
+    from mavis.store.models import AuditLog, User
+
+    async with Session() as s:
+        ids = list(await s.scalars(select(User.id).where(User.status == "deleting")))
+    for user_id in ids:
+        state = (await users.get_state(user_id)).get("deletion", {})
+        if "reset" in state:
+            reset = bool(state["reset"])
+        else:  # marked before the flag was kept on the row: what they asked for is in the audit log
+            async with Session() as s:
+                asked = await s.scalar(select(AuditLog.action).where(
+                    AuditLog.user_id == user_id,
+                    AuditLog.action.in_(("user.reset_requested", "user.delete_requested")))
+                    .order_by(AuditLog.id.desc()).limit(1))
+            reset = asked == "user.reset_requested"
+        await bus.get_bus().enqueue(Job(id=f"delete:{user_id}:resume:{int(utcnow().timestamp())}",
+                                        user_id=user_id, kind=JobKind.DELETE_USER,
+                                        payload={"reset": reset} if reset else {}))
+    if ids:
+        log.info("deletion.resumed", count=len(ids))
+    return len(ids)
+
+
 async def run_deletion(job: Job) -> None:
     if (await users.get(job.user_id)).status != "deleting":
         return  # a retried job after it already finished: the account is deleted, or reset and in use again
@@ -290,13 +323,14 @@ async def _button(event: Event, data: str) -> None:
 
 def register() -> None:
     from mavis.access.commands import register_owner_command, register_user_command
-    from mavis.worker.runner import register_job_handler
+    from mavis.worker.runner import register_job_handler, register_startup_hook
 
     register_user_command("delete_me", _delete_cmd)
     register_user_command("deleteme", _delete_cmd)
     register_user_command("privacy", _privacy_cmd)
     register_button_handler("del:", _button)
     register_job_handler(JobKind.DELETE_USER, run_deletion)
+    register_startup_hook(resume_deletions)
 
     async def admin_delete(event, owner, args):
         if len(args) >= 2 and args[0] == "delete" and args[1].isdigit():
