@@ -31,7 +31,7 @@ from mavis.store.repo import outbox, users
 from mavis.studio import brand as brand_store
 from mavis.studio import skills
 from mavis.studio.spec import SPECS
-from mavis.studio.themes import STYLE_HELP, Style
+from mavis.studio.themes import STYLE_HELP, THEMES, Style
 
 log = structlog.get_logger()
 
@@ -51,6 +51,8 @@ SOURCE_CHARS = 24_000  # all source files together, after their own clipping
 SPEC_DEADLINE_S = 300.0  # a whole deck is a long output; the queue and 429 backoffs count too
 # one attempt may take minutes: a full analysis report spec timed out at the tier's 30 s on every try
 SPEC_CALL_TIMEOUT_S = 240.0
+# an analysis report always takes a gradient style unless the user chose one (skills/analysis-report)
+ANALYSIS_SKILL, ANALYSIS_STYLE = "analysis-report", "ocean"
 
 STUDIO_PROMPT = """You are Mavis's studio: a senior designer and writer. Turn the brief into one {kind} spec.
 Follow the skills below exactly; they are the house rules. Today is {today}. The user is {who}.
@@ -240,8 +242,12 @@ async def plan(user_id: int, req: Request) -> tuple[BaseModel, str]:
         log.info("studio.missing_material", kind=req.kind)
         gap = " ".join(out.missing.split())[:200] or "the material it needs"
         raise ActionFailed(f"studio: the material lacks {gap}", reason=f"I don't have {gap}")
-    log.info("studio.planned", kind=req.kind, skills=list(loaded), style=out.style)
-    return out.spec, out.style
+    style = out.style
+    if ANALYSIS_SKILL in loaded and not brand.get("style") and not THEMES[style].gradient:
+        # the analysis-report rule, kept here because the spec writer does not always follow it
+        style = ANALYSIS_STYLE
+    log.info("studio.planned", kind=req.kind, skills=list(loaded), style=style)
+    return out.spec, style
 
 
 async def _deliver(user_id: int, job_id: str, req: Request, path, theme_style: str) -> str:

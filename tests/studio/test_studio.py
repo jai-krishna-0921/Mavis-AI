@@ -9,7 +9,7 @@ import pytest
 from mavis.domain.errors import LLMError
 from mavis.store.repo import outbox, users
 from mavis.studio import agent, brand, skills, tools
-from mavis.studio.spec import DeckSpec, Slide
+from mavis.studio.spec import DeckSpec, DocSpec, Section, Slide
 
 
 def test_every_skill_follows_the_format_and_carries_no_dashes():
@@ -49,6 +49,10 @@ def _deck() -> DeckSpec:
         Slide(layout="title", title="Falcon kickoff", subtitle="Q4 plan"),
         Slide(layout="stats", title="Where we stand", stats=[{"value": "18 lakh", "label": "Budget"}]),
         Slide(layout="closing", title="Next: pilot by 20 Nov")])
+
+
+def _doc() -> DocSpec:
+    return DocSpec(title="Q3 analysis", sections=[Section(heading="Revenue grew 22%")])
 
 
 async def test_run_renders_in_the_chosen_style_and_does_not_lock_it(db, settings, monkeypatch):
@@ -153,3 +157,25 @@ async def test_a_data_report_without_its_data_is_not_drawn(db, settings, monkeyp
     await agent.run(user.id, "studio:3", req)
     assert [m.text for m in sent] == [
         "I couldn't finish October spending: I don't have the October transactions. Want me to try again?"]
+
+
+async def test_an_analysis_report_gets_a_gradient_style_unless_the_user_chose_one(db, settings, monkeypatch):
+    user, _ = await users.get_or_create_by_chat(24, "JK")
+
+    async def loads_analysis(tools, *a, **k):
+        load = next(t for t in tools if t.name == "load_skill")
+        await load.ainvoke({"name": "analysis-report"})
+
+    async def no_context(*a, **k):
+        return "", None
+
+    async def writer(schema, system, human, **kw):
+        return schema(style="minimal", spec=_doc())
+
+    monkeypatch.setattr("mavis.agents.react.react_loop", loads_analysis)
+    monkeypatch.setattr("mavis.agents.turn_support.build_context_ex", no_context)
+    monkeypatch.setattr(agent.llm, "structured", writer)
+    req = agent.Request(kind="doc", title="Q3 analysis", brief="analyse Q3")
+    assert (await agent.plan(user.id, req))[1] == "ocean"
+    await brand.set_brand(user.id, style="minimal")
+    assert (await agent.plan(user.id, req))[1] == "minimal"
