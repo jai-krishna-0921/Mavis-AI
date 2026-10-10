@@ -200,6 +200,7 @@ class Register:
     sample: int = 0  # user messages measured
     brief: bool = False  # a standing wish for short messages (profile card brevity)
     latest_swore: bool = False  # the latest message itself swears: mirror it now, not just "may"
+    latest_strong: bool = False  # ...with a strong word (fuck, shit): mirror at that strength, not softened
     swears: bool = False  # swore recently and the latest message is not formal: swearing may be mirrored
     swear_share: float = 0.0  # share of measured messages with profanity ("in proportion")
     formal: bool = False  # the latest message reads formal
@@ -224,6 +225,7 @@ def measure(texts: list[str], *, brief: bool = False) -> Register:
         sample=len(texts),
         brief=brief,
         latest_swore=swears and sweary[-1],
+        latest_strong=swears and strong_profanity(latest),
         swears=swears,
         swear_share=sum(sweary) / len(texts),
         formal=formal,
@@ -284,14 +286,17 @@ def _register_line(reg: Register, *, proactive: bool = False) -> str:
         if reg.swear_share >= 0.5:
             amount = "they swear a lot, so a swear here and there sounds natural"
         if reg.latest_swore:
-            # "may" was read as "better not": the model stayed clean in every live run. They just swore, so
-            # a clean reply reads as stiff: ask for one, aimed at the situation.
+            # "may" was read as "better not": the model stayed clean in every live run, and "no stronger
+            # than theirs" was read as "softer" (a "fucking long week" got a "hell"): ask for their level.
+            level = ("They used a strong word, so match it: a strong one (fuck, fucking, shit), not a "
+                     "softened hell or damn" if reg.latest_strong else
+                     "They swore mildly, so keep it mild (damn, hell, bloody, crap)")
+            count = ("one or two casual swear words, since they swear a lot" if reg.swear_share >= 0.5
+                     else "ONE casual swear word")
             return ("Their register right now: casual and sweary, and they just swore, so a spotless reply "
-                    "sounds stiff. You may swear casually back, so do: include exactly ONE casual swear word "
-                    "(damn, shit, hell, bloody, fuck: whichever fits, no stronger than theirs), aimed at the "
-                    "situation (the "
-                    f"week, the deadline, the mess), {_LIMITS}. In proportion: {amount}. Skip it only if "
-                    f"they are upset or the news is bad.{energy}")
+                    f"sounds stiff. You may swear back, so do: include {count}. {level}. Aim it at the "
+                    f"situation (the week, the deadline, the mess), {_LIMITS}. Skip it only if they are "
+                    f"upset or the news is bad.{energy}")
         return ("Their register right now: casual and sweary. You may swear casually back, in proportion: "
                 f"{amount}. Use it for emphasis or fun, not filler ({_LIMITS}). Drop it the moment they "
                 f"are upset or the news is bad.{energy}")

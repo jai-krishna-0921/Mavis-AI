@@ -137,4 +137,4 @@ async def test_brevity_preference_reaches_the_model_from_the_profile_only(db, ch
 async def test_just_made_swear_is_mirrored_in_the_prompt(db, channel, fake_llm, memory, bus):
     user, _ = await users.get_or_create_by_chat(77, "Jai")
     system = await _turns(user.id, fake_llm, ["fuck this week man, so much shit to do"])
-    assert "ONE casual swear" in system
+    assert "casual swear word" in system

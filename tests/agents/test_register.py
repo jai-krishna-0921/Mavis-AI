@@ -329,11 +329,11 @@ def test_a_real_sentence_end_still_counts():
 def test_latest_swear_asks_for_a_mirrored_swear_but_older_swearing_only_allows_it():
     now = measure(["yo", "fuck this week man, so much shit to do"])
     assert now.swears and now.latest_swore
-    assert "ONE casual swear" in prompt_line(now) and "never at them" in prompt_line(now)
+    assert "casual swear word" in prompt_line(now) and "never at them" in prompt_line(now)
     earlier = measure(["fuck this week", "anyway, what's on today"])
     assert earlier.swears and not earlier.latest_swore
     line = prompt_line(earlier)
-    assert "may swear" in line and "ONE casual swear" not in line
+    assert "may swear" in line and "casual swear word" not in line
 
 
 @pytest.mark.parametrize("latest", [
@@ -342,7 +342,21 @@ def test_latest_swear_asks_for_a_mirrored_swear_but_older_swearing_only_allows_i
 ])
 def test_a_just_made_swear_is_not_mirrored_when_formal_or_upset(latest):
     reg = measure(["fuck this week", latest])
-    assert not reg.latest_swore and "ONE casual swear" not in prompt_line(reg)
+    assert not reg.latest_swore and "casual swear word" not in prompt_line(reg)
+
+
+def test_a_strong_swear_is_mirrored_at_its_strength_and_a_mild_one_stays_mild():
+    strong = prompt_line(measure(["hey", "ugh this week is so fucking long man"]))
+    assert "match it" in strong and "not a softened hell" in strong
+    mild = prompt_line(measure(["hey", "damn this bloody week"]))
+    assert "keep it mild" in mild and "fucking" not in mild
+
+
+def test_someone_who_swears_a_lot_gets_more_than_one():
+    heavy = prompt_line(measure(["shit, ok", "fuck yes", "this is fucking great"]))
+    assert "one or two casual swear words" in heavy
+    once = prompt_line(measure(["hi", "ok", "sounds good", "this is fucking great"]))
+    assert "ONE casual swear word" in once
 
 
 def test_brief_is_added_to_every_register_line_including_proactive_and_empty():
