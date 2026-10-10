@@ -291,6 +291,20 @@ def reply_lacks(*patterns: str, label: str = ""):
     return check
 
 
+def names_a_recent_file(top: int = 8):
+    """The reply names one of the Drive's actual most recent files (by modified time, whatever they are):
+    the seeded eval files stop being the newest as soon as the user makes anything else."""
+
+    async def check(ctx: Ctx) -> tuple[bool, str]:
+        data = await act(ctx.uid, "drive.list_recent", {"max_results": top})
+        names = [str(f.get("name") or "") for f in extract_list(data, "files", "data.files")]
+        text = "\n".join(ctx.replies).lower()
+        hits = [n for n in names if n and re.sub(r"\.\w{3,4}$", "", n).lower()[:24] in text]
+        return bool(hits), f"reply names a recent Drive file ({len(hits)} of {len(names)})"
+
+    return check
+
+
 def drive_has(name: str):
     async def check(ctx: Ctx) -> tuple[bool, str]:
         files = await drive_files(ctx.uid, name)
@@ -432,7 +446,7 @@ SCENARIOS: list[Scenario] = [
         "R3",
         "read.drive",
         [Turn("What are the most recent files in my Google Drive?")],
-        [reply_has(r"falcon|budget|vendor", label="a seeded file"), no_denial()],
+        [names_a_recent_file(), no_denial()],
     ),
     sc(
         "R4",
