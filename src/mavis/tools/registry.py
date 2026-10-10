@@ -610,7 +610,7 @@ class ToolRegistry:
         except (ApprovalRequired, ConnectionRequired):
             raise
         except ActionFailed as exc:
-            log.warning("tool.action_failed", tool=tool.name)
+            log.warning("tool.action_failed", tool=tool.name, kind=getattr(exc.kind, "value", None))
             if (exc.kind is FailureKind.PERMISSION_MISSING and tool.requires is not None
                     and self.permission_missing is not None):
                 try:

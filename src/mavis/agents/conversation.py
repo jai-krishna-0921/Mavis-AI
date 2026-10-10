@@ -77,12 +77,15 @@ log = structlog.get_logger(__name__)
 # What the turn did, for Phase 7 metrics: SMALL_TALK, DIRECT_TOOL, TASK, CONNECT or APPROVAL_REPLY.
 current_route: ContextVar[str | None] = ContextVar("current_route", default=None)
 
-CHAT_TOOL_LIMIT = 14
+CHAT_TOOL_LIMIT = 18
 # a follow up ("make it Chennai") ranks tools by the request it continues: this many earlier user messages
 CHAT_QUERY_TURNS = 2
 DISCOVER_LIMIT = 4  # tools find_tools adds per call
 # each only when available; track_loop and wake_me carry agreements and reminders (LEARN does not)
-CHAT_ALWAYS = ("start_task", "pending", "web_search", "track_loop", "wake_me", "complete_item")
+CHAT_ALWAYS = ("start_task", "pending", "web_search", "track_loop", "wake_me", "complete_item",
+               # the core reads, whenever their account is linked: a question about mail or the calendar never
+               # depends on how a ranking scored the words around it (10 Oct: "any emails today?" lost them)
+               "mail_search", "mail_read", "calendar_list", "drive_search")
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
 # Sends the user a link by itself: offered only when they ask to connect something (commands.wants_connect).
 CONNECT_TOOL = "connect_account"
