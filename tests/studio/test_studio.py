@@ -51,7 +51,7 @@ def _deck() -> DeckSpec:
         Slide(layout="closing", title="Next: pilot by 20 Nov")])
 
 
-async def test_run_renders_in_the_users_theme_delivers_and_fixes_their_style(db, settings, monkeypatch):
+async def test_run_renders_in_the_chosen_style_and_does_not_lock_it(db, settings, monkeypatch):
     user, _ = await users.get_or_create_by_chat(21, "JK")
 
     async def fake_plan(uid, req):
@@ -76,7 +76,8 @@ async def test_run_renders_in_the_users_theme_delivers_and_fixes_their_style(db,
     await agent.run(user.id, "studio:1", req)
     [(path, style)] = delivered
     assert path.exists() and path.suffix == ".pptx" and style == "bold"
-    assert (await brand.get_brand(user.id))["style"] == "bold"  # later artifacts match the first
+    # only a style the user picks is kept: each later artifact gets the style that fits it
+    assert "style" not in await brand.get_brand(user.id)
     assert "Here it is: Falcon kickoff" in sent[-1].text and "docs.google.com" in sent[-1].text
 
 

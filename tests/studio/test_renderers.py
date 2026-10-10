@@ -239,3 +239,35 @@ def test_table_cells_are_never_cut_and_rows_fit_the_slide():
     size, heights = _table_rows(grid, 3.68, 14, 3.95)
     assert 10 <= size <= 14 and sum(heights) <= 3.95
     assert heights[1] > heights[0]  # a wrapped row is taller than the one-line header
+
+
+def test_gradient_themes_paint_covers_and_documents_carry_charts_and_kpis(tmp_path):
+    """Gradient styles draw the cover, divider and closing slides with the gradient and give documents a
+    gradient cover band; chart and kpis blocks render as a real picture and a numbers row."""
+    from docx import Document
+    from pptx import Presentation
+
+    from mavis.studio.render import render
+    from mavis.studio.spec import Block, Chart, DeckSpec, DocSpec, Section, Series, Slide, Stat
+    from mavis.studio.themes import THEMES, theme_for
+
+    assert all(len(THEMES[s].gradient) >= 2 for s in ("corporate", "executive", "aurora", "ocean", "sunset"))
+    chart = Chart(kind="column", categories=["Q1", "Q2", "Q3"],
+                  series=[Series(name="Revenue", values=[4, 6, 9])])
+    deck = DeckSpec(title="Review", slides=[Slide(layout="title", title="Review"),
+                                            Slide(layout="chart", title="Up", chart=chart),
+                                            Slide(layout="closing", title="Next")])
+    pptx = render("deck", deck, theme_for("aurora"), tmp_path / "d.pptx")
+    slides = list(Presentation(str(pptx)).slides)
+    assert b"gradFill" in slides[0].background._element.xml.encode()
+    assert b"gradFill" in slides[-1].background._element.xml.encode()
+    doc = DocSpec(title="Analysis", summary="- Up 50%", sections=[Section(heading="Numbers", blocks=[
+        Block(kind="kpis", stats=[Stat(value="+50%", label="Growth"), Stat(value="9", label="Q3")]),
+        Block(kind="chart", chart=chart, text="Revenue rose every quarter.")])])
+    docx = Document(str(render("doc", doc, theme_for("ocean"), tmp_path / "a.docx")))
+    assert len(docx.inline_shapes) == 2  # the gradient cover band and the chart
+    texts = [p.text for p in docx.paragraphs]
+    assert "Revenue rose every quarter." in texts
+    assert any(c.text.startswith("+50%") for t in docx.tables for c in t.rows[0].cells)
+    plain = Document(str(render("doc", doc, theme_for("minimal"), tmp_path / "m.docx")))
+    assert len(plain.inline_shapes) == 1  # no band without a gradient, still the chart

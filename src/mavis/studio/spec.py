@@ -85,11 +85,15 @@ class DeckSpec(BaseModel):
 class Block(BaseModel):
     """One block of a document section."""
 
-    kind: Literal["paragraph", "bullets", "numbered", "table", "callout", "quote"]
-    text: Annotated[str, Field(max_length=4000)] = ""
+    kind: Literal["paragraph", "bullets", "numbered", "table", "callout", "quote", "chart", "kpis"]
+    text: Annotated[str, Field(max_length=4000)] = Field(
+        default="", description="The paragraph; for a chart, the one-line takeaway shown under it")
     items: list[Text] = Field(default_factory=list, max_length=20)
     table_header: list[Short] = Field(default_factory=list, max_length=8)
     table_rows: list[list[Short]] = Field(default_factory=list, max_length=40)
+    chart: Chart | None = Field(default=None, description="kind=chart: the data, drawn in the theme")
+    stats: list[Stat] = Field(default_factory=list, max_length=4,
+                              description="kind=kpis: 2 to 4 headline numbers with labels")
 
 
 class Section(BaseModel):

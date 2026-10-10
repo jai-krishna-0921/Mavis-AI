@@ -32,6 +32,12 @@ choice per slide and tight copy. Never describe colours or fonts in the slides.
 - Every deck of 6 or more slides should use at least 4 different layouts, and at least one of
   `stats`, `chart`, `timeline` or `two_column`.
 
+## How the theme looks
+Gradient styles (corporate, executive, aurora, ocean, sunset) paint the title, section and closing slides
+with the gradient and draw content slides on white with gradient accent bars, so a deck reads as
+designed. Use `section` slides as real chapter breaks (3+ parts) and end on `closing`: those are where the
+gradient shows. Content slides stay calm: data, stats and charts carry them.
+
 ## Copy rules
 - Bullets: 2 to 5 per slide, each under 12 words, no full stops, start with a strong word.
 - Subtitles: one line. Takeaways: one sentence that says what the chart means.

@@ -27,6 +27,9 @@ A reader should not be able to tell a model made this. Check every line against 
 - Titles fit in two lines. If a title runs longer, it is two ideas: split the slide.
 - Symmetry is not a virtue: a stat slide with 3 real numbers beats 4 where one is padding.
 - No decorative content: every chart, table and number carries information the reader needs.
+- Gradients belong to the theme (covers, dividers, closing): never ask for more colour, and never pick a
+  loud style for a sober audience (a board report is `executive`, not `sunset`).
+- A chart that shows one number, or two bars, is a `kpis` block or a sentence instead.
 
 ## Self-check before you answer
 1. Read only the titles in order: do they tell the whole story?

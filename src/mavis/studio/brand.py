@@ -1,7 +1,8 @@
 """Each user's brand: the theme base and overrides every artifact they get is drawn in.
 
 Stored on the user row (state["studio_brand"]). Set by the user ("use navy and gold, Montserrat") through
-the set_brand tool, or, when they never set one, fixed by their first artifact's style so later ones match.
+the brand tool. Without a chosen style each artifact gets the style that fits it; colours, fonts and company
+still apply.
 """
 
 from __future__ import annotations

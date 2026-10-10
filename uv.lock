@@ -1645,6 +1645,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint-postgres" },
     { name = "langgraph-checkpoint-sqlite" },
+    { name = "matplotlib" },
     { name = "neo4j" },
     { name = "openpyxl" },
     { name = "packaging" },
@@ -1669,7 +1670,6 @@ dependencies = [
 dev = [
     { name = "fakeredis", extra = ["lua"] },
     { name = "fpdf2" },
-    { name = "matplotlib" },
     { name = "pypdf" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1693,6 +1693,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.2.12" },
     { name = "langgraph-checkpoint-postgres", specifier = ">=3.1.2" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.1" },
+    { name = "matplotlib", specifier = ">=3.11.2" },
     { name = "neo4j", specifier = ">=6.3.1" },
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "packaging", specifier = ">=26.3" },
@@ -1717,7 +1718,6 @@ requires-dist = [
 dev = [
     { name = "fakeredis", extras = ["lua"], specifier = ">=2.39.0" },
     { name = "fpdf2", specifier = ">=2.8.9" },
-    { name = "matplotlib", specifier = ">=3.11.2" },
     { name = "pypdf", specifier = ">=6.19.0" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },

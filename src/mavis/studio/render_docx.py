@@ -6,11 +6,12 @@ the output stays an ordinary, editable Word document that Google Docs imports fa
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_TAB_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
@@ -165,8 +166,22 @@ class _Writer:
 
     def cover(self, spec: DocSpec, author: str, date_text: str) -> None:
         t = self.t
+        if t.gradient:  # the theme's gradient as a full-width band above the title
+            from mavis.studio.visuals import gradient_band
+
+            band = self.doc.add_paragraph()
+            band.paragraph_format.space_after = Pt(0)
+            band.add_run().add_picture(io.BytesIO(gradient_band(t.gradient, t.gradient_angle)),
+                                       width=Inches(CONTENT_WIDTH))
+            if t.company:
+                p = self.doc.add_paragraph()
+                r = p.add_run(t.company.upper())
+                r.bold = True
+                r.font.size, r.font.color.rgb, r.font.name = Pt(9), _rgb(t.muted), t.body_font
+                p.paragraph_format.space_before = Pt(10)
+                p.paragraph_format.space_after = Pt(0)
         title = self.doc.add_paragraph(spec.title, style="Title")
-        title.paragraph_format.space_before = Pt(36)
+        title.paragraph_format.space_before = Pt(14 if t.gradient else 36)
         if spec.subtitle:
             p = self.doc.add_paragraph()
             r = p.add_run(spec.subtitle)
@@ -306,8 +321,59 @@ class _Writer:
                     run.font.color.rgb = _rgb("#FFFFFF")
         self._gap(8)
 
+    def kpis(self, block: Block) -> None:
+        """2 to 4 headline numbers side by side: big value, small label, an accent rule on top."""
+        t = self.t
+        stats = [x for x in block.stats if x.value.strip()][:4]
+        if not stats:
+            return
+        table = self.doc.add_table(rows=1, cols=len(stats))
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = False
+        width = Inches(CONTENT_WIDTH / len(stats))
+        for cell, stat in zip(table.rows[0].cells, stats, strict=True):
+            cell.width = width
+            _shade(cell, t.surface)
+            _cell_borders(cell, top=(t.gradient[-1] if t.gradient else t.accent, 24),
+                          left=("#FFFFFF", 12), right=("#FFFFFF", 12))
+            _cell_margins(cell, 0.14, 0.14, 0.12, 0.1)
+            p = cell.paragraphs[0]
+            r = p.add_run(stat.value)
+            r.bold = True
+            r.font.size, r.font.color.rgb, r.font.name = Pt(24), _rgb(t.primary), t.heading_font
+            p.paragraph_format.space_after = Pt(0)
+            q = cell.add_paragraph()
+            r = q.add_run(stat.label)
+            r.font.size, r.font.color.rgb = Pt(9.5), _rgb(t.muted)
+            q.paragraph_format.space_after = Pt(0)
+        self._gap(10)
+
+    def chart(self, block: Block) -> None:
+        """A themed chart image with its takeaway as a caption under it."""
+        from mavis.studio.visuals import chart_png
+
+        t = self.t
+        if block.chart is None:
+            return
+        p = self.doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.add_run().add_picture(io.BytesIO(chart_png(block.chart, t)), width=Inches(CONTENT_WIDTH))
+        p.paragraph_format.space_after = Pt(2)
+        if block.text.strip():
+            cap = self.doc.add_paragraph()
+            r = cap.add_run(block.text.strip())
+            r.italic = True
+            r.font.size, r.font.color.rgb = Pt(9.5), _rgb(t.muted)
+            cap.paragraph_format.space_after = Pt(12)
+
     def block(self, block: Block) -> None:
         kind = block.kind
+        if kind == "chart":
+            self.chart(block)
+            return
+        if kind == "kpis":
+            self.kpis(block)
+            return
         if kind == "paragraph":
             self.paragraph(block.text)
             return

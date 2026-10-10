@@ -14,7 +14,7 @@ from mavis.domain.args import ToolArgs
 from mavis.domain.events import Job, JobKind
 from mavis.domain.policy import RiskClass
 from mavis.studio import brand as brand_store
-from mavis.studio.themes import SAFE_FONTS
+from mavis.studio.themes import SAFE_FONTS, STYLE_HELP
 from mavis.tools.chat_tools import current_turn
 from mavis.tools.registry import MavisTool
 
@@ -47,7 +47,8 @@ class CreateDocumentArgs(ToolArgs):
 
 
 class BrandArgs(ToolArgs):
-    style: Literal["minimal", "corporate", "bold", "warm", "editorial", ""] | None = None
+    style: Literal["minimal", "corporate", "executive", "bold", "aurora", "ocean", "sunset", "warm",
+                   "editorial", ""] | None = Field(default=None, description=STYLE_HELP)
     company: str | None = Field(default=None, max_length=80)
     primary: str | None = Field(default=None, description="#RRGGBB")
     secondary: str | None = Field(default=None, description="#RRGGBB")
@@ -114,8 +115,9 @@ TOOLS = [
     MavisTool(
         "brand",
         (
-            "Show or change the look of every file the studio makes for them: style (minimal, corporate, "
-            "bold, warm, editorial), company name, colours, fonts and tone. No arguments shows it."
+            "Show or change the look of every file the studio makes for them: a fixed style (by default "
+            "each file gets the style that fits it), company name, colours, fonts and tone. No arguments "
+            "shows it."
         ),
         BrandArgs,
         RiskClass.WRITE_SELF,

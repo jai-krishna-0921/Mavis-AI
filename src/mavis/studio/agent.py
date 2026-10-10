@@ -31,7 +31,7 @@ from mavis.store.repo import outbox, users
 from mavis.studio import brand as brand_store
 from mavis.studio import skills
 from mavis.studio.spec import SPECS
-from mavis.studio.themes import Style
+from mavis.studio.themes import STYLE_HELP, Style
 
 log = structlog.get_logger()
 
@@ -210,7 +210,7 @@ async def plan(user_id: int, req: Request) -> tuple[BaseModel, str]:
         )
         out_model = create_model(
             f"Studio{req.kind.title()}",
-            style=(Style, Field(description="minimal, corporate, bold, warm or editorial")),
+            style=(Style, Field(description=f"The look that fits this artifact and audience: {STYLE_HELP}")),
             spec=(SPECS[req.kind], ...),
         )
         material = "\n\n".join(x for x in sources if x)[:SOURCE_CHARS]
@@ -274,9 +274,9 @@ async def make(user_id: int, job_id: str, req: Request) -> str:
     from mavis.studio.render import render
 
     spec, style = await plan(user_id, req)
+    # A style the user chose (the brand tool) wins; otherwise each artifact gets the style that fits it.
+    # Their colours, fonts and company name still apply on top either way (brand.theme_of).
     brand = await brand_store.get_brand(user_id)
-    if not brand.get("style"):  # their first artifact fixes the look; later ones match it
-        brand = await brand_store.set_brand(user_id, style=style)
     theme = brand_store.theme_of(brand, style)
     user = await users.get(user_id)
     folder = artifacts.user_dir(user_id) / "studio"
