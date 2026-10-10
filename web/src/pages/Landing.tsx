@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Navigate, useSearchParams } from 'react-router-dom'
 import { CalendarDots, EnvelopeSimple, UsersThree } from '@phosphor-icons/react'
 import { useMe } from '../api/hooks'
 import { gsap, MOTION, ScrollTrigger, useGSAP } from '../lib/gsap'
@@ -47,6 +47,9 @@ export function Landing() {
     })
     void document.fonts?.ready.then(() => ScrollTrigger.refresh())
   }, { scope: root })
+
+  // an invite link lands here (older links) or on /login: either way the invite goes straight to sign-in
+  if (invite) return <Navigate to={signIn} replace />
 
   return (
     <div ref={root}>

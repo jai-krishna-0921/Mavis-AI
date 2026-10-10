@@ -69,7 +69,7 @@ The link is shown only once, so copy it from the reply.
 
 Sign in at your Mavis address, press the invite button, give the link a name and create it. The owner has no
 cap. Everyone else can hold 3 open links (10 if trusted) and each link admits 5 people; they can revoke a
-link to make another. The link looks like `https://<your-address>/?invite=MAV...` and opens the sign-in page
+link to make another. The link looks like `https://<your-address>/login?invite=MAV...` and opens the sign-in page
 with the code already filled in.
 
 ## 2. What the new person sees
