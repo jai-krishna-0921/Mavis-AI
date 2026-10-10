@@ -39,7 +39,7 @@ READ_DATA = {
     "subject": "AI Builders Meetup this Thursday", "messageText": MEETUP_BODY,
     "messageTimestamp": "2026-10-02T09:00:00Z",
 }
-NEVER_IN_CHAT = {"web_extract", "calendar_update_event", "mail_thread"}
+NEVER_IN_CHAT = {"web_extract", "mail_thread"}  # calendar_update_event joined chat on 2026-10-10
 
 
 def _call(name: str, args: dict, cid: str) -> AIMessage:
