@@ -6,6 +6,9 @@ Webhook and getUpdates long-polling are mutually exclusive: while a webhook is s
 
 from __future__ import annotations
 
+import asyncio
+import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -67,6 +70,65 @@ async def set_commands() -> Any:
     return await _call("setMyCommands", {
         "commands": [{"command": c, "description": d} for c, d in BOT_COMMANDS],
     })
+
+
+# The bot's public profile: the name in chats, the short line on its profile and in shares (max 120), and
+# the "What can this bot do?" text a new user sees above Start (max 512). Plain text, no dashes.
+BOT_NAME = "Mavis AI"
+BOT_SHORT_DESCRIPTION = (
+    "Your personal assistant: email, calendar, Drive, to-dos and polished docs, all in one chat. Invite only."
+)
+BOT_DESCRIPTION = (
+    "Mavis is your personal assistant. Connect your Google account and it learns how you work.\n\n"
+    "• Reads your inbox and drafts replies\n"
+    "• Plans your calendar and keeps your to-dos\n"
+    "• Finds files in Drive and answers from them\n"
+    "• Makes decks, docs and sheets in your style\n"
+    "• Researches the web and reports back\n"
+    "• Reminds you before things slip\n\n"
+    "Nothing goes out to anyone without your OK. Mavis is invite only for now: open your invite link, "
+    "then tap Start."
+)
+AVATAR = Path(__file__).parent / "brand" / "mavis-avatar.jpg"  # the mark on the brand orange, 640 px
+
+
+async def set_profile() -> dict[str, bool]:
+    """Publish the name, descriptions and command menu; each is sent only when Telegram's copy differs
+    (setMyName and friends are rate limited, and this runs on every api start). Returns what changed."""
+    changed: dict[str, bool] = {}
+    for getter, setter, key, value in (
+        ("getMyName", "setMyName", "name", BOT_NAME),
+        ("getMyShortDescription", "setMyShortDescription", "short_description", BOT_SHORT_DESCRIPTION),
+        ("getMyDescription", "setMyDescription", "description", BOT_DESCRIPTION),
+    ):
+        current = (await _call(getter)).get(key, "")
+        changed[key] = current != value
+        if changed[key]:
+            await _call(setter, {key: value})
+    commands = [{"command": c, "description": d} for c, d in BOT_COMMANDS]
+    changed["commands"] = await _call("getMyCommands") != commands
+    if changed["commands"]:
+        await set_commands()
+    return changed
+
+
+async def set_photo(path: Path = AVATAR) -> Any:
+    """Upload the profile photo (a JPG). Each upload is a new photo, so this runs on request only
+    (`mavis telegram set-photo`), never at start."""
+    token = get_settings().telegram_bot_token
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+    photo = await asyncio.to_thread(path.read_bytes)
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(
+            f"https://api.telegram.org/bot{token}/setMyProfilePhoto",
+            data={"photo": json.dumps({"type": "static", "photo": "attach://avatar"})},
+            files={"avatar": (path.name, photo, "image/jpeg")},
+        )
+    data = r.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram setMyProfilePhoto failed: {data.get('description', r.status_code)}")
+    return data["result"]
 
 
 async def delete_webhook() -> Any:
