@@ -15,6 +15,7 @@ from mavis.domain.events import Job, JobKind
 from mavis.domain.policy import RiskClass
 from mavis.studio import brand as brand_store
 from mavis.studio.themes import SAFE_FONTS
+from mavis.tools.chat_tools import current_turn
 from mavis.tools.registry import MavisTool
 
 _CONV = frozenset({"conversation"})
@@ -58,6 +59,7 @@ class BrandArgs(ToolArgs):
 
 async def create_document(user_id: int, args: CreateDocumentArgs) -> str:
     job_id = f"studio:{user_id}:{uuid.uuid4().hex[:12]}"
+    turn = current_turn.get()
     await get_bus().enqueue(
         Job(
             id=job_id,
@@ -69,6 +71,7 @@ async def create_document(user_id: int, args: CreateDocumentArgs) -> str:
                 "brief": args.brief,
                 "format": args.format or "",
                 "source_file_ids": list(args.source_file_ids),
+                "turn_ref": turn.event_id if turn else "",
             },
         )
     )

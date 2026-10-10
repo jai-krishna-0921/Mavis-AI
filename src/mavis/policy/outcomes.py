@@ -223,6 +223,73 @@ async def drop_blocked_by(user_id: int, approval_ids: list[int]) -> int:
     return await _set(user_id, blocked, LoopStatus.DROPPED)
 
 
+# --- loops of delivered work ----------------------------------------------------------------------
+
+DELIVERED_KEY = "delivered_turns"  # users.state: {turn id: {"at": iso time, "what": the file}}
+DELIVERED_WINDOW = timedelta(hours=12)
+# a loop from another turn is about making a file only when it names one ("pitch deck retry requested")
+FILE_WORDS = frozenset("deck slides slide presentation powerpoint pptx doc docs document report proposal "
+                       "agenda notes sheet sheets spreadsheet excel xlsx tracker budget pdf file".split())
+
+
+def _about(loop, what: str) -> bool:
+    """Is `loop` about the file described by `what`? It shares a word with it (the turn link already says
+    they are related; this keeps "buy milk" from the same turn open), and it is not due later."""
+    due = timeutil.ensure_utc(loop.due_at) if loop.due_at else None
+    if due is not None and due > timeutil.now():
+        return False  # "review the deck on Friday" is still ahead
+    return bool(set(loops_repo.title_tokens(loop.title)) & set(loops_repo.title_tokens(what)))
+
+
+async def delivered(user_id: int, turn_ref: str | None, what: str) -> int:
+    """Mavis made and sent a file (`what`: its title and kind) for the chat turn `turn_ref`. The OPEN
+    conversation loops LEARN wrote about making it ("create the pitch deck", "deck retry requested") are
+    DONE: those created in that turn or the one before it (structural, as for a failure), and those of the
+    last hours that name the same matter (the asks of earlier attempts that failed). The turn is recorded
+    so a loop LEARN writes from it afterwards is closed on creation (done_if_from_delivered_turn)."""
+    now = timeutil.now()
+    turns: list[str] = []
+    if turn_ref:
+        turns = [turn_ref]
+        previous = await messages.previous_user_event(user_id, turn_ref)
+        if previous is not None and previous[1] <= timedelta(minutes=get_settings().failed_turn_link_minutes):
+            turns.append(previous[0])
+
+        def record(cur: dict) -> dict:
+            keep = {k: v for k, v in cur.items() if isinstance(v, dict) and
+                    now - datetime.fromisoformat(v.get("at", "1970-01-01T00:00:00+00:00")) <= WINDOW}
+            return {**keep, turn_ref: {"at": now.isoformat(), "what": what[:200]}}
+
+        from mavis.store.repo import users  # lazy: keeps this module's import surface small
+
+        await users.modify_nested(user_id, DELIVERED_KEY, record)
+    since = now - DELIVERED_WINDOW
+    done = []
+    for lp in await loops_repo.list_open(user_id):
+        if lp.origin is not LoopOrigin.CONVERSATION or not _about(lp, what):
+            continue
+        if lp.created_ref in turns:
+            done.append(lp)
+        elif lp.created_at and timeutil.ensure_utc(lp.created_at) >= since and \
+                FILE_WORDS & set(loops_repo.title_tokens(lp.title)) and \
+                loops_repo.same_matter(lp.title, what, one_word=False):
+            done.append(lp)
+    return await _set(user_id, done, LoopStatus.DONE)
+
+
+async def done_if_from_delivered_turn(user_id: int, loop) -> bool:
+    """A loop LEARN created from a turn whose file was already made and sent: close it at once."""
+    if not loop.created_ref or loop.status is not LoopStatus.OPEN or \
+            loop.origin is not LoopOrigin.CONVERSATION:
+        return False
+    from mavis.store.repo import users
+
+    entry = ((await users.get_state(user_id)).get(DELIVERED_KEY) or {}).get(loop.created_ref)
+    if not isinstance(entry, dict) or not _about(loop, str(entry.get("what", ""))):
+        return False
+    return await _set(user_id, [loop], LoopStatus.DONE) > 0
+
+
 async def _set(user_id: int, loops: list, status: LoopStatus, blocked_by: str | None = None) -> int:
     from mavis import bus  # lazy: bus wiring imports the worker
     from mavis.loops.service import LoopService

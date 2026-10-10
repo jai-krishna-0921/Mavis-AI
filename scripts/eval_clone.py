@@ -28,8 +28,8 @@ from mavis.domain.events import Job, JobKind
 from mavis.domain.policy import Capability
 from mavis.store import db as dbm
 from mavis.store.models import NativeGrant, User
-from mavis.store.repo import connections
-from mavis.tools.integrations.actions import GOOGLE_ANCHOR, workspace_enabled
+from mavis.store.repo import connections, users
+from mavis.tools.integrations.actions import GOOGLE_ANCHOR, GOOGLE_CAPABILITIES, workspace_enabled
 from mavis.tools.integrations.native import crypto
 from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.tokens import _ctx
@@ -90,6 +90,12 @@ async def remove() -> None:
             NativeGrant.user_id == target, NativeGrant.provider == G.value,
             NativeGrant.account_key.like(f"{EVAL_KEY}%")))).rowcount
         await s.commit()
+    # as a real disconnect does (connect_flow): the Drive and Tasks poll chains end when not synced
+    dropped = {c.value for c in GOOGLE_CAPABILITIES}
+    st = await users.get_state(target)
+    kept = {key: {k: v for k, v in (st.get(key) or {}).items() if k not in dropped}
+            for key in ("synced", "polling")}
+    await users.update_state(target, kept)
     print(f"removed {n} eval google grant(s) from test user {target}")
 
 

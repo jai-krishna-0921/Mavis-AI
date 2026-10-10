@@ -200,7 +200,9 @@ async def _upsert_unless_closed(
         from mavis.policy import outcomes  # lazy: policy imports the tool registry
 
         # created by this turn after the action of this turn (or the next) had already failed
-        await outcomes.block_if_from_failed_turn(user_id, loop)
+        if not await outcomes.block_if_from_failed_turn(user_id, loop):
+            # or after the file it asks for was already made and sent
+            await outcomes.done_if_from_delivered_turn(user_id, loop)
 
 
 def extraction_trust(prov: Provenance) -> Trust:
