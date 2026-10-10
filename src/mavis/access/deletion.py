@@ -20,7 +20,10 @@ log = structlog.get_logger(__name__)
 CONFIRM_TEXT = ("This deletes everything I know about you: messages, memories, reminders, connected "
                 "accounts. It can't be undone.")
 DONE_TEXT = "Done. Everything is deleted. If you ever want to come back, you'll need a new invite."
-PRIVACY_TEXT = "Here's how Mavis AI handles your data: {url}"
+PRIVACY_TEXT = ("Here's how Mavis AI handles your data: {url}\n\nYou can erase everything I know about you "
+                "anytime with /delete_me.")
+PRIVACY_NO_PAGE = ("Your data stays yours: I use it only to help you, never sell or share it, and you can "
+                   "erase everything I know about you anytime with /delete_me.")
 CONFIRM_TTL = timedelta(minutes=10)
 
 
@@ -314,7 +317,11 @@ async def _delete_cmd(event: Event, user, args) -> str | None:
 async def _privacy_cmd(event: Event, user, args) -> str:
     from mavis.config import get_settings
 
-    return PRIVACY_TEXT.format(url=get_settings().privacy_url)
+    s = get_settings()
+    # the site's own policy page unless another is configured (an empty PRIVACY_URL left the sentence
+    # ending at its colon)
+    url = s.privacy_url or (f"{s.public_base_url.rstrip('/')}/privacy" if s.public_base_url else "")
+    return PRIVACY_TEXT.format(url=url) if url else PRIVACY_NO_PAGE
 
 
 async def _button(event: Event, data: str) -> None:

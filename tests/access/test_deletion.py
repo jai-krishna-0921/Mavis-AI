@@ -351,3 +351,18 @@ async def test_a_lost_deletion_marked_before_the_flag_reads_the_request_from_the
     await users.modify_nested(uid, "deletion", lambda cur: {k: v for k, v in cur.items() if k != "reset"})
     await deletion.resume_deletions()
     assert recording_bus.jobs[-1].payload.get("reset") is True
+
+
+@pytest.mark.parametrize(("privacy_url", "base", "expect"), [
+    ("", "https://mavis.example", "https://mavis.example/privacy"),
+    ("https://legal.example/p", "https://mavis.example", "https://legal.example/p"),
+    ("", "", None),
+])
+async def test_privacy_command_always_says_something_whole(settings, monkeypatch, privacy_url, base, expect):
+    """Evals 2026-10-10: with PRIVACY_URL unset /privacy answered "Here's how Mavis AI handles your data:"."""
+    monkeypatch.setattr(settings, "privacy_url", privacy_url)
+    monkeypatch.setattr(settings, "public_base_url", base)
+    text = await deletion._privacy_cmd(None, None, [])
+    assert not text.rstrip().endswith(":") and "/delete_me" in text
+    if expect:
+        assert expect in text
