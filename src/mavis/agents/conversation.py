@@ -354,7 +354,7 @@ async def _connect_prompt(event: Event, user_id: int, exc: ConnectionRequired) -
         log.warning("simple_turn.connect_flow_failed", capability=exc.capability.value, exc_info=True)
     hint = _connect_hint(exc)
     async with Session() as s:
-        await outbox.enqueue(s, Outbound(user_id=user_id, text=hint, dedupe_key=f"reply:{event.id}:0"))
+        await outbox.enqueue(s, Outbound(user_id=user_id, text=hint, dedupe_key=f"reply:{event.id}:connect"))
         await s.commit()
     return [hint]
 
@@ -779,6 +779,8 @@ async def run_turn(event: Event) -> None:
                 untrusted_sources=sources,
                 deadline_s=CHAT_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
                 discover=discover_tools(user.id, connect=connect, unlinked=unlinked) if tools else None,
+                # an unlinked account needed for one part does not drop the rest of the request
+                defer_connect=True,
             )
             result = await bind_claims(result, tools, text, user.id, self_tainted=self_taint,
                                         sources=sources)
@@ -818,6 +820,8 @@ async def run_turn(event: Event) -> None:
         if register.unmirrored(their_register, reply):  # formal, upset or never swore: no swearing (T1.2)
             reply = await register.tone_down(reply)
         bubbles = persona.split_bubbles(reply) or [reply]
+        if result.connection is not None and not (result.text or "").strip():
+            bubbles = []  # nothing else to say: the connect prompt below is the reply
         if card_only(result, reply):
             # The card (preview + buttons, rendered by code) is the only prompt: no prose bubble repeats it.
             log.info("simple_turn.card_only", queued=result.queued_approvals)
@@ -828,6 +832,10 @@ async def run_turn(event: Event) -> None:
                 key = f"reply:{event.id}:{i}"
                 await outbox.enqueue(s, Outbound(user_id=user.id, text=bubble, dedupe_key=key))
             await s.commit()
+        if result.connection is not None:
+            # after the answer to everything else, so the button is the last thing they see
+            connect_texts = await _connect_prompt(event, user.id, result.connection)
+            bubbles = [*bubbles, *connect_texts]
     # This turn's own untrusted input marks the reply: a tool read, or the digest it was shown.
     read_untrusted = _read_untrusted(result.tools_called) or result.read_untrusted or hooked
     if bubbles:

@@ -184,10 +184,11 @@ async def test_missing_connection_gives_connect_prompt(
     monkeypatch.setattr(wiring, "get_connect_flow", _getter(flow))
     fake_llm.push_ai(_call("calendar_list", {"time_min": "2026-10-03T00:00:00",
                                              "time_max": "2026-10-04T00:00:00"}, "c1"))
+    fake_llm.push_text("")  # nothing else was asked: the connect prompt is the whole reply
 
     await run_turn(msg_event(user.id, "what's on my calendar today?"))
 
-    assert len(fake_llm.calls) == 1  # no error reply, no second model call
+    assert len(fake_llm.calls) == 2  # the model was told the link is coming, and had nothing to add
     assert integ.executed == []
     [prompt] = rec.sent
     assert "Google Calendar" in prompt.text
@@ -209,10 +210,42 @@ async def test_connect_flow_failure_still_gives_a_hint(
     monkeypatch.setattr(wiring, "get_connect_flow", broken)
     user, _ = await users.get_or_create_by_chat(77, "Jai")
     fake_llm.push_ai(_call("mail_search", {"query": "Meetup"}, "c1"))
+    fake_llm.push_text("")
     await run_turn(msg_event(user.id, "find the Meetup email"))
     assert await outbox.texts_with_dedupe_prefix("reply:") == [
         "I need your Gmail linked for that. Send /connect gmail and I'll take it from there."
     ]
+
+
+async def test_an_unlinked_account_for_one_part_still_answers_the_rest(
+    db, channel, fake_llm, memory, bus, integ, cache, monkeypatch
+) -> None:
+    """Evals 2026-10-10: "What do you know about Pranav? And what's my Q3 budget total?" from a user with
+    no Google got only a connect link; the question about Pranav was dropped."""
+    from langchain_core.messages import ToolMessage
+
+    from mavis.agents.react import DEFERRED_CONNECTION
+    from mavis.tools.integrations import wiring
+
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    rec = Recorder()
+    flow = ConnectFlow(provider=integ, cache=cache, bus=FakeBus(), notify=rec.notify, schedule=rec.schedule,
+                       state=FakeState(), base_url="https://mavis.test")
+    monkeypatch.setattr(wiring, "get_connect_flow", _getter(flow))
+    fake_llm.push_ai(_call("mail_search", {"query": "Q3 budget"}, "c1"))
+    fake_llm.push_text("I don't know anyone called Pranav yet. For the budget I need your Gmail.")
+
+    await run_turn(msg_event(user.id, "what do you know about Pranav, and what's my Q3 budget?"))
+
+    told = [m for m in fake_llm.calls[1] if isinstance(m, ToolMessage)]
+    assert told and told[-1].content == DEFERRED_CONNECTION
+    assert integ.executed == []
+    answer = await outbox.texts_with_dedupe_prefix("reply:")
+    assert any("Pranav" in t for t in answer)
+    [prompt] = rec.sent  # and the connect button after it
+    assert "Gmail" in prompt.text
+    log = await messages.recent(user.id)
+    assert "Pranav" in log[-1].content and "Gmail" in log[-1].content
 
 
 async def test_llm_error_gives_fallback_copy(db, channel, fake_llm, memory, bus, integ) -> None:

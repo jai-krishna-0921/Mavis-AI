@@ -60,6 +60,8 @@ class ReactResult:
     tainted: bool = False  # the model saw untrusted tool output during this run
     read_untrusted: bool = False  # a tool in THIS loop returned third-party text (not inherited taint)
     wrapped_up: bool = False  # wrap_up forced a final answer (step budget or deadline reached)
+    # defer_connect: the first tool that needed an account linked; the caller sends its connect prompt
+    connection: ConnectionRequired | None = None
 
 
 def _text_of(content: Any) -> str:
@@ -110,6 +112,7 @@ async def react_loop(
     digest_on_failed_wrap_up: bool = False,
     should_stop: Callable[[], Awaitable[bool]] | None = None,
     discover: Discover | None = None,
+    defer_connect: bool = False,
 ) -> ReactResult:
     """Call the model, run the tools it asks for, repeat until it answers in text.
 
@@ -135,6 +138,10 @@ async def react_loop(
     `should_stop` (task loops) is checked before every model call and every tool round; when it returns
     True the loop raises TaskCancelled (the user cancelled the task), so nothing more runs.
 
+    `defer_connect` (chat turns): a tool that needs an account linked does not end the loop. The model is
+    told the link is coming and answers the rest of the request; the first such ConnectionRequired is
+    returned on `ReactResult.connection` for the caller to send its connect prompt after the reply.
+
     `discover(need, offered_names)` (chat turns): offers find_tools, which adds up to MAX_DISCOVERED of
     the tools it returns (names not offered yet) for the rest of the loop.
     """
@@ -159,6 +166,7 @@ async def react_loop(
     tools_called: list[str] = []
     unqueued: list[ApprovalRequired] = []
     steps = 0
+    deferred: ConnectionRequired | None = None
     end = None if deadline_s is None else time.monotonic() + deadline_s
     out_of_time = False
     try:
@@ -192,6 +200,15 @@ async def react_loop(
                     out_of_time = True
                     continue
                 except LLMError as exc:
+                    if deferred is not None:
+                        # the answer to the rest failed: the connect prompt alone still goes out
+                        log.warning("react.model_failed_after_connect", name=name,
+                                    error_type=type(exc).__name__)
+                        return ReactResult(text="", steps=steps, messages=history, tools_called=tools_called,
+                                           queued_approvals=run.queued_approvals[first_approval:],
+                                           unqueued_approvals=unqueued, tainted=run.tainted,
+                                           read_untrusted=run.untrusted_reads > first_read,
+                                           connection=deferred)
                     # a background loop whose model fails after some rounds keeps what it gathered, as
                     # on running out of budget; with nothing gathered yet (or in chat) the error stands
                     digest = gathered_digest(history[len(messages):]) if digest_on_failed_wrap_up else ""
@@ -204,6 +221,7 @@ async def react_loop(
                         text=digest, steps=steps, messages=history, tools_called=tools_called,
                         queued_approvals=run.queued_approvals[first_approval:], unqueued_approvals=unqueued,
                         tainted=run.tainted, wrapped_up=True, read_untrusted=run.untrusted_reads > first_read,
+                        connection=deferred,
                     )
             ai = _sanitized(ai, steps)
             history.append(ai)
@@ -215,7 +233,7 @@ async def react_loop(
                     text=_text_of(ai.content).strip(), steps=steps, messages=history,
                     tools_called=tools_called, queued_approvals=run.queued_approvals[first_approval:],
                     unqueued_approvals=unqueued, tainted=run.tainted, wrapped_up=final,
-                    read_untrusted=run.untrusted_reads > first_read,
+                    read_untrusted=run.untrusted_reads > first_read, connection=deferred,
                 )
             steps += 1
             if steps > max_steps:
@@ -225,7 +243,10 @@ async def react_loop(
             messages_out, connection = await _run_step(
                 calls, bad, by_name, tools_called, unqueued, default_timeout=tool_timeout_s, end=end
             )
-            if connection is not None:
+            if connection is not None and defer_connect:
+                deferred = deferred or connection
+                messages_out = [_deferred_note(m) for m in messages_out]
+            elif connection is not None:
                 connection.partial_messages = messages_out
                 connection.queued_approvals = run.queued_approvals[first_approval:]
                 raise connection
@@ -235,6 +256,20 @@ async def react_loop(
                 run.spawned = 0  # the per-step worker cap counts the outermost loop's steps
     finally:
         current_run.reset(token)
+
+
+NEEDS_CONNECTION = "Needs an account connected first. The user is being asked to connect it."
+DEFERRED_CONNECTION = (
+    "NOT CONNECTED: this needs an account the user has not linked. A message with a connect button goes "
+    "out right after your reply and explains it, so do not write about linking, links or steps. Answer "
+    "everything else they asked from what you know and your other tools; if this was all they asked, "
+    "reply with one short line.")
+
+
+def _deferred_note(m: ToolMessage) -> ToolMessage:
+    if m.content == NEEDS_CONNECTION:
+        return ToolMessage(content=DEFERRED_CONNECTION, tool_call_id=m.tool_call_id, name=m.name)
+    return m
 
 
 def _discovery_tool(discover: Discover, tools: list[BaseTool], by_name: dict[str, BaseTool]) -> BaseTool:
@@ -306,7 +341,7 @@ async def _run_step(
                 tools_called.append(call["name"])
         elif isinstance(res, ConnectionRequired):
             connection = connection or res
-            content = "Needs an account connected first. The user is being asked to connect it."
+            content = NEEDS_CONNECTION
         elif isinstance(res, ApprovalRequired):
             unqueued.append(res)
             content = "This needs the user's approval and has NOT been done."

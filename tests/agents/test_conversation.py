@@ -427,8 +427,9 @@ async def test_connection_required_prompts_to_connect_without_a_task(
                                       needs_mail, frozenset({"conversation"}), requires=Capability.GMAIL))
     fresh_registry.capability_check = not_linked
     fake_llm.push_ai(_call("mail_peek", {}))
+    fake_llm.push_text("")
     await run_turn(_event(user.id, "peek at my email"))
-    assert len(fake_llm.calls) == 1
+    assert len(fake_llm.calls) == 2
     [prompt] = flow.sent
     assert "Gmail" in prompt.text
     assert jobs(JobKind.RUN_TASK) == [] and await tasks.active_for_user(user.id) == []
