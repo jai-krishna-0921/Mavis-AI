@@ -157,7 +157,7 @@ def _background(slide, color: str) -> None:
 def _title(ctx: _Ctx, slide, text: str) -> None:
     t = ctx.theme
     _rect(slide, M, 0.5, 0.6, 0.07, t.accent)
-    text = _clip(text, 110)
+    text = _clip(text, 120)
     size = _tier(len(text), [(40, 36), (60, 32), (90, 28)], 24)
     _text(slide, M, 0.68, CW, 1.1, text, font=t.heading_font, size=size, color=t.text, bold=True)
 
@@ -185,9 +185,9 @@ def _title_slide(ctx: _Ctx, slide, s: Slide, deck: DeckSpec) -> None:
     if t.company:
         _text(slide, M, 0.6, CW, 0.3, t.company.upper(), font=t.body_font, size=12, color=_light(t),
               bold=True)
-    title = _clip(s.title or deck.title, 76)
+    title = _clip(s.title or deck.title, 120)  # the spec's own limit: shrink, never cut a title short
     sub = _clip(s.subtitle or deck.subtitle, 200)
-    size = _tier(len(title), [(24, 60), (46, 48)], 38)
+    size = _tier(len(title), [(24, 60), (46, 48), (76, 38)], 30)
     _rect(slide, M, 2.35, 1.1, 0.09, t.accent)
     _text(slide, M, 2.7, CW, 2.3, title, font=t.heading_font, size=size, color="#FFFFFF", bold=True,
           spacing=1.0)
@@ -203,9 +203,10 @@ def _section_slide(ctx: _Ctx, slide, s: Slide) -> None:
     _rect(slide, 0, 0, 0.35, SH, t.accent)
     _text(slide, 1.1, 1.7, 6, 1.6, f"{ctx.section:02d}", font=t.heading_font, size=110, color=t.accent,
           bold=True)
-    title = _clip(s.title, 70)
+    title = _clip(s.title, 120)
     _text(slide, 1.1, 3.6, 10.8, 1.7, title, font=t.heading_font,
-          size=_tier(len(title), [(30, 52), (55, 44)], 36), color="#FFFFFF", bold=True, anchor=MSO_ANCHOR.TOP)
+          size=_tier(len(title), [(30, 52), (55, 44), (80, 36)], 30), color="#FFFFFF", bold=True,
+          anchor=MSO_ANCHOR.TOP)
     if s.subtitle:
         _text(slide, 1.1, 5.4, 10.2, 1.0, _clip(s.subtitle, 200), font=t.body_font, size=20, color=_light(t))
 
@@ -496,10 +497,10 @@ def _table_slide(ctx: _Ctx, slide, s: Slide) -> None:
 def _closing_slide(ctx: _Ctx, slide, s: Slide, deck: DeckSpec) -> None:
     t = ctx.theme
     _background(slide, t.dark)
-    title = _clip(s.title or "Thank you", 70)
+    title = _clip(s.title or "Thank you", 120)
     _rect(slide, M, 1.55, 1.1, 0.09, t.accent)
     _text(slide, M, 1.9, 11.5, 1.6, title, font=t.heading_font,
-          size=_tier(len(title), [(30, 60), (55, 48)], 40), color="#FFFFFF", bold=True)
+          size=_tier(len(title), [(30, 60), (55, 48), (80, 38)], 32), color="#FFFFFF", bold=True)
     sub = _clip(s.subtitle, 200)
     if sub:
         _text(slide, M, 3.6, 10.5, 0.9, sub, font=t.body_font, size=22, color=_light(t))
