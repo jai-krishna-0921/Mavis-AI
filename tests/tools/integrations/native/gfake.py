@@ -15,7 +15,7 @@ from .test_gmail_mime import b64, part
 
 
 class Tokens:
-    def __init__(self, email: str | None = "me@kripya.com", *, revoked: bool = False) -> None:
+    def __init__(self, email: str | None = "me@orbit.test", *, revoked: bool = False) -> None:
         self.calls: list[bool] = []
         self.email, self.revoked = email, revoked
 
@@ -120,7 +120,7 @@ def gmail_message(
         },
         {"name": "Received", "value": "by 2002:a1 with SMTP"},
         {"name": "From", "value": sender},
-        {"name": "To", "value": "me@kripya.com"},
+        {"name": "To", "value": "me@orbit.test"},
         {"name": "Subject", "value": subject},
         {"name": "Date", "value": "Mon, 05 Oct 2026 10:00:00 +0530"},
         {"name": "Message-ID", "value": f"<{mid}@mail.acme.com>"},

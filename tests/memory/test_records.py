@@ -17,10 +17,10 @@ from mavis.store.repo import events as events_repo
 from mavis.store.repo import profile as profile_repo
 from mavis.tools.integrations.normalize import normalize_email, normalize_slack
 
-SELF = {"emails": ["jai@kripya.com"], "slack_ids": ["U0JAI0001"]}
+SELF = {"emails": ["jai@orbit.test"], "slack_ids": ["U0JAI0001"]}
 
 
-def gmail(mid, sender, subject, body, *, to="Jai <jai@kripya.com>", cc="", labels=("INBOX",), extra_headers=(), auth=False):
+def gmail(mid, sender, subject, body, *, to="Jai <jai@orbit.test>", cc="", labels=("INBOX",), extra_headers=(), auth=False):
     headers = [{"name": "From", "value": sender}, {"name": "To", "value": to}, {"name": "Subject", "value": subject}]
     if cc:
         headers.append({"name": "Cc", "value": cc})
@@ -44,14 +44,14 @@ async def all_statements(memory, uid):
 
 @pytest.fixture
 async def me(user):
-    await remember_identity(user.id, emails=("jai@kripya.com",), slack_ids=("U0JAI0001",), team="T0TEAM1")
+    await remember_identity(user.id, emails=("jai@orbit.test",), slack_ids=("U0JAI0001",), team="T0TEAM1")
     return user
 
 
 INVOICE = gmail(
     "m-inv", "Meera Iyer <meera@vendorco.in>", "Invoice 4471 due 25 Oct",
     "Hi Jai, invoice 4471 for the Phoenix migration from Vendorco is due on 25 October 2026. "
-    "Please pay to A/c No. 912010034455667 (IFSC HDFC0001234). Thanks, Meera", cc="Rohan Das <rohan.das@kripya.com>",
+    "Please pay to A/c No. 912010034455667 (IFSC HDFC0001234). Thanks, Meera", cc="Rohan Das <rohan.das@orbit.test>",
     auth=True)
 
 
@@ -106,7 +106,7 @@ def test_email_record_people_trust_and_origin(user):
     assert job.source_ref == "gmail:m-inv" and job.trust == "medium" and job.kind == "email"
     by_email = {p.email: p for p in job.people}
     assert by_email["meera@vendorco.in"].role == "sender" and by_email["meera@vendorco.in"].name == "Meera Iyer"
-    assert by_email["jai@kripya.com"].is_user and not by_email["rohan.das@kripya.com"].is_user
+    assert by_email["jai@orbit.test"].is_user and not by_email["rohan.das@orbit.test"].is_user
     assert "912010034455667" not in job.text and "[redacted:account]" in job.text
     payload = job.payload()
     assert payload["trust"] == Trust.UNTRUSTED.value and payload["conversation"] is False
@@ -126,11 +126,11 @@ def test_person_name_from_address_only_when_it_looks_like_a_person():
 
 def test_slack_record_resolves_author_mentions_and_self():
     n = slack_msg("U0ARJUN01", "Hey <@U0JAI0001> can you review the Phoenix plan? cc <@U0MEERA01>",
-                  user_name="Arjun Rao", user_email="Arjun@kripya.com", team="T0TEAM1")
+                  user_name="Arjun Rao", user_email="Arjun@orbit.test", team="T0TEAM1")
     job = records.slack_record(5, n, team="T0TEAM1", self_ids=SELF, directory={"U0MEERA01": {"name": "Meera Iyer", "email": "meera@vendorco.in"}})
     assert job.source_ref == "slack:T0TEAM1:D0DM00001:1791451800.000100" and job.trust == "medium"
     people = {p.slack_id: p for p in job.people}
-    assert people["U0ARJUN01"].email == "arjun@kripya.com" and people["U0ARJUN01"].role == "sender"
+    assert people["U0ARJUN01"].email == "arjun@orbit.test" and people["U0ARJUN01"].role == "sender"
     assert people["U0JAI0001"].is_user and people["U0MEERA01"].name == "Meera Iyer"
     assert "@Meera Iyer" in job.text and "U0MEERA01" not in job.text.split("\n\n", 1)[1]
     assert job.label == "Slack DM from Arjun Rao"
@@ -183,13 +183,13 @@ async def test_vector_entries_from_a_record_are_signals(memory, me, fake_llm):
 
 
 async def test_people_resolve_by_address_before_name(memory, me, fake_llm):
-    first = gmail("m-a", "Rohan Das <rohan.das@kripya.com>", "Roadmap sync Thursday 3pm",
+    first = gmail("m-a", "Rohan Das <rohan.das@orbit.test>", "Roadmap sync Thursday 3pm",
                   "Hi Jai, can we do the roadmap sync on Thursday at 3pm? Rohan", auth=True)
     fake_llm.push_structured(Extraction(entities=[Entity(name="Rohan Das", label="Person")], relations=[
         Relation(subject="Rohan Das", rel="COLLEAGUE_OF", object="User", statement="Rohan Das is Jai's colleague.")]))
     await learn(memory, me.id, records.email_record(me.id, first, self_ids=SELF))
     # same address, another display name, and the model calls him by first name only
-    again = gmail("m-b", "Rohan D. <rohan.das@kripya.com>", "Re: Roadmap sync Thursday 3pm",
+    again = gmail("m-b", "Rohan D. <rohan.das@orbit.test>", "Re: Roadmap sync Thursday 3pm",
                   "Thursday 3pm works. Rohan", auth=True)
     fake_llm.push_structured(Extraction(entities=[Entity(name="Rohan", label="Person")]))
     await learn(memory, me.id, records.email_record(me.id, again, self_ids=SELF))
@@ -200,7 +200,7 @@ async def test_people_resolve_by_address_before_name(memory, me, fake_llm):
 
 
 async def test_the_users_own_name_maps_to_the_user_node(memory, me, fake_llm):
-    mail = gmail("m-self", "Rohan Das <rohan.das@kripya.com>", "Lunch", "Jai, lunch tomorrow? Also Jai Krishna owes me a coffee.")
+    mail = gmail("m-self", "Rohan Das <rohan.das@orbit.test>", "Lunch", "Jai, lunch tomorrow? Also Jai Krishna owes me a coffee.")
     fake_llm.push_structured(Extraction(
         entities=[Entity(name="Jai", label="Person"), Entity(name="Rohan Das", label="Person")],
         relations=[Relation(subject="Rohan Das", rel="FRIEND_OF", object="Jai", statement="Rohan Das is Jai's friend.")]))
@@ -212,7 +212,7 @@ async def test_the_users_own_name_maps_to_the_user_node(memory, me, fake_llm):
 
 async def test_slack_dm_creates_people_by_slack_id_and_email(memory, me, fake_llm):
     n = slack_msg("U0ARJUN01", "Can you review the Phoenix migration plan by Friday? Meera is waiting.",
-                  user_name="Arjun Rao", user_email="arjun@kripya.com", team="T0TEAM1")
+                  user_name="Arjun Rao", user_email="arjun@orbit.test", team="T0TEAM1")
     job = records.slack_record(me.id, n, team="T0TEAM1", self_ids=SELF)
     fake_llm.push_structured(Extraction(
         entities=[Entity(name="Arjun", label="Person"), Entity(name="Phoenix migration", label="Project"), Entity(name="Meera", label="Person")],
@@ -220,7 +220,7 @@ async def test_slack_dm_creates_people_by_slack_id_and_email(memory, me, fake_ll
         loops=[LoopDraft(kind="COMMITMENT", title="Review the Phoenix migration plan", entities=["Arjun"])]))
     await learn(memory, me.id, job)
     ents = {e.name: e for e in await memory.graph.entities(me.id)}
-    assert "arjun@kripya.com" in ents["Arjun Rao"].aliases and "Arjun" not in ents
+    assert "arjun@orbit.test" in ents["Arjun Rao"].aliases and "Arjun" not in ents
     assert "Phoenix migration" in ents
     dump = await memory.graph.dump(me.id)
     assert all(d["source_ref"] == "tp:slack:T0TEAM1:D0DM00001:1791451800.000100" for d in dump)
@@ -262,13 +262,13 @@ async def test_prompt_injection_mail_is_untrusted_data_never_user_facts(memory, 
 
     memory.on_extraction.append(hook)
     # the user's genuine fact, stated in chat, must survive
-    await memory.graph.upsert_relation(me.id, Relation(subject="User", rel="WORKS_AT", object="Kripya", statement="Jai works at Kripya."))
+    await memory.graph.upsert_relation(me.id, Relation(subject="User", rel="WORKS_AT", object="Orbit", statement="Jai works at Orbit."))
     await learn(memory, me.id, records.email_record(me.id, evil, self_ids=SELF))
 
     assert (await profile_repo.get(me.id)).name != "Mallory"
     dump = await memory.graph.dump(me.id)
     mine = [d for d in dump if not is_third_party(d["source_ref"])]
-    assert [d["statement"] for d in mine] == ["Jai works at Kripya."]  # untouched, still current
+    assert [d["statement"] for d in mine] == ["Jai works at Orbit."]  # untouched, still current
     theirs = [d for d in dump if is_third_party(d["source_ref"])]
     assert theirs and all(d["relation"] != "WORKS_AT" for d in theirs)
     assert loop_calls and all(p.trust is Trust.UNTRUSTED and not p.conversation for p in loop_calls)
@@ -365,9 +365,9 @@ async def test_ingest_routes_mail_by_structure(me, mail, lane):
 
 async def test_own_sent_mail_teaches_the_users_address_and_is_not_learned(user):
     sink = Sink()
-    sent = gmail("s1", "Jai <jai.work@kripya.com>", "Re: plan", "sounds good to me", labels=("SENT",))
+    sent = gmail("s1", "Jai <jai.work@orbit.test>", "Re: plan", "sounds good to me", labels=("SENT",))
     assert (await ConnectorIngest(sink).email(user.id, sent)).reason == "own_mail"
-    assert sink.jobs == [] and "jai.work@kripya.com" in (await load_identities(user.id))["emails"]
+    assert sink.jobs == [] and "jai.work@orbit.test" in (await load_identities(user.id))["emails"]
 
 
 async def test_ingest_slack_skips_bots_system_messages_and_muted_sources(me):
@@ -445,7 +445,7 @@ async def test_intake_hands_every_mail_to_the_connector_ingest_and_survives_its_
             seen.append(payload["message_id"])
 
     intake = Intake(pipeline=None, loops=None, wakeups=None, thresholds=None, forward=None, connectors=Spy())
-    sent = gmail("z1", "Jai <jai@kripya.com>", "note", "note to self", labels=("SENT",))
+    sent = gmail("z1", "Jai <jai@orbit.test>", "note", "note to self", labels=("SENT",))
     event = Event(id="e1", user_id=me.id, type=EventType.EMAIL_RECEIVED,
                   occurred_at=datetime(2026, 10, 8, tzinfo=UTC), source="poll", payload=sent)
     await intake.on_email(event)  # a sent mail returns early in intake, but the connector saw it first
@@ -462,7 +462,7 @@ async def test_intake_hands_every_mail_to_the_connector_ingest_and_survives_its_
     (("SENT",), False, True),            # the mailbox filed it as sent by the user
 ])
 def test_a_from_header_is_the_user_only_with_proof(labels, auth, mine):
-    n = gmail("m-self", "Jai Krishna <jai@kripya.com>", "Wire the money", "Please wire it today.", labels=labels, auth=auth)
+    n = gmail("m-self", "Jai Krishna <jai@orbit.test>", "Wire the money", "Please wire it today.", labels=labels, auth=auth)
     job = records.email_record(5, n, self_ids=SELF, self_names=["Jai Krishna"])
     sender = next(p for p in job.people if p.role == "sender")
     assert sender.is_user is mine

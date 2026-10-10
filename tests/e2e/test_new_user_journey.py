@@ -347,7 +347,7 @@ async def test_connect_google_from_telegram_end_to_end(j, memory):
     link, _ = await j.owner_invite("uses=2")
     await j.onboard(6101, "Priya", link)
     await j.onboard(6102, "Dev", link)  # a second person who connects nothing
-    j.google_account("priya@kripya.com", PRIYA_MAIL)
+    j.google_account("priya@orbit.test", PRIYA_MAIL)
 
     await j.tg.say(6101, "/connect google")
     texts = j.tg.texts(6101)
@@ -357,17 +357,17 @@ async def test_connect_google_from_telegram_end_to_end(j, memory):
     q = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
     assert set(q["scope"].split()) == set(GOOGLE_SCOPES)
     assert q["redirect_uri"] == f"{BASE}/oauth/google/callback"
-    params = j.cloud.google_consent(url, "priya@kripya.com")
+    params = j.cloud.google_consent(url, "priya@orbit.test")
     r = await j.callback("google", params)
-    assert r.status_code == 200 and "priya@kripya.com" in r.text
+    assert r.status_code == 200 and "priya@orbit.test" in r.text
     await j.settle()
 
     grant = await j.grant_of(6101, NativeProvider.GOOGLE)
-    assert grant.status == "ACTIVE" and grant.account["email"] == "priya@kripya.com"
+    assert grant.status == "ACTIVE" and grant.account["email"] == "priya@orbit.test"
     assert set(grant.scopes) == set(GOOGLE_SCOPES)
     assert await j.grant_of(6102, NativeProvider.GOOGLE) is None  # nobody else got it
     after = j.tg.texts(6101)
-    assert any(t.startswith("Google is connected: priya@kripya.com") for t in after)
+    assert any(t.startswith("Google is connected: priya@orbit.test") for t in after)
     assert any(t.startswith("Connected") for t in after)
     assert not any("Connected" in t or "Google is connected" in t for t in j.tg.texts(6102))
 
@@ -419,7 +419,7 @@ async def test_add_google_account_from_the_dashboard(j, memory):
 
     link, _ = await j.owner_invite()
     await j.onboard(6201, "Aiko", link)
-    j.google_account("aiko@kripya.com", PRIYA_MAIL)
+    j.google_account("aiko@orbit.test", PRIYA_MAIL)
     c, h = await j.dashboard(6201, "Aiko")
     listed = (await c.get("/api/v1/connectors", headers=h)).json()
     assert {x["id"]: x["status"] for x in listed} == {"google": "none", "slack": "none"}
@@ -427,22 +427,22 @@ async def test_add_google_account_from_the_dashboard(j, memory):
     assert r.status_code == 200
     assert r.json()["notice"] == UNVERIFIED  # the page shows this beside the button, before the redirect
     url = r.json()["url"]
-    params = j.cloud.google_consent(url, "aiko@kripya.com")
+    params = j.cloud.google_consent(url, "aiko@orbit.test")
     # a different browser (no session) cannot finish a consent that was started from the dashboard
     stranger = await j.callback("google", params)
     assert stranger.status_code == 400 and "different browser session" in stranger.text
     assert await j.grant_of(6201, NativeProvider.GOOGLE) is None
     # the state is spent, so the real browser needs a fresh consent
     r = await c.post("/api/v1/connectors/google/connect", json={}, headers=h)
-    params = j.cloud.google_consent(r.json()["url"], "aiko@kripya.com")
+    params = j.cloud.google_consent(r.json()["url"], "aiko@orbit.test")
     done = await c.get("/oauth/google/callback", params=params)
     assert done.status_code == 303 and done.headers["location"] == "/workspace?connected=google"
     await j.settle()
     listed = {x["id"]: x for x in (await c.get("/api/v1/connectors", headers=h)).json()}
-    assert listed["google"]["status"] == "active" and listed["google"]["account"] == "aiko@kripya.com"
+    assert listed["google"]["status"] == "active" and listed["google"]["account"] == "aiko@orbit.test"
     assert listed["google"]["missing_scopes"] == [] and "mail" in listed["google"]["scopes_granted"]
     texts = j.tg.texts(6201)
-    assert any(t.startswith("Google is connected: aiko@kripya.com") for t in texts)  # the same confirmation
+    assert any(t.startswith("Google is connected: aiko@orbit.test") for t in texts)  # the same confirmation
     aiko = await users.get_by_chat(6201)
     assert "Priya Nair" in {e.name for e in await memory.graph.entities(aiko.id)}  # first sync ran
 
@@ -462,7 +462,7 @@ def slack_person(team: str, team_name: str, uid: str, name: str, email: str, pee
 
 
 def dev_person(**kw) -> SlackPerson:
-    return slack_person("T0KRIPYA1", "Kripya", "U0PRIYA01", "Priya", "priya@kripya.com", "U0DEV0001", "Dev Patel",
+    return slack_person("T0ORBIT1", "Orbit", "U0PRIYA01", "Priya", "priya@orbit.test", "U0DEV0001", "Dev Patel",
                         "dev@acme.com", "Dev Patel here: the Phoenix cutover is moving to Friday, can you confirm?")
 
 
@@ -496,15 +496,15 @@ async def test_connect_slack_from_telegram_backfill_events_and_chat(j, memory):
     assert q["user_scope"].split(",") == list(SLACK_USER_SCOPES) and q["scope"].split(",") == list(SLACK_BOT_SCOPES)
     assert not any("not verified" in t for t in j.tg.texts(6301))  # only Google shows that screen
     r = await j.callback("slack", j.cloud.slack_consent(url, person))
-    assert r.status_code == 200 and "Kripya workspace" in r.text
+    assert r.status_code == 200 and "Orbit workspace" in r.text
     await j.settle()
 
     grant = await j.grant_of(6301, NativeProvider.SLACK)
-    assert grant.status == "ACTIVE" and grant.account["team_id"] == "T0KRIPYA1" and grant.account["user_id"] == "U0PRIYA01"
+    assert grant.status == "ACTIVE" and grant.account["team_id"] == "T0ORBIT1" and grant.account["user_id"] == "U0PRIYA01"
     assert await j.grant_of(6301, NativeProvider.SLACK_BOT) is not None  # the bot token sits beside it
     assert await j.grant_of(6302, NativeProvider.SLACK) is None
     texts = j.tg.texts(6301)
-    assert any(t.startswith("Slack is connected: the Kripya workspace") for t in texts)
+    assert any(t.startswith("Slack is connected: the Orbit workspace") for t in texts)
     assert any(t.startswith("Connected") and "Slack" in t for t in texts)
     assert any("message me right in Slack" in t for t in texts)  # the bot DM is there too
 
@@ -525,7 +525,7 @@ async def test_connect_slack_from_telegram_backfill_events_and_chat(j, memory):
     assert any(x["source"] == "slack" for x in (await c.get("/api/v1/vault/sources", headers=h)).json())
 
     # a live message in that DM reaches Priya (not Dev) through the signed webhook
-    live = event_callback("T0KRIPYA1", {"type": "message", "channel": person.dms[0]["channel"], "channel_type": "im",
+    live = event_callback("T0ORBIT1", {"type": "message", "channel": person.dms[0]["channel"], "channel_type": "im",
                                          "user": "U0DEV0001", "text": "Dev Patel: the Phoenix review is Monday",
                                          "ts": _ts()}, event_id="Ev100", auth_user="U0PRIYA01")
     resp = await post_slack(j, live)
@@ -540,12 +540,12 @@ async def test_connect_slack_from_telegram_backfill_events_and_chat(j, memory):
     # chat with the bot in Slack: the reply comes back to Slack, as Priya's turn, and Dev is not involved
     bot_dm = "DBOTU0PRIYA01"
     j.llm.push_text("You have nothing on your calendar this afternoon.")
-    chat_event = event_callback("T0KRIPYA1", {"type": "message", "channel": bot_dm, "channel_type": "im",
+    chat_event = event_callback("T0ORBIT1", {"type": "message", "channel": bot_dm, "channel_type": "im",
                                               "user": "U0PRIYA01", "text": "what is on my calendar?", "ts": _ts()},
-                                event_id="Ev101", auth_user="U0PRIYA01", bot="B0KRIPYA1")
+                                event_id="Ev101", auth_user="U0PRIYA01", bot="B0ORBIT1")
     r = await post_slack(j, chat_event)
     assert r.json()["published"] == 1
-    sent = [s for s in j.channel.sent if str(s.chat_id).startswith("slack:T0KRIPYA1:")]
+    sent = [s for s in j.channel.sent if str(s.chat_id).startswith("slack:T0ORBIT1:")]
     assert [s.text for s in sent][-1] == "You have nothing on your calendar this afternoon."
     assert j.tg.texts(6302) == j.tg.texts(6302)  # Dev's chat untouched (checked below against his own history)
     assert not any("calendar this afternoon" in t for t in j.tg.texts(6302))
@@ -573,7 +573,7 @@ async def test_two_people_connecting_in_parallel_stay_fully_apart(j, memory):
     link, _ = await j.owner_invite("uses=2")
     await j.onboard(6401, "Priya", link)
     await j.onboard(6402, "Mara", link)
-    j.google_account("priya@kripya.com", PRIYA_MAIL)
+    j.google_account("priya@orbit.test", PRIYA_MAIL)
     j.google_account("mara@nordwind.example", MARA_MAIL)
     priya_slack, mara_slack = dev_person(), mara_person()
 
@@ -582,7 +582,7 @@ async def test_two_people_connecting_in_parallel_stay_fully_apart(j, memory):
         "ps": await start_connect(j, 6401, "slack"), "ms": await start_connect(j, 6402, "slack"),
     }
     consents = [
-        ("google", j.cloud.google_consent(urls["pg"], "priya@kripya.com")),
+        ("google", j.cloud.google_consent(urls["pg"], "priya@orbit.test")),
         ("google", j.cloud.google_consent(urls["mg"], "mara@nordwind.example")),
         ("slack", j.cloud.slack_consent(urls["ps"], priya_slack)),
         ("slack", j.cloud.slack_consent(urls["ms"], mara_slack)),
@@ -593,7 +593,7 @@ async def test_two_people_connecting_in_parallel_stay_fully_apart(j, memory):
 
     priya, mara = await users.get_by_chat(6401), await users.get_by_chat(6402)
     tokens = get_provider().tokens
-    for u, email, team in ((priya, "priya@kripya.com", "T0KRIPYA1"), (mara, "mara@nordwind.example", "T0NORDWIN1")):
+    for u, email, team in ((priya, "priya@orbit.test", "T0ORBIT1"), (mara, "mara@nordwind.example", "T0NORDWIN1")):
         assert (await tokens.grant(u.id, NativeProvider.GOOGLE)).account["email"] == email
         assert (await tokens.grant(u.id, NativeProvider.SLACK)).account["team_id"] == team
         assert (await tokens.grant(u.id, NativeProvider.SLACK_BOT)).account["team_id"] == team
@@ -603,9 +603,9 @@ async def test_two_people_connecting_in_parallel_stay_fully_apart(j, memory):
         return {d["source_ref"] for d in dump if is_third_party(d["source_ref"])}
 
     pr, ma = refs(await memory.graph.dump(priya.id)), refs(await memory.graph.dump(mara.id))
-    assert "tp:gmail:m-priya" in pr and "tp:gmail:m-mara" not in pr and any(r.startswith("tp:slack:T0KRIPYA1") for r in pr)
+    assert "tp:gmail:m-priya" in pr and "tp:gmail:m-mara" not in pr and any(r.startswith("tp:slack:T0ORBIT1") for r in pr)
     assert "tp:gmail:m-mara" in ma and "tp:gmail:m-priya" not in ma and any(r.startswith("tp:slack:T0NORDWIN1") for r in ma)
-    assert not any("T0NORDWIN1" in r for r in pr) and not any("T0KRIPYA1" in r for r in ma)
+    assert not any("T0NORDWIN1" in r for r in pr) and not any("T0ORBIT1" in r for r in ma)
     assert {"Priya Nair", "Dev Patel"} <= {e.name for e in await memory.graph.entities(priya.id)}
     assert {"Mara Lindqvist", "Tomas Weber"} <= {e.name for e in await memory.graph.entities(mara.id)}
     assert not ({"Mara Lindqvist", "Tomas Weber"} & {e.name for e in await memory.graph.entities(priya.id)})
@@ -618,14 +618,14 @@ async def test_two_people_connecting_in_parallel_stay_fully_apart(j, memory):
     vm = json.dumps((await cm.get("/api/v1/vault/items", params={"kind": "person"}, headers=hm)).json())
     assert "Priya Nair" in vp and "Dev Patel" in vp and "Mara Lindqvist" not in vp and "Tomas Weber" not in vp
     assert "Mara Lindqvist" in vm and "Tomas Weber" in vm and "Priya Nair" not in vm and "Dev Patel" not in vm
-    assert (await cp.get("/api/v1/connectors", headers=hp)).json()[0]["account"] == "priya@kripya.com"
+    assert (await cp.get("/api/v1/connectors", headers=hp)).json()[0]["account"] == "priya@orbit.test"
     assert (await cm.get("/api/v1/connectors", headers=hm)).json()[0]["account"] == "mara@nordwind.example"
 
     # outbox: nothing of one reached the other's chat
     mine, theirs = " ".join(j.tg.texts(6401)), " ".join(j.tg.texts(6402))
-    assert "priya@kripya.com" in mine and "priya@kripya.com" not in theirs
+    assert "priya@orbit.test" in mine and "priya@orbit.test" not in theirs
     assert "mara@nordwind.example" in theirs and "mara@nordwind.example" not in mine
-    assert "Kripya" in mine and "Kripya" not in theirs and "Nordwind" in theirs and "Nordwind" not in mine
+    assert "Orbit" in mine and "Orbit" not in theirs and "Nordwind" in theirs and "Nordwind" not in mine
 
     # reminders: set by chat tool calls, owned and delivered per person
     from zoneinfo import ZoneInfo
@@ -678,8 +678,8 @@ async def test_disconnect_with_forget_then_reconnect_brings_it_back(j, memory, c
 
     link, _ = await j.owner_invite()
     await j.onboard(6501, "Priya", link)
-    j.google_account("priya@kripya.com", PRIYA_MAIL)
-    await j.connect_google(6501, "priya@kripya.com")
+    j.google_account("priya@orbit.test", PRIYA_MAIL)
+    await j.connect_google(6501, "priya@orbit.test")
     await connect_slack(j, 6501, dev_person())
     priya = await users.get_by_chat(6501)
 
@@ -708,7 +708,7 @@ async def test_disconnect_with_forget_then_reconnect_brings_it_back(j, memory, c
     left = await WakeupService().pending(priya.id, WakeupKind.SYSTEM_POLL)
     assert all(w.reason == "slack" for w in left)  # and the chain for Google did not re-arm
 
-    await j.connect_google(6501, "priya@kripya.com")  # reconnect: link, consent, first sync again
+    await j.connect_google(6501, "priya@orbit.test")  # reconnect: link, consent, first sync again
     assert (await j.grant_of(6501, NativeProvider.GOOGLE)).status == "ACTIVE"
     assert refs(await memory.graph.dump(priya.id)) == {"gmail", "slack"}
 
@@ -720,7 +720,7 @@ async def test_disconnect_with_forget_then_reconnect_brings_it_back(j, memory, c
     assert "slack" in refs(await memory.graph.dump(priya.id))
     assert j.tg.texts(6501)[-1].startswith("Disconnected Slack.") and "removed what I had learned" not in j.tg.texts(6501)[-1]
     # a Slack message in the old workspace now reaches nobody
-    gone = event_callback("T0KRIPYA1", {"type": "message", "channel": "D0PRIYA01DEV0001", "channel_type": "im",
+    gone = event_callback("T0ORBIT1", {"type": "message", "channel": "D0PRIYA01DEV0001", "channel_type": "im",
                                          "user": "U0DEV0001", "text": "still there?", "ts": _ts()},
                           event_id="Ev300", auth_user="U0PRIYA01")
     assert (await post_slack(j, gone)).json()["unmapped"] == 1
@@ -732,10 +732,10 @@ async def test_revoked_google_token_asks_for_a_reconnect_and_reconnecting_heals_
 
     link, _ = await j.owner_invite()
     await j.onboard(6601, "Priya", link)
-    j.google_account("priya@kripya.com", PRIYA_MAIL)
-    await j.connect_google(6601, "priya@kripya.com")
+    j.google_account("priya@orbit.test", PRIYA_MAIL)
+    await j.connect_google(6601, "priya@orbit.test")
     priya = await users.get_by_chat(6601)
-    j.cloud.revoked_refresh.add("1//refresh-priya@kripya.com")  # she removed Mavis in her Google account
+    j.cloud.revoked_refresh.add("1//refresh-priya@orbit.test")  # she removed Mavis in her Google account
     clock.advance(hours=2)  # the access token has expired
     await get_poller().poll(priya.id, Capability.GMAIL)
     await j.settle()
@@ -746,8 +746,8 @@ async def test_revoked_google_token_asks_for_a_reconnect_and_reconnecting_heals_
     c, h = await j.dashboard(6601, "Priya")
     assert [x["status"] for x in (await c.get("/api/v1/connectors", headers=h)).json()][0] == "failed"
     # chat: asking about mail when the grant is dead offers the reconnect instead of failing silently
-    j.cloud.google_accounts["priya@kripya.com"].mail = [PRIYA_MAIL]
-    r = await j.callback("google", j.cloud.google_consent(url, "priya@kripya.com"))
+    j.cloud.google_accounts["priya@orbit.test"].mail = [PRIYA_MAIL]
+    r = await j.callback("google", j.cloud.google_consent(url, "priya@orbit.test"))
     assert r.status_code == 200
     await j.settle()
     grant = await j.grant_of(6601, __import__("mavis.tools.integrations.native.base", fromlist=["NativeProvider"]).NativeProvider.GOOGLE)
@@ -767,7 +767,7 @@ async def test_unticked_boxes_are_recorded_as_granted_and_the_router_obeys_them(
 
     link, _ = await j.owner_invite()
     await j.onboard(6701, "Priya", link)
-    j.google_account("priya@kripya.com", PRIYA_MAIL)
+    j.google_account("priya@orbit.test", PRIYA_MAIL)
     # An earlier Mavis asked for mail read and calendar events only, and she allowed them. This time she
     # unticks every new box (sending mail, Drive, Docs, Sheets and the rest): Google still reports the
     # earlier grant (include_granted_scopes), so mail read and calendar keep working and nothing else does.
@@ -777,7 +777,7 @@ async def test_unticked_boxes_are_recorded_as_granted_and_the_router_obeys_them(
             "meetings.space.readonly")
     earlier = ("https://www.googleapis.com/auth/gmail.readonly",
                "https://www.googleapis.com/auth/calendar.events")
-    url, r = await j.connect_google(6701, "priya@kripya.com", untick=untick, earlier=earlier)
+    url, r = await j.connect_google(6701, "priya@orbit.test", untick=untick, earlier=earlier)
     grant = await j.grant_of(6701, NativeProvider.GOOGLE)
     assert grant.status == "ACTIVE"
     assert set(grant.scopes) == {"openid", "email", "profile", "https://www.googleapis.com/auth/gmail.readonly",
@@ -832,7 +832,7 @@ async def test_unticked_boxes_are_recorded_as_granted_and_the_router_obeys_them(
     offer = [b for b in j.tg.buttons(6701) if b.label == "Reconnect Google"]
     assert offer and any("That needs more access to your Google than you allowed" in t for t in j.tg.texts(6701))
     # she taps it and this time leaves every box ticked: the grant widens, sending now reaches Google
-    r = await j.callback("google", j.cloud.google_consent(offer[0].url, "priya@kripya.com"))
+    r = await j.callback("google", j.cloud.google_consent(offer[0].url, "priya@orbit.test"))
     assert r.status_code == 200
     await j.settle()
     widened = await j.grant_of(6701, NativeProvider.GOOGLE)
@@ -846,12 +846,12 @@ async def test_a_consent_with_every_service_unticked_is_not_called_connected(j):
 
     link, _ = await j.owner_invite()
     await j.onboard(6801, "Priya", link)
-    j.google_account("priya@kripya.com", PRIYA_MAIL)
+    j.google_account("priya@orbit.test", PRIYA_MAIL)
     everything = ("gmail.modify", "gmail.send", "gmail.compose", "calendar", "drive", "documents", "spreadsheets",
             "presentations", "forms.body.readonly", "forms.responses.readonly", "tasks", "contacts",
             "contacts.other.readonly", "directory.readonly", "meetings.space.created",
             "meetings.space.readonly")
-    await j.connect_google(6801, "priya@kripya.com", untick=everything, status=400)
+    await j.connect_google(6801, "priya@orbit.test", untick=everything, status=400)
     texts = j.tg.texts(6801)
     assert not any(t.startswith("Connected") or t.startswith("Google is connected") for t in texts)
     note = texts[-1]
@@ -920,9 +920,9 @@ async def test_chat_after_the_token_was_revoked_offers_the_reconnect_link(j, clo
 
     link, _ = await j.owner_invite()
     await j.onboard(7101, "Priya", link)
-    j.google_account("priya@kripya.com", PRIYA_MAIL)
-    await j.connect_google(7101, "priya@kripya.com")
-    j.cloud.revoked_refresh.add("1//refresh-priya@kripya.com")
+    j.google_account("priya@orbit.test", PRIYA_MAIL)
+    await j.connect_google(7101, "priya@orbit.test")
+    j.cloud.revoked_refresh.add("1//refresh-priya@orbit.test")
     clock.advance(hours=2)
     j.llm.push_ai(AIMessage(content="", tool_calls=[{"name": "mail_search", "id": "c1", "args": {"query": "contract"}}]))
     out = await j.tg.say(7101, "find the contract mail from Priya", "Priya")
@@ -938,12 +938,12 @@ async def test_a_google_account_that_belongs_to_someone_else_is_skipped_politely
     link, _ = await j.owner_invite("uses=2")
     await j.onboard(7201, "Priya", link)
     await j.onboard(7202, "Mara", link)
-    j.google_account("priya@kripya.com", PRIYA_MAIL)
-    await j.connect_google(7201, "priya@kripya.com")
-    await j.connect_google(7202, "priya@kripya.com", status=400)  # Mara signs in with Priya's address
+    j.google_account("priya@orbit.test", PRIYA_MAIL)
+    await j.connect_google(7201, "priya@orbit.test")
+    await j.connect_google(7202, "priya@orbit.test", status=400)  # Mara signs in with Priya's address
     assert "That Google account is already connected to another Mavis user, so I skipped it." in j.tg.texts(7202)
     assert await j.grant_of(7202, NativeProvider.GOOGLE) is None
-    assert (await j.grant_of(7201, NativeProvider.GOOGLE)).account["email"] == "priya@kripya.com"
+    assert (await j.grant_of(7201, NativeProvider.GOOGLE)).account["email"] == "priya@orbit.test"
     assert not any("Mara" in t for t in j.tg.texts(7201))
 
 

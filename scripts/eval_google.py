@@ -50,7 +50,7 @@ BUDGET = f"{TAG} Q3 budget"
 VENDOR = f"{TAG} Vendor notes"
 FALCON_MD = """# Project Falcon
 
-Project Falcon is a customer support copilot for Kripya's retail clients.
+Project Falcon is a customer support copilot for retail clients.
 
 - PM: Priya Raman (priya.raman@example.com)
 - Tech lead: Arjun Mehta (arjun.mehta@example.com)

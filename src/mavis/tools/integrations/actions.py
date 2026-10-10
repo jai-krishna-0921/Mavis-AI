@@ -398,6 +398,7 @@ class DriveUploadFileArgs(BaseModel):
     name: str
     mime: str
     folder_id: str = ""
+    convert_to: str = ""  # a Google type (application/vnd.google-apps.*): Drive converts on upload
 
 
 CellValue = str | int | float | bool

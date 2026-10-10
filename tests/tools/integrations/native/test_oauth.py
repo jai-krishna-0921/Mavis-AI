@@ -27,14 +27,14 @@ def query(url):
     return {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
 
 
-def google_vendor(vendor, *, refresh="1//r", email="Me@Kripya.com", scope="openid email gmail.readonly"):
+def google_vendor(vendor, *, refresh="1//r", email="Me@Orbit.test", scope="openid email gmail.readonly"):
     vendor.routes[GOOGLE_TOKEN_URL] = lambda r: httpx.Response(200, json={
         "access_token": "ya29.a", "refresh_token": refresh, "expires_in": 3599, "scope": scope})
     vendor.routes[GOOGLE_USERINFO_URL] = lambda r: httpx.Response(200, json={"sub": "42", "email": email})
 
 
 def slack_vendor(vendor, **authed):
-    body = {"ok": True, "team": {"id": "T1", "name": "Kripya"},
+    body = {"ok": True, "team": {"id": "T1", "name": "Orbit"},
             "authed_user": {"id": "U1", "scope": "channels:history,chat:write", "access_token": "xoxp-1",
                             "token_type": "user", **authed}}
     vendor.routes[SLACK_TOKEN_URL] = lambda r: httpx.Response(200, json=body)
@@ -90,7 +90,7 @@ async def test_google_exchange_saves_a_sealed_grant(oauth, tokens, vendor):
     assert sent["code_verifier"] == verify_state(state).verifier
     assert sent["redirect_uri"] == "https://mavis.test/oauth/google/callback"
     assert vendor.to(GOOGLE_USERINFO_URL)[0].headers["authorization"] == "Bearer ya29.a"
-    assert done.account["email"] == "me@kripya.com"
+    assert done.account["email"] == "me@orbit.test"
     assert "openid" in done.account["scopes"]
     assert await tokens.reveal(5, G) == ("ya29.a", "1//r")
     assert (await tokens.grant(5, G)).status == "ACTIVE"
@@ -101,7 +101,7 @@ async def test_slack_exchange_stores_team_and_user(oauth, tokens, vendor):
     state = query(await oauth.authorize_url(5, S, None))["state"]
     done = await oauth.complete(state, "c0de", S)
     assert done.pending_id is None
-    assert done.account == {"team_id": "T1", "team_name": "Kripya", "user_id": "U1",
+    assert done.account == {"team_id": "T1", "team_name": "Orbit", "user_id": "U1",
                             "scopes": ["channels:history", "chat:write"]}
     assert "code_verifier" not in form(vendor.to(SLACK_TOKEN_URL)[0])
     assert await tokens.reveal(5, S) == ("xoxp-1", None)

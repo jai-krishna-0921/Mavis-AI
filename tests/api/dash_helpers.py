@@ -38,7 +38,7 @@ def id_token(nonce: str, *, key=None, **over) -> str:
     kid = over.pop("kid", "k1")
     now = int(time.time())
     claims = {"iss": "https://accounts.google.com", "aud": "gid", "exp": now + 3600, "iat": now, "sub": "g-42",
-              "nonce": nonce, "email": "me@kripya.com", "email_verified": True, **over}
+              "nonce": nonce, "email": "me@orbit.test", "email_verified": True, **over}
     head = b64(json.dumps({"alg": "RS256", "kid": kid, "typ": "JWT"}).encode())
     body = b64(json.dumps(claims).encode())
     sig = (key or KEY).sign(f"{head}.{body}".encode(), padding.PKCS1v15(), hashes.SHA256())

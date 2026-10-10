@@ -107,7 +107,7 @@ async def test_a_rejected_write_is_retried(rejected):
 
 @pytest.mark.parametrize("exc", UNSENT + MAYBE_SENT, ids=lambda e: type(e).__name__)
 async def test_a_read_is_retried_after_any_transport_error(exc):
-    ok = httpx.Response(200, json={"emailAddress": "me@kripya.com"})
+    ok = httpx.Response(200, json={"emailAddress": "me@orbit.test"})
     fake = FakeGoogle().on("GET", r"/profile$", [raiser(exc), ok])
     ex, sleeps = fake.executor()
     res = await ex.execute(USER, "mail.profile", {})

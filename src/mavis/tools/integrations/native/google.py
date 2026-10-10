@@ -1225,7 +1225,8 @@ class GoogleExecutor:
     async def _drive_upload_file(self, uid: int, a: Any) -> dict:
         content = await asyncio.to_thread(_read_artifact, a.path)
         mime = a.mime if _MIME.match(a.mime or "") else "application/octet-stream"
-        meta: dict[str, Any] = {"name": a.name, "mimeType": mime}
+        target = a.convert_to if str(a.convert_to or "").startswith(GOOGLE_APPS) else mime
+        meta: dict[str, Any] = {"name": a.name, "mimeType": target}
         if a.folder_id:
             meta["parents"] = [a.folder_id]
         boundary = "mavis" + secrets.token_hex(16)

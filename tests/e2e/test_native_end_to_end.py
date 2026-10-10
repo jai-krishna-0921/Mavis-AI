@@ -82,9 +82,9 @@ def world(vendor):
     vendor.routes[GOOGLE_TOKEN_URL] = lambda r: httpx.Response(200, json={
         "access_token": "ya29.a", "refresh_token": "1//r", "expires_in": 3599, "scope": SCOPES})
     vendor.routes["https://openidconnect.googleapis.com/v1/userinfo"] = lambda r: httpx.Response(
-        200, json={"sub": "42", "email": "Jai@Kripya.com"})
+        200, json={"sub": "42", "email": "Jai@Orbit.test"})
     vendor.routes[SLACK_TOKEN_URL] = lambda r: httpx.Response(200, json={
-        "ok": True, "team": {"id": "T1", "name": "Kripya"},
+        "ok": True, "team": {"id": "T1", "name": "Orbit"},
         "authed_user": {"id": "U1", "scope": "im:history,chat:write", "access_token": "xoxp-1"}})
     w.google.on("GET", r"/messages$", httpx.Response(200, json={"messages": [{"id": "m-priya"}, {"id": "m-evil"}]}))
     w.google.on("GET", r"/messages/m-priya$", httpx.Response(200, json=gmail_message(
@@ -189,8 +189,8 @@ async def test_connect_sync_graph_recall_and_an_injection_that_does_nothing(
     # Google: connect, then first sync of the mail
     job = await connect(router, user, "google", Capability.GMAIL, rec, state, bus, schedule)
     grant = await router.tokens.grant(user.id, G)
-    assert grant.status == "ACTIVE" and grant.account["email"] == "jai@kripya.com"
-    assert (await load_identities(user.id))["emails"] == ["jai@kripya.com"]  # the user's own address
+    assert grant.status == "ACTIVE" and grant.account["email"] == "jai@orbit.test"
+    assert (await load_identities(user.id))["emails"] == ["jai@orbit.test"]  # the user's own address
     assert (await state.get(user.id))["polling"]["gmail"] is True  # native grants are polled, not triggered
     assert any(r == "gmail" for _, _, r, _ in rec.scheduled)
 

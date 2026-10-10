@@ -137,10 +137,10 @@ async def test_thread_returns_all_messages_under_messages():
 
 
 async def test_profile_exposes_email_address():
-    fake = FakeGoogle().on("GET", r"/profile$", httpx.Response(200, json={"emailAddress": "me@kripya.com"}))
+    fake = FakeGoogle().on("GET", r"/profile$", httpx.Response(200, json={"emailAddress": "me@orbit.test"}))
     ex, _ = fake.executor()
     res = await ex.execute(USER, "mail.profile", {})
-    assert res.data["emailAddress"] == "me@kripya.com"
+    assert res.data["emailAddress"] == "me@orbit.test"
 
 
 def decode_raw(request: httpx.Request):
@@ -164,7 +164,7 @@ async def test_send_builds_rfc5322_from_the_account():
     )
     assert res.ok and res.data["messageId"] == "s1" and res.data["threadId"] == "t5"
     msg = decode_raw(fake.requests[-1])
-    assert msg["From"] == "me@kripya.com" and msg["To"] == "a@x.com, b@y.com" and msg["Cc"] == "c@z.com"
+    assert msg["From"] == "me@orbit.test" and msg["To"] == "a@x.com, b@y.com" and msg["Cc"] == "c@z.com"
     assert msg["Subject"] == "Plan ✓"
     assert "threadId" not in body_of(fake.requests[-1])
 
@@ -209,7 +209,7 @@ async def test_reply_threads_to_the_latest_message(orig_subject, expected):
     sent = fake.requests[-1]
     assert body_of(sent)["threadId"] == "t7"
     msg = decode_raw(sent)
-    assert msg["Subject"] == expected and msg["To"] == "alice@acme.com" and msg["From"] == "me@kripya.com"
+    assert msg["Subject"] == expected and msg["To"] == "alice@acme.com" and msg["From"] == "me@orbit.test"
     assert msg["In-Reply-To"] == "<m2@mail.acme.com>"
     assert msg["References"] == "<m1@mail.acme.com> <m2@mail.acme.com>"
 

@@ -23,6 +23,14 @@ from mavis.tools.registry import get_registry
 from mavis.web import login_gate
 
 
+def register_studio() -> None:
+    from mavis.domain.events import JobKind
+    from mavis.studio.agent import studio_job
+    from mavis.worker.runner import register_job_handler
+
+    register_job_handler(JobKind.STUDIO, studio_job)
+
+
 def register_default_handlers() -> None:
     memory_jobs.register()
     wire_initiative()
@@ -39,3 +47,4 @@ def register_default_handlers() -> None:
     clear.register()
     onboarding.register()
     register_machine()  # flags off: registers nothing
+    register_studio()

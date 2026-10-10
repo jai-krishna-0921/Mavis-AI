@@ -63,6 +63,7 @@ class JobKind(StrEnum):
     FIRST_SYNC = "first_sync"       # P5
     POLL_PROVIDER = "poll_provider"  # P5
     DELETE_USER = "delete_user"      # Phase 11: erase one user from every store
+    STUDIO = "studio"                # the studio sub-agent: a designed deck, doc or sheet
 
 
 class Job(BaseModel):

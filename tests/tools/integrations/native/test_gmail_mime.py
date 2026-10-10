@@ -159,7 +159,7 @@ def test_kept_headers_preserve_order_and_drop_noise():
 
 def test_build_message_reply_headers_and_roundtrip():
     msg = gm.build_message(
-        sender="me@kripya.com",
+        sender="me@orbit.test",
         to=["a@x.com", "b@y.com"],
         cc=["c@z.com"],
         subject=gm.reply_subject("Budget ünïcode"),
@@ -169,7 +169,7 @@ def test_build_message_reply_headers_and_roundtrip():
     )
     parsed = email.message_from_bytes(base64.urlsafe_b64decode(gm.encode_raw(msg)), policy=policy.default)
     assert (
-        parsed["From"] == "me@kripya.com" and parsed["To"] == "a@x.com, b@y.com" and parsed["Cc"] == "c@z.com"
+        parsed["From"] == "me@orbit.test" and parsed["To"] == "a@x.com, b@y.com" and parsed["Cc"] == "c@z.com"
     )
     assert parsed["Subject"] == "Re: Budget ünïcode"
     assert parsed["In-Reply-To"] == "<orig@mail.x>"
