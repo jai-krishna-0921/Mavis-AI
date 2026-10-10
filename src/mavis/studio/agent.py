@@ -47,6 +47,7 @@ GOOGLE_MIME = {
     "sheet": "application/vnd.google-apps.spreadsheet",
 }
 SOURCE_CHARS = 24_000  # all source files together, after their own clipping
+SPEC_DEADLINE_S = 300.0  # a whole deck is a long output; the queue and 429 backoffs count too
 
 STUDIO_PROMPT = """You are Mavis's studio: a senior designer and writer. Turn the brief into one {kind} spec.
 Follow the skills below exactly; they are the house rules. Today is {today}. The user is {who}.
@@ -202,7 +203,17 @@ async def plan(user_id: int, req: Request) -> tuple[BaseModel, str]:
         )
         material = "\n\n".join(x for x in sources if x)[:SOURCE_CHARS]
         human = brief + (f"\n\nSource files:\n{material}" if material else "")
-        out = await llm.structured(out_model, system, human, tier=llm.Tier.SMART, priority="background")
+        out = None
+        for attempt in range(2):  # one retry: a busy or rate-limited provider usually clears in a minute
+            try:
+                out = await llm.structured(out_model, system, human, tier=llm.Tier.SMART,
+                                           priority="background", deadline_s=SPEC_DEADLINE_S)
+                break
+            except LLMError:
+                if attempt:
+                    raise
+                log.info("studio.spec_retry")
+                await asyncio.sleep(20)
     log.info("studio.planned", kind=req.kind, skills=list(loaded), style=out.style)
     return out.spec, out.style
 
