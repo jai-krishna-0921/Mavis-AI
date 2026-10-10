@@ -48,6 +48,16 @@ async def list_files(user_id: int, prefix: str = "") -> list[WorkspaceFileRow]:
         return list(await s.scalars(q.order_by(WorkspaceFileRow.path)))
 
 
+async def ever_used(user_id: int) -> bool:
+    """Did this user ever have a sandbox session or a workspace file (deleted ones included)? Only then can
+    their workspace hold anything to erase."""
+    async with Session() as s:
+        for model in (WorkspaceFileRow, MachineSession):
+            if await s.scalar(select(model.id).where(model.user_id == user_id).limit(1)) is not None:
+                return True
+    return False
+
+
 async def soft_delete_file(user_id: int, path: str) -> None:
     async with Session() as s:
         await s.execute(update(WorkspaceFileRow).where(WorkspaceFileRow.user_id == user_id,
