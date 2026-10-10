@@ -775,8 +775,10 @@ async def structured[T: BaseModel](
     tier: Tier = Tier.FAST,
     priority: Priority = "interactive",
     fallback: bool | None = None,
+    deadline_s: float | None = None,
 ) -> T:
-    """Return a validated `schema` instance or raise LLMError.
+    """Return a validated `schema` instance or raise LLMError. `deadline_s` overrides the chain-wide
+    budget (long outputs such as a studio spec need more than a chat call).
 
     Per model: 1) native tool-calling structured output; 2) up to two JSON-mode attempts validated
     locally. Only model-specific errors (404, 5xx) or invalid output move to the tier's next model;
@@ -788,9 +790,12 @@ async def structured[T: BaseModel](
     chain = _chain(tier, _use_fallback(priority, fallback))
     tried_secondary = False
 
+    def chain_deadline() -> _Deadline:
+        return _Deadline(deadline_s) if deadline_s else _deadline_for(tier, priority)
+
     async def via_secondary() -> T:
-        return await _structured_with(None, schema, messages, tier, priority,
-                                      _deadline_for(tier, priority), secondary=True)
+        return await _structured_with(None, schema, messages, tier, priority, chain_deadline(),
+                                      secondary=True)
 
     if _prefer_secondary(tier, priority):
         tried_secondary = True
@@ -798,7 +803,7 @@ async def structured[T: BaseModel](
             return await via_secondary()
         except Exception as exc:  # noqa: BLE001
             log.warning("llm.secondary_failed", error=type(exc).__name__)
-    deadline = _deadline_for(tier, priority)
+    deadline = _Deadline(deadline_s) if deadline_s else _deadline_for(tier, priority)
     for i, model in enumerate(chain):
         try:
             return await _structured_with(model, schema, messages, tier, priority, deadline,
