@@ -162,7 +162,7 @@ def test_sheet_structure(tmp_path: Path) -> None:
     assert head.alignment.horizontal == "center"
     assert ws.freeze_panes == "A2"
     assert ws.auto_filter.ref == "A1:E4"
-    assert ws["B2"].number_format == "#,##0.##" and ws["B3"].value == 1200
+    assert ws["B2"].number_format == "#,##0" and ws["B3"].value == 1200
     assert ws["C2"].number_format == '"Rs"#,##0.00'
     assert ws["D2"].number_format == "0.0%" and abs(ws["D2"].value - 0.12) < 1e-9
     assert ws["E2"].number_format == "yyyy-mm-dd" and ws["E2"].value.date() == datetime.date(2027, 1, 5)
