@@ -16,7 +16,7 @@ from typing import Any
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 
 from mavis.agents.cancellation import TaskCancelled
 from mavis.config import get_settings
@@ -28,6 +28,19 @@ from mavis.tools.registry import ToolRun, current_run
 log = structlog.get_logger(__name__)
 
 MAX_CALLS_PER_STEP = 8  # tool calls executed from one AI message; extras are answered "skipped"
+# Tool discovery: a turn offers a ranked subset of the tools, so a follow up ("make the location Chennai")
+# can lack the one it needs. With `discover`, the loop also offers find_tools, which adds the tools that
+# match a need to the rest of this loop. Added tools pass the same registry gates as any other.
+DISCOVER_TOOL = "find_tools"
+MAX_DISCOVERED = 8
+DISCOVER_DESCRIPTION = (
+    "Get more tools for this turn. Your tool list is a subset picked for the message. When the request needs "
+    "an action you have no tool for (for example creating or changing a calendar event, a Google Doc, Sheet "
+    "or Slides deck, Drive sharing, tasks, contacts, Meet, mail actions), call this with a short description "
+    "of the action; the matching tools are added and you can call them next. Call it before telling the user "
+    "you cannot do something."
+)
+Discover = Callable[[str, frozenset[str]], Sequence[BaseTool]]
 _ERROR_CHARS = 300
 WRAP_UP_NOTE = (
     "[System note, not from the user] Time is up for looking things up. Do not call any more tools. "
@@ -96,6 +109,7 @@ async def react_loop(
     wrap_up_timeout_s: float | None = None,
     digest_on_failed_wrap_up: bool = False,
     should_stop: Callable[[], Awaitable[bool]] | None = None,
+    discover: Discover | None = None,
 ) -> ReactResult:
     """Call the model, run the tools it asks for, repeat until it answers in text.
 
@@ -120,8 +134,16 @@ async def react_loop(
 
     `should_stop` (task loops) is checked before every model call and every tool round; when it returns
     True the loop raises TaskCancelled (the user cancelled the task), so nothing more runs.
+
+    `discover(need, offered_names)` (chat turns): offers find_tools, which adds up to MAX_DISCOVERED of
+    the tools it returns (names not offered yet) for the rest of the loop.
     """
+    tools = list(tools)
     by_name = {t.name: t for t in tools}
+    if discover is not None and DISCOVER_TOOL not in by_name:
+        finder = _discovery_tool(discover, tools, by_name)
+        tools.append(finder)
+        by_name[finder.name] = finder
     history: list[BaseMessage] = list(messages)
     # A nested loop (a tool that spawns a worker) shares its parent's run: taint flows both ways.
     parent = current_run.get()
@@ -213,6 +235,29 @@ async def react_loop(
                 run.spawned = 0  # the per-step worker cap counts the outermost loop's steps
     finally:
         current_run.reset(token)
+
+
+def _discovery_tool(discover: Discover, tools: list[BaseTool], by_name: dict[str, BaseTool]) -> BaseTool:
+    """find_tools for one loop: it extends `tools` and `by_name` in place (the next model call binds them)."""
+    added: list[str] = []
+
+    async def find_tools(need: str) -> str:
+        room = MAX_DISCOVERED - len(added)
+        if room <= 0:
+            return "No more tools can be added in this turn. Answer with what you have."
+        found = [t for t in discover(need, frozenset(by_name)) if t.name not in by_name][:room]
+        for t in found:
+            tools.append(t)
+            by_name[t.name] = t
+            added.append(t.name)
+        log.info("react.tools_discovered", need=need[:120], added=[t.name for t in found])
+        if not found:
+            return "No other tool matches that need. If none of your tools can do it, say so plainly."
+        lines = [f"- {t.name}: {' '.join((t.description or '').split())[:200]}" for t in found]
+        return "These tools are now available; call them as needed:\n" + "\n".join(lines)
+
+    return StructuredTool.from_function(coroutine=find_tools, name=DISCOVER_TOOL,
+                                        description=DISCOVER_DESCRIPTION)
 
 
 GATHERED_HEAD = "I ran out of time before writing this up. What I found so far:"

@@ -10,6 +10,7 @@ the model only; the user-facing words come from the FailureKind.
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
 import json
 import re
@@ -53,6 +54,7 @@ _A1_ONLY = re.compile(r"^\$?[A-Za-z]{1,3}\$?\d*(?::\$?[A-Za-z]{1,3}\$?\d*)?$")
 
 MAX_JSON_BYTES = 16 * 1024 * 1024
 DOWNLOAD_CAP_BYTES = 1_000_000  # exported or downloaded file text is cut here; larger files are flagged
+EXPORT_CAP_BYTES = 10_000_000  # Drive's own export limit: an exported file sent to the user as an attachment
 SEARCH_BODY_CAP = 2000  # body chars kept per message in a list (the full text is mail.read)
 THREAD_BODY_CAP = 8000
 FETCH_CONCURRENCY = 5
@@ -422,6 +424,7 @@ class GoogleExecutor:
             "calendar.update_event": self._calendar_update,
             "drive.search": self._drive_search, "drive.list_recent": self._drive_recent,
             "drive.read": self._drive_text, "drive.download": self._drive_download,
+            "drive.export_file": self._drive_export_file,
             "drive.meta": self._drive_meta, "drive.permissions": self._drive_permissions,
             "docs.read": self._docs_read, "sheets.find": self._sheets_find, "sheets.read": self._sheets_read,
             "contacts.search": self._contacts_search, "contacts.list": self._contacts_list,
@@ -876,6 +879,8 @@ class GoogleExecutor:
         }
         if a.description:
             body["description"] = a.description
+        if a.location:
+            body["location"] = a.location
         if a.attendees:
             body["attendees"] = [{"email": e} for e in a.attendees]
         params = {"sendUpdates": "all"} if a.attendees else None
@@ -891,6 +896,8 @@ class GoogleExecutor:
             body["end"] = _when(a.start + timedelta(minutes=a.duration_minutes))
         if a.description is not None:
             body["description"] = a.description
+        if a.location is not None:
+            body["location"] = a.location
         if a.attendees is not None:
             existing = {
                 str(g.get("email", "")).lower(): g
@@ -1025,6 +1032,20 @@ class GoogleExecutor:
 
     async def _drive_download(self, uid: int, a: Any) -> dict:
         return await self._file_text(uid, a.file_id, a.mime_type)
+
+    async def _drive_export_file(self, uid: int, a: Any) -> dict:
+        """A Google Doc, Sheet or deck exported to `mime_type`, as base64 bytes (for an attachment)."""
+        meta = await self._meta(uid, a.file_id)
+        mime = str(meta.get("mimeType") or "")
+        if not mime.startswith(GOOGLE_APPS) or not a.mime_type:
+            raise GoogleError(FailureKind.INVALID_ARGUMENT, "only Google Docs, Sheets and Slides export",
+                              "file_id")
+        _, data, cut = await self._raw(uid, "GET", f"{DRIVE}/files/{_q(a.file_id)}/export",
+                                       params={"mimeType": a.mime_type}, cap=EXPORT_CAP_BYTES)
+        if cut:
+            raise GoogleError(FailureKind.INVALID_ARGUMENT, "the exported file is over 10 MB", "file_id")
+        return {"file_id": a.file_id, "name": meta.get("name", ""), "mimeType": mime,
+                "content_b64": base64.b64encode(data).decode("ascii")}
 
     async def _docs_read(self, uid: int, a: Any) -> dict:
         return await self._json(uid, "GET", f"{DOCS}/{_q(a.document_id)}",

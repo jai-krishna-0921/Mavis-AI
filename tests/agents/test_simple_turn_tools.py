@@ -100,8 +100,8 @@ async def test_small_talk_is_one_call_and_no_tools(db, channel, fake_llm, memory
     assert len(fake_llm.calls) == 1
     assert integ.executed == []
     names = bound[0]
-    assert len(names) == conversation.CHAT_TOOL_LIMIT == 10
-    assert {"start_task", "mail_search", "web_search", "wake_me"} <= set(names)
+    assert len(names) == conversation.CHAT_TOOL_LIMIT + 1  # the ranked set plus find_tools
+    assert {"start_task", "mail_search", "web_search", "wake_me", "find_tools"} <= set(names)
     assert "connect_account" not in names  # track 1 T1.4: only when they ask to connect something
     assert not set(names) & NEVER_IN_CHAT
     await OutboxSender(channel).run_once()
@@ -263,7 +263,7 @@ async def test_wrap_up_that_still_wants_tools_gets_fallback_line(
 def test_chat_tools_are_capped_and_never_offer_web_extract(db) -> None:
     for query in ("", "read this page https://example.com and extract the text", "send an email to Jawahar"):
         names = [t.name for t in simple_turn.chat_tools(1, query)]
-        assert len(names) == 10 and names[:2] == ["start_task", "pending"]
+        assert len(names) == conversation.CHAT_TOOL_LIMIT and names[:2] == ["start_task", "pending"]
         assert "web_extract" not in names and "connect_account" not in names
     assert "mail_send" in [t.name for t in simple_turn.chat_tools(1, "send an email to Jawahar")]
 

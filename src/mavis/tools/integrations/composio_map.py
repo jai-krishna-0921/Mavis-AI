@@ -66,6 +66,7 @@ def _create_event(a: Any) -> dict[str, Any]:
         "event_duration_hour": a.duration_minutes // 60,
         "event_duration_minutes": a.duration_minutes % 60,
         "attendees": list(a.attendees), "description": a.description, "timezone": tz,
+        **({"location": a.location} if a.location else {}),
     }
 
 
@@ -85,6 +86,8 @@ def _update_event(a: Any) -> dict[str, Any]:
             out["timezone"] = a.start.tzinfo.key
     if a.attendees is not None:
         out["attendees"] = list(a.attendees)
+    if a.location is not None:
+        out["location"] = a.location
     if a.description is not None:
         out["description"] = a.description
     return out
@@ -208,7 +211,7 @@ NATIVE_ONLY_ACTIONS: frozenset[str] = frozenset({
     "mail.archive", "mail.mark_read", "mail.mark_unread", "mail.label", "mail.trash", "mail.untrash",
     "calendar.calendars", "calendar.get", "calendar.delete_event", "calendar.respond",
     "contacts.create", "contacts.update", "slides.read", "slides.create", "forms.read", "forms.responses",
-    "meet.recent",
+    "meet.recent", "drive.export_file",
 })
 
 COMPOSIO_ACTIONS: dict[str, SlugMapping] = {

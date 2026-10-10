@@ -201,3 +201,54 @@ async def test_drive_read_uses_inline_text_without_fetching(google, cache):
 
     out = await drive_read(CTX, a.FileArgs(file_id="f1"), provider=google, cache=cache, fetch=fetch)
     assert out == "file_id=f1 | Budget | Sheet\n\nmonth,amount\nOct,1200"
+
+
+# --- drive.export: a Doc, Sheet or deck sent to the user as a file ---------------------------------
+
+
+async def test_drive_export_sends_the_file_to_the_users_own_chat(google, cache, db, sent, settings):
+    import base64
+
+    from mavis.store import artifacts
+    from mavis.tools.integrations.workspace_tools import drive_export
+
+    google.results["drive.meta"] = ToolResult(ok=True, data={
+        "name": "Falcon / kickoff: v2", "mimeType": "application/vnd.google-apps.presentation"})
+    google.results["drive.export_file"] = ToolResult(ok=True, data={
+        "content_b64": base64.b64encode(b"PK-pptx-bytes").decode()})
+    args = a.DriveExportArgs(file_id="f1", format="pptx")
+    out = await drive_export(CTX, args, provider=google, cache=cache)
+    assert out.startswith("SENT: Falcon  kickoff v2.pptx")
+    mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    assert google.executed[-1] == (1, "drive.export_file", {"file_id": "f1", "mime_type": mime})
+    [msg] = sent
+    assert msg.user_id == 1 and msg.text == "Falcon  kickoff v2.pptx"
+    path = artifacts.guard(1, msg.document_path)  # inside this user's own artifacts
+    assert path.read_bytes() == b"PK-pptx-bytes"
+
+
+@pytest.mark.parametrize(("mime", "fmt", "expected"), [
+    ("application/vnd.google-apps.document", "xlsx", "exports as pdf, txt, docx, not xlsx"),
+    ("application/pdf", "pdf", "only Google Docs, Sheets and Slides can be exported"),
+])
+async def test_drive_export_refuses_formats_the_file_type_has_not(google, cache, sent, mime, fmt, expected):
+    from mavis.tools.integrations.workspace_tools import drive_export
+
+    google.results["drive.meta"] = ToolResult(ok=True, data={"name": "X", "mimeType": mime})
+    out = await drive_export(CTX, a.DriveExportArgs(file_id="f1", format=fmt), provider=google, cache=cache)
+    assert expected in out and sent == []
+    assert all(call[1] != "drive.export_file" for call in google.executed)
+
+
+def test_file_links_are_built_from_the_id_never_taken_from_content():
+    from mavis.tools.integrations.workspace_render import file_line, file_link, render_created
+
+    doc = "application/vnd.google-apps.document"
+    assert file_link("1AbC_d-EfGhIjK", doc) == "https://docs.google.com/document/d/1AbC_d-EfGhIjK/edit"
+    assert file_link("1AbC_d-EfGhIjK", "application/pdf") == "https://drive.google.com/file/d/1AbC_d-EfGhIjK/view"
+    assert file_link("x/../evil?q=1", doc) is None and file_link(None, doc) is None
+    line = file_line({"id": "1AbC_d-EfGhIjK", "name": "Brief", "mimeType": doc,
+                      "webViewLink": "https://evil.example/phish"})
+    assert "link: https://docs.google.com/document/d/1AbC_d-EfGhIjK/edit" in line and "evil" not in line
+    made = render_created({"documentId": "1AbC_d-EfGhIjK", "title": "Notes"})
+    assert '"link": "https://docs.google.com/document/d/1AbC_d-EfGhIjK/edit"' in made

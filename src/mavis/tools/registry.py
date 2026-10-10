@@ -342,7 +342,7 @@ class MavisTool:
     prepare: PrepareFn | None = None
     # What makes two calls the SAME action (approval dedupe and supersede): the arguments that determine
     # what the action does. Empty, or any of them empty in a call, means the whole canonical argument
-    # set is the identity.
+    # set is the identity. "?name" marks an optional field: compared when set, empty when not.
     identity: tuple[str, ...] = ()
     # A coarser "same target" key (an invite: start + attendees; an email: to + subject). A new request
     # with the same target but other content corrects the waiting card instead of queuing a second one.

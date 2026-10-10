@@ -538,3 +538,54 @@ def test_wake_preview_uses_users_local_time():
     assert "09:00" in tool.render_preview(naive, ctx)
     bad_tz = ToolContext(user_id=1, timezone="Not/AZone")
     assert tool.render_preview(aware, bad_tz).startswith("Set a reminder for")
+
+
+# --- tool discovery (find_tools) ---------------------------------------------------------------
+
+
+def _named_tool(name: str, calls: list[str]):
+    async def run(text: str) -> str:
+        calls.append(f"{name}:{text}")
+        return f"{name} ok"
+
+    return StructuredTool.from_function(coroutine=run, name=name, description=f"{name} does a thing.")
+
+
+async def test_find_tools_adds_matching_tools_for_the_rest_of_the_loop(fake_llm):
+    calls: list[str] = []
+    asked: list[tuple[str, frozenset[str]]] = []
+    pool = {n: _named_tool(n, calls) for n in ("calendar_create_event", "echo")}
+
+    def discover(need: str, offered: frozenset[str]):
+        asked.append((need, offered))
+        return [pool["echo"], pool["calendar_create_event"]]  # echo is already offered: skipped
+
+    fake_llm.push_ai(_call("find_tools", {"need": "create a calendar event"}, "c1"))
+    fake_llm.push_ai(_call("calendar_create_event", {"text": "3pm"}, "c2"))
+    fake_llm.push_text("Queued.")
+    res = await react_loop([pool["echo"]], [HumanMessage("go")], max_steps=4, discover=discover)
+    assert calls == ["calendar_create_event:3pm"]
+    assert asked == [("create a calendar event", frozenset({"echo", "find_tools"}))]
+    assert "calendar_create_event" in res.messages[2].content and "echo:" not in res.messages[2].content
+    assert res.tools_called == ["find_tools", "calendar_create_event"]
+
+
+async def test_find_tools_reports_no_match_and_caps_additions(fake_llm, monkeypatch):
+    monkeypatch.setattr(react_mod, "MAX_DISCOVERED", 1)
+    calls: list[str] = []
+    first = [_named_tool("a_tool", calls), _named_tool("b_tool", calls)]
+    fresh = iter([first, [_named_tool("c_tool", calls)]])
+
+    fake_llm.push_ai(_call("find_tools", {"need": "x"}, "c1"))
+    fake_llm.push_ai(_call("find_tools", {"need": "y"}, "c2"))
+    fake_llm.push_text("done")
+    res = await react_loop([], [HumanMessage("go")], max_steps=4, discover=lambda n, o: next(fresh))
+    assert "a_tool" in res.messages[2].content and "b_tool" not in res.messages[2].content
+    assert "No more tools" in res.messages[4].content
+
+
+async def test_no_find_tools_without_discover(fake_llm):
+    fake_llm.push_ai(_call("find_tools", {"need": "x"}, "c1"))
+    fake_llm.push_text("ok")
+    res = await react_loop([], [HumanMessage("go")], max_steps=3)
+    assert "Unknown tool" in res.messages[-2].content

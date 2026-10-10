@@ -77,7 +77,10 @@ log = structlog.get_logger(__name__)
 # What the turn did, for Phase 7 metrics: SMALL_TALK, DIRECT_TOOL, TASK, CONNECT or APPROVAL_REPLY.
 current_route: ContextVar[str | None] = ContextVar("current_route", default=None)
 
-CHAT_TOOL_LIMIT = 10
+CHAT_TOOL_LIMIT = 14
+# a follow up ("make it Chennai") ranks tools by the request it continues: this many earlier user messages
+CHAT_QUERY_TURNS = 2
+DISCOVER_LIMIT = 4  # tools find_tools adds per call
 # each only when available; track_loop and wake_me carry agreements and reminders (LEARN does not)
 CHAT_ALWAYS = ("start_task", "pending", "web_search", "track_loop", "wake_me", "complete_item")
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
@@ -124,6 +127,14 @@ TOOL_RULES = (
     "for their OK. When a tool answers QUEUED_FOR_APPROVAL, a card with the action and its buttons goes "
     "to them by itself: don't repeat it or ask them to approve or tap anything, and never say it was sent "
     "or done. Only a tool call makes a card; never promise one you didn't queue.\n"
+    "- An action that waits for their OK (an invite, an email to someone): call its tool as soon as you "
+    "know what it needs. The card is their confirmation, so don't ask \"shall I?\" in prose first; ask only "
+    "for a detail you truly lack (who, or when).\n"
+    "- Someone's email or details: use what this chat already showed (a doc or mail you read counts), "
+    "then what you remember, contacts_search, mail_search by their name, and Drive files that mention them "
+    "(drive_search fullText contains 'Name', then read it). Ask only after those come up empty.\n"
+    "- Your tools are a subset picked for this message. If the request needs an action none of them does, "
+    "call find_tools with that action first. Never tell them a tool is unavailable before trying it.\n"
     "- Saying you'll do something is not doing it: call its tool in this same turn, or offer and ask "
     "instead of announcing it. Never say something is done, set or waiting unless a tool said so.\n"
     "- Reminders: wake_me at the exact time they asked for. Write what as the thing to do in their own "
@@ -252,6 +263,30 @@ async def focus_tools(user_id: int, history: list[Message]) -> tuple[str, ...]:
     except Exception:  # noqa: BLE001
         log.warning("simple_turn.focus_failed", exc_info=True)
         return ()
+
+
+def discover_tools(user_id: int, *, connect: bool = False,
+                   unlinked: frozenset[Capability] = frozenset()):
+    """find_tools' lookup for a chat turn: the best tools for a stated need that the turn was not offered,
+    under the same exclusions as chat_tools. Never raises (no match is an answer)."""
+    def discover(need: str, offered: frozenset[str]) -> list[BaseTool]:
+        try:
+            from mavis.tools.registry import get_registry
+
+            exclude = (CHAT_EXCLUDED if connect else CHAT_EXCLUDED | {CONNECT_TOOL}) | offered
+            return get_registry().select("conversation", user_id, query=need, limit=DISCOVER_LIMIT,
+                                         exclude=exclude, exclude_capabilities=unlinked)
+        except Exception:  # noqa: BLE001
+            log.warning("simple_turn.discover_failed", exc_info=True)
+            return []
+    return discover
+
+
+def tool_query(text: str, previous: str | None, history: list[Message]) -> str:
+    """What the turn's tools are ranked by: the message, the reply it answers, and the user's messages
+    just before it (the request a short follow up continues)."""
+    earlier = [m.content for m in history if m.role == Role.USER.value][:-1][-CHAT_QUERY_TURNS:]
+    return "\n".join([text, previous or "", *earlier])
 
 
 def _with_companions(registry, user_id: int, tools: list[BaseTool]) -> list[BaseTool]:
@@ -539,12 +574,20 @@ async def _approval_reply(event: Event, user_id: int, text: str, history: list[M
         return False
     quick = approval_flow.quick_decision(text)
     on_card = _replies_to_card(approval, event)
+    interp = quick
     if quick is None:
         editing = approval.status == ApprovalStatus.AWAITING_EDIT and _edit_question_is_latest(history)
         if not (editing or on_card):
-            log.info("conversation.card_reply_not_an_edit", approval_id=approval.id)
-            return False
-    interp = quick or await approval_flow.interpret_reply(approval, text)
+            # A longer "no, cancel that, don't send it" still cancels the card it follows: a wrongly read
+            # cancel only drops an action, so free text may cancel, never approve or edit, here.
+            try:
+                interp = await approval_flow.interpret_reply(approval, text)
+            except LLMError:
+                interp = None  # unread: the card stays, and the message is answered as a normal turn
+            if interp is None or interp.decision != "cancel":
+                log.info("conversation.card_reply_not_an_edit", approval_id=approval.id)
+                return False
+    interp = interp or await approval_flow.interpret_reply(approval, text)
     if interp.decision == "approve" and not (prompt_is_latest(approval, history) or on_card):
         log.info("conversation.approve_not_latest", approval_id=approval.id)
         return False  # something was said after the prompt: this "yes" may answer that instead
@@ -687,9 +730,9 @@ async def run_turn(event: Event) -> None:
             prior_turns=max(len(recent) - 1, 0),  # the current message is already in history
             register_line="" if web_prefs.register_opt_out(user) else register.prompt_line(their_register),
         )
-        tools = chat_tools(user.id, query=f"{text}\n{previous or ''}",
-                           focus=await focus_tools(user.id, history), connect=commands.wants_connect(text),
-                           unlinked=await unlinked_with_internal(user.id))
+        connect, unlinked = commands.wants_connect(text), await unlinked_with_internal(user.id)
+        tools = chat_tools(user.id, query=tool_query(text, previous, history),
+                           focus=await focus_tools(user.id, history), connect=connect, unlinked=unlinked)
         if tools:
             system = f"{system}\n\n{TOOL_RULES}"
             if any(t.name == "web_search" for t in tools):
@@ -719,6 +762,7 @@ async def run_turn(event: Event) -> None:
                 user_words=f"{text} {card_name or ''}",
                 untrusted_sources=sources,
                 deadline_s=CHAT_DEADLINE_S, tool_timeout_s=CHAT_TOOL_TIMEOUT_S,
+                discover=discover_tools(user.id, connect=connect, unlinked=unlinked) if tools else None,
             )
             result = await bind_claims(result, tools, text, user.id, self_tainted=self_taint,
                                         sources=sources)

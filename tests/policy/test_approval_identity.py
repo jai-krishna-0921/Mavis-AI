@@ -105,7 +105,7 @@ def test_identity_and_target_declarations_live_on_the_tools():
     reg = get_registry()
     names = ("calendar_create_event", "calendar_update_event", "mail_send")
     create, update, mail = (reg.get(n) for n in names)
-    assert create.identity == ("start", "duration_minutes", "attendees", "summary")
+    assert create.identity == ("start", "duration_minutes", "attendees", "summary", "?location")
     assert create.target == ("start", "attendees") and create.action_time == "start"
     assert update.identity == () and update.target == ("event_id",) and update.action_time == "start"
     assert mail.identity == ("to", "cc", "subject", "body") and mail.target == ("to", "subject")

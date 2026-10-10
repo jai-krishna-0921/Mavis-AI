@@ -75,6 +75,7 @@ ACTION_SCOPES: dict[str, tuple[frozenset[str], ...]] = {
     "calendar.create_event": (_CAL_WRITE,), "calendar.update_event": (_CAL_WRITE,),
     "drive.search": (_DRIVE_META,), "drive.list_recent": (_DRIVE_META,), "drive.meta": (_DRIVE_META,),
     "drive.permissions": (_DRIVE_META,), "drive.read": (_DRIVE_READ,), "drive.download": (_DRIVE_READ,),
+    "drive.export": (_DRIVE_READ,), "drive.export_file": (_DRIVE_READ,),
     "docs.read": (_DOCS_READ,), "sheets.find": (_DRIVE_META,), "sheets.read": (_SHEETS_READ,),
     "contacts.search": (_CONTACTS_READ,), "contacts.list": (_CONTACTS_READ,),
     "drive.create_folder": (_DRIVE_WRITE,), "drive.move": (_DRIVE_WRITE,), "drive.share": (_DRIVE_WRITE,),
