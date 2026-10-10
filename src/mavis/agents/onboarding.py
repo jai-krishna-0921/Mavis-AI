@@ -176,13 +176,27 @@ async def onboarding_gate(event: Event) -> bool:
 
 ALREADY_IN = ("You're already in, {name}. Tell me what's on your mind, or send /connect to link your Google "
               "or Slack.")
+ALREADY_IN_LINKED = "You're already in, {name}. Tell me what's on your mind."
 
 
 async def start_command(event: Event, user: User, args: list[str]) -> str:
     """/start from someone who is already in (the invite link tapped again, or Start pressed twice). The
     access gate has dealt with pending people and the web login gate with sign-in links, so what reaches
     here is never a chat turn for the model."""
-    return ALREADY_IN.format(name=(user.name or "there").split()[0])
+    name = (user.name or "there").split()[0]
+    if await _has_google(user.id):
+        return ALREADY_IN_LINKED.format(name=name)  # no "send /connect" to someone already connected
+    return ALREADY_IN.format(name=name)
+
+
+async def _has_google(user_id: int) -> bool:
+    try:
+        from mavis.domain.policy import Capability
+        from mavis.tools.registry import get_registry
+
+        return bool(await get_registry().capability_check(user_id, Capability.GMAIL))
+    except Exception:  # noqa: BLE001 - unknown link state: the hint is harmless
+        return False
 
 
 def register() -> None:

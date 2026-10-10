@@ -262,3 +262,18 @@ async def test_connector_offer_adds_slack_when_slack_sign_in_is_set_up(db, chann
     texts = await _texts(channel)
     assert texts[-1] == onboarding.CONNECT_WITH_SLACK == "Want me to keep an eye on your email, calendar and Slack too?"
     assert [b.label for row in channel.sent[-1].buttons for b in row] == ["Connect Google", "Connect Slack", "Later"]
+
+
+@pytest.mark.parametrize("linked", [False, True])
+async def test_start_from_someone_already_in_mentions_connect_only_when_unlinked(db, monkeypatch, linked):
+    """Evals 2026-10-10: /start told a user with Google connected to "send /connect to link your Google"."""
+    from mavis.agents import onboarding
+
+    async def has_google(user_id: int) -> bool:
+        return linked
+
+    monkeypatch.setattr(onboarding, "_has_google", has_google)
+    user, _ = await users.get_or_create_by_chat(3131, "Jai Krishna")
+    text = await onboarding.start_command(None, user, [])
+    assert text.startswith("You're already in, Jai.")
+    assert ("/connect" in text) is not linked
