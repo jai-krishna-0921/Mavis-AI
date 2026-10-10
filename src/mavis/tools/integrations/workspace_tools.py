@@ -47,6 +47,7 @@ from mavis.tools.integrations.actions import (
 )
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connections import ConnectionCache
+from mavis.tools.integrations.native.office_text import OFFICE_MIMES
 from mavis.tools.integrations.normalize import pick
 from mavis.tools.integrations.tools import action_data
 from mavis.tools.integrations.workspace_guard import (
@@ -121,14 +122,16 @@ async def drive_read(
     name = one_line(pick(meta, "name", "data.name", default="(untitled)"))
     head = f"file_id={args.file_id} | {name} | {kind_of(mime)}"
     export = EXPORTS.get(mime, "")
-    if not export and not mime.startswith(TEXT_MIMES):
+    if not export and not mime.startswith(TEXT_MIMES) and mime not in OFFICE_MIMES:
         return (f"{head}\nThis is a {kind_of(mime)} file, so I can't read its text. "
-                "Docs, Sheets, Slides and text files work.")
+                "Docs, Sheets, Slides, Excel, Word, PowerPoint, PDF and text files work.")
     data = await action_data(ctx, "drive.download", DriveDownloadArgs(file_id=args.file_id, mime_type=export),
                              provider=provider, cache=cache)
     inline = pick(data, "text")
     if isinstance(inline, str):  # the native provider returns the exported text itself
         return f"{head}\n\n{clip_body(inline) or '(empty)'}"
+    if mime in OFFICE_MIMES:  # only the native provider parses these; a linked copy would read as bytes
+        return f"{head}\nThis is a {kind_of(mime)} file, so I can't read its text through this connection."
     url = pick(data, "downloaded_file_content.s3url", "data.downloaded_file_content.s3url")
     if not isinstance(url, str) or not url:
         raise ActionFailed("drive.read failed: the download returned no file",

@@ -412,7 +412,6 @@ async def test_download_caps_size_and_flags_truncation(monkeypatch):
 @pytest.mark.parametrize(
     "mime",
     [
-        "application/pdf",
         "image/png",
         "application/vnd.google-apps.folder",
         "application/vnd.google-apps.form",
@@ -425,6 +424,60 @@ async def test_non_text_files_are_refused_without_downloading(mime):
     res = await ex.execute(USER, "drive.read", {"file_id": "f"})
     assert not res.ok and res.error_kind.value == "invalid_argument"
     assert len(fake.requests) == 1
+
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _xlsx_bytes() -> bytes:
+    import io
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "October"
+    ws.append(["Category", "Amount"])
+    ws.append(["Rent", 18000])
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def _media(content: bytes, mime: str):
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("alt") == "media":
+            return httpx.Response(200, content=content, headers={"content-type": mime})
+        return httpx.Response(200, json=drive_file("x", "October Expenses.xlsx", mime))
+    return answer
+
+
+async def test_an_uploaded_excel_file_reads_as_csv_rows():
+    fake = FakeGoogle().on("GET", FILE, _media(_xlsx_bytes(), XLSX))
+    ex, _ = fake.executor()
+    res = await ex.execute(USER, "drive.read", {"file_id": "x"})
+    assert res.ok and res.data["text"] == "# Sheet: October\nCategory,Amount\nRent,18000"
+    assert not fake.calls("GET", r"/export$")
+
+
+async def test_a_damaged_office_file_is_invalid_argument():
+    fake = FakeGoogle().on("GET", FILE, _media(b"not a zip", XLSX))
+    ex, _ = fake.executor()
+    res = await ex.execute(USER, "drive.read", {"file_id": "x"})
+    assert not res.ok and res.error_kind.value == "invalid_argument"
+
+
+async def test_a_zip_bomb_office_file_is_refused_before_parsing():
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("xl/huge.xml", b"0" * (70 * 1024 * 1024))
+    fake = FakeGoogle().on("GET", FILE, _media(buf.getvalue(), XLSX))
+    ex, _ = fake.executor()
+    res = await ex.execute(USER, "drive.read", {"file_id": "x"})
+    assert not res.ok and "too large inside" in (res.error or "")
 
 
 async def test_export_too_large_is_invalid_argument():

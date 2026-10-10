@@ -1652,6 +1652,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "pyahocorasick" },
     { name = "pydantic-settings" },
+    { name = "pypdf" },
     { name = "python-docx" },
     { name = "python-pptx" },
     { name = "python-telegram-bot", extra = ["job-queue"] },
@@ -1670,7 +1671,6 @@ dependencies = [
 dev = [
     { name = "fakeredis", extra = ["lua"] },
     { name = "fpdf2" },
-    { name = "pypdf" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "respx" },
@@ -1700,6 +1700,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
     { name = "pyahocorasick", specifier = ">=2.3.1" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
+    { name = "pypdf", specifier = ">=6.19.0" },
     { name = "python-docx", specifier = ">=1.2.0" },
     { name = "python-pptx", specifier = ">=1.0.2" },
     { name = "python-telegram-bot", extras = ["job-queue"], specifier = ">=21" },
@@ -1718,7 +1719,6 @@ requires-dist = [
 dev = [
     { name = "fakeredis", extras = ["lua"], specifier = ">=2.39.0" },
     { name = "fpdf2", specifier = ">=2.8.9" },
-    { name = "pypdf", specifier = ">=6.19.0" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "respx", specifier = ">=0.23.1" },

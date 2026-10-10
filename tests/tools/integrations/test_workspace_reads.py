@@ -140,10 +140,19 @@ async def test_drive_read_exports_a_sheet_as_csv(google, cache):
 
 
 async def test_drive_read_declines_binary_files(google, cache):
-    google.results["drive.meta"] = ToolResult(ok=True, data={"name": "Scan", "mimeType": "application/pdf"})
+    google.results["drive.meta"] = ToolResult(ok=True, data={"name": "Scan", "mimeType": "image/png"})
     out = await drive_read(CTX, a.FileArgs(file_id="f1"), provider=google, cache=cache)
-    assert "PDF file, so I can't read its text" in out
+    assert "Image file, so I can't read its text" in out
     assert [e[1] for e in google.executed] == ["drive.meta"]
+
+
+async def test_drive_read_returns_an_office_files_text_from_the_native_provider(google, cache):
+    xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    google.results["drive.meta"] = ToolResult(ok=True, data={"name": "October Expenses", "mimeType": xlsx})
+    google.results["drive.download"] = ToolResult(ok=True, data={"text": "# Sheet: Oct\nRent,18000"})
+    out = await drive_read(CTX, a.FileArgs(file_id="f1"), provider=google, cache=cache)
+    assert out.endswith("# Sheet: Oct\nRent,18000")
+    assert google.executed[-1] == (1, "drive.download", {"file_id": "f1", "mime_type": ""})
 
 
 async def test_drive_read_fetch_failure_is_action_failed(google, cache):

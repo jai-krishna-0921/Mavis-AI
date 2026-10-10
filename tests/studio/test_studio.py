@@ -118,3 +118,38 @@ def _record(jobs):
 @pytest.mark.parametrize("kind,ext", [("deck", "pptx"), ("doc", "docx"), ("sheet", "xlsx")])
 def test_default_formats(kind, ext):
     assert agent.default_format(kind) == ext
+
+
+async def test_a_data_report_without_its_data_is_not_drawn(db, settings, monkeypatch):
+    """The spec writer says what is missing instead of filling a spending report with invented figures:
+    nothing is rendered or sent, and the failure names the gap."""
+    user, _ = await users.get_or_create_by_chat(23, "JK")
+
+    async def no_research(*a, **k):
+        return None
+
+    async def no_context(*a, **k):
+        return "", None
+
+    async def writer(schema, system, human, **kw):
+        assert "do not write a spec" in system
+        return schema(style="ocean", missing="the October transactions")
+
+    def no_render(*a, **k):
+        raise AssertionError("a report without its data must not be drawn")
+
+    sent: list = []
+
+    async def capture(msg):
+        sent.append(msg)
+        return 1
+
+    monkeypatch.setattr("mavis.agents.react.react_loop", no_research)
+    monkeypatch.setattr("mavis.agents.turn_support.build_context_ex", no_context)
+    monkeypatch.setattr(agent.llm, "structured", writer)
+    monkeypatch.setattr("mavis.studio.render.render", no_render)
+    monkeypatch.setattr(outbox, "enqueue_now", capture)
+    req = agent.Request(kind="doc", title="October spending", brief="analyse my October spending")
+    await agent.run(user.id, "studio:3", req)
+    assert [m.text for m in sent] == [
+        "I couldn't finish October spending: I don't have the October transactions. Want me to try again?"]

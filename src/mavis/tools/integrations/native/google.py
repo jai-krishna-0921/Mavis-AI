@@ -34,6 +34,7 @@ from mavis.tools.integrations.composio_map import input_option
 from mavis.tools.integrations.native import gmail_mime
 from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired, TokenSource
 from mavis.tools.integrations.native.docs_markdown import MAX_MARKDOWN_CHARS, markdown_requests
+from mavis.tools.integrations.native.office_text import OFFICE_MIMES, UnreadableFile, office_text
 from mavis.tools.integrations.native.slides_outline import parse_outline, slide_requests
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -1024,6 +1025,8 @@ class GoogleExecutor:
             url, params = f"{base}/export", {"mimeType": target}
         elif mime.startswith(TEXT_MIMES):
             url, params = base, {"alt": "media", "supportsAllDrives": "true"}
+        elif mime in OFFICE_MIMES:
+            return await self._office_text(uid, file_id, meta, mime)
         else:
             raise GoogleError(FailureKind.INVALID_ARGUMENT,
                               f"{mime or 'this file'} is not a text file", "file_id")
@@ -1035,6 +1038,24 @@ class GoogleExecutor:
         return {
             "file_id": file_id, "id": file_id, "name": meta.get("name", ""), "mimeType": mime,
             "size": meta.get("size"), "text": gmail_mime.decode_bytes(data, charset), "truncated": cut,
+        }
+
+    async def _office_text(self, uid: int, file_id: str, meta: dict, mime: str) -> dict:
+        """An uploaded Excel, Word, PowerPoint or PDF file: the whole file (a cut zip will not open), parsed
+        off the event loop."""
+        _, data, cut = await self._raw(uid, "GET", f"{DRIVE}/files/{_q(file_id)}",
+                                       params={"alt": "media", "supportsAllDrives": "true"},
+                                       cap=EXPORT_CAP_BYTES)
+        if cut:
+            raise GoogleError(FailureKind.INVALID_ARGUMENT, "the file is over 10 MB, too large to read",
+                              "file_id")
+        try:
+            text = await asyncio.to_thread(office_text, data, mime)
+        except UnreadableFile as exc:
+            raise GoogleError(FailureKind.INVALID_ARGUMENT, str(exc), "file_id") from None
+        return {
+            "file_id": file_id, "id": file_id, "name": meta.get("name", ""), "mimeType": mime,
+            "size": meta.get("size"), "text": text, "truncated": False,
         }
 
     async def _drive_text(self, uid: int, a: Any) -> dict:
