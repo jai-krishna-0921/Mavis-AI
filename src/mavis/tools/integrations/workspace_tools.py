@@ -23,12 +23,14 @@ from pydantic import BaseModel
 from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed
 from mavis.domain.messages import Outbound
+from mavis.domain.policy import RiskClass
 from mavis.domain.results import ToolOutput
 from mavis.store import artifacts
 from mavis.store.repo import outbox, users
 from mavis.store.repo import tasks as tasks_repo
 from mavis.tools import web
 from mavis.tools.integrations.actions import (
+    CalendarGetArgs,
     DocAppendArgs,
     DocArgs,
     DocInsertArgs,
@@ -69,7 +71,7 @@ from mavis.tools.integrations.workspace_render import (
     one_line,
     render_created,
 )
-from mavis.tools.registry import PrepareFn, ToolContext
+from mavis.tools.registry import Prepared, PrepareFn, ToolContext
 
 CustomFn = Callable[[ToolContext, BaseModel], Awaitable[str]]
 Fetch = Callable[[str], Awaitable[str]]
@@ -400,6 +402,20 @@ def creating(
     return fn
 
 
+async def prepare_event_update(ctx: ToolContext, args: BaseModel) -> Prepared:
+    """Read the event before an update: one with guests (other than the user) is OUTWARD, because Google
+    tells them; the card names the event by its title, never by its id. A guest change is OUTWARD by its
+    arguments already, so nothing is read for it."""
+    if getattr(args, "attendees", None) is not None:
+        return Prepared()
+    event = await action_data(ctx, "calendar.get", CalendarGetArgs(event_id=getattr(args, "event_id", "")))
+    guests = [g for g in (pick(event, "attendees", "data.attendees", default=[]) or [])
+              if isinstance(g, dict) and not g.get("self")]
+    title = one_line(pick(event, "summary", "data.summary", default="")) or "(untitled event)"
+    note = f"Event: {title}" + (f", {len(guests)} guest(s) are told about the change" if guests else "")
+    return Prepared(risk=RiskClass.OUTWARD if guests else None, note=note)
+
+
 CREATES = ("drive.create_folder", "docs.create", "sheets.create", "tasks.add", "slides.create",
            "contacts.create")
 CUSTOM_FNS: dict[str, CustomFn] = {
@@ -413,6 +429,7 @@ CUSTOM_FNS: dict[str, CustomFn] = {
 # (spec 4.3), then runs its own escalation or verification step, if it has one.
 _STEPS: dict[str, PrepareFn] = {**ESCALATIONS, **VERIFIERS}
 PREPARES: dict[str, PrepareFn] = {
+    "calendar.update_event": prepare_event_update,
     **_STEPS,
     **{name: guarded(name, _STEPS.get(name)) for name in (*FILE_TARGETS, *DESTINATIONS)},
 }
