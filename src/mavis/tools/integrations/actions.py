@@ -339,6 +339,9 @@ class DocCommentArgs(ToolArgs):
 
 class SheetCreateArgs(ToolArgs):
     title: str = Field(min_length=1, max_length=200)
+    rows: list[list[CellValue]] = Field(
+        default_factory=list, max_length=200,
+        description="Cells to fill from A1, one list per row, header first (empty for a blank sheet)")
 
 
 class TaskAddArgs(ToolArgs):
@@ -641,7 +644,12 @@ def _preview_comment(args: DocCommentArgs, tz: str) -> str:
 
 
 def _preview_sheet(args: SheetCreateArgs, tz: str) -> str:
-    return f"📊 New Google Sheet: {args.title}"
+    head = f"📊 New Google Sheet: {args.title}"
+    if not args.rows:
+        return head
+    shown = "\n".join(" | ".join(str(c) for c in row) for row in args.rows[:6])
+    more = f"\n(+{len(args.rows) - 6} more rows)" if len(args.rows) > 6 else ""
+    return f"{head}\n{shown}{more}"
 
 
 def _preview_task(args: TaskAddArgs, tz: str) -> str:
@@ -996,8 +1004,9 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
                _INTERNAL),
     ActionSpec("drive.export", Capability.DRIVE,
                "Send the user one of their Google Docs, Sheets or Slides as a file in this chat: PDF, "
-               "Word (docx), Excel (xlsx), CSV or PowerPoint (pptx). For a file they ask for, create the "
-               "Doc, Sheet or deck first, then export it.",
+               "Word (docx), Excel (xlsx), CSV or PowerPoint (pptx). For a file they ask for, create a new "
+               "Doc, Sheet (with its rows) or deck first, then export it. Never change their existing file "
+               "to make one: a changed version (a total row added) goes into a new Sheet or Doc.",
                DriveExportArgs, RiskClass.READ, _CHAT),
     ActionSpec("drive.export_file", Capability.DRIVE, "Export a Google file's bytes.", DriveDownloadArgs,
                RiskClass.READ, _INTERNAL),

@@ -406,6 +406,16 @@ def _error_info(body: bytes) -> tuple[str, str, str | None]:
     return reason, str(err.get("message") or err.get("status") or ""), field
 
 
+def _cell(value: Any) -> dict:
+    """One Sheets CellData: numbers stay numbers and text stays text. A leading = is never a formula here
+    (like input_option's RAW): text from a file or email must never become =IMAGE(...)."""
+    if isinstance(value, bool):
+        return {"userEnteredValue": {"boolValue": value}}
+    if isinstance(value, int | float):
+        return {"userEnteredValue": {"numberValue": value}}
+    return {"userEnteredValue": {"stringValue": "" if value is None else str(value)}}
+
+
 class GoogleExecutor:
     provider = NativeProvider.GOOGLE
 
@@ -1273,8 +1283,12 @@ class GoogleExecutor:
             params={"fields": "id,content,createdTime"}, body={"content": a.content})
 
     async def _sheets_create(self, uid: int, a: Any) -> dict:
+        body: dict[str, Any] = {"properties": {"title": a.title}}
+        if a.rows:  # created with its cells in the same call: one action, nothing left half done
+            body["sheets"] = [{"data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                {"values": [_cell(v) for v in row]} for row in a.rows]}]}]
         made = await self._json(
-            uid, "POST", SHEETS, idempotent=False, body={"properties": {"title": a.title}},
+            uid, "POST", SHEETS, idempotent=False, body=body,
             params={"fields": "spreadsheetId,spreadsheetUrl,properties.title"})
         return {"spreadsheetId": made.get("spreadsheetId", ""),
                 "spreadsheetUrl": made.get("spreadsheetUrl", ""),

@@ -161,8 +161,10 @@ def system_prompt(
     ask_name: bool = True,
     prior_turns: int | None = None,
     register_line: str = "",
+    own_emails: tuple[str, ...] = (),
 ) -> str:
-    """`register_line`: the user's measured register (agents/register.py), "" when unknown."""
+    """`register_line`: the user's measured register (agents/register.py), "" when unknown. `own_emails`:
+    the addresses of the accounts they linked (their own, so "email me" has a real recipient)."""
     local = local_time(user, now)
     name = user.name or known_name
     who = name or "the user"
@@ -175,6 +177,9 @@ def system_prompt(
         )
     else:
         name_line = "You don't know their name yet, but you already asked today. Do not ask again."
+    if own_emails:
+        name_line += (f" Their own email address: {', '.join(own_emails)}. \"Me\", \"myself\" or "
+                      "\"my email\" in a request means this address; never make one up.")
     if prior_turns is None:
         convo_block = ""  # proactive callers: no claim about whether this is a first contact
     elif prior_turns > 0:

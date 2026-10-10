@@ -252,6 +252,27 @@ async def test_sheets_create_returns_the_spreadsheet_id_and_title():
     assert body_of(fake.requests[0]) == {"properties": {"title": "Budget"}}
 
 
+async def test_sheets_create_with_rows_fills_them_in_the_same_call_as_plain_values():
+    made = {"spreadsheetId": "S1", "properties": {"title": "C"}}
+    fake = FakeGoogle().on("POST", r"/v4/spreadsheets$", ok(made))
+    rows = [["Name", "Score", "Note"], ["Pranav", 9.5, "=IMAGE(\"https://evil.example/x\")"]]
+    res, _ = await run(fake, "sheets.create", {"title": "C", "rows": rows})
+    assert res.ok and len(fake.requests) == 1
+    [grid] = body_of(fake.requests[0])["sheets"][0]["data"]
+    cells = [[c["userEnteredValue"] for c in r["values"]] for r in grid["rowData"]]
+    assert cells[0] == [{"stringValue": "Name"}, {"stringValue": "Score"}, {"stringValue": "Note"}]
+    assert cells[1][1] == {"numberValue": 9.5}
+    assert cells[1][2] == {"stringValue": '=IMAGE("https://evil.example/x")'}  # never a formula
+
+
+def test_sheet_card_shows_the_rows_it_will_hold():
+    from mavis.tools.integrations.actions import ACTIONS, SheetCreateArgs
+
+    preview = ACTIONS["sheets.create"].preview(
+        SheetCreateArgs(title="C", rows=[["Name", "Role"], ["Pranav", "AI Engineer"]]), "Asia/Kolkata")
+    assert preview == "📊 New Google Sheet: C\nName | Role\nPranav | AI Engineer"
+
+
 APPEND = r"/v4/spreadsheets/S1/values/.+:append$"
 
 

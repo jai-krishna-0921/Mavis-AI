@@ -233,8 +233,10 @@ async def test_complete_item_card_names_the_item_never_its_ref(db, fake_llm, mem
     user = await _user(integ, linked=False)
     groceries, _, wake = await _seed(user)
     ctx = ToolContext(user_id=user.id)
-    assert (await _prepare_complete(ctx, CompleteItemArgs(ref=f"loop:{groceries.id}"))).note == "Buy groceries"
-    assert (await _prepare_complete(ctx, CompleteItemArgs(ref=f"reminder:{wake}"))).note == "Reminder: Call mom"
+    loop_card = await _prepare_complete(ctx, CompleteItemArgs(ref=f"loop:{groceries.id}"))
+    assert loop_card.note == "Buy groceries"
+    wake_card = await _prepare_complete(ctx, CompleteItemArgs(ref=f"reminder:{wake}"))
+    assert wake_card.note == "Reminder: Call mom"
     assert (await _prepare_complete(ctx, CompleteItemArgs(ref="loop:999999"))).refusal
     other = await users.get_or_create_by_chat(4242, "Other")
     assert (await _prepare_complete(ToolContext(user_id=other[0].id),

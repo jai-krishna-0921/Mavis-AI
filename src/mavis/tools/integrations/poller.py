@@ -166,7 +166,8 @@ class Poller:
     async def _poll_gmail(self, user_id: int, st: dict) -> int:
         after = int(st.get("cursors", {}).get("gmail_after") or (self.clock() - INITIAL_LOOKBACK).timestamp())
         res = await self.provider.execute(
-            UserRef(user_id=user_id), "mail.search", {"query": f"after:{after} -in:sent", "max_results": 25}
+            UserRef(user_id=user_id), "mail.search",
+            {"query": f"after:{after} -in:sent -in:drafts", "max_results": 25},
         )
         if not res.ok:
             log.warning("poller.gmail_failed", user_id=user_id, error=res.error)

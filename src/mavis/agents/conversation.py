@@ -67,7 +67,7 @@ from mavis.llm import models as llm
 from mavis.policy import approvals as approval_flow
 from mavis.policy.risk import UNTRUSTED_NOTE
 from mavis.store.db import Session, utcnow
-from mavis.store.models import Message, PendingApproval
+from mavis.store.models import Message, PendingApproval, User
 from mavis.store.repo import approvals, messages, outbox, tasks, users
 from mavis.tools.chat_tools import TurnInfo, current_turn
 from mavis.tools.registry import CARD_RESULT_PREFIXES
@@ -128,8 +128,9 @@ TOOL_RULES = (
     "to them by itself: don't repeat it or ask them to approve or tap anything, and never say it was sent "
     "or done. Only a tool call makes a card; never promise one you didn't queue.\n"
     "- An action that waits for their OK (an invite, an email to someone): call its tool as soon as you "
-    "know what it needs. The card is their confirmation, so don't ask \"shall I?\" in prose first; ask only "
-    "for a detail you truly lack (who, or when).\n"
+    "know what it needs. The card is their confirmation, so don't ask \"shall I?\" or \"confirm and I'll "
+    "queue it\" in prose first, even for an address you looked up yourself (the card shows it); ask only for "
+    "a detail you truly lack (who, or when).\n"
     "- Someone's email or details: use what this chat already showed (a doc or mail you read counts), "
     "then what you remember, contacts_search, mail_search by their name, and Drive files that mention them "
     "(drive_search fullText contains 'Name', then read it). Ask only after those come up empty.\n"
@@ -280,6 +281,14 @@ def discover_tools(user_id: int, *, connect: bool = False,
             log.warning("simple_turn.discover_failed", exc_info=True)
             return []
     return discover
+
+
+def own_emails(user: User) -> tuple[str, ...]:
+    """The addresses of the accounts the user linked (recorded on connect), at most three."""
+    from mavis.attention.connector_ingest import IDENTITY_KEY
+
+    found = ((user.state or {}).get(IDENTITY_KEY) or {}).get("emails") or []
+    return tuple(str(e) for e in found if isinstance(e, str) and "@" in e)[:3]
 
 
 def tool_query(text: str, previous: str | None, history: list[Message]) -> str:
@@ -603,13 +612,14 @@ async def _approval_reply(event: Event, user_id: int, text: str, history: list[M
     ack = await approval_flow.apply_reply(approval, interp)
     if ack is None:  # unrelated: an ordinary message after all
         return False
-    async with Session() as s:
-        await outbox.enqueue(s, Outbound(user_id=user_id, text=ack, dedupe_key=f"reply:{event.id}:0"))
-        await s.commit()
-    await messages.log(user_id, Role.ASSISTANT, ack, event_id=f"reply:{event.id}")
+    if ack:  # "" when the decision's receipt (sent by the resumed task) is the only reply
+        async with Session() as s:
+            await outbox.enqueue(s, Outbound(user_id=user_id, text=ack, dedupe_key=f"reply:{event.id}:0"))
+            await s.commit()
+        await messages.log(user_id, Role.ASSISTANT, ack, event_id=f"reply:{event.id}")
+        await initiative_hook("quiet.after_assistant_message",
+                              lambda i: i.quiet.after_assistant_message(user_id, ack))
     await enqueue_learn(user_id, event, text, previous_reply(history), tainted=previous_tainted(history))
-    await initiative_hook("quiet.after_assistant_message",
-                          lambda i: i.quiet.after_assistant_message(user_id, ack))
     current_route.set("APPROVAL_REPLY")
     log.info("conversation.approval_reply", approval_id=approval.id, decision=interp.decision)
     return True
@@ -729,6 +739,7 @@ async def run_turn(event: Event) -> None:
             ask_name=persona.should_ask_name(name, history, now, user.timezone),
             prior_turns=max(len(recent) - 1, 0),  # the current message is already in history
             register_line="" if web_prefs.register_opt_out(user) else register.prompt_line(their_register),
+            own_emails=own_emails(user),
         )
         connect, unlinked = commands.wants_connect(text), await unlinked_with_internal(user.id)
         tools = chat_tools(user.id, query=tool_query(text, previous, history),
