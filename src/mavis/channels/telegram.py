@@ -34,12 +34,13 @@ _GONE = ("message to edit not found", "message can't be edited", "message_id_inv
 log = structlog.get_logger(__name__)
 
 
-_GONE = ("chat not found", "user is deactivated", "bot was blocked", "bot was kicked", "peer_id_invalid")
+_UNREACHABLE = ("chat not found", "user is deactivated", "bot was blocked", "bot was kicked",
+                "peer_id_invalid")
 
 
 def _unreachable(exc: Exception) -> bool:
     """Telegram's answer means the chat can never receive a message (blocked, deleted, never existed)."""
-    return isinstance(exc, Forbidden) or any(g in str(exc).lower() for g in _GONE)
+    return isinstance(exc, Forbidden) or any(g in str(exc).lower() for g in _UNREACHABLE)
 
 
 def _seconds(value: int | float | timedelta) -> float:

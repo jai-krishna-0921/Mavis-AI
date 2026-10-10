@@ -30,9 +30,14 @@ async def _start_reaper() -> None:
 
 
 async def _purge_workspace(user_id: int) -> dict:
-    """Account deletion: the user's sandbox files go too (S3 or local), even if the machine is now off."""
+    """Account deletion: the user's sandbox files go too (S3 or local), even if the machine is now off. A
+    user who never had a session or a file has nothing there, and the store is not called: with the
+    machine off the box has no S3 credentials, and every deletion failed on this step (evals 2026-10-10)."""
     from mavis.machine.selection import build_store
+    from mavis.store.repo import machine as repo_machine
 
+    if not await repo_machine.ever_used(user_id):
+        return {"workspace": 0}
     await build_store().purge_user(user_id)
     return {"workspace": 1}
 
