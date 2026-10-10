@@ -46,9 +46,11 @@ def _sheet_name(raw: str, used: set[str]) -> str:
     return name
 
 
-def _number_format(col: Column) -> str:
+def _number_format(col: Column, whole: bool = False) -> str:
+    """`whole`: every value in the column is an integer. "#,##0.##" would show 25000 as "25,000." in
+    Excel, so a number column is either whole or two places."""
     if col.kind == "number":
-        return "#,##0.##"
+        return "#,##0" if whole else "#,##0.00"
     if col.kind == "currency":
         return f'"{col.currency}"#,##0.00' if col.currency else "#,##0.00"
     if col.kind == "percent":
@@ -206,11 +208,14 @@ def _write_tab(ws, tab: Tab, theme: Theme) -> None:
         widths[c_i - 1] = len(col.name) + 4  # room for the filter button
     ws.row_dimensions[1].height = 22
 
-    for r_i, row in enumerate(tab.rows, start=2):
+    coerced = [[_coerce(row[c_i] if c_i < len(row) else None, col) for c_i, col in enumerate(cols)]
+               for row in tab.rows]
+    whole = [all(float(r[c_i]).is_integer() for r in coerced if isinstance(r[c_i], int | float))
+             for c_i in range(len(cols))]
+    for r_i, row in enumerate(coerced, start=2):
         for c_i, col in enumerate(cols, start=1):
-            raw = row[c_i - 1] if c_i - 1 < len(row) else None
-            value = _coerce(raw, col)
-            fmt = _number_format(col)
+            value = row[c_i - 1]
+            fmt = _number_format(col, whole[c_i - 1])
             cell = ws.cell(row=r_i, column=c_i, value=value)
             cell.font = body_font
             if not isinstance(value, str):
@@ -233,7 +238,7 @@ def _write_tab(ws, tab: Tab, theme: Theme) -> None:
             if col.total:
                 letter = get_column_letter(c_i)
                 cell.value = f"=SUM({letter}2:{letter}{last})"
-                cell.number_format = _number_format(col)
+                cell.number_format = _number_format(col, whole[c_i - 1])
                 cell.alignment = Alignment(horizontal="right", vertical="center")
                 widths[c_i - 1] = max(widths[c_i - 1], 14)
             elif c_i == 1:
