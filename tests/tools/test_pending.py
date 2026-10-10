@@ -200,3 +200,22 @@ async def test_a_task_paused_for_a_connection_is_not_reported_as_waiting_for_the
     assert f"task #{paused} [paused, waiting for an account to be connected; nothing needs your OK]" in out
     assert f"task #{carded} [waiting for your OK on card #{aid}]" in out
     assert "awaiting_approval" not in out
+
+
+async def test_routines_the_user_set_up_are_listed_apart_and_mavis_own_are_not(user, recording_bus, clock):
+    """Evals 2026-10-10: the Monday status-update routine was set, but pending hid every routine, so Mavis
+    told the user "nothing's set up" and offered to add it again."""
+    from mavis.domain.loops import LoopOrigin
+
+    clock.set(NOW)
+    svc = LoopService(recording_bus)
+    await svc.upsert(user.id, LoopUpsert(kind=LoopKind.ROUTINE, title="Status update to Asha every Monday",
+                                         due_at=NOW + timedelta(days=2), trust=Trust.USER,
+                                         origin=LoopOrigin.CONVERSATION))
+    await svc.upsert(user.id, LoopUpsert(kind=LoopKind.ROUTINE, title="Morning check-in", trust=Trust.SYSTEM,
+                                         origin=LoopOrigin.ROUTINE))
+    await _loop(recording_bus, user.id, "Renew passport")
+    out, _ = await _run(user.id)
+    assert "Routines (set up, recurring):" in out and "Status update to Asha every Monday" in out
+    assert out.index("Renew passport") < out.index("Routines")  # to-dos stay their own section
+    assert "Morning check-in" not in out
