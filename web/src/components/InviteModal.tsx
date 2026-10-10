@@ -13,11 +13,19 @@ export function InviteModal({ onClose }: { onClose: () => void }) {
   const revoke = useRevokeInvite()
   const toast = useToast()
   const [name, setName] = useState('')
+  // the full link exists only in the create response (the server keeps a hash), so it is held here
+  const [fresh, setFresh] = useState<{ link: string; name: string | null } | null>(null)
   const left = me.data?.invites_left
 
   const onCreate = (e: React.FormEvent) => {
     e.preventDefault()
-    create.mutate(name.trim() || undefined, { onSuccess: () => { setName(''); toast('Invite link created') } })
+    create.mutate(name.trim() || undefined, {
+      onSuccess: (inv) => {
+        setName('')
+        if (inv.link) setFresh({ link: inv.link, name: inv.name ?? null })
+        toast('Invite link created')
+      },
+    })
   }
 
   return (
@@ -34,6 +42,17 @@ export function InviteModal({ onClose }: { onClose: () => void }) {
         <button type="submit" className="btn btn-primary" disabled={create.isPending || left === 0}>Create link</button>
         {create.error && <p className="error" role="alert">{create.error.message}</p>}
       </form>
+      {fresh && (
+        <div className="mt-5 rounded-2xl border border-line bg-raised p-4" role="status" aria-live="polite">
+          <div className="text-sm font-bold">{fresh.name ? `Link for ${fresh.name}` : 'Your new link'}</div>
+          <input readOnly value={fresh.link} aria-label="New invite link" className="input mt-2 w-full font-mono text-sm"
+            onFocus={(e) => e.currentTarget.select()} />
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <CopyButton text={fresh.link} label="Copy link" what={fresh.name ? `for ${fresh.name}` : 'invite'} />
+            <span className="text-sm text-muted">Copy it now. For security it is shown only once.</span>
+          </div>
+        </div>
+      )}
 
       <h3 className="mb-2 mt-8 text-base font-bold">Your links</h3>
       {invites.isPending && <SkeletonRows rows={2} />}
