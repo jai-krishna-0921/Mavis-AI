@@ -35,6 +35,8 @@ from typing import Any
 import httpx
 from sqlalchemy import select
 
+from mavis.domain.tasks import ApprovalStatus
+
 from mavis.channels.test_sink import active_test_chat, read_sink
 from mavis.config import get_settings
 from mavis.domain import timeutil
@@ -794,6 +796,19 @@ SCENARIOS: list[Scenario] = [
 # --- run -------------------------------------------------------------------------------------------
 
 
+async def _decline_leftover_cards(uid: int) -> None:
+    """Every scenario starts with no card waiting: one left by an earlier scenario turns "yes, send it" or
+    "cancel that" into "which one do you mean?" and fails a scenario that is fine on its own."""
+    from sqlalchemy import update
+
+    async with Session() as s:
+        await s.execute(update(PendingApproval).where(
+            PendingApproval.user_id == uid,
+            PendingApproval.status.in_([ApprovalStatus.PENDING.value, ApprovalStatus.AWAITING_EDIT.value]))
+            .values(status=ApprovalStatus.REJECTED.value))
+        await s.commit()
+
+
 async def run(ids: list[str]) -> Path:
     uid, chat = await test_uid(), active_test_chat()
     me = await own_email(uid)
@@ -802,6 +817,7 @@ async def run(ids: list[str]) -> Path:
     report: list[dict] = []
     n = 0
     for sc in chosen:
+        await _decline_leftover_cards(uid)
         ctx = Ctx(uid=uid, me=me)
         a0, sink0 = await _last(PendingApproval, uid), len(read_sink(data_dir))
         turns = []
