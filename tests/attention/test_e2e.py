@@ -243,3 +243,13 @@ async def test_social_tab_login_alert_is_understood_not_dropped(user, clock, sta
     obs = await obs_for(user.id, "soc1")
     assert len(fake_llm.structured_calls) > calls  # it went to understanding
     assert obs.verdict == "notify" and obs.kind == "security"
+
+
+async def test_the_users_own_draft_is_never_news(user, clock, stack, fake_llm):
+    """A draft the user (or Mavis for them) saved in Gmail reached attention as "new mail from an unknown
+    sender" (2026-10-10 evals). Drafts, like sent mail, are skipped before any model call."""
+    clock.set(T0)
+    await stack.intake.on_email(email(user.id, "draft1", sender="Me <me@example.com>",
+                                      subject="Project Falcon: updated Q4 budget", labels=("DRAFT",), at=T0))
+    assert not [r for r in await repo.recent(user.id, EPOCH, limit=100) if r.message_id == "draft1"]
+    assert fake_llm.calls == []

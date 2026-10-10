@@ -130,3 +130,19 @@ async def test_register_line_lands_in_right_now_section(db) -> None:
     prompt = system_prompt(user, NOW, register_line=line, context="## Known facts\n- x")
     assert line in prompt
     assert prompt.index("Right now") < prompt.index(line) < prompt.index("## Known facts")
+
+
+def test_the_users_own_address_is_in_the_prompt_so_email_me_has_a_recipient():
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from mavis.agents.conversation import own_emails
+    from mavis.agents.persona import system_prompt
+
+    user = SimpleNamespace(name="JK", timezone="Asia/Kolkata",
+                           state={"identities": {"emails": ["jk@example.com", "not-an-address"]}})
+    assert own_emails(user) == ("jk@example.com",)
+    prompt = system_prompt(user, datetime(2026, 10, 10, tzinfo=UTC), own_emails=own_emails(user))
+    assert "Their own email address: jk@example.com" in prompt
+    assert "own email address" not in system_prompt(user, datetime(2026, 10, 10, tzinfo=UTC))
+    assert own_emails(SimpleNamespace(state=None)) == ()

@@ -63,7 +63,7 @@ async def test_gmail_poll_emits_and_advances_cursor(provider, cache, fake_bus, s
     poller = make_poller(provider, cache, fake_bus, state, rec)
     assert await poller.poll(1, Capability.GMAIL) == 1
     after = int((NOW - timedelta(minutes=10)).timestamp())
-    assert provider.executed[0][2]["query"] == f"after:{after} -in:sent"
+    assert provider.executed[0][2]["query"] == f"after:{after} -in:sent -in:drafts"
     assert (await state.get(1))["cursors"]["gmail_after"] == int(
         email_event(1, RAW, "x").occurred_at.timestamp()
     )

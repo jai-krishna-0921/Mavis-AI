@@ -382,6 +382,7 @@ async def _which_one(approval) -> str | None:
 
 
 async def apply_reply(approval, interp: ApprovalReplyInterpretation) -> str | None:
+    """The acknowledgement to send now, "" when the decision's own receipt follows, None when unrelated."""
     if interp.decision == "unrelated":
         return None
     if (ask := await _which_one(approval)) is not None:
@@ -392,9 +393,10 @@ async def apply_reply(approval, interp: ApprovalReplyInterpretation) -> str | No
     await audit.record(approval.user_id, actor="user", action=f"approval.{decision}",
                        detail={"approval_id": approval.id, "via": "text"})
     await _resume(approval, decision, interp.instructions)
+    # A cancel says nothing here: the resumed task's own receipt ("Okay, not doing that.") is the one reply.
     return {
         "ok": "On it.",
-        "no": "Okay, cancelled.",
+        "no": "",
         "edit": "Got it, revising. I'll show you the new version.",
     }[decision]
 

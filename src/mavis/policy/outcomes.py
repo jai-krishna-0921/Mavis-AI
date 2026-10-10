@@ -180,6 +180,19 @@ async def block_loops_of_failed_approval(approval_id: int) -> int:
                       LoopStatus.BLOCKED, blocked_by=_ref(approval.id))
 
 
+async def drop_loops_of_rejected_approval(approval_id: int) -> int:
+    """The user said no to an action: the OPEN conversation loops created in its turns (the request it
+    answered, "send Ravi the invite at 3") are dropped, so nothing later says it is still waiting. Same
+    structural link as a failure (turn ids, never titles). Returns how many."""
+    approval = await approvals.get(approval_id)
+    if approval is None or approval.status != ApprovalStatus.REJECTED.value:
+        return 0
+    turns = await _turns_of(approval)
+    created = [lp for lp in await loops_repo.list_created_in(approval.user_id, turns, (LoopStatus.OPEN,))
+               if lp.origin is LoopOrigin.CONVERSATION]
+    return await _set(approval.user_id, created, LoopStatus.DROPPED)
+
+
 async def block_if_from_failed_turn(user_id: int, loop) -> bool:
     """A loop LEARN created after the approval of its turn had already failed: block it at once. A loop
     that only merged into an older one (created elsewhere) is left alone."""

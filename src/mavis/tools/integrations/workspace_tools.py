@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -180,9 +181,11 @@ async def drive_export(
         path.write_bytes(raw)
 
     await asyncio.to_thread(write)
-    minute = int(time.time() // 60)  # a retry of the same call within the minute sends it once
+    # the same unchanged file asked for again within the hour (a retry, or "yes" after it went) goes once
+    digest = hashlib.sha256(raw).hexdigest()[:16]
+    hour = int(time.time() // 3600)
     await outbox.enqueue_now(Outbound(user_id=ctx.user_id, text=path.name, document_path=str(path),
-                                      dedupe_key=f"export:{ctx.user_id}:{args.file_id}:{args.format}:{minute}"))
+                                      dedupe_key=f"export:{ctx.user_id}:{args.format}:{digest}:{hour}"))
     size = max(1, len(raw) // 1024)
     return (f"SENT: {path.name} ({size} KB) goes to them as a file in this chat by itself. "
             "Don't paste its contents or a link to it.")

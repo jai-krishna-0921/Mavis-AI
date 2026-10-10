@@ -600,6 +600,16 @@ async def _block_loops_of(approval_id: int) -> None:
         log.warning("approval.block_loops_failed", approval_id=approval_id, error=_err(exc))
 
 
+async def _drop_loops_of(approval_id: int) -> None:
+    """A declined action's loops are dropped (nothing later reports it as still waiting)."""
+    try:
+        from mavis.policy import outcomes  # lazy: policy imports the registry
+
+        await outcomes.drop_loops_of_rejected_approval(approval_id)
+    except Exception as exc:  # noqa: BLE001 - the decision stands; loops are a best-effort follow-on
+        log.warning("approval.drop_loops_failed", approval_id=approval_id, error=_err(exc))
+
+
 async def _reopen_loops_of(approval_id: int) -> None:
     """A retry of a failed action went through: the loops that failure blocked are live again."""
     try:
@@ -701,6 +711,7 @@ async def approval_gate(state: OrchestratorState) -> Command:
         return Command(goto="approval_gate")  # already resolved elsewhere; don't report a stale outcome
     if status is ApprovalStatus.REJECTED:
         await _supersede_duplicates(pending, executed=False)
+        await _drop_loops_of(pending.id)
     return Command(goto="approval_gate", update={
         "action_results": [f"{status.value.title()}: {pending.preview}"],
         "approval_outcomes": [{"status": status.value, "preview": pending.preview, "detail": ""}],

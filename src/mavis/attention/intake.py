@@ -59,7 +59,8 @@ PENDING_KEYS = (
 CHAT_YIELD = timedelta(seconds=20)
 REDELIVER_AFTER = timedelta(seconds=60)
 BACKFILL_DAYS = 14
-BACKFILL_TEMPLATE = "newer_than:{days}d -in:sent -category:promotions -category:social"
+BACKFILL_TEMPLATE = "newer_than:{days}d -in:sent -in:drafts -category:promotions -category:social"
+OWN_LABELS = frozenset({"SENT", "DRAFT"})
 BACKFILL_QUERY = BACKFILL_TEMPLATE.format(days=BACKFILL_DAYS)
 DRAIN_REASON, BACKFILL_REASON = "drain", "backfill"
 DEAD_LABELS = frozenset({"SPAM", "TRASH"})
@@ -105,7 +106,8 @@ class Intake:
         if self._connectors is not None:
             await self._connectors.email(event.user_id, p)  # never raises; bulk and own mail stay out
         labels = set(p.get("labels") or [])
-        if p.get("from_me") or "SENT" in labels or not p.get("message_id"):
+        # the user's own mail (sent, or a draft they are still writing) is never news to them
+        if p.get("from_me") or labels & OWN_LABELS or not p.get("message_id"):
             return
         try:
             user = await users.get(event.user_id)

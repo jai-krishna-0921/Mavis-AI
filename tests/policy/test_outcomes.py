@@ -202,6 +202,24 @@ async def test_failed_approval_blocks_loops_of_its_turn_and_the_one_before(user,
     assert asked.id not in {lp.id for lp in await LoopService(rec_bus).active(user.id)}
 
 
+async def test_declined_approval_drops_loops_of_its_turns_only(user, at_now, rec_bus):
+    """"No, cancel that" on an invite: the loop its request created no longer reads as waiting (evals
+    2026-10-10: "the interview invite is still waiting on your OK" after the user cancelled it)."""
+    await _turns(user.id, "tg:1", "tg:2", "tg:3")
+    before = await _loop(user.id, "Call the plumber", "tg:1")
+    asked = await _loop(user.id, "Send the interview invite", "tg:2")
+    mine = await _loop(user.id, "Check in about the invite", "tg:3", origin=LoopOrigin.REASONER)
+    tid = await tasks.create(user.id, goal="approve", kind=TaskKind.APPROVAL, turn_ref="tg:3")
+    args = {"summary": "Interview", "start": START}
+    aid = await approvals.create(user.id, tid, "calendar_create_event", args, "📅 Interview",
+                                 timeutil.now() + timedelta(hours=48))
+    assert await outcomes.drop_loops_of_rejected_approval(aid) == 0  # still pending: nothing decided
+    await approvals.set_status(aid, ApprovalStatus.REJECTED)
+    assert await outcomes.drop_loops_of_rejected_approval(aid) == 1
+    status = {lp.id: (await loops_repo.get(lp.id)).status for lp in (before, asked, mine)}
+    assert status == {before.id: LoopStatus.OPEN, asked.id: LoopStatus.DROPPED, mine.id: LoopStatus.OPEN}
+
+
 async def test_learn_after_the_failure_creates_a_blocked_loop(user, at_now, rec_bus):
     from mavis.domain.events import Provenance
     from mavis.domain.memory import Extraction, LoopDraft
