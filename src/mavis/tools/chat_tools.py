@@ -53,9 +53,14 @@ CONNECT_RESULT = "Sent them the connect link and buttons. Don't repeat the link.
 
 
 class StartTaskArgs(ToolArgs):
+    # The goal is checked against the user's own words (registry._user_worded): an expanded goal with new
+    # numbers or mostly the model's wording reads as possibly steered and needs a card. How to do it well
+    # belongs in `context`.
     goal: str = Field(min_length=3, max_length=2000,
-                      description="What to do, in the user's words plus anything needed to do it well")
-    context: str = Field(default="", max_length=4000, description="Relevant facts from the conversation")
+                      description="The user's request as they said it, close to their words; add no new "
+                                  "numbers, dates or names they did not write")
+    context: str = Field(default="", max_length=4000,
+                         description="How to do it well and relevant facts from the conversation")
 
 
 class ConnectArgs(ToolArgs):
