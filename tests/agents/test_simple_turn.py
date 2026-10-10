@@ -95,6 +95,23 @@ async def test_llm_error_propagates(db, channel, fake_llm, memory, bus) -> None:
         await run_turn(msg_event(user.id, "hi"))
 
 
+async def test_a_turn_over_budget_ends_quietly_without_a_retry(db, channel, fake_llm, memory, bus,
+                                                                monkeypatch) -> None:
+    """The user was told once that today's budget is used up; their next messages must not crash the
+    handler (which redelivered each one three times on 10 Oct)."""
+    from mavis.domain.errors import BudgetExceededLLM
+    from mavis.llm import models
+
+    async def over(tier, priority):
+        raise BudgetExceededLLM("daily budget runaway")
+
+    monkeypatch.setattr(models, "_budget_gate", over)
+    user, _ = await users.get_or_create_by_chat(77, "Jai")
+    await run_turn(msg_event(user.id, "hi"))  # no exception
+    assert await messages.recent(user.id, 10) and all(m.role == Role.USER.value
+                                                      for m in await messages.recent(user.id, 10))
+
+
 async def test_connection_states_unknown_when_provider_unconfigured(db) -> None:
     from mavis.agents.simple_turn import connection_states
 

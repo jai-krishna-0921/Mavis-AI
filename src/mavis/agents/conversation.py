@@ -57,7 +57,7 @@ from mavis.agents.turn_support import (
 from mavis.channels import presence, routing
 from mavis.channels.formatting import strip_verbatim
 from mavis.config import get_settings
-from mavis.domain.errors import ConnectionRequired, LLMError
+from mavis.domain.errors import BudgetExceededLLM, ConnectionRequired, LLMError
 from mavis.domain.events import Event
 from mavis.domain.messages import Outbound, Role
 from mavis.domain.policy import Capability
@@ -777,6 +777,12 @@ async def run_turn(event: Event) -> None:
             )
             result = await bind_claims(result, tools, text, user.id, self_tainted=self_taint,
                                         sources=sources)
+        except BudgetExceededLLM:
+            # Over today's budget: the user was told once (budgets.notify_once). Retrying cannot help, so
+            # the turn ends here instead of failing and being redelivered.
+            log.info("simple_turn.budget_refused", user_id=user.id)
+            await _settle_reaction(event, user.id, user.telegram_chat_id, None)
+            return
         except ConnectionRequired as exc:
             result = None
             connect_texts = await _connect_prompt(event, user.id, exc)
