@@ -376,6 +376,19 @@ async def _tasks_update(ctx: ToolContext, args: BaseModel) -> str:
     return await tasks_update(ctx, args)
 
 
+FILE_KINDS = {"docs.create": "doc document", "sheets.create": "sheet spreadsheet",
+              "slides.create": "slides presentation"}
+
+
+async def _close_asks(user_id: int, what: str) -> None:
+    """A file made in a chat turn: LEARN's "create the agenda doc" loop from that turn is done."""
+    from mavis.policy import outcomes  # lazy: policy imports the tool registry
+    from mavis.tools.chat_tools import current_turn
+
+    if (turn := current_turn.get()) is not None:
+        await outcomes.delivered(user_id, turn.event_id, what)
+
+
 def creating(
     action: str, *, provider: IntegrationProvider | None = None, cache: ConnectionCache | None = None
 ) -> CustomFn:
@@ -397,6 +410,8 @@ def creating(
             note = f"{note}\n{sent}"
             if not sent.startswith("SENT:"):
                 receipt = f"{receipt}\n{sent}" if receipt else sent
+        if made and action in FILE_KINDS:
+            await _close_asks(ctx.user_id, f"{getattr(args, 'title', '')} {FILE_KINDS[action]}")
         return ToolOutput(user_text=receipt, model_note=note)
 
     return fn

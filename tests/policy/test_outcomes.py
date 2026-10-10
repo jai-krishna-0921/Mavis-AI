@@ -501,3 +501,55 @@ async def test_a_third_party_failure_in_the_prompt_taints_the_reasoner_decision(
     decision = await reasoner.decide(user, ev, FilterResult(drop=False, summary="s"))
     assert "Recently failed" in fake_llm.structured_calls[-1]["user"]
     assert decision.tainted is tainted
+
+
+# --- loops of delivered work ------------------------------------------------------------------------
+
+
+async def _ask(user_id, title, source, *, due=None, kind=LoopKind.COMMITMENT):
+    from mavis.bus import get_bus
+
+    return await LoopService(get_bus()).upsert(user_id, LoopUpsert(
+        kind=kind, title=title, source=source, origin=LoopOrigin.CONVERSATION, trust=Trust.USER, due_at=due))
+
+
+async def test_a_delivered_file_closes_the_asks_to_make_it(user, at_now, rec_bus):
+    """Evals 2026-10-10: the to-do list still said "pitch deck: building now" and "agenda: not confirmed"
+    after both files had arrived in the chat. The asks of the delivering turn, and earlier retries of the
+    same file, are done; the rest of that turn and unrelated loops stay open."""
+    await _turns(user.id, "tg:1", "tg:2", "tg:3")
+    first = await _ask(user.id, "Create 7-slide Mavis AI pitch deck for investors", "tg:1")
+    retry = await _ask(user.id, "Pitch deck rebuild, retry requested (Sat 10 Oct)", "tg:2",
+                       kind=LoopKind.WAITING_ON)
+    asked = await _ask(user.id, "Produce another Mavis AI pitch deck as PowerPoint", "tg:3")
+    milk = await _ask(user.id, "Buy milk", "tg:3")  # same turn, unrelated
+    review = await _ask(user.id, "Review the pitch deck", "tg:3", due=NOW + timedelta(days=2))  # ahead
+    goal = await _ask(user.id, "Launch Mavis AI publicly", "tg:1", kind=LoopKind.GOAL)  # names no file
+    assert await outcomes.delivered(user.id, "tg:3", "Mavis AI pitch deck presentation") == 3
+    loops = (first, retry, asked, milk, review, goal)
+    status = {lp.title: (await loops_repo.get(lp.id)).status for lp in loops}
+    done, still = LoopStatus.DONE, LoopStatus.OPEN
+    assert status == {first.title: done, retry.title: done, asked.title: done,
+                      milk.title: still, review.title: still, goal.title: still}
+
+
+async def test_learn_after_the_delivery_creates_a_done_loop(user, at_now, rec_bus):
+    """docs_create runs inside the turn and LEARN reads the turn afterwards: its "create the agenda" loop
+    is closed on creation, while a loop from another turn is not."""
+    from mavis.domain.events import Provenance
+    from mavis.domain.memory import Extraction, LoopDraft
+    from mavis.loops.service import loops_from_extraction
+
+    await _turns(user.id, "cli:a", "cli:b")
+    await outcomes.delivered(user.id, "cli:a", "Interview agenda doc document")
+    service = LoopService(rec_bus)
+    for source, title in (("cli:a", "Create one-page interview agenda as a Google Doc"),
+                          ("cli:a", "Renew passport"), ("cli:b", "Share the interview agenda with Asha")):
+        extraction = Extraction(loops=[LoopDraft(kind="commitment", title=title)])
+        await loops_from_extraction(service, user.id, extraction,
+                                    Provenance(source_ref=source, trust=Trust.USER, conversation=True))
+    by_title = {lp.title: lp.status for lp in await loops_repo.list_created_in(
+        user.id, ["cli:a", "cli:b"], tuple(LoopStatus))}
+    assert by_title == {"Create one-page interview agenda as a Google Doc": LoopStatus.DONE,
+                        "Renew passport": LoopStatus.OPEN,
+                        "Share the interview agenda with Asha": LoopStatus.OPEN}
