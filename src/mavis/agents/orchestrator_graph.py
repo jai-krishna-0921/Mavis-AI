@@ -266,8 +266,11 @@ async def planner(state: OrchestratorState) -> dict:
     plan = await make_plan(state["goal"], context)
     data = plan.model_dump()
     clock = current_clock.get()
-    if clock is not None and plan_is_machine(plan):
-        data["clock_s"] = clock.extend_to(get_settings().machine_task_timeout_s)  # the stale sweep reads it
+    if clock is not None and (plan_is_machine(plan) or plan_makes_files(plan)):
+        s = get_settings()
+        longest = max(s.machine_task_timeout_s if plan_is_machine(plan) else 0.0,
+                      s.studio_task_timeout_s if plan_makes_files(plan) else 0.0)
+        data["clock_s"] = clock.extend_to(longest)  # the stale sweep reads it
     # Status is owned by the task runner (QUEUED -> RUNNING claim); this never revives a finished task.
     await tasks.save_plan(state["task_id"], data)
     await start_card_now(state["task_id"], plan)
@@ -390,6 +393,11 @@ def _step_context(inp: StepInput) -> str:
             fb = wrap_untrusted(fb, "reviewer")
         parts.append(f"Reviewer feedback on your previous attempt (fix this): {fb}")
     return "\n\n".join(parts)
+
+
+def plan_makes_files(plan: Plan) -> bool:
+    """A plan with a studio step: making a file is slow, so its clock is longer."""
+    return any(s.agent in DELIVERING_AGENTS for s in plan.steps)
 
 
 def plan_is_machine(plan: Plan) -> bool:
@@ -852,6 +860,12 @@ def partial_messages(state: dict, lead: str = PARTIAL_LEAD) -> list[str]:
             if results.get(sid, {}).get("ok") and str(results[sid].get("text") or "").strip()]
     if not done:
         return []
+    files = [s.id for s in plan.steps if s.agent in DELIVERING_AGENTS] if plan else []
+    if files and all(results.get(sid, {}).get("ok") for sid in files):
+        # every file went out: name them with their links, not the research they were made from (evals
+        # 2026-10-10: a page of raw findings under "I ran out of time" after both files had arrived)
+        bubbles = _bubbles("\n".join(str(results[sid].get("text") or "").strip() for sid in files), 2)
+        return [lead, *bubbles] if lead else bubbles
     last_id = order[-1]
     if done[-1][0] == last_id and _folds_in_all(plan, last_id, {sid for sid, _ in done}):
         body = str(done[-1][1]["text"]).strip()  # the closing step already folds in the earlier ones
