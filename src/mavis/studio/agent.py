@@ -253,9 +253,10 @@ async def _deliver(user_id: int, job_id: str, req: Request, path, theme_style: s
         ),
     )
     fid = str((up or {}).get("id") or "")
-    link = str((up or {}).get("webViewLink") or "") or (
-        file_link(fid, GOOGLE_MIME[req.kind] if convert else OFFICE_MIME[ext]) or ""
-    )
+    # built from the id, as everywhere else (workspace_render.file_link): Drive's webViewLink for an
+    # Office upload is a long URL with tracking parameters that reads badly in the chat
+    link = file_link(fid, GOOGLE_MIME[req.kind] if convert else OFFICE_MIME[ext]) or str(
+        (up or {}).get("webViewLink") or "")
     if fmt == "pdf" and fid:
         await drive_export(ctx, DriveExportArgs(file_id=fid, format="pdf"))
     elif fmt != "google":
