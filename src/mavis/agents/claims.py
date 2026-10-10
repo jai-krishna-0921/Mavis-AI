@@ -27,8 +27,10 @@ from langchain_core.tools import BaseTool
 from mavis.domain.policy import RiskClass
 from mavis.domain.terms import terms
 
-# Working an on-screen control: in a chat, only our approval card has controls.
-UI_TERMS = frozenset(terms("tap tapping tapped button buttons"))
+# Working an on-screen control: in a chat, only our approval card has controls. "Queued" is how a reply
+# says a card was made ("Queued: Falcon sync, Mon 11 AM"): the same claim, and as unbacked without a card
+# (evals 2026-10-10: a turn that only looked things up replied "Queued" and no card existed).
+UI_TERMS = frozenset(terms("tap tapping tapped button buttons queued queue"))
 _SHARED_BY = 3  # a term in this many offered action tools' vocabularies says nothing about any one of them
 # How an outward tool's description says it waits for the user ("asked to approve first"): mechanics,
 # not what the tool does, so never evidence that a reply is about that tool.

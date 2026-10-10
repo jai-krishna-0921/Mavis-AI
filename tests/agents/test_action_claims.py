@@ -253,3 +253,15 @@ def test_check_is_quiet_once_an_action_ran_or_a_card_was_shown():
 
 def test_reprompt_copy_has_no_dashes():
     assert "\u2014" not in claims.REPROMPT and "\u2013" not in claims.REPROMPT
+
+
+def test_a_queued_claim_after_only_lookups_is_reprompted():
+    """Evals 2026-10-10: the turn read the Falcon brief, found the tech lead, then replied "Queued: Falcon
+    sync" without calling the calendar tool; no card existed. Read tools before do not back a card claim."""
+    reply = "Queued: Falcon sync, Mon 12 Oct, 11:00 to 11:30 AM, with Arjun Mehta (arjun.mehta@example.com)."
+    found = claims.check(reply, "set up a Falcon sync with the tech lead", OFFERED,
+                         tools_called=["drive_search", "docs_read"], card_shown=False, risk_of=RISK.get)
+    assert found.ui_claim and found.reprompt
+    backed = claims.check(reply, "x", OFFERED, tools_called=["drive_search"], card_shown=True,
+                          risk_of=RISK.get)
+    assert not backed.reprompt
