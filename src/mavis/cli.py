@@ -16,6 +16,7 @@ from mavis.bus import get_bus, set_bus
 from mavis.bus.base import EventBus
 from mavis.config import get_settings
 from mavis.logging import configure_logging
+from mavis.ops import liveness
 from mavis.store.db import dispose_engine, init_db
 from mavis.tools.integrations import close_provider
 
@@ -115,6 +116,7 @@ async def _dev() -> None:
         asyncio.create_task(run_worker(bus, "dev")),
         asyncio.create_task(OutboxSender().run_forever()),
         asyncio.create_task(run_timer()),
+        *(asyncio.create_task(liveness.beat_forever(role)) for role in liveness.ROLES),
     ]
     if s.telegram_bot_token:
         tasks.append(asyncio.create_task(run_polling(bus, s.telegram_bot_token)))
@@ -129,7 +131,8 @@ async def _worker(name: str) -> None:
     from mavis.worker.runner import run_worker
 
     bus = await bootstrap(create_tables=get_settings().is_sqlite)
-    tasks = [asyncio.create_task(run_worker(bus, name)), asyncio.create_task(OutboxSender().run_forever())]
+    tasks = [asyncio.create_task(run_worker(bus, name)), asyncio.create_task(OutboxSender().run_forever()),
+             asyncio.create_task(liveness.beat_forever("worker"))]
     log.info("worker.started", consumer=name)
     await _run_tasks(tasks, bus)
 
@@ -139,7 +142,8 @@ async def _timer() -> None:
 
     bus = await bootstrap(create_tables=get_settings().is_sqlite, handlers=False, warm=False)
     log.info("timer.started")
-    await _run_tasks([asyncio.create_task(run_timer())], bus)
+    await _run_tasks([asyncio.create_task(run_timer()),
+                      asyncio.create_task(liveness.beat_forever("timer"))], bus)
 
 
 async def _chat() -> None:

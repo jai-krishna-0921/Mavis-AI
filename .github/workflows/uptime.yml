@@ -1,4 +1,4 @@
-# Uptime check from outside AWS: if Mavis's health page stops answering, GitHub emails the owner (a failed
+# Uptime check from outside AWS: if Mavis's /status stops answering ok (server, stores, worker or timer down), GitHub emails the owner (a failed
 # scheduled run) and, when the TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID secrets are set, Telegram says so once
 # per outage and once when it is back. No secrets are needed for the email alert.
 name: uptime
@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      URL: ${{ inputs.url || 'https://mavis-0de9f18d.sslip.io/healthz' }}
+      URL: ${{ inputs.url || 'https://mavis-0de9f18d.sslip.io/status' }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GH_TOKEN: ${{ github.token }}
@@ -43,8 +43,12 @@ jobs:
         run: |
           # three tries 30 s apart: one slow answer or a deploy restart is not an outage
           for i in 1 2 3; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$URL" || true)
-            if [ "$code" = "200" ]; then echo "up=true" >> "$GITHUB_OUTPUT"; echo "up ($code)"; exit 0; fi
+            body=$(curl -s -w '\n%{http_code}' --max-time 20 "$URL" || true)
+            code=$(printf '%s' "$body" | tail -n1)
+            # the body too: an unknown path answers 200 with the web app's page
+            if [ "$code" = "200" ] && printf '%s' "$body" | grep -q '"status":"ok"'; then
+              echo "up=true" >> "$GITHUB_OUTPUT"; echo "up ($code)"; exit 0
+            fi
             echo "try $i: got ${code:-no answer}"; [ "$i" = 3 ] || sleep 30
           done
           echo "up=false" >> "$GITHUB_OUTPUT"

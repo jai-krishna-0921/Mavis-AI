@@ -1,12 +1,12 @@
 # Automatic Let's Encrypt for {$DOMAIN} (e.g. 13-233-10-5.sslip.io, no domain purchase needed).
-# The api owns /api, /oauth, /webhooks, /telegram/webhook, /connect/callback and /healthz.
+# The api owns /api, /oauth, /webhooks, /telegram/webhook, /connect/callback, /healthz and /status.
 # Everything else is the static web app in /srv/web (built into the caddy image, see
 # deploy/caddy/Dockerfile) with an SPA fallback. If /srv/web is missing or empty, those paths
 # return 404 as before.
 {$DOMAIN} {
 	encode zstd gzip
 
-	@api path /api/* /oauth/* /webhooks/* /telegram/webhook /connect/callback /healthz
+	@api path /api/* /oauth/* /webhooks/* /telegram/webhook /connect/callback /healthz /status
 	handle @api {
 		request_body {
 			max_size 1MB
