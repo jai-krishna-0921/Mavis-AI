@@ -120,9 +120,6 @@ src/mavis/
   memory/     extraction, graph, vectors, profile card, recall (phase-2-memory)
   store/      database models, repositories, migrations
   worker/     handler registry, per-user locks
-docs/superpowers/
-  specs/      design spec
-  plans/      phase-by-phase implementation plans
 ```
 
 ## Deploy to AWS
@@ -145,7 +142,7 @@ deploy/aws/webhook.sh set            # switch Telegram to the webhook
 
 Later redeploys are just `deploy/aws/deploy.sh`. It reads the existing keys from SSM Parameter Store: they are kept (generated secrets and any you added with `secrets.sh set`) and only missing ones are added, except `ENV`, `PUBLIC_BASE_URL`, `DOMAIN` and `TELEGRAM_MODE`, which follow the run. A failed read aborts the deploy rather than regenerating secrets.
 
-Secrets and configuration are not stored on the box's disk. Every key is a SecureString under `/mavis/prod/<KEY>` in SSM Parameter Store (standard tier, free, encrypted with the AWS managed key `alias/aws/ssm`, tagged `Project=mavis`). `deploy.sh` builds the desired key set from the demo `.env` keys (`OLLAMA_API_KEY`, `TAVILY_API_KEY`, `COMPOSIO_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_CHAT_IDS` and the optional ones) plus generated secrets (`TELEGRAM_WEBHOOK_SECRET`, database passwords, `NATIVE_TOKEN_KEK`) and the in-stack settings, pushes only the changed keys (`deploy/aws/secrets.sh push`, values are never printed), and the `mavis-secrets.service` unit on the box renders them to `/run/mavis/mavis.env` (tmpfs, root, mode 600; recreated on every boot). Compose always runs with `--env-file /run/mavis/mavis.env` as root: use `deploy/aws/compose.sh ps` from your laptop, or `sudo docker compose --env-file /run/mavis/mavis.env -f docker-compose.prod.yml --profile prod ...` on the box. The box role can only read `/mavis/prod/*`; it cannot write or delete. Rotation, recovery and what never to rotate: [docs/SECRETS.md](docs/SECRETS.md). `ENV=prod` makes the allowlist mandatory: the api refuses to start without `ALLOWED_TELEGRAM_CHAT_IDS`. `COMPOSIO_WEBHOOK_SECRET` stays empty, which keeps Composio on polling. The Composio connect redirect lands on `https://<host>/connect/callback`, served by the `api` service.
+Secrets and configuration are not stored on the box's disk. Every key is a SecureString under `/mavis/prod/<KEY>` in SSM Parameter Store (standard tier, free, encrypted with the AWS managed key `alias/aws/ssm`, tagged `Project=mavis`). `deploy.sh` builds the desired key set from the demo `.env` keys (`OLLAMA_API_KEY`, `TAVILY_API_KEY`, `COMPOSIO_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_CHAT_IDS` and the optional ones) plus generated secrets (`TELEGRAM_WEBHOOK_SECRET`, database passwords, `NATIVE_TOKEN_KEK`) and the in-stack settings, pushes only the changed keys (`deploy/aws/secrets.sh push`, values are never printed), and the `mavis-secrets.service` unit on the box renders them to `/run/mavis/mavis.env` (tmpfs, root, mode 600; recreated on every boot). Compose always runs with `--env-file /run/mavis/mavis.env` as root: use `deploy/aws/compose.sh ps` from your laptop, or `sudo docker compose --env-file /run/mavis/mavis.env -f docker-compose.prod.yml --profile prod ...` on the box. The box role can only read `/mavis/prod/*`; it cannot write or delete. Rotation, recovery and what never to rotate are in the private secrets runbook. `ENV=prod` makes the allowlist mandatory: the api refuses to start without `ALLOWED_TELEGRAM_CHAT_IDS`. `COMPOSIO_WEBHOOK_SECRET` stays empty, which keeps Composio on polling. The Composio connect redirect lands on `https://<host>/connect/callback`, served by the `api` service.
 
 Moving an existing box from the old plaintext `/opt/mavis/.env` to SSM is a one-time migration, in this order (each step is a dry run until `--apply`):
 
@@ -252,5 +249,5 @@ Roll back by setting `MACHINE_ENABLED=false` and restarting the worker. Slack do
 
 ## Documentation
 
-- Design spec: [`docs/superpowers/specs/2026-10-02-mavis-pa-design.md`](docs/superpowers/specs/2026-10-02-mavis-pa-design.md)
-- Implementation plans, one per phase: [`docs/superpowers/plans/`](docs/superpowers/plans/) (start with the `00-index` file)
+Design specs, implementation plans and the operations runbooks (secrets, onboarding, limitations) are kept
+private, outside this repository.

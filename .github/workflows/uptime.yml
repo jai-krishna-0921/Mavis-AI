@@ -1,0 +1,66 @@
+# Uptime check from outside AWS: if Mavis's health page stops answering, GitHub emails the owner (a failed
+# scheduled run) and, when the TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID secrets are set, Telegram says so once
+# per outage and once when it is back. No secrets are needed for the email alert.
+name: uptime
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Health URL to check (leave empty for production)"
+        required: false
+        default: ""
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      URL: ${{ inputs.url || 'https://mavis-0de9f18d.sslip.io/healthz' }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Previous result
+        id: prev
+        run: |
+          # the last finished run's outcome, so Telegram hears about a change, not every 10 minutes
+          last=$(gh run list -R "$GITHUB_REPOSITORY" --workflow uptime.yml --status completed --limit 1 \
+                 --json conclusion --jq '.[0].conclusion // "success"')
+          echo "last=$last" >> "$GITHUB_OUTPUT"
+      - name: Check health
+        id: health
+        run: |
+          # three tries 30 s apart: one slow answer or a deploy restart is not an outage
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$URL" || true)
+            if [ "$code" = "200" ]; then echo "up=true" >> "$GITHUB_OUTPUT"; echo "up ($code)"; exit 0; fi
+            echo "try $i: got ${code:-no answer}"; [ "$i" = 3 ] || sleep 30
+          done
+          echo "up=false" >> "$GITHUB_OUTPUT"
+      - name: Tell Telegram
+        if: env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        run: |
+          up="${{ steps.health.outputs.up }}"; last="${{ steps.prev.outputs.last }}"
+          if [ "$up" = "false" ] && [ "$last" != "failure" ]; then
+            text="Mavis is down: the health check has failed 3 times in a row. Check the server."
+          elif [ "$up" = "true" ] && [ "$last" = "failure" ]; then
+            text="Mavis is back up: the health check passes again."
+          else
+            exit 0
+          fi
+          curl -s -o /dev/null --max-time 20 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${text}"
+      - name: Fail when down
+        if: steps.health.outputs.up != 'true'
+        run: exit 1
