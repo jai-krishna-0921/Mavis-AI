@@ -22,7 +22,8 @@ async def log(
     content = strip_verbatim(content)
     now = utcnow()
     async with Session() as s:
-        if event_id and await s.scalar(select(Message.id).where(Message.event_id == event_id)):
+        if event_id and await s.scalar(select(Message.id).where(Message.user_id == user_id,
+                                                                Message.event_id == event_id)):
             return False
         try:
             async with s.begin_nested():  # SAVEPOINT: a concurrent duplicate must not poison the session
@@ -32,16 +33,17 @@ async def log(
         except IntegrityError:
             if event_id is None:
                 raise
-            return False  # lost the race on the unique event_id
+            return False  # lost the race on the user's unique event_id
         column = "last_user_msg_at" if role is Role.USER else "last_agent_msg_at"
         await s.execute(update(User).where(User.id == user_id).values({column: now}))
         await s.commit()
         return True
 
 
-async def exists(event_id: str) -> bool:
+async def exists(user_id: int, event_id: str) -> bool:
     async with Session() as s:
-        return await s.scalar(select(Message.id).where(Message.event_id == event_id)) is not None
+        return await s.scalar(select(Message.id).where(Message.user_id == user_id,
+                                                       Message.event_id == event_id)) is not None
 
 
 async def recent(user_id: int, limit: int = 20) -> list[Message]:

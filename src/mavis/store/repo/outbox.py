@@ -19,10 +19,12 @@ _DELIVERABLE = ("pending", "sending")
 
 
 async def enqueue(session: AsyncSession, msg: Outbound) -> int:
-    """Insert within the caller's transaction. Same dedupe_key => existing row id, no new row."""
+    """Insert within the caller's transaction. Same user and dedupe_key => existing row id, no new row.
+    Keys are per user: daily keys like "morning:<date>" are the same string for everyone."""
     if msg.dedupe_key:
         existing = await session.scalar(
-            select(OutboxMessage.id).where(OutboxMessage.dedupe_key == msg.dedupe_key)
+            select(OutboxMessage.id).where(OutboxMessage.user_id == msg.user_id,
+                                           OutboxMessage.dedupe_key == msg.dedupe_key)
         )
         if existing is not None:
             return existing
@@ -45,15 +47,17 @@ async def enqueue(session: AsyncSession, msg: Outbound) -> int:
         if not msg.dedupe_key:
             raise
         existing = (
-            await session.execute(select(OutboxMessage.id).where(OutboxMessage.dedupe_key == msg.dedupe_key))
+            await session.execute(select(OutboxMessage.id).where(OutboxMessage.user_id == msg.user_id,
+                                                                 OutboxMessage.dedupe_key == msg.dedupe_key))
         ).scalar_one()
         return existing
     return row.id
 
 
-async def exists_with_key(session: AsyncSession, dedupe_key: str) -> bool:
+async def exists_with_key(session: AsyncSession, user_id: int, dedupe_key: str) -> bool:
     return await session.scalar(
-        select(OutboxMessage.id).where(OutboxMessage.dedupe_key == dedupe_key)) is not None
+        select(OutboxMessage.id).where(OutboxMessage.user_id == user_id,
+                                       OutboxMessage.dedupe_key == dedupe_key)) is not None
 
 
 async def enqueue_now(msg: Outbound) -> int:
@@ -63,12 +67,13 @@ async def enqueue_now(msg: Outbound) -> int:
         return outbox_id
 
 
-async def texts_with_dedupe_prefix(prefix: str) -> list[str]:
-    """Texts of every outbox row whose dedupe_key starts with `prefix`, in enqueue order."""
+async def texts_with_dedupe_prefix(user_id: int, prefix: str) -> list[str]:
+    """Texts of the user's outbox rows whose dedupe_key starts with `prefix`, in enqueue order."""
     async with Session() as s:
         rows = await s.scalars(
             select(OutboxMessage.text)
-            .where(OutboxMessage.dedupe_key.startswith(prefix, autoescape=True))
+            .where(OutboxMessage.user_id == user_id,
+                   OutboxMessage.dedupe_key.startswith(prefix, autoescape=True))
             .order_by(OutboxMessage.id)
         )
         return list(rows)

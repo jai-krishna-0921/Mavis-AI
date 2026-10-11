@@ -58,18 +58,22 @@ class User(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    # per user: proactive ids are built from daily keys shared by every user (0023)
+    __table_args__ = (UniqueConstraint("user_id", "event_id", name="uq_messages_user_event"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     role: Mapped[str] = mapped_column(String(16))
     content: Mapped[str] = mapped_column(Text)
     proactive: Mapped[bool] = mapped_column(default=False)
-    event_id: Mapped[str | None] = mapped_column(String(200), unique=True)
+    event_id: Mapped[str | None] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
 
 
 class OutboxMessage(Base):
     __tablename__ = "outbox"
+    # per user: daily keys ("morning:<date>") are the same string for everyone (0023)
+    __table_args__ = (UniqueConstraint("user_id", "dedupe_key", name="uq_outbox_user_dedupe"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
@@ -83,7 +87,7 @@ class OutboxMessage(Base):
 
     # chat handle of a non-default channel (Slack)
     route: Mapped[str | None] = mapped_column(String(200), default=None)
-    dedupe_key: Mapped[str | None] = mapped_column(String(200), unique=True)
+    dedupe_key: Mapped[str | None] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     attempts: Mapped[int] = mapped_column(default=0)
     next_attempt_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)

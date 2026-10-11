@@ -141,4 +141,29 @@ async def test_outbox_enqueue_duplicate_race_returns_existing_and_keeps_transact
             other = await outbox.enqueue(s, Outbound(user_id=u.id, text="y", dedupe_key="k2"))
             await s.commit()  # transaction still usable after the conflict
     assert again == first and other != first
-    assert await outbox.texts_with_dedupe_prefix("k") == ["x", "y"]
+    assert await outbox.texts_with_dedupe_prefix(u.id, "k") == ["x", "y"]
+
+
+async def test_outbox_dedupe_keys_are_per_user(db) -> None:
+    """Two users' daily check-ins share the key "morning:<date>": each gets its own row, and one user's
+    rows are never found under the other's key (a dropped check-in, and the other's text in history)."""
+    a, _ = await users.get_or_create_by_chat(51, "A")
+    b, _ = await users.get_or_create_by_chat(52, "B")
+    first = await outbox.enqueue_now(Outbound(user_id=a.id, text="morning A", dedupe_key="morning:d:0"))
+    second = await outbox.enqueue_now(Outbound(user_id=b.id, text="morning B", dedupe_key="morning:d:0"))
+    assert first != second
+    assert await outbox.texts_with_dedupe_prefix(b.id, "morning:d:") == ["morning B"]
+    async with Session() as s:
+        assert await outbox.exists_with_key(s, a.id, "morning:d:0")
+        assert not await outbox.exists_with_key(s, a.id, "other")
+
+
+async def test_message_event_ids_are_per_user(db) -> None:
+    """A proactive id built from a shared daily key logs for both users; a retry for one user is a no-op."""
+    a, _ = await users.get_or_create_by_chat(53, "A")
+    b, _ = await users.get_or_create_by_chat(54, "B")
+    key = "proactive:morning:d:0"
+    assert await messages.log(a.id, Role.ASSISTANT, "morning A", proactive=True, event_id=key)
+    assert await messages.log(b.id, Role.ASSISTANT, "morning B", proactive=True, event_id=key)
+    assert not await messages.log(b.id, Role.ASSISTANT, "again", proactive=True, event_id=key)
+    assert await messages.exists(a.id, key) and not await messages.exists(a.id, "x")

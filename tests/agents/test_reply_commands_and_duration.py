@@ -14,10 +14,10 @@ from mavis.agents.conversation import run_turn
 from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.policy import RiskClass
-from mavis.store.repo import outbox
 from mavis.tools import chat_tools
 from mavis.tools.integrations.actions import CalendarCreateArgs
 from mavis.tools.registry import MavisTool
+from tests.fakes.outbox import texts as outbox_texts
 
 
 def _event(user_id: int, text: str, n: int = 1) -> Event:
@@ -76,7 +76,7 @@ async def test_a_chat_reply_carries_the_real_command(user, channel, fake_llm, fa
                                                      fresh_registry):
     fake_llm.push_text("You can link it with /connect_gmail whenever you like.")
     await run_turn(_event(user.id, "how do I add my email?"))
-    assert await outbox.texts_with_dedupe_prefix("reply:tg:update:1:") == [
+    assert await outbox_texts("reply:tg:update:1:") == [
         "You can link it with /connect gmail whenever you like."]
 
 

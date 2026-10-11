@@ -19,9 +19,10 @@ from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.policy import RiskClass
 from mavis.store.db import utcnow
-from mavis.store.repo import approvals, outbox
+from mavis.store.repo import approvals
 from mavis.tools import assistant, chat_tools
 from mavis.tools.registry import MavisTool
+from tests.fakes.outbox import texts as outbox_texts
 
 
 class BlockArgs(BaseModel):
@@ -79,7 +80,7 @@ def env(channel, fake_memory, rec_bus, catalog):
 
 
 async def _texts(n: int = 1) -> list[str]:
-    return await outbox.texts_with_dedupe_prefix(f"reply:tg:update:{n}:")
+    return await outbox_texts(f"reply:tg:update:{n}:")
 
 
 def _reprompted(call: list) -> bool:

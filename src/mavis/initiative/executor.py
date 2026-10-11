@@ -360,7 +360,7 @@ class InitiativeExecutor:
         """A prior attempt enqueued bubbles but died before log/record: finish that, send nothing new."""
         now = timeutil.now()
         local_date = timeutil.to_local(now, user.timezone).date().isoformat()
-        sent = await outbox.texts_with_dedupe_prefix(f"{intent.dedupe_key}:{local_date}:")
+        sent = await outbox.texts_with_dedupe_prefix(user.id, f"{intent.dedupe_key}:{local_date}:")
         if not sent:
             return False
         await messages.log(user.id, Role.ASSISTANT, "\n".join(sent), proactive=True,

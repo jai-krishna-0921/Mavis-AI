@@ -15,6 +15,7 @@ from mavis.worker.runner import (
     register_job_handler,
     run_worker,
 )
+from tests.fakes.outbox import texts as outbox_texts
 
 
 def ev(event_id: str, user_id: int = 1, trust: Trust = Trust.USER) -> Event:
@@ -214,7 +215,7 @@ async def test_inline_retries_send_fallback_once_and_succeed(db, monkeypatch) ->
     await bus.wait_idle()
     task.cancel()
     assert calls == 3 and bus.dead_events == []
-    assert await outbox.texts_with_dedupe_prefix("fallback:tg:update:10") == [FALLBACK_TEXT]
+    assert await outbox_texts("fallback:tg:update:10") == [FALLBACK_TEXT]
 
 
 @pytest.mark.inline_retries

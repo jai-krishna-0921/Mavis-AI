@@ -21,6 +21,7 @@ from mavis.tools.integrations.connect_flow import ConnectFlow
 from mavis.tools.integrations.mail_render import BODY_CHARS, render_read, render_search
 from mavis.worker.runner import FALLBACK_TEXT, _run_handlers
 from tests.agents.test_simple_turn import msg_event
+from tests.fakes.outbox import texts as outbox_texts
 from tests.tools.integrations.fakes import FakeBus, FakeState, Recorder
 
 MEETUP_BODY = (
@@ -212,7 +213,7 @@ async def test_connect_flow_failure_still_gives_a_hint(
     fake_llm.push_ai(_call("mail_search", {"query": "Meetup"}, "c1"))
     fake_llm.push_text("")
     await run_turn(msg_event(user.id, "find the Meetup email"))
-    assert await outbox.texts_with_dedupe_prefix("reply:") == [
+    assert await outbox_texts("reply:") == [
         "I need your Gmail linked for that. Send /connect gmail and I'll take it from there."
     ]
 
@@ -240,7 +241,7 @@ async def test_an_unlinked_account_for_one_part_still_answers_the_rest(
     told = [m for m in fake_llm.calls[1] if isinstance(m, ToolMessage)]
     assert told and told[-1].content == DEFERRED_CONNECTION
     assert integ.executed == []
-    answer = await outbox.texts_with_dedupe_prefix("reply:")
+    answer = await outbox_texts("reply:")
     assert any("Pranav" in t for t in answer)
     [prompt] = rec.sent  # and the connect button after it
     assert "Gmail" in prompt.text
@@ -254,8 +255,8 @@ async def test_llm_error_gives_fallback_copy(db, channel, fake_llm, memory, bus,
     event = msg_event(user.id, "hi")
     with pytest.raises(LLMError):
         await _run_handlers(event, [run_turn])
-    assert await outbox.texts_with_dedupe_prefix("fallback:") == [FALLBACK_TEXT]
-    assert await outbox.texts_with_dedupe_prefix("reply:") == []
+    assert await outbox_texts("fallback:") == [FALLBACK_TEXT]
+    assert await outbox_texts("reply:") == []
 
 
 async def test_llm_error_after_a_tool_still_falls_back(db, channel, fake_llm, memory, bus, integ) -> None:
@@ -265,7 +266,7 @@ async def test_llm_error_after_a_tool_still_falls_back(db, channel, fake_llm, me
     fake_llm.push_error(LLMError("model down"))
     with pytest.raises(LLMError):
         await _run_handlers(msg_event(user.id, "find the Meetup email"), [run_turn])
-    assert await outbox.texts_with_dedupe_prefix("fallback:") == [FALLBACK_TEXT]
+    assert await outbox_texts("fallback:") == [FALLBACK_TEXT]
 
 
 async def test_step_budget_wraps_up_with_what_she_has(db, channel, fake_llm, memory, bus, integ) -> None:
@@ -277,7 +278,7 @@ async def test_step_budget_wraps_up_with_what_she_has(db, channel, fake_llm, mem
     await run_turn(msg_event(user.id, "find that email"))
     last = fake_llm.calls[-1]
     assert isinstance(last[-1], HumanMessage) and last[-1].content == react.WRAP_UP_NOTE
-    assert await outbox.texts_with_dedupe_prefix("reply:") == ["I looked but couldn't find it, sorry."]
+    assert await outbox_texts("reply:") == ["I looked but couldn't find it, sorry."]
 
 
 async def test_wrap_up_that_still_wants_tools_gets_fallback_line(
@@ -290,7 +291,7 @@ async def test_wrap_up_that_still_wants_tools_gets_fallback_line(
     fake_llm.push_ai(_call("mail_search", {"query": "b"}, "c2"))  # ignored: time is up
     await run_turn(msg_event(user.id, "find that email"))
     assert len(fake_llm.calls) == 2 and len(integ.executed) == 1
-    assert await outbox.texts_with_dedupe_prefix("reply:") == [simple_turn.WRAP_UP_FALLBACK]
+    assert await outbox_texts("reply:") == [simple_turn.WRAP_UP_FALLBACK]
 
 
 def test_chat_tools_are_capped_and_never_offer_web_extract(db) -> None:

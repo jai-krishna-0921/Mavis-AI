@@ -9,6 +9,7 @@ from mavis.domain.decisions import InitiativeDecision, NotifyIntent
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.loops import LoopKind, LoopOrigin, LoopUpsert
 from mavis.initiative.wiring import build_initiative
+from tests.fakes.outbox import texts as outbox_texts
 
 
 async def no_embed(texts):
@@ -81,7 +82,7 @@ def test_normalize_dedupe_key():
 
 async def test_llm_key_variants_deliver_once(user, clock, recording_bus, fake_memory, fake_llm, monkeypatch):
     from mavis.domain.decisions import ComposedMessage
-    from mavis.store.repo import outbox, tasks
+    from mavis.store.repo import tasks
 
     init = build(recording_bus, fake_memory)
     clock.set(ist(27, 14, 0))
@@ -95,7 +96,7 @@ async def test_llm_key_variants_deliver_once(user, clock, recording_bus, fake_me
                                         occurred_at=timeutil.now(), source="timer", trust=Trust.SYSTEM,
                                         payload={"kind": "agent", "reason": "thanks", "wakeup_id": 70 + i,
                                                  "subject": f"task:{task_id}"}))
-    assert await outbox.texts_with_dedupe_prefix("thankyoujawahar:") == ["Send that thank-you note 0"]
+    assert await outbox_texts("thankyoujawahar:") == ["Send that thank-you note 0"]
 
 
 async def test_same_loop_and_kind_pings_once_per_day(user, clock, recording_bus, fake_memory, fake_llm):
@@ -255,7 +256,6 @@ async def test_wakeup_reason_naming_another_loop_does_not_bind_to_it(user, clock
 
 async def test_wakeup_from_untrusted_event_fires_untrusted(user, clock, recording_bus, fake_memory, fake_llm):
     from mavis.domain.decisions import ComposedMessage, WakeupRequest
-    from mavis.store.repo import outbox
     from mavis.timers.runner import wakeup_event
 
     init = build(recording_bus, fake_memory)
@@ -279,7 +279,7 @@ async def test_wakeup_from_untrusted_event_fires_untrusted(user, clock, recordin
     await init.handler.handle(event)
     reasoner_prompt = fake_llm.structured_calls[1]["user"]
     assert "<untrusted" in reasoner_prompt
-    assert await outbox.texts_with_dedupe_prefix("invoice:") == ["Pay it at (check it directly)"]
+    assert await outbox_texts("invoice:") == ["Pay it at (check it directly)"]
 
 
 # F5 ----------------------------------------------------------------------------------------------
@@ -510,7 +510,7 @@ async def test_security_notice_survives_the_budget(user, clock, recording_bus, f
     from mavis.domain.messages import Role
     from mavis.initiative import hooks
     from mavis.initiative.email_triage import EmailTriage
-    from mavis.store.repo import messages, outbox
+    from mavis.store.repo import messages
 
     async def no_names(uid):
         return set()
@@ -527,7 +527,7 @@ async def test_security_notice_survives_the_budget(user, clock, recording_bus, f
     fake_llm.push_structured(InitiativeDecision(ignore_reason="meh"))
     fake_llm.push_structured(ComposedMessage(send=True, messages=["Was that new sign-in you?"]))
     await init.handler.handle(email)
-    assert await outbox.texts_with_dedupe_prefix(f"email:{user.id}:s1:") == ["Was that new sign-in you?"]
+    assert await outbox_texts(f"email:{user.id}:s1:") == ["Was that new sign-in you?"]
 
 
 async def test_model_cannot_claim_security(user, clock, recording_bus, fake_memory, fake_llm, settings,

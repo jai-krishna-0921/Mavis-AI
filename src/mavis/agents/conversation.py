@@ -677,10 +677,10 @@ async def run_turn(event: Event) -> None:
         return
 
     # Retry after the reply was enqueued: don't call the LLM again (it could split differently).
-    enqueued = await outbox.texts_with_dedupe_prefix(f"reply:{event.id}:")
+    enqueued = await outbox.texts_with_dedupe_prefix(user.id, f"reply:{event.id}:")
     if enqueued:
         # Whether the first attempt read untrusted output is unknown unless it logged: assume it did.
-        tainted = not await messages.exists(reply_event_id(event.id, False))
+        tainted = not await messages.exists(user.id, reply_event_id(event.id, False))
         if tainted:
             await messages.log(user.id, Role.ASSISTANT, "\n\n".join(enqueued),
                                event_id=reply_event_id(event.id, True))

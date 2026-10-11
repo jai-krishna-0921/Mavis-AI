@@ -15,9 +15,10 @@ from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, JobKind, Trust
 from mavis.domain.policy import RiskClass
 from mavis.domain.tasks import TaskKind
-from mavis.store.repo import approvals, messages, outbox, tasks
+from mavis.store.repo import approvals, messages, tasks
 from mavis.tools import chat_tools
 from mavis.tools.registry import CARD_RESULT_PREFIXES, MavisTool
+from tests.fakes.outbox import texts as outbox_texts
 
 
 class MailArgs(BaseModel):
@@ -63,7 +64,7 @@ def env(channel, fake_memory, tools):
 
 
 async def _texts(n: int = 1) -> list[str]:
-    return await outbox.texts_with_dedupe_prefix(f"reply:tg:update:{n}:")
+    return await outbox_texts(f"reply:tg:update:{n}:")
 
 
 @pytest.mark.parametrize("call,said", [

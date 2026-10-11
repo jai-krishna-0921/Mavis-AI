@@ -60,7 +60,7 @@ async def say(user_id: int, text: str, buttons: list[list[Button]] | None = None
     with the taint marker so the next turn runs tainted and learns it as untrusted."""
     async with Session() as s:
         # A deduped send is not a new message: it must not be logged to history a second time.
-        is_new = not (dedupe_key and await outbox.exists_with_key(s, dedupe_key))
+        is_new = not (dedupe_key and await outbox.exists_with_key(s, user_id, dedupe_key))
         await outbox.enqueue(
             s, Outbound(user_id=user_id, text=text, buttons=buttons or [], dedupe_key=dedupe_key)
         )
