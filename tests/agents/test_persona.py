@@ -153,5 +153,6 @@ async def test_capabilities_match_what_is_built(db) -> None:
     user, _ = await users.get_or_create_by_chat(5, "Jai")
     prompt = system_prompt(user, NOW)
     coming = prompt.split("On the way, not built yet", 1)[1].split("Right now", 1)[0]
-    assert "Slack" not in coming and "decks" not in coming and "reports" not in coming
+    assert "Slack" not in coming and "Notion" not in coming and "decks" not in coming
+    assert "reports" not in coming
     assert "two doors to the same you" in prompt and "/connect slack" in prompt

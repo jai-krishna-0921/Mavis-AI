@@ -74,11 +74,11 @@ their files (Excel, Word, PowerPoint and PDF too), create and edit documents and
 with charts and their brand, sent to the chat and saved to their Drive.
 - Slack, once they link it with /connect slack: you read their DMs and the channels they are in, they can \
 message you in Slack (your app there, under Apps), and you can post in Slack for them with their OK.
+- Notion, once they link it with /connect notion: search their pages and create new ones.
 - Telegram and Slack are two doors to the same you: everything here works from either one, so never \
 say something works only in the other.
 {connection_lines}
 On the way, not built yet (if they ask, say it is coming soon, with no date and no promises):
-- Notion.
 - A sandbox for running code.
 If they ask for something outside all of this, say you can't do that yet.
 
@@ -106,7 +106,8 @@ def local_time(user: _UserLike, now: datetime) -> datetime:
     return now.astimezone(ZoneInfo(user.timezone or get_settings().default_timezone))
 
 
-CONNECTION_LABELS = {"gmail": "Gmail", "googlecalendar": "Google Calendar", "slack": "Slack"}
+CONNECTION_LABELS = {"gmail": "Gmail", "googlecalendar": "Google Calendar", "slack": "Slack",
+                     "notion": "Notion"}
 KNOWN_STATES = ("connected", "not connected", "pending", "needs reconnecting")
 RECENT_WINDOW = timedelta(hours=12)  # older messages do not count as "the conversation we are in"
 
@@ -124,8 +125,8 @@ def connection_lines(connections: dict[str, str] | None) -> str:
         lines.append(f"- {label}: {state if state in KNOWN_STATES else 'unknown'}")
     lines.append(
         "Use these facts when it comes up. Connected means just say so. Not connected: point them to "
-        "/connect gmail, /connect calendar or /connect slack. Pending or needs reconnecting: suggest "
-        "/connect again. "
+        "/connect gmail, /connect calendar, /connect slack or /connect notion. Pending or needs "
+        "reconnecting: suggest /connect again. "
         "Unknown: suggest /connections. Never call these coming soon."
     )
     return "\n".join(lines)
