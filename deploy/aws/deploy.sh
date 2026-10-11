@@ -97,7 +97,7 @@ set_key INTEGRATION_PROVIDER native force
 # Owner decision 2026-10-09: other people join with invite codes (the owner chats stay admitted in every mode)
 set_key ACCESS_MODE invite force
 # Sandbox workspaces live in this bucket (deploy/aws/machine.sh creates it). Not forced: the owner can override.
-set_key WORKSPACE_BUCKET "mavis-machine-123456789012-aps1"
+set_key WORKSPACE_BUCKET "mavis-machine-$(aws_ sts get-caller-identity --query Account --output text)-aps1"
 tz="$(envget "$DEMO_ENV" DEFAULT_TIMEZONE)"
 [[ -z "$tz" ]] || set_key DEFAULT_TIMEZONE "$tz"
 set_key COMPOSIO_WEBHOOK_SECRET ""

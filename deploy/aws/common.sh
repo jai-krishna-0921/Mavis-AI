@@ -3,7 +3,7 @@
 # Shared helpers for the Mavis AWS scripts. Source this, do not run it.
 # Defaults are overridable from the environment.
 
-: "${AWS_PROFILE:=default}"
+: "${AWS_PROFILE:=}"  # empty: taken from state.env (git-ignored), else "default"
 : "${AWS_REGION:=ap-south-1}"
 : "${MAVIS_KEY_NAME:=mavis-ec2}"
 : "${MAVIS_KEY_FILE:=$HOME/.ssh/mavis-ec2.pem}"
@@ -24,6 +24,8 @@ AWS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$AWS_DIR/../.." && pwd)"
 : "${DEMO_ENV:=$REPO_ROOT/.env}"
 STATE_FILE="${MAVIS_STATE_FILE:-$AWS_DIR/state.env}"
+if [[ -z "$AWS_PROFILE" && -f "$STATE_FILE" ]]; then AWS_PROFILE="$(sed -n 's/^AWS_PROFILE=//p' "$STATE_FILE" | tail -1)"; fi
+: "${AWS_PROFILE:=default}"
 KNOWN_HOSTS="${MAVIS_KNOWN_HOSTS:-$HOME/.ssh/known_hosts_mavis}"
 export AWS_PAGER=""
 

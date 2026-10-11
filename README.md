@@ -131,7 +131,7 @@ One small box runs everything in a single docker compose stack: Postgres, Redis,
 
 HTTPS needs no domain: Caddy gets a Let's Encrypt certificate for `<elastic-ip-with-dashes>.sslip.io`, for example `13-233-10-5.sslip.io`. Telegram runs in webhook mode at `https://<host>/telegram/webhook`. Caddy proxies `/api/*`, `/oauth/*`, `/telegram/webhook`, `/webhooks/*`, `/connect/callback` and `/healthz` to the api and serves the web app (when built) for everything else.
 
-Prerequisites: the AWS CLI with a `default` profile (override with `AWS_PROFILE`, `AWS_REGION`), `ssh`, `rsync`, `openssl`, `docker` and `uv` locally. The scripts live in `deploy/aws/` and share state through `deploy/aws/state.env` (resource ids only, gitignored).
+Prerequisites: the AWS CLI with a your AWS profile profile (override with `AWS_PROFILE`, `AWS_REGION`), `ssh`, `rsync`, `openssl`, `docker` and `uv` locally. The scripts live in `deploy/aws/` and share state through `deploy/aws/state.env` (resource ids only, gitignored).
 
 ```bash
 deploy/aws/provision.sh              # key pair, security group, t4g.small, Elastic IP (idempotent)
