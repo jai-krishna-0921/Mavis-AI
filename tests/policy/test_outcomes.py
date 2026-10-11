@@ -564,3 +564,21 @@ async def test_a_delivered_file_leaves_another_file_asked_in_the_same_turn_open(
     assert await outcomes.delivered(user.id, "tg:1", "October 2026 Spending Analysis doc document") == 1
     assert (await loops_repo.get(market.id)).status is LoopStatus.OPEN
     assert (await loops_repo.get(spend.id)).status is LoopStatus.DONE
+
+
+async def test_a_task_redone_in_other_words_or_made_as_a_file_is_not_reported_again(user, at_now):
+    """The morning brief listed a market report as half done after it was asked again in other words and
+    delivered; a different ask that shares a few words still shows."""
+    redone = await _task(user.id, "Do a deep analysis of the personal AI assistant market in India "
+                                  "(size, growth, players, gaps)", TaskStatus.PARTIAL)
+    other = await _task(user.id, "Research the top 3 personal AI assistant products, pricing comparison",
+                        TaskStatus.PARTIAL)
+    filed = await _task(user.id, "Make the October spending report", TaskStatus.PARTIAL)
+    same_words = await _task(user.id, "Make the Q3 sales analysis report", TaskStatus.PARTIAL)
+    at_now.advance(minutes=5)
+    await _task(user.id, "Run the India personal AI assistant market analysis again: size, growth, players, "
+                         "gaps", TaskStatus.DONE)
+    await outcomes.delivered(user.id, "tg:update:900", "October Spending report (doc)")
+    refs = [i.ref for i in await outcomes.recently_failed(user.id)]
+    assert f"task:{redone}" not in refs and f"task:{filed}" not in refs
+    assert f"task:{other}" in refs and f"task:{same_words}" in refs

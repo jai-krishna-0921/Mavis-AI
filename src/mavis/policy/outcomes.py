@@ -95,13 +95,15 @@ async def recently_failed(user_id: int, now: datetime | None = None) -> list[Fai
     done = await tasks.finished_since(user_id, since, [TaskStatus.DONE], kind=TaskKind.TASK)
     outcomes = await tasks.finished_since(user_id, since, [TaskStatus.FAILED, TaskStatus.PARTIAL],
                                           kind=TaskKind.TASK)
+    files = await _delivered_files(user_id)
     for t in outcomes:
         if t.acknowledged_at is not None:
             continue
         finished = timeutil.ensure_utc(t.finished_at)
-        if any(_norm(d.goal) == _norm(t.goal) and timeutil.ensure_utc(d.finished_at) > finished
-               for d in done):
-            continue  # asked again and that run finished
+        later = [d.goal for d in done if timeutil.ensure_utc(d.finished_at) > finished]
+        later += [what for at, what in files if at > finished]
+        if any(_replaces(t.goal, x) for x in later):
+            continue  # asked again (in any words) and that run finished, or the file was made since
         partial = t.status == TaskStatus.PARTIAL.value
         items.append(FailedItem(
             f"task:{t.id}", t.goal[:160], "partly done" if partial else "failed",
@@ -250,6 +252,34 @@ def _about(loop, what: str) -> bool:
     if due is not None and due > timeutil.now():
         return False  # "review the deck on Friday" is still ahead
     return bool(_content(loop.title) & _content(what))
+
+
+def _replaces(goal: str, later: str) -> bool:
+    """A later finished task or delivered file covers this ask: the same words, all of its content words
+    (dates are not content: "October spending report" is "spending"), or at least two and half of them.
+    "Run the India AI assistant market analysis again" covers
+    "Do a deep analysis of the AI assistant market in India"; "top 3 AI assistant products" is a different
+    ask, and a shared "analysis report" alone never counts (_GENERIC_ASK)."""
+    if _norm(goal) == _norm(later):
+        return True
+    mine = _content(goal)
+    shared = mine & _content(later)
+    return bool(mine) and (shared == mine or (len(shared) >= 2 and len(shared) * 2 >= len(mine)))
+
+
+async def _delivered_files(user_id: int) -> list[tuple[datetime, str]]:
+    """(when, what) for the files Mavis made and sent lately (DELIVERED_KEY)."""
+    from mavis.store.repo import users  # lazy, as in delivered()
+
+    out = []
+    for entry in ((await users.get_state(user_id)).get(DELIVERED_KEY) or {}).values():
+        if isinstance(entry, dict) and entry.get("at"):
+            try:
+                at = timeutil.ensure_utc(datetime.fromisoformat(entry["at"]))
+            except ValueError:
+                continue
+            out.append((at, str(entry.get("what", ""))))
+    return out
 
 
 async def delivered(user_id: int, turn_ref: str | None, what: str) -> int:
