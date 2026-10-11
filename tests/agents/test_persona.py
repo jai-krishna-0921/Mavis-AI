@@ -146,3 +146,12 @@ def test_the_users_own_address_is_in_the_prompt_so_email_me_has_a_recipient():
     assert "Their own email address: jk@example.com" in prompt
     assert "own email address" not in system_prompt(user, datetime(2026, 10, 10, tzinfo=UTC))
     assert own_emails(SimpleNamespace(state=None)) == ()
+
+
+async def test_capabilities_match_what_is_built(db) -> None:
+    """Slack and designed files work today; a stale "not built yet" list denied sending mail from Slack."""
+    user, _ = await users.get_or_create_by_chat(5, "Jai")
+    prompt = system_prompt(user, NOW)
+    coming = prompt.split("On the way, not built yet", 1)[1].split("Right now", 1)[0]
+    assert "Slack" not in coming and "decks" not in coming and "reports" not in coming
+    assert "two doors to the same you" in prompt and "/connect slack" in prompt

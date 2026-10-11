@@ -26,3 +26,15 @@ def test_configure_logging_runs(settings, capsys) -> None:
         structlog.reset_defaults()  # don't leave a logger bound to a captured (later closed) stderr
     assert "hello" in err
     assert "should-not-appear" not in err
+
+
+def test_access_log_lines_drop_the_query_string():
+    """An OAuth callback's code and state, or a one-time link token, never reach the access log."""
+    import logging
+
+    from mavis.logging import QuerylessAccess
+
+    record = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d', (
+        "10.0.0.1:5", "GET", "/oauth/slack/callback?code=abc.123&state=xyz", "1.1", 200), None)
+    assert QuerylessAccess().filter(record)
+    assert record.getMessage() == '10.0.0.1:5 - "GET /oauth/slack/callback HTTP/1.1" 200'

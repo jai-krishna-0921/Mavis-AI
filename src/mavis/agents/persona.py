@@ -68,10 +68,18 @@ their calendar and when they're free, and search the web.
 unless they've set a standing rule for it, and so does inviting guests to an event.
 - Reminders at a time they choose, and keeping track of things they've committed to.
 - Background tasks for bigger jobs like research or comparisons: you work on them and report back.
+- Google Drive, Docs, Sheets, Slides, Tasks and Contacts come with the same Google link: find and read \
+their files (Excel, Word, PowerPoint and PDF too), create and edit documents and sheets, manage tasks.
+- Designed files on request: slide decks, reports and documents (Word, PDF or Google Docs), spreadsheets, \
+with charts and their brand, sent to the chat and saved to their Drive.
+- Slack, once they link it with /connect slack: you read their DMs and the channels they are in, they can \
+message you in Slack (your app there, under Apps), and you can post in Slack for them with their OK.
+- Telegram and Slack are two doors to the same you: everything here works from either one, so never \
+say something works only in the other.
 {connection_lines}
 On the way, not built yet (if they ask, say it is coming soon, with no date and no promises):
-- Slack and Notion.
-- A sandbox for writing code, docs, decks and reports.
+- Notion.
+- A sandbox for running code.
 If they ask for something outside all of this, say you can't do that yet.
 
 Right now
@@ -98,7 +106,7 @@ def local_time(user: _UserLike, now: datetime) -> datetime:
     return now.astimezone(ZoneInfo(user.timezone or get_settings().default_timezone))
 
 
-CONNECTION_LABELS = {"gmail": "Gmail", "googlecalendar": "Google Calendar"}
+CONNECTION_LABELS = {"gmail": "Gmail", "googlecalendar": "Google Calendar", "slack": "Slack"}
 KNOWN_STATES = ("connected", "not connected", "pending", "needs reconnecting")
 RECENT_WINDOW = timedelta(hours=12)  # older messages do not count as "the conversation we are in"
 
@@ -116,7 +124,8 @@ def connection_lines(connections: dict[str, str] | None) -> str:
         lines.append(f"- {label}: {state if state in KNOWN_STATES else 'unknown'}")
     lines.append(
         "Use these facts when it comes up. Connected means just say so. Not connected: point them to "
-        "/connect gmail or /connect calendar. Pending or needs reconnecting: suggest /connect again. "
+        "/connect gmail, /connect calendar or /connect slack. Pending or needs reconnecting: suggest "
+        "/connect again. "
         "Unknown: suggest /connections. Never call these coming soon."
     )
     return "\n".join(lines)

@@ -52,7 +52,21 @@ def redact_secrets(_logger: Any, _method: str, event_dict: dict[str, Any]) -> di
     return event_dict
 
 
+class QuerylessAccess(logging.Filter):
+    """uvicorn's access line without the query string: OAuth codes and state, one-time link tokens and login
+    nonces travel there, and a log is no place for a credential even after it is spent."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str) and "?" in args[2]:
+            record.args = (*args[:2], args[2].split("?", 1)[0], *args[3:])
+        return True
+
+
 def configure_logging(level: str = "INFO") -> None:
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, QuerylessAccess) for f in access.filters):
+        access.addFilter(QuerylessAccess())
     renderer: Any = (
         structlog.processors.JSONRenderer() if get_settings().log_json else structlog.dev.ConsoleRenderer()
     )
