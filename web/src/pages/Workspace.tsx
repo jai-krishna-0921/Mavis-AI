@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { ArrowSquareOut, GoogleLogo, Plugs, SlackLogo, TelegramLogo, WarningCircle, CheckCircle } from '@phosphor-icons/react'
+import { ArrowSquareOut, GoogleLogo, Plugs, SlackLogo, TelegramLogo, WarningCircle, CheckCircle, Circle } from '@phosphor-icons/react'
 import { useConfig, useConnectors, useDisconnect, useMe } from '../api/hooks'
 import { api } from '../api/client'
 import type { Connector } from '../api/types'
@@ -80,14 +80,93 @@ function DisconnectDialog({ c, onClose }: { c: Connector; onClose: () => void })
   )
 }
 
-function ConnectorRow({ c }: { c: Connector }) {
-  const [confirm, setConfirm] = useState(false)
+function useStartConnect(id: Connector['id']) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const connect = async () => {
     setBusy(true); setErr('')
-    try { redirectTo((await api.connect(c.id)).url) } catch (e) { setErr((e as Error).message); setBusy(false) }
+    try { redirectTo((await api.connect(id)).url) } catch (e) { setErr((e as Error).message); setBusy(false) }
   }
+  return { busy, err, connect }
+}
+
+const START_HIDDEN = 'mavis.start.hidden'
+
+function readHidden(): boolean {
+  try { return localStorage.getItem(START_HIDDEN) === '1' } catch { return false }
+}
+
+function StartConnect({ c }: { c: Connector }) {
+  const { busy, err, connect } = useStartConnect(c.id)
+  return (
+    <>
+      <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void connect()} aria-label={`Connect ${c.name}`}>Connect</button>
+      {err && <p className="error w-full" role="alert">{err}</p>}
+    </>
+  )
+}
+
+// First-run checklist: three steps read from what is actually linked; it goes away once they are done.
+function GettingStarted() {
+  const me = useMe()
+  const cfg = useConfig()
+  const conns = useConnectors()
+  const [hidden, setHidden] = useState(readHidden)
+  if (!me.data || !conns.data || hidden) return null
+  const tg = normalizeChannel('telegram', me.data.channels.telegram, cfg.data?.bot_url)
+  const google = conns.data.find((c) => c.id === 'google')
+  const slack = conns.data.find((c) => c.id === 'slack')
+  const steps = [
+    {
+      key: 'telegram', title: 'Say hi to Mavis on Telegram', done: tg.connected,
+      sub: 'Mavis lives in your chat. Tell it what is on your plate this week.',
+      action: tg.open_url ? (
+        <a className="btn btn-sm" href={tg.open_url} target="_blank" rel="noopener noreferrer" aria-label="Open Telegram">
+          Open <ArrowSquareOut size={14} weight="light" aria-hidden="true" />
+        </a>
+      ) : null,
+    },
+    ...(google ? [{
+      key: 'google', title: 'Connect Google', done: google.status === 'active',
+      sub: 'Gmail, Calendar and Drive, so Mavis knows your day.', action: <StartConnect c={google} />,
+    }] : []),
+    ...(slack ? [{
+      key: 'slack', title: 'Connect Slack (optional)', done: slack.status === 'active',
+      sub: 'Message Mavis from Slack too, in any workspace.', action: <StartConnect c={slack} />,
+    }] : []),
+  ]
+  const done = steps.filter((st) => st.done).length
+  if (done === steps.length) return null
+  const hide = () => {
+    try { localStorage.setItem(START_HIDDEN, '1') } catch { /* private mode: hide for this visit only */ }
+    setHidden(true)
+  }
+  return (
+    <Panel id="start" title="Get started" lede={`${done} of ${steps.length} done. It takes about two minutes.`}
+      action={<button type="button" className="btn btn-sm" onClick={hide}>Hide</button>}>
+      <ol className="m-0 list-none p-0" aria-label="Getting started steps">
+        {steps.map((st) => (
+          <li key={st.key} className="row flex-wrap">
+            <IconTile tone={st.done ? 'accent' : 'plain'}>
+              {st.done
+                ? <CheckCircle size={22} weight="light" aria-label="Done" />
+                : <Circle size={22} weight="light" aria-label="To do" />}
+            </IconTile>
+            <div className="min-w-0 flex-1">
+              <div className={`row-title ${st.done ? 'text-muted line-through' : ''}`}>{st.title}</div>
+              {!st.done && <div className="row-sub">{st.sub}</div>}
+            </div>
+            {!st.done && st.action && <div className="row-actions">{st.action}</div>}
+          </li>
+        ))}
+      </ol>
+    </Panel>
+  )
+}
+
+function ConnectorRow({ c }: { c: Connector }) {
+  const [confirm, setConfirm] = useState(false)
+  const { busy, err, connect } = useStartConnect(c.id)
   const active = c.status === 'active'
   const Icon = c.id === 'google' ? GoogleLogo : SlackLogo
   return (
@@ -149,6 +228,7 @@ export function Workspace() {
   return (
     <div>
       <PageHead title="Workspace" lede="Where Mavis lives and what it can see." />
+      <GettingStarted />
       <Contact />
       <Panel id="connectors" title="Connectors" lede="Accounts Mavis can read and act on, only with your permission.">
         <ConnectNote />

@@ -115,6 +115,46 @@ async def test_backfill_survives_a_failing_channel_and_is_idempotent():
     assert await slack_events.backfill(provider, bus, 7, days=7, now=NOW) == 0
 
 
+async def test_backfill_waits_out_a_rate_limit_in_another_workspace():
+    """An unlisted app in another workspace may read history once a minute: the first sync waits its turn
+    and still reads every conversation, instead of stopping at the first limit."""
+    data = {"D0000DM001": [m(-5, "dm one")], "C0000NEW01": [m(-5, "launch one")],
+            "C0000GEN01": [m(-5, "general one")]}
+    provider, bus = SlackProvider(chans(), data), FakeBus()
+    limited = {"D0000DM001": 1, "C0000NEW01": 2}  # how many times each conversation is refused first
+    serve = provider.execute
+
+    async def execute(user, action, args):
+        cid = args.get("channel")
+        if action == "slack.history" and limited.get(cid):
+            limited[cid] -= 1
+            provider.executed.append((user.user_id, action, args))
+            return ToolResult(ok=False, error="ratelimited", error_kind=FailureKind.RATE_LIMITED)
+        return await serve(user, action, args)
+
+    provider.execute = execute
+    waits: list[float] = []
+
+    async def sleep(s):
+        waits.append(s)
+
+    assert await slack_events.backfill(provider, bus, 7, days=7, now=NOW, sleep=sleep) == 3
+    assert waits == [slack_events.RATE_LIMIT_WAIT_S] * 3
+
+
+async def test_backfill_gives_up_on_a_limit_once_its_budget_is_spent():
+    provider, bus = SlackProvider(chans(), {"D0000DM001": [m(-5, "dm one")]}), FakeBus()
+    provider.fail["D0000DM001"] = ToolResult(ok=False, error="ratelimited",
+                                             error_kind=FailureKind.RATE_LIMITED)
+    waits: list[float] = []
+
+    async def sleep(s):
+        waits.append(s)
+
+    assert await slack_events.backfill(provider, bus, 7, days=7, now=NOW, sleep=sleep, budget_s=10) == 0
+    assert waits == []  # a wait that would run past the budget is not started
+
+
 # --- poll -------------------------------------------------------------------------------------------
 
 

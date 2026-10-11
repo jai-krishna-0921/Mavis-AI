@@ -11,6 +11,7 @@ Expected lookup (wired at merge from the native grant account data):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -42,6 +43,11 @@ DM_KINDS = frozenset({"dm", "group_dm"})
 PER_CHANNEL_CAP = 200
 TOTAL_CAP = 2000
 HISTORY_PAGE = 100
+# Slack (May 2025): an app installed in other workspaces and not listed in the Marketplace may read history
+# once a minute, 15 messages a page. The first sync of such a workspace waits its turn instead of stopping;
+# live messages arrive by event and are unaffected.
+RATE_LIMIT_WAIT_S = 61.0
+BACKFILL_BUDGET_S = 20 * 60.0
 POLL_BATCH = 25
 POLL_PAGE = 50
 POLL_INITIAL_LOOKBACK = timedelta(minutes=10)
@@ -283,22 +289,30 @@ def conversation_order(channels: list[dict]) -> list[dict]:
     )
 
 
-async def _history(provider: IntegrationProvider, user_id: int, args: dict) -> dict | None:
-    res = await provider.execute(UserRef(user_id=user_id), "slack.history", args)
-    if not res.ok:
+class RecordSink(Protocol):
+    async def on_slack_event(self, event: Event) -> None: ...
+
+
+async def _patient_history(provider: IntegrationProvider, user_id: int, args: dict, deadline: float,
+                           sleep) -> dict | None:
+    """One history page; a rate limit is waited out while the backfill's time budget lasts."""
+    while True:
+        res = await provider.execute(UserRef(user_id=user_id), "slack.history", args)
+        if res.ok:
+            return res.data if isinstance(res.data, dict) else None
+        if res.error_kind is FailureKind.RATE_LIMITED and time.monotonic() + RATE_LIMIT_WAIT_S < deadline:
+            log.info("slack.backfill_waiting", user_id=user_id)
+            await sleep(RATE_LIMIT_WAIT_S)
+            continue
         kind = res.error_kind.value if res.error_kind else ""
         log.warning("slack.history_failed", user_id=user_id, kind=kind)
         return None
-    return res.data if isinstance(res.data, dict) else None
-
-
-class RecordSink(Protocol):
-    async def on_slack_event(self, event: Event) -> None: ...
 
 
 async def backfill(
     provider: IntegrationProvider, bus: EventBus | None, user_id: int, *, days: int, now: datetime,
     per_channel: int = PER_CHANNEL_CAP, total: int = TOTAL_CAP, sink: RecordSink | None = None,
+    budget_s: float = BACKFILL_BUDGET_S, sleep=asyncio.sleep,
 ) -> int:
     """Deliver the last `days` of kept messages: DMs first, then member channels by recent activity, at most
     `per_channel` kept messages per conversation and `total` overall. With a `sink` (the connector ingest)
@@ -311,6 +325,7 @@ async def backfill(
         log.warning("slack.backfill_channels_failed", user_id=user_id)
         return 0
     oldest = f"{(now - timedelta(days=days)).timestamp():.6f}"
+    deadline = time.monotonic() + budget_s
     published = seen = 0
     for chan in conversation_order(extract_list(res.data, "channels", "data.channels")):
         cid = str(chan.get("id") or "")
@@ -318,9 +333,9 @@ async def backfill(
             continue
         kept, cursor = 0, ""
         while kept < per_channel and seen < total:
-            page = await _history(provider, user_id, {
+            page = await _patient_history(provider, user_id, {
                 "channel": cid, "limit": HISTORY_PAGE, "oldest": oldest, "cursor": cursor,
-            })
+            }, deadline, sleep)
             if page is None:
                 break
             for m in page.get("messages") or []:

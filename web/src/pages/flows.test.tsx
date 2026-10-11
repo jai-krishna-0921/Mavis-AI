@@ -131,6 +131,32 @@ describe('workspace connectors', () => {
   })
 })
 
+describe('getting started', () => {
+  it('lists the steps from what is linked, connects from the card, and hides for good', async () => {
+    localStorage.clear()
+    const redirect = vi.spyOn(nav, 'redirectTo').mockImplementation(() => {})
+    const user = userEvent.setup()
+    renderApp('/workspace')
+    const steps = await screen.findByRole('list', { name: 'Getting started steps' })
+    // Telegram and Google are linked in the mock, Slack is not
+    expect(screen.getByText('2 of 3 done. It takes about two minutes.')).toBeInTheDocument()
+    expect(within(steps).getAllByLabelText('Done')).toHaveLength(2)
+    await user.click(within(steps).getByRole('button', { name: 'Connect Slack' }))
+    await waitFor(() => expect(redirect).toHaveBeenCalledWith('/oauth/mock/slack'))
+    await user.click(screen.getByRole('button', { name: 'Hide' }))
+    expect(screen.queryByRole('list', { name: 'Getting started steps' })).not.toBeInTheDocument()
+    expect(localStorage.getItem('mavis.start.hidden')).toBe('1')
+  })
+
+  it('goes away once every step is done', async () => {
+    localStorage.clear()
+    db().connectors.forEach((c) => { c.status = 'active' })
+    renderApp('/workspace')
+    expect(await screen.findByRole('heading', { name: 'Connectors' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Get started' })).not.toBeInTheDocument()
+  })
+})
+
 describe('vault', () => {
   it('renders third party text as plain text', async () => {
     renderApp('/vault')

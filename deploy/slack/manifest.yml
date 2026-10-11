@@ -1,5 +1,7 @@
-# Slack app manifest for Mavis AI: an internal, single-workspace app (not distributed).
-# Internal customer-built apps keep Tier 3 limits for conversations.history and conversations.replies.
+# Slack app manifest for Mavis AI. Any workspace can install it once public distribution is on (Manage
+# Distribution in the app settings). Slack (May 2025): outside the app's own workspace, an app not listed in
+# the Marketplace may read conversation history once a minute, 15 messages a page; Mavis gets live messages
+# by event (unaffected) and its one-off first sync waits out the limit. Marketplace listing lifts it.
 # Mavis is also a bot user: users DM it (App Home messages tab) or @mention it, and it posts cards with buttons.
 # Create at api.slack.com/apps ("From a manifest"), install to the workspace, then give the client id,
 # client secret and signing secret to the deployment (SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET).
