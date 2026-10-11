@@ -170,13 +170,14 @@ async def test_an_analysis_report_gets_a_gradient_style_unless_the_user_chose_on
         return "", None
 
     async def writer(schema, system, human, **kw):
-        return schema(style="minimal", spec=_doc())
+        return schema(style="minimal", spec=_doc().model_copy(update={"cover": False}))
 
     monkeypatch.setattr("mavis.agents.react.react_loop", loads_analysis)
     monkeypatch.setattr("mavis.agents.turn_support.build_context_ex", no_context)
     monkeypatch.setattr(agent.llm, "structured", writer)
     req = agent.Request(kind="doc", title="Q3 analysis", brief="analyse Q3")
-    assert (await agent.plan(user.id, req))[1] == "ocean"
+    spec, style = await agent.plan(user.id, req)
+    assert style == "ocean" and spec.cover  # the skill's cover, even when the writer left it off
     await brand.set_brand(user.id, style="minimal")
     assert (await agent.plan(user.id, req))[1] == "minimal"
 

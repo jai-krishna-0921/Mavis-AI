@@ -573,12 +573,13 @@ async def test_a_task_redone_in_other_words_or_made_as_a_file_is_not_reported_ag
                                   "(size, growth, players, gaps)", TaskStatus.PARTIAL)
     other = await _task(user.id, "Research the top 3 personal AI assistant products, pricing comparison",
                         TaskStatus.PARTIAL)
-    filed = await _task(user.id, "Make the October spending report", TaskStatus.PARTIAL)
+    filed = await _task(user.id, "Make a proper analysis report of my October spending as a Word doc",
+                        TaskStatus.PARTIAL)
     same_words = await _task(user.id, "Make the Q3 sales analysis report", TaskStatus.PARTIAL)
     at_now.advance(minutes=5)
     await _task(user.id, "Run the India personal AI assistant market analysis again: size, growth, players, "
                          "gaps", TaskStatus.DONE)
-    await outcomes.delivered(user.id, "tg:update:900", "October Spending report (doc)")
+    await outcomes.delivered(user.id, "tg:update:900", "October 2026 Spending Report doc document")
     refs = [i.ref for i in await outcomes.recently_failed(user.id)]
     assert f"task:{redone}" not in refs and f"task:{filed}" not in refs
     assert f"task:{other}" in refs and f"task:{same_words}" in refs

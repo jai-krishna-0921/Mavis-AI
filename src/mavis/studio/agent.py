@@ -244,11 +244,15 @@ async def plan(user_id: int, req: Request) -> tuple[BaseModel, str]:
         gap = " ".join(out.missing.split())[:200] or "the material it needs"
         raise ActionFailed(f"studio: the material lacks {gap}", reason=f"I don't have {gap}")
     style = out.style
-    if ANALYSIS_SKILL in loaded and not brand.get("style") and not THEMES[style].gradient:
-        # the analysis-report rule, kept here because the spec writer does not always follow it
-        style = ANALYSIS_STYLE
+    spec = out.spec
+    if ANALYSIS_SKILL in loaded:
+        # the analysis-report rules, kept here because the spec writer does not always follow them
+        if not brand.get("style") and not THEMES[style].gradient:
+            style = ANALYSIS_STYLE
+        if "cover" in type(spec).model_fields and not spec.cover:
+            spec = spec.model_copy(update={"cover": True})
     log.info("studio.planned", kind=req.kind, skills=list(loaded), style=style)
-    return out.spec, style
+    return spec, style
 
 
 async def _deliver(user_id: int, job_id: str, req: Request, path, theme_style: str) -> str:

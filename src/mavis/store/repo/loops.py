@@ -144,7 +144,7 @@ DUPLICATE_DUE_WINDOW = timedelta(hours=2)
 DUPLICATE_SIMILARITY = 0.8
 _TIME_TOKEN = re.compile(r"^\d+(?:[:.]\d+)?(?:am|pm|h|hrs?|st|nd|rd|th)?$")
 _DUP_STOPWORDS = frozenset(
-    "a an the at on by in to for of with and or my me i is it this that next coming about from "
+    "a an the as at on by in to for of with and or my me i is it this that next coming about from "
     "am pm today tomorrow tonight tmrw tmr morning afternoon evening night noon midnight "
     "monday tuesday wednesday thursday friday saturday sunday mon tue tues wed thu thur thurs fri sat sun "
     "january february march april may june july august september october november december "
