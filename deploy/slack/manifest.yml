@@ -5,8 +5,19 @@
 # client secret and signing secret to the deployment (SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET).
 display_information:
   name: Mavis AI
-  description: Your personal assistant. Reads the Slack messages you can read and posts as you when you ask.
-  background_color: "#1f2937"
+  description: Your personal AI assistant for email, calendar, files and Slack. Ask in a DM, it handles the rest.
+  long_description: |
+    Mavis is a personal assistant that knows your work. Message it here in Slack or on Telegram and it picks up where you left off.
+
+    *What it does*
+    • Reads your Gmail, Calendar and Drive, and the Slack DMs and channels you are in, so it knows your people, projects and deadlines.
+    • Tells you what is on your plate, drafts and sends replies, books meetings and keeps track of what you promised.
+    • Researches and writes: designed slide decks, analysis reports and spreadsheets, saved to your Drive.
+    • Speaks up first when something needs you, and sends a morning check-in.
+
+    *Your data stays yours*
+    Mavis reads only what you can already read. Anything that goes out to another person, or spends money, waits for your tap. Disconnect anytime with /disconnect.
+  background_color: "#E8572A"
 features:
   app_home:
     home_tab_enabled: false
