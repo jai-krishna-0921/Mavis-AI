@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Off-box backups (multiuser plan, Task 18): the S3 bucket the box writes its nightly backups to, and the
 # write-only inline policy `mavis-backups` on role mavis-ec2. Write-only on purpose: a compromised box can add
 # backups but cannot read, overwrite history of, or delete them (versioning keeps every write; lifecycle

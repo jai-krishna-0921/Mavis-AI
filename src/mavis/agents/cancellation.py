@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """One cancel path for every trigger (Cancel button, cancel_task tool, chat "stop that").
 
 `cancel_by_user` claims the status, closes the task's approvals, sets the cancel flag (in-process and a

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-user mailboxes (spec 7.1): a FIFO list per (user, lane), a ready ZSET per lane scored by arrival,
 and a lease per (user, lane). One lease per user and lane gives per-user order across processes; re-adding
 a busy user at the back after each turn gives round robin across users."""

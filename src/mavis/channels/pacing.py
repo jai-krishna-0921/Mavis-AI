@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Telegram send pacing (shared contract A with plan 11).
 
 A global per-second window across every process (Redis INCR on the current second, in-memory without

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Validated shapes for the attention layer. Validated enums, booleans, numbers and dates are computed
 facts; free text (counterparty, action_requested) stays untrusted wherever it flows."""
 

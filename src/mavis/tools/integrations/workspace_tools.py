@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Google Workspace actions that need more than one provider call, and the registry hooks tools.py attaches.
 
 CUSTOM_FNS replaces the default single-call `gated` for an action; PREPARES holds MavisTool.prepare

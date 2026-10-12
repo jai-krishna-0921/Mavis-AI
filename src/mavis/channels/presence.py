@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Best-effort presence cues (reaction, typing) around a user turn.
 
 Everything here swallows errors: presence is cosmetic and must never block or fail a turn. Channels

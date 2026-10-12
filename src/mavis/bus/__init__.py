@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Process-wide bus accessor: Redis Streams when REDIS_URL is set, otherwise in-process."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Morning-brief context from connected services. Returns None when a service isn't connected."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Google sign-in: OpenID Connect authorization code flow with PKCE, scopes `openid email profile` only.
 
 It never creates a Mavis user. The ID token is verified as Google documents: signature against the keys at

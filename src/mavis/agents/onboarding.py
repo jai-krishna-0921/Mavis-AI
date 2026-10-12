@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Onboarding a newly invited user (spec 5): at most three questions, buttons where possible, first value
 inside two minutes. State lives in users.state["onboarding"] so a restart resumes."""
 

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Gmail and Slack records on their way into the knowledge graph.
 
 One entry per source. Each decides from structure only (native.guard filters and the user's mute list),

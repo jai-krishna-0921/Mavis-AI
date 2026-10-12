@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Mood reactions on the user's message (T1.3).
 
 The chat model may end its reply with one marker line, `[react: <emoji>]`, in the same call that writes

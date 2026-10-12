@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Wordmark } from '../components/Logo'

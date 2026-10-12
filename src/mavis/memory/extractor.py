@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Turn one piece of text (a chat turn, an email, an event) into structured memory."""
 
 from __future__ import annotations

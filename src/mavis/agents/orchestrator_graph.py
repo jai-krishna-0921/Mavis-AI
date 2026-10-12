@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Orchestrator graph.
 
     planner -> schedule -(Send per ready step)-> run_step -> schedule ... -> connect_gate -> critic

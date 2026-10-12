@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Record-grounded learning: Gmail and Slack messages become graph facts with their source.
 
 A kept message (see native.guard) becomes one LEARN job whose origin is the record itself

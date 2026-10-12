@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Extension points for the initiative pipeline. Integrations plug in here; the core stays generic."""
 
 from __future__ import annotations

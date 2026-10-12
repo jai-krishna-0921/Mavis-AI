@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Build access/data tables (run once, commit the output): zone -> country from the system tzdata
 zone1970.tab, and cities (population >= 15000) from a GeoNames cities15000.txt the owner downloads.
 

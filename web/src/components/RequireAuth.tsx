@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import { Navigate, useLocation } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { useMe } from '../api/hooks'

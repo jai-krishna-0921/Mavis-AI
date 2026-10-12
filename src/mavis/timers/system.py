@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """System wakeups (kind 'system_*') are plumbing, not initiative: they never reach the reasoner."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Read-only export of a Neo4j graph (all nodes and relationships) to JSON.
 
 Usage: NEO4J_URI=... NEO4J_USER=... NEO4J_PASSWORD=... python graph_export.py OUT.json

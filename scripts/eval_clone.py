@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Operator-only eval helper: lend a real user's Google grant to the synthetic TEST user, then take it back.
 
 The live evals (scripts/eval_google.py) speak as TEST_TELEGRAM_CHAT_ID, whose replies land in the test sink,

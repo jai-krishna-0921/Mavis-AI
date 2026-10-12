@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """On a new ACTIVE connection: subscribe push triggers; if that's impossible, start polling."""
 
 from __future__ import annotations

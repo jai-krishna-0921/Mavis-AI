@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Manage the Telegram webhook from the box. Webhook and getUpdates polling are mutually exclusive:
 # once `set` runs, a local `mavis dev` poller loses updates (409). Stop it first.
 #   webhook.sh set | delete | info

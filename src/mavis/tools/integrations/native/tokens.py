@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """NativeTokenStore: sealed per-user grants with single-flight refresh (implements TokenSource).
 
 Tokens only ever live sealed in `native_grants`. Refresh is single-flight per (user, provider): an

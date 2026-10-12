@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Email-specific initiative hooks: drop noise before the LLM, add signals, enforce a security floor."""
 
 from __future__ import annotations

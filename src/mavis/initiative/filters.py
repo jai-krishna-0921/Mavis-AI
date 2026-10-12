@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Cheap, no-LLM first pass over every event (spec §4.3 step 1)."""
 
 from __future__ import annotations

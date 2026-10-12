@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Mavis action catalog: provider-agnostic names, argument models, risk and previews.
 
 Adding a provider means mapping these names; adding an action means one entry here plus a mapping.

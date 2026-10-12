@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Shared contract B (Plans 11 and 12): IAM role + instance profile `mavis-ec2` for the box, associated to the
 # instance, and IMDSv2. The hop limit is raised to 2 (so the api, worker and timer containers can use the role)
 # ONLY after the DOCKER-USER rule that keeps every other container away from 169.254.169.254 is verified on the

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Progress card state and rendering (Phase 12, spec section 8.1). Pure: no I/O.
 
 The card is UI chrome. Its header comes from the task goal, step lines from PlanStep.title, the "Last:"

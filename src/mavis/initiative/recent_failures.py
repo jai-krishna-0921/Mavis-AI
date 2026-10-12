@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """What recently failed and needs the user's decision, for the reasoner and composer prompts.
 
 The default provider renders policy.outcomes.recently_failed (failed approvals, failed or partial background

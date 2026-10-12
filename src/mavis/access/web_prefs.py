@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-user preferences set from the dashboard, kept in users.state["web_prefs"] and honoured by the quiet
 hours policy, the morning check-in and the register mirroring. Name, time zone and the proactive channel use
 their existing storage (access.preferences, channels.routing)."""

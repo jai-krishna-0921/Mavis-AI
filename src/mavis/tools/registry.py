@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Tool registry: one place that knows every tool's risk, capability and audience.
 
 Agents never see raw functions. `for_agent()` / `select()` hand out LangChain tools

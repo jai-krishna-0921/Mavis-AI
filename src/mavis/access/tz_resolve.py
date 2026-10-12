@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Timezone from a shared location (tzfpy, offline), a city name (bundled GeoNames), or the fast model.
 Telegram's language_code never sets a timezone (spec 5)."""
 

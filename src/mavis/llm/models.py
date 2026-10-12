@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Model routing (FAST / SMART) and validated structured output.
 
 Callers MUST use `from mavis.llm import models as llm` and call `llm.structured(...)` etc. so tests can

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Composio user identity per user (spec 6.2): stored `users.composio_user_id` (`mavis-<env>-<id>` for new
 users); legacy rows keep `mavis-<id>`, which only a prod stack may claim, so a staging stack sharing the key
 can never take prod user 1's webhooks."""

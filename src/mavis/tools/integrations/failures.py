@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Classify a provider failure into the one FailureKind vocabulary (hotfix4 H3).
 
 Classification reads STRUCTURE, never English prose: an HTTP status (ours, or one the provider put in a

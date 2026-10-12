@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Account deletion: the existing DELETE_USER job, started after a typed confirmation."""
 
 from __future__ import annotations

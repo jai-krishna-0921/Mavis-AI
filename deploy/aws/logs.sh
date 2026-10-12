@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # logs.sh [service ...] [-f]   (default: last 200 lines of everything)
 set -euo pipefail
 # shellcheck source=deploy/aws/common.sh

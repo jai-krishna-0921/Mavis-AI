@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Currency from a zone's country (zone1970.tab first country) through a country -> ISO 4217 map."""
 
 from __future__ import annotations

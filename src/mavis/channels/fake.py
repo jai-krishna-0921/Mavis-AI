@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """In-memory channels: FakeChannel for tests, ConsoleChannel for `mavis chat` and token-less dev."""
 
 from __future__ import annotations

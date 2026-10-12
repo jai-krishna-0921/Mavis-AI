@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """In-house Slack executor: slack.channels, slack.history, slack.send over the Slack Web API.
 
 Calls use the user's token (xoxp), so Mavis reads what the user can read and posts as the user. Slack answers

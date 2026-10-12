@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Lua for the shared limiter: a line-for-line mirror of mavis.llm.share.best_effort_verdict and of the
 `_Limiter` ranking in mavis.llm.models. The Python function is the policy; tests/llm/test_limiter_parity.py
 drives both with the same scenarios. Every key besides KEYS starts with the ARGV prefix

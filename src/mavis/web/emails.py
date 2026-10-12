@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Confirmed emails: the link between a verified Google address and a Mavis user."""
 
 from __future__ import annotations

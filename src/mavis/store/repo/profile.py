@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Versioned profile cards: every save is a new row; the latest version wins."""
 
 from __future__ import annotations

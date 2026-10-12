@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Alembic environment (async). URL comes from config.attributes['url'] or Settings.db_url."""
 
 from __future__ import annotations

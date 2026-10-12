@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Markdown (as written by the model) to Telegram HTML or plain text. Pure functions, no I/O."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """What a tool returns when its result can reach the user as well as the model (hotfix4 H3).
 
 A tool result has two readers. The model reads everything (what happened plus how to talk about it); the

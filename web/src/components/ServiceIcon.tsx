@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import {
   AddressBook, CalendarDots, CheckSquare, EnvelopeSimple, FileText, GoogleDriveLogo, Table, VideoCamera, Square,
   type Icon,

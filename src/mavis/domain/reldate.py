@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Make stored text time-neutral: resolve relative date expressions against when the text was written (T2).
 
 A title such as "Block 2 pm tomorrow" is true only on the day it was written; stored and shown days later

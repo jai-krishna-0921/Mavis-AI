@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Runtime configuration loaded from the environment / .env. Every config key in the project lives here."""
 
 from __future__ import annotations

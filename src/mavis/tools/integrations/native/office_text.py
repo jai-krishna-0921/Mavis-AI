@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Text out of an uploaded Excel, Word, PowerPoint or PDF file, so a Drive file the user made outside Google
 reads like a Sheet or a Doc does.
 

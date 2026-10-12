@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Web dashboard: sessions, Telegram link sign-in nonces, confirmed emails, and where a native OAuth
 consent was started from (so a web connect returns to the dashboard)."""
 

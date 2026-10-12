@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Text embeddings behind a small port so tests never download a model.
 
 Production uses fastembed (ONNX on CPU, ~5 ms/sentence, no API key). The model

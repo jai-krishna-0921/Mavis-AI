@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Who may be served right now, as one pure rule shared by every entry point that is not the Telegram gate.
 
 The access gate (access.gate) decides per Telegram event and has side effects (invite codes, replies). The

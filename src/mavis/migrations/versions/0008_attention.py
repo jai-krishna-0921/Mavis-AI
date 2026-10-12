@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """attention layer: observations, senders, money baselines, prefs
 
 Merge order: qa-hardening (0006_initiative_decisions), Phase 4 (0007_orchestrator), then this revision.

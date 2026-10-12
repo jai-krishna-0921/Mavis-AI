@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Evidence for the personal layer: what is known about one user, computed in code, with its source.
 
 Two halves.

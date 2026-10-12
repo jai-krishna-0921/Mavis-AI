@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-user connection status, cached briefly so every tool call doesn't hit the provider."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Wordmark } from '../Logo'

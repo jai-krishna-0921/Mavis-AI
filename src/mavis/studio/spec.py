@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """What the studio agent writes and the renderers draw: a structured spec per artifact kind.
 
 The model never writes layout code or file bytes. It writes one of these specs (validated by pydantic), guided

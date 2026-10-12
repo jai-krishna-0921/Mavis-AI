@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Default handler wiring for the worker roles (`mavis dev`, `mavis worker`, `mavis chat`).
 
 Order matters: the initiative engine first (it claims every non-chat event type), then integrations

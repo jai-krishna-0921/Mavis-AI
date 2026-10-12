@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Turn a notify intent into 1-3 chat bubbles in Mavis's voice."""
 
 from __future__ import annotations

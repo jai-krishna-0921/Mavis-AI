@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Worker job handlers for memory: LEARN (after each turn/signal) and CONSOLIDATE (nightly).
 
 Both run off the reply path, serialised per user under a lock distinct from the turn lock.

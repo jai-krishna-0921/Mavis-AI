@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """A small, budgeted tool-calling loop shared by chat turns, specialists and spawned workers.
 
 Hand-rolled rather than a prebuilt agent so the step budget, error reporting, taint tracking and

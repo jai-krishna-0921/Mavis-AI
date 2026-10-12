@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Compatibility shim: the chat turn now lives in agents/conversation.py (helpers in turn_support.py).
 
 Kept so existing imports and tests keep working; Phase 4 Task 12 points the USER_MESSAGE handler at

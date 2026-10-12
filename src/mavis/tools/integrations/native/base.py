@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Contracts shared by the native token store, the Google and Slack executors and the router.
 
 Executors never see refresh tokens or keys: they ask a TokenSource for a short-lived access token and

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Attention observations and preferences (spec attention section 11)."""
 
 from __future__ import annotations

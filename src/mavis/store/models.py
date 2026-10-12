@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """ORM tables. Later phases append their tables here AND add a matching Alembic revision."""
 
 from __future__ import annotations

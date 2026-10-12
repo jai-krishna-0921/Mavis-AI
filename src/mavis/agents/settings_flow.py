@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """/settings: show the user's preferences and let them change the time zone, apart from onboarding. It never
 touches the onboarding state, never asks the first-value question, and never changes the currency."""
 

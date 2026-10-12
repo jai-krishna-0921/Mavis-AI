@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import { ArrowUpRight, ArrowClockwise } from '@phosphor-icons/react'
 import { useConfig } from '../api/hooks'
 import { Skeleton } from './Ui'

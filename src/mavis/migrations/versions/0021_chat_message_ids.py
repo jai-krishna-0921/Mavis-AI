@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Telegram message ids per chat, so /clear can delete recent messages (ids only, no text)."""
 
 from __future__ import annotations

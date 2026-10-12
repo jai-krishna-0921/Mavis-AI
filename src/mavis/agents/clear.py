@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """/clear: start fresh in the chat (also offered from /settings).
 
 Two choices behind an inline keyboard:

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Truthful outcomes (hotfix4 H1): what recently failed, computed from the rows, for every reader.
 
 `recently_failed` is the ONE source for "Recently failed (needs your decision)": the `pending` tool and the

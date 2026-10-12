@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Pending connection requests (a connect link sent, outcome unknown)."""
 
 from __future__ import annotations

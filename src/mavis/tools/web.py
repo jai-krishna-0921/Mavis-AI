@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Web search (Tavily, DuckDuckGo fallback) and page extraction.
 
 Everything returned from here is third-party content: the tools are registered with

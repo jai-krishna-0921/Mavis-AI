@@ -1,0 +1,17 @@
+Mavis AI
+Copyright (c) 2026 Jai Krishna. All rights reserved.
+
+Original author: Jai Krishna (github.com/jai-krishna-0921)
+
+Mavis AI (the agent runtime, memory and knowledge layer, initiative and
+attention engines, orchestrator and tool loop, native Google Workspace and
+Slack connectors, code machine, persona and prompts, web dashboard and the
+AWS deployment) was designed and written by Jai Krishna, starting
+2026-10-02. The signed git tag "v0-pre-collab" (commit d2b975d) marks the
+state of the work before any outside collaborator was given access.
+
+Contributions made after that tag are identified by their git author and
+commit signatures, and are governed by the written agreement between the
+contributor and the owner.
+
+This software is proprietary. See LICENSE.

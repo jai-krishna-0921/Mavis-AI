@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Mavis's own tools: memory, wakeups, open loops, task board, standing rules."""
 
 from __future__ import annotations

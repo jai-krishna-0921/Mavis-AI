@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Polling fallback that emits exactly the events webhooks would. Self-rescheduling; no cron."""
 
 from __future__ import annotations

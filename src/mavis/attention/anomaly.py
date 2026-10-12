@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Deterministic anomaly scoring (spec attention section 6.3). Each signal contributes a weight and a
 human-readable reason; weights combine as a noisy-or into [0, 1]. Reasons never contain a domain,
 address, link or raw counterparty text."""

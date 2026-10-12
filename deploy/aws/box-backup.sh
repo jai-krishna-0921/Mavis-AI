@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Nightly backup on the box (installed by deploy/aws/backups.sh as /usr/local/bin/mavis-backup.sh, cron 03:00).
 # Postgres (pg_dump), the Neo4j graph (graph_export.py) and the Qdrant vectors (a collection snapshot) are
 # written to /var/backups/mavis (the last 7 of each kept) and copied to s3://$BACKUP_BUCKET/<store>/<day>/

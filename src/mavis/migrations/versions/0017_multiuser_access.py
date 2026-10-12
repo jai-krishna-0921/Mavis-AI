@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Phase 11 multi-user: user status/tier/identity columns, invite codes, llm usage, outbox priority.
 
 Existing users become active (they were admitted by the allowlist); a user whose chat is in

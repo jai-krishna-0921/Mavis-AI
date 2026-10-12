@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Slack interactivity: Block Kit button presses (block_actions) and slash commands.
 
 Both arrive as a form POST signed like every Slack request (v0 HMAC over the raw body); the signature is

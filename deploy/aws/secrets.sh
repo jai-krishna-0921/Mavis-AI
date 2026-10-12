@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Mavis configuration and secrets live in AWS SSM Parameter Store, not on the box's disk.
 # Every key is one SecureString (standard tier, free) under /mavis/prod/<KEY>, encrypted with the AWS
 # managed key alias/aws/ssm and tagged Project=mavis. Non-secret settings (ENV, DOMAIN, TELEGRAM_MODE...)

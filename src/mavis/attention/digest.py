@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """What Mavis has seen in the inbox, injected into a chat turn that asks about it (spec attention 12).
 
 A cheap regex decides whether the turn is about email, updates or money; no extra LLM call. Lines come from

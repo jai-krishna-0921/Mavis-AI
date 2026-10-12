@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Stable ids for the things Mavis knows about a user.
 
 One id scheme serves the Vault (list, correct, forget), the learning suppression list and the evidence the

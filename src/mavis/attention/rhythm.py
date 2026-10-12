@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Morning brief section, evening wrap-up, first-look summary and retention (spec attention 11 and 13)."""
 
 from __future__ import annotations

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Instance metadata (IMDS) control from the laptop. The role credentials must reach api, worker and timer
 # (hop limit 2 lets a container's packets through) and NO other container: a DOCKER-USER iptables rule on the
 # box, installed first and persisted by a systemd unit, drops 169.254.169.254 from everything else.

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Create (or find) the AWS resources for the single-box Mavis deploy. Idempotent.
 # Creates: key pair, security group, one t4g.small Ubuntu 24.04 arm64 instance, one Elastic IP.
 # Everything is tagged Project=mavis; ids are written to deploy/aws/state.env.

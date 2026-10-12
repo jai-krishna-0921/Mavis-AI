@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Draw a DeckSpec as a 16:9 PPTX: a blank layout and plain shapes, so it opens cleanly in Google Slides.
 
 Every layout has its own composition on one grid (0.6in margins, fixed title position, quiet footer).

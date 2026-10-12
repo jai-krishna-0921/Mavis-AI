@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Who and what an LLM call is for, set by the executor and job runner (spec 8.3): no signature changes."""
 
 from __future__ import annotations

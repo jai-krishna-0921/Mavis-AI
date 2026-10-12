@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Workspace path guard, empty environment and output clipping, shared by every adapter."""
 
 from __future__ import annotations

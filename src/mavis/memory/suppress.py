@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The learning suppression list, checked wherever something is about to be learned.
 
 A user can tell Mavis to stop learning a fact, a person or a pattern. The list holds item ids (`itemids`);

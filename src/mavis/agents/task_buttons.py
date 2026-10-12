@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """`tk:<task_id>:x` taps on a progress card. Only the task's owner may cancel; the tap is acknowledged at
 ingest (spinner stops), so no second message is sent."""
 

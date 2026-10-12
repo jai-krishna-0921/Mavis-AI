@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Delivers outbox rows through the Channel with leasing, exponential backoff and rate-limit handling."""
 
 from __future__ import annotations

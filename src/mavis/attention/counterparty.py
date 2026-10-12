@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Counterparty keys for money baselines: deterministic normalization plus stdlib difflib matching.
 
 No embeddings (names are not semantics) and no new dependency (the per-user key set is tiny). The key is

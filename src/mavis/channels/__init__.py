@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Process-wide channel accessor. Business logic depends on the Channel protocol only."""
 
 from __future__ import annotations

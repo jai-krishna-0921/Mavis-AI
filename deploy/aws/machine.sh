@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Phase 12 AWS resources (spec section 12; owner decision 2, approved 2026-10-08):
 #   R1 inline policy `mavis-machine` on role mavis-ec2 (run iam-role.sh first)
 #   R3 bucket mavis-machine-<account>-aps1 (private, SSE-S3, lifecycle by object tag and prefix)

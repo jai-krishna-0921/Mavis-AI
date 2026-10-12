@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The dashboard API, mounted at /api/v1 as its own small app so its errors always have the
 {"error", "message"} shape and it answers 404 unless DASHBOARD_ENABLED."""
 

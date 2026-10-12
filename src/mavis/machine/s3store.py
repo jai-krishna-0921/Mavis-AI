@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """S3 workspace store plus the quota-checked put and metadata reads every store shares."""
 
 from __future__ import annotations

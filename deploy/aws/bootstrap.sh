@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # One-time (idempotent) host setup over SSH: docker + compose plugin, 2 GB swapfile,
 # unattended-upgrades, ufw, AWS CLI v2 + mavis-secrets.service (secrets.sh install-box). Safe to re-run.
 set -euo pipefail

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """What a proactive wakeup or ping is about: an explicit subject id, never a guess from words.
 
 A subject is one row Mavis can check by id: a loop, an approval, a task or an attention observation.

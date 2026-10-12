@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Telegram Bot API webhook management (setWebhook / deleteWebhook / getWebhookInfo).
 
 Webhook and getUpdates long-polling are mutually exclusive: while a webhook is set, a running

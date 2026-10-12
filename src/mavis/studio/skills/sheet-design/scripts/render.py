@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Render a sheet spec (JSON) into a file in a theme: what the studio runs for this skill.
 
     python src/mavis/studio/skills/<skill>/scripts/render.py SPEC.json OUT [--theme NAME]

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Code and file tools for the machine specialists (spec 7.1). Never offered to chat: a chat request that
 needs the machine starts a task, and the card makes the work visible. All run at background priority
 inside a task; labels for the card are code-made."""

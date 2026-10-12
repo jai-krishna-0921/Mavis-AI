@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The Vault page: what Mavis knows about the session user, with edit and forget. A thin mapping over
 mavis.memory.vault.Vault (which resolves every item id inside the caller's own data) and the preferences
 setters for the profile card."""

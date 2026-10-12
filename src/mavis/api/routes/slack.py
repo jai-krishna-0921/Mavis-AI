@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Slack Events API endpoint. Verify the signature over the raw body, then parse. Never calls an LLM."""
 
 from __future__ import annotations

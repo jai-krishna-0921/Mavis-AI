@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import { useRef } from 'react'
 import { ChatCircleDots, Check, Eye, Eraser, Lock } from '@phosphor-icons/react'
 import { gsap, MOTION_DESKTOP, ScrollTrigger, useGSAP } from '../../lib/gsap'

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-user learning controls kept in the user's settings: which connectors are paused, and the daily
 budget for learning from the user's own words.
 

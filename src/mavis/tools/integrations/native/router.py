@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """NativeRouter: the IntegrationProvider that prefers our own Google and Slack executors.
 
 Per action: the native executor runs it when (a) native is configured for that provider, (b) the user has

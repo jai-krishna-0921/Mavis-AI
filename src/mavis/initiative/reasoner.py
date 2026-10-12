@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Decide what a sharp human PA would do about one signal (spec §4.3 step 3)."""
 
 from __future__ import annotations

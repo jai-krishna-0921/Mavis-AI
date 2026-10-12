@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Dev-only sandbox: a subprocess in a temp workspace. NOT the production backend.
 
 Safety for local use: empty whitelisted environment, per-command resource limits (CPU seconds, address

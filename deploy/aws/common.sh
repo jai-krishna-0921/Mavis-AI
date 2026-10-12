@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # shellcheck disable=SC2034,SC1090,SC2029
 # Shared helpers for the Mavis AWS scripts. Source this, do not run it.
 # Defaults are overridable from the environment.

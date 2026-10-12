@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Where the reply of the current turn goes: set by the worker around an event from a non-Telegram channel,
 read by the outbox when a message is queued. Telegram turns leave it unset (the default route)."""
 

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import { useState } from 'react'
 import { CalendarDots, EnvelopeSimple, FileText, GoogleDriveLogo, SlackLogo, Table, TelegramLogo, type Icon } from '@phosphor-icons/react'
 

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The studio's skills: folders under mavis/studio/skills/, each a SKILL.md (Agent Skills format: YAML
 frontmatter with name and description, then the guide) plus optional scripts/.
 

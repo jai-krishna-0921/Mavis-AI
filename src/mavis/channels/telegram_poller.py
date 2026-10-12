@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Long-polling for dev (no public URL needed). Feeds the same normaliser as the webhook."""
 
 from __future__ import annotations

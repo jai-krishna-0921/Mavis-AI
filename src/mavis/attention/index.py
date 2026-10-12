@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Embeddings for the attention layer: observation search for chat, preference kNN and novelty.
 
 Reuses the process embedder (one fastembed model in RAM) and the memory service's Qdrant client, in its

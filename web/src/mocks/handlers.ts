@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import { http, HttpResponse } from 'msw'
 import { db } from './db'
 import type { Preferences, VaultItem, VaultKind } from '../api/types'

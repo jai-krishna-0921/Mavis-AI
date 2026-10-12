@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Storage for the personal layer: versioned layer documents, learning suppressions, deterministic signals.
 
 Every function takes the user id and filters on it: a user's rows are never readable through another's.

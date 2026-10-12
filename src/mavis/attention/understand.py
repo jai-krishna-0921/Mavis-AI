@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """One FAST structured LLM call per email at background priority, plus a deterministic fallback.
 
 The prompt is generic on purpose: no bank, payment-app or sender names. The email is untrusted data."""

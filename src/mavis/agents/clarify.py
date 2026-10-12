@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Deterministic pre-reply checks that ask instead of guessing."""
 
 from __future__ import annotations

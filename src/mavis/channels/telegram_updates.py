@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Raw Telegram Update dict -> Event. Shared by the webhook route and the dev poller."""
 
 from __future__ import annotations

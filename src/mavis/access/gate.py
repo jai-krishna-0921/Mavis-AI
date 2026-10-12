@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The access gate (spec 4.2): decides, per event and before routing, whether a user may be served."""
 
 from __future__ import annotations

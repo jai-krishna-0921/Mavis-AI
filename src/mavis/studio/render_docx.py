@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Draw a DocSpec as a DOCX: styled headings, a cover block, shaded callouts and clean tables.
 
 Built on python-docx's default template with its styles restyled to the theme (fonts, colours, spacing), so

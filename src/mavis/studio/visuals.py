@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Raster pieces a document needs and Word cannot draw itself: the gradient cover band and themed charts.
 
 Both are PNG bytes made from the theme alone (colours, gradient, fonts when installed), so they match the

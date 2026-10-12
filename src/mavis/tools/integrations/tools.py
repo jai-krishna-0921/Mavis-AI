@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Integration actions exposed as Mavis tools.
 
 Missing/revoked connection -> ConnectionRequired. Phase 4's ToolRegistry checks the capability before

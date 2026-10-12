@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Guards for data read from Gmail and Slack before it can be stored, logged or learned.
 
 Two independent parts, both shared by every ingest path (webhook, poll, first sync):

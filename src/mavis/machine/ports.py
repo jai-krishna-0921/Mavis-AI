@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The three machine ports (sandbox, browser, workspace store) and their shared shapes.
 
 Adapters (fake, local, AgentCore, S3) implement these; the runtime and tools only see the ports."""

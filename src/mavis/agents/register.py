@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The user's register (how they talk), measured from their own recent messages (T1.2).
 
 The model is told how the user talks right now so it can mirror it: casual or formal, sweary or clean,

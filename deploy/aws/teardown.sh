@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Delete EVERYTHING tagged Project=mavis (instances, Elastic IPs, security groups, key pairs, volumes).
 # Without --yes it only lists what would be deleted and exits 1.
 #   teardown.sh [--yes]

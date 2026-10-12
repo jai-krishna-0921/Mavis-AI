@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Event gates: run before any handler, in order; a gate returning False drops the event (Phase 11).
 
 Gates are for decisions that must happen before routing and never through the LLM: access status, owner

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Web sign-in hardening: approval details on login nonces, server-side pending email links, and the
 dashboard session a web connect was started from."""
 

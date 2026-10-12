@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Live E2E harness: post Telegram updates to the local webhook as the TEST user and print Mavis's replies.
 
     LIVE_TEST_ENABLED=true TEST_TELEGRAM_CHAT_ID=-1000000000000001 \

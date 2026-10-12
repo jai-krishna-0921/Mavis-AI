@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """`mavis telegram set-webhook|delete-webhook|info|set-profile|set-photo`."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Outbox dedupe keys and message event ids are unique per user, not across all users.
 
 Daily keys ("morning:<date>", "evening:<date>") are the same string for every user: with one global unique

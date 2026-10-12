@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """hotfix4 H1: truthful task outcomes.
 
 - tasks.status may now be 'partial' (a plain string column, no constraint to change).

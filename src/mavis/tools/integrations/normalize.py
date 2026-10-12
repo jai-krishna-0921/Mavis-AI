@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Provider data to canonical event payloads. Webhook and poller both go through here."""
 
 from __future__ import annotations

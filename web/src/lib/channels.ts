@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import type { ChannelInfo, Me } from '../api/types'
 
 // The contract leaves the channel shape open; accept a flag, a handle or an object.

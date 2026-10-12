@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-user preferences with side effects (spec 5): timezone hooks re-anchor routines; one-off wakeups keep
 their absolute instant."""
 

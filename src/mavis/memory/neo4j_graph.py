@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Neo4j GraphStore. Labels/relation types are interpolated only after being
 sanitised to the fixed vocabulary; every value travels as a parameter.
 

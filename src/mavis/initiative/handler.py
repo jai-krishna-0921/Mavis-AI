@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Entry point for every non-chat event (spec §4.3)."""
 
 from __future__ import annotations

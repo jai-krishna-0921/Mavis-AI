@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Telegram adapter over python-telegram-bot's Bot. Only this module imports `telegram`."""
 
 from __future__ import annotations

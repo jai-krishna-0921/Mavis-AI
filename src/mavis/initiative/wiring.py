@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Composition root for the initiative engine (one instance per process)."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Optional Langfuse tracing: no-op unless both keys are configured."""
 
 from __future__ import annotations

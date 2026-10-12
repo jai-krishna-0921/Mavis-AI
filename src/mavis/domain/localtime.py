@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Tool datetimes are the user's wall-clock time; code, never the model, attaches the zone (phase A7).
 
 A model asked for an offset converts times itself and gets it wrong ("11 am" sent as

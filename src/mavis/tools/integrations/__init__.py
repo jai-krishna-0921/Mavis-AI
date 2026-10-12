@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Integration provider factory. Swap providers via INTEGRATION_PROVIDER without touching agents."""
 
 from __future__ import annotations

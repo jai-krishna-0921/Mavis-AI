@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """MemoryService: the single entry point for recall (hot path) and learn (background)."""
 
 from __future__ import annotations

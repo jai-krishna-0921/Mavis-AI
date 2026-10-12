@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """set_preferences: the user changes their own timezone, currency, name or locale in chat (WRITE_SELF)."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Create task rows and enqueue RUN_TASK jobs (used by chat turns and the initiative agent)."""
 
 from __future__ import annotations

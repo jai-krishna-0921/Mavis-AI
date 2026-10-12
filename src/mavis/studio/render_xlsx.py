@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Draw a SheetSpec as an XLSX: one styled table per tab, real number formats, totals and a native chart."""
 
 from __future__ import annotations

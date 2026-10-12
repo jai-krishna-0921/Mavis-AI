@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Gmail message payloads to text and back: a MIME walk for reading, EmailMessage for sending.
 
 Reading: text/plain is preferred, html is reduced to text with the stdlib parser (scripts, styles and

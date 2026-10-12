@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Generic worker agents created on demand by the planner (agent='spawn').
 
 A worker is bounded by its own step and wall-clock budget. If it is exposed to a parent loop as a

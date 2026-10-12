@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Built-in tool loading. Later tasks and phases append their tool modules here."""
 
 from __future__ import annotations

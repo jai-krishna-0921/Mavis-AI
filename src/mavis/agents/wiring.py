@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Phase 4 handler registration: chat turns, approval buttons, task jobs, progress and system wakeups.
 
 `register()` is idempotent and runs on every call (tests clear the registries between runs). It does not

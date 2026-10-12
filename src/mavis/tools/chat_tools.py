@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Tools only the chat turn has: hand work to a background task, and send a connect link.
 
 Both read `current_turn` (set by `agents.conversation.run_turn`) for the triggering event, so a retried

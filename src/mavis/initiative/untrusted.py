@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Marking third-party content as data before it reaches a prompt (spec §8.3).
 
 Single implementation lives in the memory extractor; re-exported here as the Phase 3 contract.

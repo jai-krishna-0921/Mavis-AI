@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { ArrowSquareOut, GoogleLogo, Plugs, SlackLogo, TelegramLogo, WarningCircle, CheckCircle, Circle } from '@phosphor-icons/react'

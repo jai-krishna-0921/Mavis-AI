@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """One live, edited status card per user task (Phase 12, spec 8.2).
 
 Updates are in-process calls from the task runner (no bus events). Each update changes the card state;

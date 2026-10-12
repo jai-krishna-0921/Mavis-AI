@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-user daily budgets (spec 9.3), cooldowns and bans (spec 9.4)."""
 
 from __future__ import annotations

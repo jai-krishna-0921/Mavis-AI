@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Nightly consolidation: rewrite the profile card from recent facts, merge duplicate entities."""
 
 from __future__ import annotations

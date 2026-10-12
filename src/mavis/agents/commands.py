@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Slash commands handled before routing, plus the CONNECT route's natural-language handler."""
 
 from __future__ import annotations

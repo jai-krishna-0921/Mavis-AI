@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Check Mavis's Composio assumptions against the live API.
 
     uv run python scripts/verify_composio.py                  # catalog checks (needs COMPOSIO_API_KEY)

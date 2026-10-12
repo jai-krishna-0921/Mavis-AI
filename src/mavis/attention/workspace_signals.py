@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Google Workspace signals (spec 2026-10-03 section 5): normalization and the deterministic scoring table.
 
 Pure: no I/O. Titles and previews are third-party text; titles keep file names (extensions included) but

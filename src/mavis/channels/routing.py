@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Which channel a message to the user goes through, and the Slack channel accessor.
 
 A chat handle's type names its channel: an int is a Telegram chat, `slack:<team>:<channel>[:<thread>]` is

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The Vault: what Mavis knows about one user, and the user's controls over it.
 
 A plain Python service API for the web app's /api/v1 endpoints (no HTTP here). Every call takes the user id

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-user mutual exclusion: asyncio locks in single-process mode, Redis locks across workers."""
 
 from __future__ import annotations

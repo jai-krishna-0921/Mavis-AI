@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Sync the repo to the box, push the config to SSM, render it on the box, build on the box, start the stack, migrate.
 #   deploy.sh              full deploy; the api sets the Telegram webhook (stop any local `mavis dev` first)
 #   deploy.sh --verify-machine  after deploying, run the machine demo suite on the box (mirrored to the owner)

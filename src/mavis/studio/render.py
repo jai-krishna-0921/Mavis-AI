@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """One entry point for the three renderers, plus the small CLI the studio skill shells out to."""
 
 from __future__ import annotations

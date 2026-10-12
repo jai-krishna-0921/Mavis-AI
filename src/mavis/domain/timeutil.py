@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Clock and timezone helpers.
 
 Every "now" in the app goes through `now()` so tests (and demos) can move time.

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """best_effort capacity policy: when may background work (memory extraction, summaries) use an LLM slot?
 
 ONE pure function, `best_effort_verdict`, with no clock, no asyncio and no I/O: the in-process limiter

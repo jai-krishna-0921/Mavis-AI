@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Dependency readiness probes. Each check returns None (ok), "skipped" (not configured) or raises."""
 
 from __future__ import annotations

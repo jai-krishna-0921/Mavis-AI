@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Whether an unsolicited message may go out now (spec §8.4)."""
 
 from __future__ import annotations

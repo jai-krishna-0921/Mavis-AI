@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Token metering (spec 9.2): one LangChain callback books every model call to the current user."""
 
 from __future__ import annotations

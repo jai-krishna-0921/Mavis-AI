@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Public settings the web app needs before sign in: the bot link and which sign-ins exist."""
 
 from __future__ import annotations

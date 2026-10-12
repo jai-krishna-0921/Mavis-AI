@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Fixed-window per-IP rate limit for public webhook routes. Redis when available, else in-memory."""
 
 from __future__ import annotations

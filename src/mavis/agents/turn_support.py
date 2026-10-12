@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Shared helpers for a chat turn (moved out of agents/simple_turn.py for the Phase 4 conversation).
 
 History, recall context, connection lines, name lookup, taint markers on logged replies, the LEARN job

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import { setSessionHint } from '../lib/session'
 import type {
   Connector, PublicConfig, ConnectorId, Invite, Me, PollStatus, Preferences, SourceInfo, TelegramStart,

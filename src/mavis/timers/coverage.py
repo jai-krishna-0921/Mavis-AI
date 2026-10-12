@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Who owns a moment: a reminder the user asked for covers anything else that would speak about the same
 thing at the same time. One intent from the user gives one proactive message.
 

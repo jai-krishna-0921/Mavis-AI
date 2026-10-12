@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Owner and user commands handled before routing, never through the LLM (spec 11). An event gate."""
 
 from __future__ import annotations

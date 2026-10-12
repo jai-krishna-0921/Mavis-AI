@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Outbox rows remember the channel they answer on (Slack chat handle); NULL keeps the default route."""
 
 from __future__ import annotations

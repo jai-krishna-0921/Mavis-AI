@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """structlog setup with secret redaction. Call configure_logging() once per process entrypoint."""
 
 from __future__ import annotations

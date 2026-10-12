@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Open loops: the PA's mental list of unfinished business.
 
 Every create/update is published as a LOOP_* event so the initiative engine

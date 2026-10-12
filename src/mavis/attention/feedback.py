@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Button presses on attention messages (spec attention section 10).
 
 The press is the user's own action (trust=USER), so the loop and follow-up it creates are trusted.

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Inline-button dispatch: handlers register by callback-data prefix; the longest prefix wins.
 
 Prefixes: `conn:` (integrations wiring) and `ap:` (approvals, registered once by `agents.wiring`).

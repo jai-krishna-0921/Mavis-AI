@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Phase 12 slice A: progress cards.
 
 - task_cards: the live status message per user task (state survives a resume).

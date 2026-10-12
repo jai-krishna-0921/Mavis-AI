@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Transactional outbox: every message to the user is a row first, delivered by OutboxSender."""
 
 from __future__ import annotations

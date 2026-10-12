@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """A log sink for the designated test chat (LIVE_TEST_ENABLED + TEST_TELEGRAM_CHAT_ID).
 
 The live E2E harness talks to the real stack as its own user (own rows, own loops, own pings), and

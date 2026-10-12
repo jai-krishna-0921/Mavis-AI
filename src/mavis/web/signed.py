@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Short-lived signed values (Google sign-in cookie, the link-telegram token). HMAC-SHA256 over a JSON body
 with an expiry; the key is derived from server secrets, never sent anywhere."""
 

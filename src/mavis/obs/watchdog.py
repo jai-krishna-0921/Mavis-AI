@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Owner alerts (spec 11). Task 16 grows this module (watchdog loop, dead-man ping)."""
 
 from __future__ import annotations

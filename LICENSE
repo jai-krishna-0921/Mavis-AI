@@ -1,0 +1,39 @@
+Mavis AI Proprietary License
+
+Copyright (c) 2026 Jai Krishna. All rights reserved.
+
+This repository and everything in it, including source code, prompts, persona
+text, designs, documentation, configuration, deployment scripts, brand assets
+and the commit history (together, the "Software"), is the exclusive property
+of Jai Krishna (the "Owner").
+
+1. No license is granted. Being able to see, clone or fork this repository,
+   including under GitHub's Terms of Service, does not give you any right to
+   use, copy, modify, merge, publish, distribute, sublicense, sell, deploy,
+   host, train a machine learning model on, or create derivative works of the
+   Software, in whole or in part.
+
+2. Collaborators. Anyone who contributes to or works on the Software does so
+   only under a separate written agreement signed by the Owner. Unless that
+   agreement says otherwise in writing: (a) access is a limited, personal,
+   non-transferable and revocable permission to work on the Software for the
+   Owner's project and for no other purpose; (b) the Owner keeps all right,
+   title and interest in the Software as it existed before the contributor's
+   access began, including everything up to the signed git tag
+   "v0-pre-collab"; and (c) access ends, and all copies must be deleted, when
+   the Owner revokes it.
+
+3. Authorship. The git history, signed commits and signed tags of this
+   repository are the record of authorship. Nobody may remove, alter or
+   obscure copyright notices, attribution or authorship records, or claim
+   authorship of any part of the Software they did not write.
+
+4. Third-party components. Open source dependencies keep their own licenses.
+   This license covers only the Owner's work.
+
+5. No warranty. The Software is provided "as is", without warranty of any
+   kind. The Owner is not liable for any claim, damages or other liability
+   arising from the Software or its use.
+
+For permission to use the Software, contact the Owner through
+https://github.com/jai-krishna-0921.

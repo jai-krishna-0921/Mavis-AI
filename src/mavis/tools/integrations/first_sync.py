@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """On a new connection: skim recent history so Mavis is useful from minute one (spec §6.4).
 
 Third-party content never creates loops here (Phase 3 ruling). `loops` is kept for a later phase

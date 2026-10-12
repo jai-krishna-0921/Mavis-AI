@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Run / resume orchestrator tasks as durable LangGraph threads (thread_id = task:{id}).
 
 Status changes after the graph starts all go through `tasks.claim`, so a cancel that landed while

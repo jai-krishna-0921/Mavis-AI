@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Live check of the native Google and Slack connectors for one Mavis user. Run inside the api or worker
 container (it needs the same environment, database and sealed token key as the running stack):
 

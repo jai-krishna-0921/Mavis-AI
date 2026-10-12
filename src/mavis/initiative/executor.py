@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Apply an InitiativeDecision (spec §4.3 step 4)."""
 
 from __future__ import annotations

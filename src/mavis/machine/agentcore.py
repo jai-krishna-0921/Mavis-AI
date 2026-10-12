@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """AWS Bedrock AgentCore Code Interpreter adapter (spec 5.2). Only this module and the browser adapter
 import boto3 for AgentCore. Credentials come from the instance role; the interpreter has no execution
 role and (SANDBOX mode) no network, so nothing in the session can reach AWS or the internet."""

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Data access for wakeups. claim_due / fire_due are safe under concurrent timers."""
 
 from __future__ import annotations

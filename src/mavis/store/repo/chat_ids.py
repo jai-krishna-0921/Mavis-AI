@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Message ids per Telegram chat (ids only), the input to /clear. Best effort everywhere: a failure to note an
 id must never fail a send or a turn."""
 

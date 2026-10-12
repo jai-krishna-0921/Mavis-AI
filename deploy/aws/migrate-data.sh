@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Copy the local demo state (Postgres, Qdrant, Neo4j) to the box so persona, memory and connection
 # state carry over. Everything read from the demo is read-only (pg_dump, qdrant snapshot API, MATCH queries).
 #

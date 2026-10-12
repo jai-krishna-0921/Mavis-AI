@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-user Redis key names: mavis:<area>:u<uid>:..., so deletion can SCAN one user's keys (spec 6.1)."""
 
 from __future__ import annotations

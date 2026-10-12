@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Machine sessions, compute usage, workspace files and user quotas (Phase 12 slice B).
 
 NOTE for the merge: this revision is named 0021 and points at 0016_outbox_route, main's head when it was

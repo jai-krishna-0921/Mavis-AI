@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Note the ids of messages a channel adapter sent, for /clear. Telegram adapters call this after each send.
 Best effort: never raises, so a bookkeeping failure cannot turn a delivered message into a retry."""
 

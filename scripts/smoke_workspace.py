@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Read-only smoke run of the Google Workspace actions on a real account (Workspace spec section 9).
 
     uv run python scripts/smoke_workspace.py --user 1

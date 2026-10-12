@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Composition root for the attention layer (one instance per process).
 
 register_attention() is safe to call repeatedly: event handlers replace or dedupe, system wakeups and button

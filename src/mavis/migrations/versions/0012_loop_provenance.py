@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """phase A: loops.trust and loops.origin (explicit provenance instead of source-prefix inference)
 
 Existing rows read as untrusted with an unknown origin (the safe default). Backfill, from writer

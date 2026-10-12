@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Re-arming system wakeups without collapsing onto the row that is firing right now."""
 
 from __future__ import annotations

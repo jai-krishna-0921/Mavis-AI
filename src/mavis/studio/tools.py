@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The chat agent's handles on the studio: create_document starts the studio sub-agent as a background job
 (the async subagent pattern: start, reply at once, deliver when done) and brand reads or sets the look
 every artifact is drawn in."""

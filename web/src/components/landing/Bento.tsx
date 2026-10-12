@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import { Brain, CalendarDots, Check, Clock, EnvelopeSimple, FileText, Table } from '@phosphor-icons/react'
 
 // Four columns by three rows, no gaps: Inbox 2x2, Calendar 2x1, Reminders 1x1, Memory 1x1, Docs 4x1.

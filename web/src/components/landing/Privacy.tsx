@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import { useRef } from 'react'
 import { Eraser, HandPalm, ShieldCheck } from '@phosphor-icons/react'
 import { gsap, MOTION, useGSAP } from '../../lib/gsap'

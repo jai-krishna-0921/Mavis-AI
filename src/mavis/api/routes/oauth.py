@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Where Google and Slack send the browser back after consent (native connectors).
 
 The state is signed, single use and bound to the user (and, when the dashboard started it, to that

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Shared httpx plumbing for the native executors and the OAuth/token code.
 
 One client per process: bounded timeouts and pool, no redirects (a vendor API never needs one and a

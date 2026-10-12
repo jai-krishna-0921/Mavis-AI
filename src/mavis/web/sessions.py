@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Server-side dashboard sessions. The cookie holds a random token; only its sha256 is stored. The CSRF token
 is derived from the cookie token (so /me can hand it out without storing it); its hash is stored too.
 A session is valid only while its user is admitted (not banned, deleting or deleted)."""

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Action claims in a chat reply are bound to what the turn did (track 1 T1.4, hotfix4 H4).
 
 The model may end a turn saying it will act ("I'll block 2 to 3 pm, just tap Approve") without having

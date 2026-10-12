@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """EMAIL_RECEIVED router, the per-user LLM budget, the self-rescheduling drain and the first-sync backfill.
 
 Registered with replace=True for EMAIL_RECEIVED (spec attention section 3.3). Promotional labels are logged

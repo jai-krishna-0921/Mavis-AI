@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Composio webhook verification (standard-webhooks HMAC) and V3 payload parsing. TEMPORARY provider glue."""
 
 from __future__ import annotations

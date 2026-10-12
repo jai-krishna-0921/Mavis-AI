@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Approval UX: prompts with buttons, button/text decisions, reminders and expiry.
 
 Decisions never execute anything here. They move the approval to RESOLVING

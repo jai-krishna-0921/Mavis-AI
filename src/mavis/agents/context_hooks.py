@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Extra prompt context for a chat turn, contributed by other packages (the attention inbox digest, ...).
 
 Each provider gets (user_id, user_text) and returns a block or "". Providers run concurrently under a short

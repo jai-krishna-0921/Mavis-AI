@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Personal layer per user: versioned layer documents, learning suppressions and deterministic signals.
 
 NOTE: down_revision skips 0017, which the multi-user merge takes; the merge re-points this revision.

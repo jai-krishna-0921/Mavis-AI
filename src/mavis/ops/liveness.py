@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Process liveness for the outside uptime check: worker and timer each refresh a short-lived Redis key.
 
 A process that crashed, hung or lost Redis stops refreshing, the key expires, and /status reports degraded.

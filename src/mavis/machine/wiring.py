@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Wire the machine into the worker when MACHINE_ENABLED (Phase 12). Idempotent."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The profile card: a short, always-in-prompt description of who the user is."""
 
 from __future__ import annotations

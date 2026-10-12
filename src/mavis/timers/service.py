@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """wake_me: the only way time enters the initiative engine."""
 
 from __future__ import annotations

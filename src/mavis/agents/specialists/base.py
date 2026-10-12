@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Specialist = prompt + model tier + tool subset + step and time budget, run as a bounded ReAct loop."""
 
 from __future__ import annotations

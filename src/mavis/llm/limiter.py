@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """LLM slot limiter backends (spec 8). SharedLimiter: Redis + Lua, safe across processes. LocalLimiterAdapter:
 today's in-process _Limiter. FallingBackLimiter: Redis, and the local limiter while Redis is unreachable."""
 

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Owner-only: reset one user to a fresh start on the server (the same as the user's "Start fresh" in /clear).
 
 It clears the user's Telegram chat (messages Mavis may delete, within Telegram's 48 hour window), erases every

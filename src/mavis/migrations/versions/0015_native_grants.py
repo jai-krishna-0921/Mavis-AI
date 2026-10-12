@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Native Google and Slack connectors: sealed per-user grants and single-use OAuth states.
 
 NOTE: parked branches (connectors, ledger, programs, multi-user) renumber after this ships

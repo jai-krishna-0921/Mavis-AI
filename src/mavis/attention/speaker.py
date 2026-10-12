@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """How the attention layer speaks (spec attention section 9).
 
 Ask: deterministic text from computed facts plus Yes/No buttons; no LLM, no injection surface. Notify:

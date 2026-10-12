@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Rules the initiative engine applies in code to what the model proposes.
 
 Connecting a service is the user's decision, made when they hit a wall and /connect it themselves. The

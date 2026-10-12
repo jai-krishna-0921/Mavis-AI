@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Envelope encryption for native grant tokens.
 
 A fresh AES-256-GCM data key seals each value; the data key is wrapped by a KEK from NATIVE_TOKEN_KEK.

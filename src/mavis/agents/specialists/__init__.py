@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Specialist registry. Phases 5 and 6 register more specialists here."""
 
 from __future__ import annotations

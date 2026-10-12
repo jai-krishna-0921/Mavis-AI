@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """orchestrator follow-ups: pending_approvals.resolving_at, tasks.source_ref (unique per user)
 
 0007_orchestrator is frozen (chat-tools deploys it first), so later orchestrator columns land here.

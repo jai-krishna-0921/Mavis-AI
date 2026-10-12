@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Ask for a connection exactly when it's needed, then pick the interrupted work back up.
 
 Flow: interrupt(connect) -> start(): link + 'Not now' -> checks at +1/+3/+10/+30/+60 min, then every 6 h

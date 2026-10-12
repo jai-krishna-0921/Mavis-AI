@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Process entrypoints. One image, many roles: `mavis api | worker | timer | dev | chat | migrate`."""
 
 from __future__ import annotations

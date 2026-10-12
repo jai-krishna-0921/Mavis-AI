@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-user machine quotas (owner decision 3: $5/month, 60 minutes/day), metering and global slots.
 
 Metering is deliberately an upper bound: wall seconds x configured vCPU and GB x list price x

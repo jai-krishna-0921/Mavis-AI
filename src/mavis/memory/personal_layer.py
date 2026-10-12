@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The personal layer: a compact, versioned description of one user, built from evidence and used as context.
 
 Build (synthesize): `personal.gather` computes the evidence in code (frequencies, calendar patterns, graph

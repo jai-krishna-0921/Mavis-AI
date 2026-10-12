@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Worker-side package resolution for offline installs inside the sandbox (no sandbox egress).
 
 PEP 691 JSON simple index at PIP_INDEX_URL; wheels only; the newest version whose tags fit the sandbox

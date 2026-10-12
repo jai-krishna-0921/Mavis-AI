@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Event gate (order 15, after the access gate): `/start login_<nonce>` from an admitted chat asks the
 person to confirm the waiting browser. A new chat in invite mode is handled by the access gate, which
 redeems the invite carried in the link first and then calls the same `logins.request_approval`."""

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Telegram documents -> the user's workspace inbox/ (spec 6.1, slice B6). Runs as the first USER_MESSAGE
 handler, so a task started by the same message already finds the file. Uploads are untrusted
 (forwarded files are third-party content)."""

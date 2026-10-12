@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Run the test suite at several pinned clock starts, so no test can depend on when CI happens to run.
 #
 # Every test runs on the project clock (tests/conftest.py, _pinned_clock), which starts at

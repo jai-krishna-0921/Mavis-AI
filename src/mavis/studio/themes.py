@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Design themes: the colours, fonts and style a renderer applies. A user's brand (mavis/studio/brand.py)
 overrides a built-in theme field by field, so every artifact a user gets looks like theirs.
 

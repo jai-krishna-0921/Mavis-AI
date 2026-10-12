@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Markdown to Google Docs API requests (documents.batchUpdate).
 
 The body is inserted as plain text in one insertText at index 1, then styled by ranges:

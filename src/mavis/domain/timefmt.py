@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """How a due time relates to now, computed in code once (phase A3).
 
 Every place that shows a due time to the model or the user renders it through `relative_due` with the

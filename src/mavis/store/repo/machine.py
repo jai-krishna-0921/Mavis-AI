@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Machine data access: sessions, usage, workspace file metadata and quota overrides (Phase 12)."""
 
 from __future__ import annotations

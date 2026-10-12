@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Standing approval rules, e.g. 'always OK invites to Jawahar'."""
 
 from __future__ import annotations

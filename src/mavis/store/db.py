@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Engine/session management. SQLite (aiosqlite) in dev/test, Postgres (psycopg 3) in prod."""
 
 from __future__ import annotations

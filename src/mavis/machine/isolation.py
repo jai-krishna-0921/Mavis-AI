@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Network isolation check for the code interpreter. The managed `aws.codeinterpreter.v1` may have egress;
 the machine runs model-written code, so in prod it is only switched on when a probe from inside a session
 proves there is none (or MACHINE_ALLOW_EGRESS=true says the owner accepts it). Fails closed: any answer

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Conversational turn: persona + recent history -> one tool-calling PA agent -> bubbles.
 
 There is no router (preflight F3). The model answers in text (small talk is exactly one model call) or

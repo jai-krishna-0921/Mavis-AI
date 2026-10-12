@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Durable LangGraph checkpointer: Postgres in prod, a SQLite file in dev.
 
 Follows the app database choice (`Settings.db_url`). Postgres URLs use SQLAlchemy's driver suffix

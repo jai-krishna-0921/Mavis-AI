@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Every Telegram link Mavis hands out is built here.
 
 telegram.me is Telegram's official alias of t.me with the same deep-link behaviour (?start=...). Some

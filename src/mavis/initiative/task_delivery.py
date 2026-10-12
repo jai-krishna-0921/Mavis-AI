@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Deliver finished task results to the user (TASK_COMPLETED -> outbox).
 
 User-requested results always go out. Initiative-originated results are unsolicited, so they pass the

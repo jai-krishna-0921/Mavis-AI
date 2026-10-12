@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Slack DMs waiting on the user's reply: after REPLY_AFTER unanswered, Mavis says so and offers a draft.
 
 A DM from someone else opens an entry in users.state[OWED_KEY] and books one wakeup; the user's own message in

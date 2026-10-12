@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-user rolling statistics: who emails the user and how money usually leaves. Deterministic, no LLM."""
 
 from __future__ import annotations

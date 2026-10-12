@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # ruff: noqa: E501
 """Demo suite runner (Phase 12, spec 13.4): real tasks through the live-test sink, saved and reported.
 

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-email attention pipeline (spec attention section 4): understand, score, decide, persist, speak.
 
 Runs under the per-user initiative lock (EMAIL_RECEIVED and system wakeups both take it), so one

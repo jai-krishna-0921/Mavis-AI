@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Single-active-instance lock for the timer role.
 
 With REDIS_URL set, leadership is a Redis key with a TTL that the leader

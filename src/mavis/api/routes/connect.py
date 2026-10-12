@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Where the provider's consent screen sends the browser back. Writes no state; it only nudges a check."""
 
 from __future__ import annotations

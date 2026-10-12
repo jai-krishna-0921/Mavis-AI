@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Redis Streams bus: consumer groups, SET NX dedupe (7d), XAUTOCLAIM for stuck messages, DLQ stream."""
 
 from __future__ import annotations

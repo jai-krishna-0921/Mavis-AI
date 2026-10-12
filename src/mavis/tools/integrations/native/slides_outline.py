@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Markdown outline to Google Slides requests (presentations.batchUpdate).
 
 Rule: each heading line ('# ' to '###### ') starts a slide whose title is the heading; the lines under it

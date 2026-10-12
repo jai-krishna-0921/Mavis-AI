@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Production wiring for integrations: the only module that binds concrete deps to the flows.
 
 `register_integrations()` is safe to call any number of times: handler, job and wakeup registration

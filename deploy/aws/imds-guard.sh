@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 # Runs ON the box as root (installed as /usr/local/bin/mavis-imds-guard by imds.sh install).
 # Only the api, worker and timer containers may reach the instance metadata service (169.254.169.254) and so
 # the mavis-ec2 role credentials. Every other container (postgres, redis, qdrant, neo4j, caddy) and any other

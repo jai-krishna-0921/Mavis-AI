@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Compact, model-facing text for Google Workspace results (spec 2026-10-03 section 4.2).
 
 Search and list results carry ids, titles, owners, dates and the kind of file, never content previews.

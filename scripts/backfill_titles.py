@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """One-off: make existing live loop titles time-neutral.
 
 Titles written before the relative-date resolver existed can still say "tomorrow" or "this Friday". This

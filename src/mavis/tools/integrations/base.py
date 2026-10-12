@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Integration provider port. Agents and tools depend on this, never on a vendor SDK."""
 
 from __future__ import annotations

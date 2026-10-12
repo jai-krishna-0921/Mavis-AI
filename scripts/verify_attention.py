@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Scripted end-to-end check of the attention layer.
 
 Offline (default): runs the attention test suite against fixtures (fake LLM, fake provider, SQLite, in-memory

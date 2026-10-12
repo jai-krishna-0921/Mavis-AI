@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """hotfix3: pending_approvals.tainted (approval dedupe never merges tainted and untainted requests)
 
 Rows queued before this revision read as untainted.

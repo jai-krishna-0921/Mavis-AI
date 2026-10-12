@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Shared plumbing for /api/v1: the error shape, the session and CSRF dependencies, cookies, rate limits.
 
 Every handler gets its user from `authed` (the session's user id); no handler reads a user id from the

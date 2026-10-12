@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Deterministic resolution of simple relative days in what the user typed.
 
 The extraction model resolves dates itself and sometimes gets them wrong ("by Tuesday" became a

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 from mavis.agents.specialists.base import Specialist
 from mavis.llm.models import Tier
 

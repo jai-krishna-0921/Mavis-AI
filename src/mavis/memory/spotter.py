@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Find which known entities a message mentions, in microseconds, with no LLM.
 
 Aho-Corasick over normalised names + aliases (regex alternation fallback when

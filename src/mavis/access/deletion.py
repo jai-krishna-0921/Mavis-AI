@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """/delete_me (spec 10): confirm with buttons, mark deleting, run idempotent steps in a job; each step is
 recorded in users.state["deletion"] so a crash resumes where it stopped."""
 

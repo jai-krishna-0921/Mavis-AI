@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Keep a rolling summary of conversation that has scrolled out of working memory."""
 
 from __future__ import annotations

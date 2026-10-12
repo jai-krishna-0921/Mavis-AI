@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Mavis action/trigger names to Composio slugs and argument shapes. TEMPORARY provider glue.
 
 Slugs and argument keys are verified against the live catalog by scripts/verify_composio.py (Task 17).

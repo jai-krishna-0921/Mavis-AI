@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Composio REST v3 adapter.
 
 TEMPORARY: swap for direct Google/Slack/Notion adapters behind the same port.

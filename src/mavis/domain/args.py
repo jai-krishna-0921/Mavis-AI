@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """One argument rule for every model-facing tool (hotfix4 H2).
 
 A model fills tool arguments loosely: a guest list of `[""]`, a title of spaces, a recipient written as

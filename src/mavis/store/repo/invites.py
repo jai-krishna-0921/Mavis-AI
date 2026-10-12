@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Invite code rows. Only hashes are stored; the plaintext is returned once by mint()."""
 
 from __future__ import annotations

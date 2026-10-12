@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 // A hint that this browser has signed in before. Public pages only ask /me when it is set, so an
 // anonymous visitor never triggers a 401. The real session is the HttpOnly cookie; this is never trusted.
 const KEY = 'mavis:signed-in'

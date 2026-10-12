@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The studio sub-agent: the chat agent hands it a brief (create_document), and it runs as a background job
 on the worker so a deck never races the chat turn's deadline.
 

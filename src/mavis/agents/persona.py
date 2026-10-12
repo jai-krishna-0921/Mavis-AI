@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The agent persona's voice (named by settings.agent_name).
 
 Every user-facing LLM responder builds its system prompt here.

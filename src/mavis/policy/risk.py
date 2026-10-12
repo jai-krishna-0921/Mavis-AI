@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Tool-output hygiene shared by the registry and every agent prompt."""
 
 from __future__ import annotations

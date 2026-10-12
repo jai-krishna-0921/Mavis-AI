@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Test doubles: an in-memory sandbox (files only, scripted exec results) and workspace store."""
 
 from __future__ import annotations

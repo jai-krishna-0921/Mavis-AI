@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Notice when the user leaves Mavis hanging on a question (USER_QUIET)."""
 
 from __future__ import annotations

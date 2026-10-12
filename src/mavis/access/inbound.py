@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-chat inbound token bucket at intake (spec 9.1). Redis (one Lua call) when available, else memory."""
 
 from __future__ import annotations

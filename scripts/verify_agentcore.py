@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Live smoke test for AgentCore (spec 13.3). Run on the box after iam-role.sh and machine.sh:
 
     deploy/aws/compose.sh exec -T worker python -m scripts.verify_agentcore

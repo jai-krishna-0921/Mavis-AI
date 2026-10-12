@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Slack Events API intake, backfill and poll safety net. All paths end in normalize.slack_event + the bus.
 
 Webhook: verify the v0 signature over the RAW body first (nothing is parsed before that), answer the

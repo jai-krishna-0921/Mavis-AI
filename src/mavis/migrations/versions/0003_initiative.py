@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """initiative engine: loops, wakeups, ping_log"""
 
 from __future__ import annotations

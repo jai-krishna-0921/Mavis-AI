@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Sign-in and sign-out: Telegram link, Google, logout."""
 
 from __future__ import annotations

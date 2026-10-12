@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The `timer` role: turns due wakeups into events. No business logic here."""
 
 from __future__ import annotations

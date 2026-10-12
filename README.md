@@ -251,3 +251,9 @@ Roll back by setting `MACHINE_ENABLED=false` and restarting the worker. Slack do
 
 Design specs, implementation plans and the operations runbooks (secrets, onboarding, limitations) are kept
 private, outside this repository.
+
+## License
+
+Copyright (c) 2026 Jai Krishna. All rights reserved. This is proprietary software, not open source: a public
+repository does not grant any right to use, copy, modify or redistribute it. See [LICENSE](LICENSE) and
+[NOTICE](NOTICE).

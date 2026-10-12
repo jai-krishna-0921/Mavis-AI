@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Replace the contents of a Neo4j database with a graph_export.py JSON file.
 
 Usage (inside the mavis image, env has NEO4J_URI/USER/PASSWORD): python graph_import.py IN.json

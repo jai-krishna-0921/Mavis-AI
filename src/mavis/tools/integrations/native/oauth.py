@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Native OAuth: authorize URLs, signed single-use state with a sealed PKCE verifier, code exchange, revoke.
 
 State travels through the browser, so the PKCE verifier inside it is encrypted (AES-GCM bound to user,

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-task facts the Workspace write actions rely on (spec 2026-10-03 sections 4.1 and 4.3).
 
 `record_created` / `created_by`: files and tasks a task made itself, the second source of the tainted-task

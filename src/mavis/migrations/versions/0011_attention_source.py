@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """attention_observations.source: mail or a Google Workspace signal source (Workspace spec section 6)."""
 
 from __future__ import annotations

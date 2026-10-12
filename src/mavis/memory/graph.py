@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Knowledge graph of the user's world behind a port.
 
 Neo4j when NEO4J_URI is set (watch it grow live in the browser during the demo);

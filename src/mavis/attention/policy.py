@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Attention decision (spec attention section 8): deterministic, explainable, no LLM."""
 
 from __future__ import annotations

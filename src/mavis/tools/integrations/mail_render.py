@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Compact, model-friendly text for Gmail results.
 
 Raw provider payloads are mostly MIME structure and base64; the 6000-char tool cap would cut them

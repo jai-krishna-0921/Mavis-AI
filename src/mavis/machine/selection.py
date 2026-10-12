@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Pick adapters from settings. `auto` means AgentCore when AWS credentials resolve (the instance role in
 prod), the local sandbox in dev, and a refusal in prod without credentials: local is never a prod fallback."""
 

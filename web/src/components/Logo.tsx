@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 // The Mavis mark: a soft speech bubble with an M drawn inside it. Geometry lives in a 512 box and never
 // leaves it, so nothing clips on small screens. `live` adds the idle breathing and the draw-on-hover.
 const BUBBLE =

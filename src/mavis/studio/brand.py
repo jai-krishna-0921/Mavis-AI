@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Each user's brand: the theme base and overrides every artifact they get is drawn in.
 
 Stored on the user row (state["studio_brand"]). Set by the user ("use navy and gold, Montserrat") through

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import { useRef } from 'react'
 import { Navigate, useSearchParams } from 'react-router-dom'
 import { CalendarDots, EnvelopeSimple, UsersThree } from '@phosphor-icons/react'

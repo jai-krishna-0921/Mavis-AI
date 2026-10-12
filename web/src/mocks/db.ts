@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import type { Connector, Invite, Me, Preferences, SourceInfo, VaultItem, VaultSource } from '../api/types'
 
 const now = Date.parse('2026-10-08T09:00:00Z')

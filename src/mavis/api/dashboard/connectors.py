@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Connectors: Google and Slack through the native OAuth. Reuses the router's grants, scope tables and
 ConnectFlow; the browser is sent to the same consent screen Telegram's /connect uses."""
 

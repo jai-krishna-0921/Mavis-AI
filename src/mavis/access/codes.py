@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Invite codes: 10 Crockford base32 characters (50 bits), shown as MAV-XXXXX-XXXXX, stored as sha256 only."""
 
 from __future__ import annotations

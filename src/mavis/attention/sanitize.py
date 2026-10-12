@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Untrusted free text (subjects, names, requested actions) on its way to storage, prompts or the user."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Persisted initiative decisions, keyed by event id, so a retried event reuses its first decision.
 
 Persistence is an optimisation for retries, never a precondition: if the table is missing (a deploy

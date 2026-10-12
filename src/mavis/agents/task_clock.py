@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """The task wall clock, extendable once the plan is known (machine plans get a longer one)."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Workspace lines for the morning brief and the evening wrap (spec 2026-10-03 section 5.3).
 
 Every title here is third-party text (scrubbed of URLs by workspace_signals.safe_title at intake), so all

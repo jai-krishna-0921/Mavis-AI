@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Per-user artifact paths and the path guard (spec 6.1).
 
 Every writer puts files under `user_dir(user_id, task_id)` (`artifacts_dir/u<uid>/t<task>/`). Files from

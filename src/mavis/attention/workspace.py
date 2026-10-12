@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Google Workspace signal intake (spec 2026-10-03 section 5).
 
 Webhooks (comment, task, share) and two self-rescheduling polls (Tasks due/overdue, Drive shared-with-me)

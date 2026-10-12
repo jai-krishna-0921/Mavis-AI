@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """MachineRuntime: the only thing tools talk to (spec 5, 6.2, 9.3).
 
 Per task, lazily: quota check, per-user concurrency, a global slot, a machine_sessions row, then

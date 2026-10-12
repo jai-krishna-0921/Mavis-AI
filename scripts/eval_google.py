@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Live Google Workspace evals: drive real chat turns as the synthetic TEST user and grade what Mavis did.
 
 Run inside the api container (it posts to the local webhook, like scripts/live_e2e) after

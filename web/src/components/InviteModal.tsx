@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 import { useState } from 'react'
 import { LinkSimple, Trash } from '@phosphor-icons/react'
 import { useCreateInvite, useInvites, useMe, useRevokeInvite } from '../api/hooks'

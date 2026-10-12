@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Map freshly extracted entity names onto the user's existing graph nodes.
 
 Order: user self-reference → normalised name/alias match → embedding similarity

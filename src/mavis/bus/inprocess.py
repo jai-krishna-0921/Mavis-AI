@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Single-process bus for dev/tests: asyncio queues, in-memory dedupe, retry ≤5 then dead-letter list."""
 
 from __future__ import annotations

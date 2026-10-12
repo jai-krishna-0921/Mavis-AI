@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Episodic / semantic memory in Qdrant.
 
 Embedded (on-disk `path`) in dev, remote (`url`) in prod, `:memory:` in tests.

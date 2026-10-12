@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Mavis AI's in-house Google Workspace executor (Gmail, Calendar, Drive, Docs, Sheets, People).
 
 Implements the provider-neutral action names in actions.py over the Google REST APIs with a short-lived

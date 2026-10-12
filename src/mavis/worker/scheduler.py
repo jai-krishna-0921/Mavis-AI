@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Two-stage worker (spec 7): intake moves events from the stream into per-user mailboxes (fast, acks the
 reaction), executors claim one user at a time per lane and run the gates and handlers exactly as
 handle_event does (inline retries, processed_events dedupe)."""

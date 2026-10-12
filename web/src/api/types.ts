@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jai Krishna. All rights reserved.
+// Proprietary. Use is governed by LICENSE in the repository root.
 // Types mirror section 3 of the dashboard design spec (/api/v1).
 
 export type ChannelInfo = { connected: boolean; label?: string; open_url?: string }

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Every user table in FK-safe delete order (children first), one transaction, plus the extension point
 other plans use for stores this module does not know (contract F)."""
 

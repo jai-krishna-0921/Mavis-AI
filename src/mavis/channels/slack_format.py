@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Markdown (as the model writes it) to Slack mrkdwn and Block Kit. Pure functions, no I/O.
 
 Slack mrkdwn: *bold*, _italic_, `code`, <url|text> links, and & < > must be escaped as entities.

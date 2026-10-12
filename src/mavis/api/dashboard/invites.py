@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Invite links a person makes from the dashboard. Reuses the invite code store; the owner has no cap."""
 
 from __future__ import annotations

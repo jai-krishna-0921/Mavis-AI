@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Crude content terms of a text, and whether a model-written text comes from the user's own words.
 
 `terms` is the overlap vocabulary of tool selection (registry.select). `grounded_in` is the provenance

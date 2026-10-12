@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """Telegram link sign-in. The browser asks for a nonce (bound to it by an HttpOnly pre-session cookie), the
 person opens https://telegram.me/<bot>?start=login_<nonce>[_<invite>] and the bot asks them to confirm (what
 is asking, and a code that the browser also shows). Only the Approve button binds the nonce to their user,

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Jai Krishna. All rights reserved.
+# Proprietary. Use is governed by LICENSE in the repository root.
 """orchestrator: tasks, artifacts, pending_approvals, policy_rules, audit_log"""
 
 from __future__ import annotations
