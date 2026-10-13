@@ -15,6 +15,7 @@ from typing import Any
 
 import structlog
 
+from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.messages import Button
 from mavis.domain.wakeups import WakeupKind
@@ -83,7 +84,7 @@ async def on_slack_event(event: Event) -> None:
         await _close(event.user_id, channel)
         return
     sent = _ts_time(ts)
-    if sent is None or datetime.now(UTC) - sent > FORGET_AFTER:
+    if sent is None or timeutil.now() - sent > FORGET_AFTER:
         return
     name = sender_name(p)
     opened = False
@@ -119,9 +120,11 @@ async def catch_up(provider: Any, user_id: int, *, limit: int = 20) -> int:
     dms = [c for c in conversation_order(extract_list(res.data, "channels", "data.channels"))
            if c.get("kind") == "dm"][:limit]
     before = len(await _owed_now(user_id))
+    oldest = f"{(timeutil.now() - FORGET_AFTER).timestamp():.6f}"  # older DMs are never raised
     for chan in dms:
         cid = str(chan.get("id") or "")
-        page = await provider.execute(UserRef(user_id=user_id), "slack.history", {"channel": cid, "limit": 1})
+        page = await provider.execute(UserRef(user_id=user_id), "slack.history",
+                                      {"channel": cid, "limit": 1, "oldest": oldest})
         rows = ((page.data or {}).get("messages") or []) if page.ok else []
         messages = [m for m in rows if isinstance(m, dict)]
         if not messages:
@@ -150,13 +153,13 @@ async def on_wakeup(user_id: int, reason: str, payload: dict[str, Any]) -> None:
     if not isinstance(entry, dict) or entry.get("ts") != ts or entry.get("notified"):
         return  # they replied (or it was already raised)
     sent = _ts_time(ts)
-    if sent is None or datetime.now(UTC) - sent > FORGET_AFTER:
+    if sent is None or timeutil.now() - sent > FORGET_AFTER:
         return
     from mavis.domain.decisions import NotifyIntent
     from mavis.initiative.wiring import current
 
     user = await users.get(user_id)
-    hours = max(1, round((datetime.now(UTC) - sent).total_seconds() / 3600))
+    hours = max(1, round((timeutil.now() - sent).total_seconds() / 3600))
     who = entry.get("from") or "Someone"
     intent = (f"{who} sent them a Slack DM about {hours} hour(s) ago and they have "
               "not replied. Say that plainly in one or two short lines and offer to draft a reply they can "
@@ -186,7 +189,7 @@ async def on_button(event: Event, data: str) -> None:
     if event.payload.get("reply_chat"):
         body["reply_chat"] = event.payload["reply_chat"]
     turn = Event(id=f"{event.id}:draft", user_id=event.user_id, type=EventType.USER_MESSAGE,
-                 occurred_at=datetime.now(UTC), source=event.source, payload=body, trust=Trust.USER)
+                 occurred_at=timeutil.now(), source=event.source, payload=body, trust=Trust.USER)
     await get_bus().publish(turn)
 
 

@@ -514,7 +514,18 @@ async def test_connect_slack_from_telegram_backfill_events_and_chat(j, memory):
     priya, dev = await users.get_by_chat(6301), await users.get_by_chat(6302)
     assert (await load_identities(priya.id))["slack_ids"] == ["U0PRIYA01"]
     hist = [dict(parse_qsl(r.content.decode())) for r in j.cloud.calls_to("slack.com", r"conversations\.history")]
-    assert all(timedelta(days=6).total_seconds() < timeutil.now().timestamp() - float(h["oldest"]) < timedelta(days=8).total_seconds() for h in hist)
+    # every history read is bounded: the backfill by the 7 day sync window, the unanswered-DM catch-up
+    # (one message per DM) by the 3 days it raises (attention.slack_replies.FORGET_AFTER)
+    from mavis.attention.slack_replies import FORGET_AFTER
+
+    def window(h: dict) -> float:
+        return timeutil.now().timestamp() - float(h["oldest"])
+
+    backfill = [h for h in hist if h.get("limit") != "1"]
+    catch_up = [h for h in hist if h.get("limit") == "1"]
+    assert backfill and all(timedelta(days=6).total_seconds() < window(h) < timedelta(days=8).total_seconds()
+                            for h in backfill)
+    assert all(0 < window(h) <= FORGET_AFTER.total_seconds() + 60 for h in catch_up)
     dump = await memory.graph.dump(priya.id)
     assert {d["source_ref"].split(":")[1] for d in dump if is_third_party(d["source_ref"])} == {"slack"}
     assert "Dev Patel" in {e.name for e in await memory.graph.entities(priya.id)}

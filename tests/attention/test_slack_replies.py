@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
 from mavis.attention import slack_replies as sr
+from mavis.domain import timeutil
 from mavis.domain.events import Event, EventType, Trust
 from mavis.store.repo import users
 
 
-def _event(uid: int, *, channel="D0MOTHI001", ts=None, from_me=False, channel_type="im", **extra) -> Event:
-    ts = ts or f"{time.time():.6f}"
+def _event(uid: int, *, channel="D0MOTHI001", ts=None, from_me=False, channel_type="im", age_days=0,
+           **extra) -> Event:
+    ts = ts or f"{timeutil.now().timestamp() - age_days * 86400:.6f}"
     payload = {"channel": channel, "ts": ts, "team": "T1", "user": "U2", "user_name": "Mothi Venkatesh",
                "text": "can you check the Strands post?", "from_me": from_me, "channel_type": channel_type,
                **extra}
@@ -61,7 +62,7 @@ async def test_a_dm_from_someone_books_one_nudge_and_a_reply_closes_it(setup):
     {"channel": "D0MAVIS001"},                 # the user's chat with Mavis itself
     {"channel": "C0GENERAL1", "channel_type": "channel"},  # a channel, not a DM
     {"bot_id": "B1"},                          # a bot
-    {"ts": f"{time.time() - 5 * 86400:.6f}"},  # too old to raise
+    {"age_days": 5},                           # too old to raise
 ])
 async def test_what_is_not_a_dm_owed(setup, change):
     await sr.on_slack_event(_event(setup.user.id, **change))
@@ -78,7 +79,7 @@ async def test_the_nudge_says_it_once_with_the_draft_buttons_and_never_after_a_r
 
     monkeypatch.setattr("mavis.initiative.wiring.current",
                         lambda: SimpleNamespace(executor=SimpleNamespace(notify=notify)))
-    dm = _event(uid, ts=f"{time.time() - 3 * 3600:.6f}")
+    dm = _event(uid, ts=f"{timeutil.now().timestamp() - 3 * 3600:.6f}")
     await sr.on_slack_event(dm)
     payload = setup.booked[0]["payload"]
     await sr.on_wakeup(uid, "r", payload)
@@ -88,7 +89,7 @@ async def test_the_nudge_says_it_once_with_the_draft_buttons_and_never_after_a_r
     assert [b.label for b in buttons[0]] == ["Draft a reply", "Leave it"]
     assert buttons[0][0].data == "sr:draft:D0MOTHI001"
 
-    other = _event(uid, channel="D0OTHER001", ts=f"{time.time() - 3 * 3600:.6f}")
+    other = _event(uid, channel="D0OTHER001", ts=f"{timeutil.now().timestamp() - 3 * 3600:.6f}")
     await sr.on_slack_event(other)
     await sr.on_slack_event(_event(uid, channel="D0OTHER001", from_me=True))
     await sr.on_wakeup(uid, "r", setup.booked[-1]["payload"])
@@ -130,7 +131,7 @@ def test_a_sender_name_is_cut_to_plain_words():
 async def test_catch_up_opens_the_dms_whose_newest_message_is_someone_elses(setup):
     from mavis.domain.integrations import ToolResult
 
-    now = time.time()
+    now = timeutil.now().timestamp()
     newest = {
         "D0MOTHI001": {"ts": f"{now - 3600:.6f}", "user": "U2", "from": "Mothi Venkatesh", "text": "hey?",
                        "from_me": False},
