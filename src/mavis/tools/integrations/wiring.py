@@ -367,6 +367,9 @@ def register_integrations(registry: ToolRegistry | None = None) -> None:
     from mavis.attention.wiring import get_connector_ingest  # lazy: attention is wired after integrations
 
     register_event_handler(EventType.SLACK_MESSAGE, get_connector_ingest().on_slack_event)
+    from mavis.attention import slack_replies  # DMs the user has not answered: nudge and offer a draft
+
+    slack_replies.register()
     flow = get_connect_flow()
     # A task that needs an account pauses on a connect interrupt; ConnectFlow sends the link and
     # resumes the task (RESUME_TASK) once the account is active, declined or failed.

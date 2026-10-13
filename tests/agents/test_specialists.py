@@ -70,6 +70,8 @@ def test_tool_sets_per_specialist():
         # mail organising and calendar housekeeping; trash and delete wait for the user's OK
         "mail.archive", "mail.mark_read", "mail.mark_unread", "mail.label", "mail.trash", "mail.untrash",
         "calendar.calendars", "calendar.delete_event", "calendar.respond",
+        # Slack and Notion from chat (2026-10-13: "what did Mothi DM me" found no Slack tool); sends wait
+        "slack.channels", "slack.history", "slack.send", "notion.search", "notion.read", "notion.create_page",
     }
 
 

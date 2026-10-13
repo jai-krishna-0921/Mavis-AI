@@ -32,6 +32,7 @@ class WakeupKind(StrEnum):
     SYSTEM_WORKSPACE_POLL = "system_workspace_poll"  # Phase 9: Tasks/Drive polls and deferred Workspace pings
     SYSTEM_ONBOARD_CONNECT = "system_onboard_connect"  # Phase 11: the connector offer after the first turn
     SYSTEM_PERSONAL_LAYER = "system_personal_layer"  # rebuild a user's personal layer (kind column: 24 chars)
+    SYSTEM_SLACK_REPLY = "system_slack_reply"  # a Slack DM still unanswered (attention.slack_replies)
 
 
 class WakeupStatus(StrEnum):
@@ -78,6 +79,7 @@ EVENT_TYPE_FOR_KIND: dict[WakeupKind, EventType] = {
     WakeupKind.SYSTEM_WORKSPACE_POLL: EventType.WAKEUP,
     WakeupKind.SYSTEM_ONBOARD_CONNECT: EventType.WAKEUP,
     WakeupKind.SYSTEM_PERSONAL_LAYER: EventType.WAKEUP,
+    WakeupKind.SYSTEM_SLACK_REPLY: EventType.WAKEUP,
 }
 
 

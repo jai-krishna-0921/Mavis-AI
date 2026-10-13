@@ -901,18 +901,26 @@ _SPECS: tuple[ActionSpec, ...] = (
                "told, so the user approves first.",
                CalendarRespondArgs, RiskClass.OUTWARD, _a("calendar", "conversation"),
                preview=_preview_respond, target=("event_id",)),
-    ActionSpec("slack.channels", Capability.SLACK, "List Slack channels.",
-               SlackChannelsArgs, RiskClass.READ, _a("comms")),
-    ActionSpec("slack.history", Capability.SLACK, "Recent messages in a Slack channel.",
-               SlackHistoryArgs, RiskClass.READ, _a("comms")),
-    ActionSpec("slack.send", Capability.SLACK, "Post a Slack message. The user is asked to approve first.",
-               SlackSendArgs, RiskClass.OUTWARD, _a("comms"), preview=_preview_slack),
+    ActionSpec("slack.channels", Capability.SLACK,
+               "List the user's Slack conversations: direct messages (DMs) with each person, group DMs and "
+               "channels, with ids and the newest activity. Use it to find the DM with someone by name.",
+               SlackChannelsArgs, RiskClass.READ, _a("comms", "conversation", "spawn")),
+    ActionSpec("slack.history", Capability.SLACK,
+               "Read recent Slack messages in one conversation: a direct message (DM) with a person, a group "
+               "DM or a channel (id from slack_channels). Shows who wrote what and when.",
+               SlackHistoryArgs, RiskClass.READ, _a("comms", "conversation", "spawn")),
+    ActionSpec("slack.send", Capability.SLACK,
+               "Send a Slack message as the user: reply in a DM with a person, or post in a channel or "
+               "thread. The user approves it first.",
+               SlackSendArgs, RiskClass.OUTWARD, _a("comms", "conversation", "spawn"),
+               preview=_preview_slack),
     ActionSpec("notion.search", Capability.NOTION, "Search Notion pages by text.",
-               NotionSearchArgs, RiskClass.READ, _a("knowledge")),
+               NotionSearchArgs, RiskClass.READ, _a("knowledge", "conversation", "spawn")),
     ActionSpec("notion.read", Capability.NOTION, "Read a Notion page.",
-               NotionReadArgs, RiskClass.READ, _a("knowledge")),
+               NotionReadArgs, RiskClass.READ, _a("knowledge", "conversation", "spawn")),
     ActionSpec("notion.create_page", Capability.NOTION, "Create a Notion page with markdown content.",
-               NotionCreateArgs, RiskClass.WRITE_SELF, _a("knowledge"), preview=_preview_notion),
+               NotionCreateArgs, RiskClass.WRITE_SELF, _a("knowledge", "conversation", "spawn"),
+               preview=_preview_notion),
 )
 
 # Workspace exposure (spec 4.4): chat gets reads plus a few self-only writes; spawned workers get all.

@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
+import structlog
+
 from mavis.bus.base import EventBus
 from mavis.config import get_settings
 from mavis.domain import timeutil
@@ -29,6 +31,8 @@ from mavis.tools.integrations.normalize import (
     pick,
     to_datetime,
 )
+
+log = structlog.get_logger()
 
 BATCH = 15  # lines per LEARN job, until MAX_LEARN_JOBS binds
 MAX_LEARN_JOBS = 3  # first sync must not flood the single LLM slot: <= 3 LEARN jobs per user overall
@@ -234,6 +238,12 @@ class FirstSync:
 
             await backfill(self.provider, None, user_id, days=sync_window("sync_slack_days", 7),
                            now=self.clock(), sink=self.connectors)
+        from mavis.attention import slack_replies  # DMs already waiting on a reply get the same nudge
+
+        try:
+            await slack_replies.catch_up(self.provider, user_id)
+        except Exception:  # noqa: BLE001 - the nudge is an extra; the first sync must finish
+            log.warning("first_sync.slack_catch_up_failed", user_id=user_id)
         names = [str(pick(c, "name", default="")) for c in channels]
         names = [n for n in names if n]
         if names:
