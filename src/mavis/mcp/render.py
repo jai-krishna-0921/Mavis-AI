@@ -105,7 +105,7 @@ def render_call_result(result: Any, *, secrets: Iterable[str] = (),
     blocks = list(getattr(result, "content", None) or [])
     if getattr(result, "is_error", False):
         body = _error_text(blocks).strip() or ERROR_FALLBACK
-        body = sanitize_error(truncate_head_tail(body[:_HARD_CAP], limit, label="ERROR"), secrets)
+        body = truncate_head_tail(sanitize_error(body, secrets)[:_HARD_CAP], limit, label="ERROR")
         return Rendered(body, is_error=True)
     parts: list[str] = []
     usable = 0

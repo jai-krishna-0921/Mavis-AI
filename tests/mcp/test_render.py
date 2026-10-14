@@ -112,3 +112,13 @@ def test_unknown_block_types_are_noted_not_dropped_silently() -> None:
     out = r.render_call_result(type("R", (), {"content": [Odd()], "is_error": False,
                                               "structured_content": None})())
     assert out.text == "[hologram block omitted]"
+
+
+def test_a_secret_straddling_the_truncation_cut_is_never_partly_leaked() -> None:
+    secret = "S3CR3Tkkkkkkkkkk"
+    limit = 12_000
+    for start in list(range(4_700, 4_800)) + list(range(12_700, 12_900)):
+        text = "a" * start + secret + "b" * (20_000 - start - len(secret))
+        call = mt.CallToolResult(content=[mt.TextContent(text=text)], is_error=True)
+        res = r.render_call_result(call, secrets=[secret], limit=limit)
+        assert "S3CR3T" not in res.text and "kkkkk" not in res.text, start
