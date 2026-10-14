@@ -600,7 +600,8 @@ async def test_public_config_needs_no_session_and_reflects_settings(app):
         r = await c.get(f"{API}/config")
         assert r.status_code == 200
         assert r.json() == {"bot_username": "MavisTestBot", "bot_url": "https://telegram.me/MavisTestBot",
-                            "slack_enabled": True, "google_signin_enabled": True}
+                            "slack_enabled": True, "google_signin_enabled": True,
+                            "mcp_enabled": False}
 
 
 async def test_public_config_without_a_bot_username_has_no_link(app, monkeypatch):

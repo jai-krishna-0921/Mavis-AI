@@ -24,4 +24,5 @@ async def public_config(response: Response) -> dict:
         "bot_url": telegram_link(bot),
         "slack_enabled": configured(NativeProvider.SLACK),
         "google_signin_enabled": bool(s.google_signin_enabled),
+        "mcp_enabled": bool(s.mcp_enabled),
     }
