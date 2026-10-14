@@ -43,7 +43,7 @@ _UNICODE_TAG_SUB_RE = re.compile(
 )
 # Not in Hermes: bidirectional overrides and zero-width characters hide or reorder text the same way. The
 # zero-width joiner (U+200D) stays: emoji sequences need it.
-_INVISIBLE_RE = re.compile(r"[​‌‎‏‪-‮⁠-⁤⁦-⁩﻿]")
+_INVISIBLE_RE = re.compile(r"[​‌‎‏‪-‮⁠-⁤⁦-⁩﻿\u061c\u00ad\u2028\u2029\u180e]")
 _WHITESPACE_RE = re.compile(r"\s+")
 
 # Credential shapes to blank out of text before it reaches a model or a log: a GitHub token, an OpenAI-style
@@ -51,7 +51,7 @@ _WHITESPACE_RE = re.compile(r"\s+")
 # The extra alternatives (Slack, AWS, JWT, GitHub fine-grained) are ours.
 _CREDENTIAL_PATTERN = re.compile(
     r"(?:ghp_[A-Za-z0-9_]{1,255}|github_pat_[A-Za-z0-9_]{20,255}|gh[ousr]_[A-Za-z0-9_]{20,255}"
-    r"|sk-[A-Za-z0-9_-](?:\.?[A-Za-z0-9_-]){0,254}|xox[abprs]-[A-Za-z0-9-]{10,255}|AKIA[0-9A-Z]{16}"
+    r"|(?<![A-Za-z0-9])sk-[A-Za-z0-9_-](?:\.?[A-Za-z0-9_-]){0,254}|xox[abprs]-[A-Za-z0-9-]{10,255}|AKIA[0-9A-Z]{16}"
     r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}|Bearer\s+\S+"
     r"|(?:token|key|API_KEY|password|secret)=[^\s&,;\"']{1,255})",
     re.IGNORECASE,

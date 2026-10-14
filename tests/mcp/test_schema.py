@@ -158,3 +158,20 @@ def test_an_unusable_schema_never_blocks_a_call() -> None:
     assert s.check_arguments({"$ref": "https://nowhere.invalid/s.json"}, {"a": 1}) is None
     dangling = {"type": "object", "properties": {"a": {"$ref": "#/$defs/missing"}}}
     assert s.check_arguments(dangling, {"a": 1}) is None
+
+
+def test_keys_matched_by_a_dropped_pattern_properties_are_not_rejected_as_additional() -> None:
+    closed = {"type": "object", "additionalProperties": False,
+              "patternProperties": {"^x_": {"type": "string"}}, "properties": {"a": {"type": "string"}}}
+    assert s.check_arguments(closed, {"a": "1", "x_b": "v"}) is None
+
+
+def test_a_required_nullable_argument_accepts_null_after_normalizing() -> None:
+    raw = {"type": "object", "required": ["n", "c"], "properties": {
+        "n": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+        "c": {"oneOf": [{"const": "a"}, {"const": "b"}, {"type": "null"}]}}}
+    norm = s.normalize_input_schema(raw)
+    assert s.check_arguments(norm, {"n": None, "c": None}) is None
+    assert s.check_arguments(norm, {"n": 3, "c": "a"}) is None
+    got = s.check_arguments(norm, {"n": "x", "c": "a"})
+    assert got is not None and "n" in got

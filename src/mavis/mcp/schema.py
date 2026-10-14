@@ -19,7 +19,6 @@ from collections.abc import Callable
 from typing import Any
 
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
 
 from mavis.mcp.text import clean_description
 
@@ -233,16 +232,37 @@ def _without_regex(node: Any) -> Any:
     if not isinstance(node, dict):
         return node
     out = {}
+    dropped_pattern_properties = False
     for key, value in node.items():
         if key in ("pattern", "format") and not isinstance(value, dict):
             continue
         if key == "patternProperties" and isinstance(value, dict):
+            dropped_pattern_properties = True
             continue
         if key in _SCHEMA_MAP_KEYS and isinstance(value, dict):
             out[key] = {name: _without_regex(sub) for name, sub in value.items()}
         else:
             out[key] = _without_regex(value)
+    if dropped_pattern_properties:
+        # Keys the dropped pattern would have matched must not trip the closed-object rules.
+        out.pop("additionalProperties", None)
+        out.pop("unevaluatedProperties", None)
+    if out.get("nullable") is True:
+        out = _allow_null(out)
     return out
+
+
+def _allow_null(node: dict[str, Any]) -> dict[str, Any]:
+    """Validation copy of a node normalization marked `nullable: true` (a hint Draft 2020-12 ignores): null
+    must pass wherever the server's original schema allowed it."""
+    node = {k: v for k, v in node.items() if k != "nullable"}
+    kind = node.get("type")
+    if isinstance(kind, str) or (isinstance(kind, list) and "$ref" not in node):
+        node["type"] = [*([kind] if isinstance(kind, str) else kind), "null"]
+        if isinstance(node.get("enum"), list):
+            node["enum"] = [*node["enum"], None]
+        return node
+    return {"anyOf": [node, {"type": "null"}]}
 
 
 def check_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> str | None:
@@ -250,9 +270,7 @@ def check_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> str | 
     that is itself unusable never blocks a call (the server will judge the arguments)."""
     try:
         validator = Draft202012Validator(_without_regex(schema))
-        errors = sorted(validator.iter_errors(arguments), key=lambda e: list(e.absolute_path))
-    except (SchemaError, RecursionError, TypeError, ValueError, AttributeError):
-        return None
+        errors = sorted(validator.iter_errors(arguments), key=lambda e: [str(p) for p in e.absolute_path])
     except Exception:  # noqa: BLE001 - unresolvable refs and the like: let the server decide
         return None
     if not errors:

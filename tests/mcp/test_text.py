@@ -74,3 +74,12 @@ def test_truncation_keeps_a_head_and_a_longer_tail_inside_the_budget() -> None:
 def test_a_budget_smaller_than_the_marker_still_yields_the_marker() -> None:
     out = t.truncate_head_tail("x" * 1000, 10)
     assert "TRUNCATED" in out
+
+
+def test_sk_prefix_is_only_redacted_at_a_word_start() -> None:
+    assert t.sanitize_error("Task-based ask-me") == "Task-based ask-me"
+    assert "sk-abc123" not in t.sanitize_error("key sk-abc123")
+
+
+def test_more_invisible_characters_are_stripped() -> None:
+    assert t.clean_text("a؜b­c d e᠎f") == "abcdef"
