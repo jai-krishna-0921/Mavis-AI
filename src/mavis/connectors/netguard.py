@@ -88,6 +88,8 @@ def blocked_ip(ip: str) -> bool:
     if isinstance(addr, ipaddress.IPv6Address) and addr.sixtofour is not None:
         if blocked_ip(str(addr.sixtofour)):
             return True
+    if addr in ipaddress.ip_network("64:ff9b::/96"):  # NAT64 can map to a private IPv4 address
+        return True
     return (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast
             or addr.is_reserved or addr.is_unspecified or not addr.is_global)
 
@@ -210,10 +212,17 @@ def _build(httpx_mod: Any, httpcore_mod: Any, auto_backend: type, too_large: typ
         async def handle_async_request(self, request: Any) -> Any:
             await check_url(str(request.url))
             limit = int(request.extensions.get("max_bytes", self._max_bytes))
+            # The cap counts wire bytes and the libraries decode after it, so a compressed body could
+            # inflate far past the cap: ask for identity and refuse anything that is encoded anyway.
+            request.headers["Accept-Encoding"] = "identity"
             resp = await super().handle_async_request(request)
             if 300 <= resp.status_code < 400:
                 await resp.aclose()
                 raise UnsafeUrl("redirects are not followed")
+            encoding = resp.headers.get("content-encoding", "identity").strip().lower()
+            if encoding not in ("", "identity"):
+                await resp.aclose()
+                raise UnsafeUrl("compressed responses are not accepted")
             try:
                 declared = int(resp.headers.get("content-length", "0"))
             except ValueError:

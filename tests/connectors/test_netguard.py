@@ -25,7 +25,8 @@ from tests.mcp.localserver import serve
 @pytest.mark.parametrize("ip", [
     "127.0.0.1", "10.0.0.5", "172.16.3.4", "192.168.1.1", "169.254.169.254", "0.0.0.0", "100.64.0.1",
     "224.0.0.1", "240.0.0.1", "::1", "::", "fe80::1", "fc00::1", "fd00:ec2::254", "ff02::1",
-    "::ffff:127.0.0.1", "::ffff:169.254.169.254", "2002:7f00:0001::", "not-an-ip", "192.0.2.1", "198.18.0.1",
+    "::ffff:127.0.0.1", "64:ff9b::a9fe:a9fe",
+    "::ffff:169.254.169.254", "2002:7f00:0001::", "not-an-ip", "192.0.2.1", "198.18.0.1",
 ])
 def test_non_public_addresses_are_blocked(ip):
     assert blocked_ip(ip)
@@ -279,3 +280,44 @@ async def test_mcp_client_factory_signature_matches_the_sdk(localhost_ok):
     c = guarded_mcp_client(headers={"a": "b"}, timeout=netguard.MCP_TIMEOUT, auth=None)
     assert c.headers["a"] == "b"
     await c.aclose()
+
+
+# --- compressed bodies (the cap counts wire bytes, so encoded responses are refused) ---------------
+
+@respx.mock
+async def test_a_compressed_response_is_refused_and_identity_is_requested(settings):
+    import gzip
+
+    route = respx.get("https://a.example.com/bomb").mock(return_value=httpx.Response(
+        200, headers={"content-encoding": "gzip"}, content=gzip.compress(b"0" * 1_000_000)))
+    async with guarded_client(max_bytes=1000) as c:
+        with pytest.raises(UnsafeUrl, match="compressed"):
+            await c.get("https://a.example.com/bomb")
+    assert route.calls.last.request.headers["accept-encoding"] == "identity"
+
+
+@respx.mock
+async def test_an_identity_response_under_the_cap_passes(settings):
+    respx.get("https://a.example.com/id").mock(return_value=httpx.Response(
+        200, headers={"content-encoding": "identity"}, content=b"fine"))
+    async with guarded_client(max_bytes=1000) as c:
+        assert (await c.get("https://a.example.com/id")).content == b"fine"
+
+
+def _gzip_app():
+    import gzip
+
+    async def bomb(_request):
+        return Response(gzip.compress(b"0" * 1_000_000), headers={"content-encoding": "gzip"})
+
+    async def echo(request):
+        return Response(request.headers.get("accept-encoding", "").encode())
+
+    return Starlette(routes=[Route("/bomb", bomb), Route("/echo", echo)])
+
+
+async def test_mcp_client_refuses_a_compressed_response_and_asks_for_identity(localhost_ok):
+    async with serve(_gzip_app()) as base, guarded_mcp_client(max_bytes=1000) as c:
+        assert (await c.get(f"{base}/echo")).text == "identity"
+        with pytest.raises(UnsafeUrl, match="compressed"):
+            await c.get(f"{base}/bomb")
