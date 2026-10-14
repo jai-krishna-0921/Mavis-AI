@@ -7,11 +7,12 @@ import { App } from '../App'
 
 export function renderApp(path = '/') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
-  return render(
+  const view = render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[path]}>
         <App pollIntervalMs={15} />
       </MemoryRouter>
     </QueryClientProvider>,
   )
+  return Object.assign(view, { qc })
 }

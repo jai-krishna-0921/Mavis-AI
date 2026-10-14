@@ -7,7 +7,7 @@ import {
   useConnectMcp, useCreateMcpServer, useDeleteMcp, useMcpCatalog, useMcpServers, useRefreshMcp,
 } from '../api/hooks'
 import type { McpCatalogEntry, McpServer, McpStatus } from '../api/types'
-import { redirectTo } from '../lib/nav'
+import { httpsUrl, redirectTo } from '../lib/nav'
 import { Modal } from '../components/Modal'
 import { useToast } from '../components/Toast'
 import { EmptyState, IconTile, Panel, SkeletonRows } from '../components/Ui'
@@ -15,7 +15,16 @@ import { EmptyState, IconTile, Panel, SkeletonRows } from '../components/Ui'
 const STATUS_LABEL: Record<McpStatus, string> = { ACTIVE: 'Ready', NEEDS_AUTH: 'Needs sign-in', ERROR: 'Not working' }
 const STATUS_TAG: Record<McpStatus, string> = { ACTIVE: 'tag-ok', NEEDS_AUTH: 'tag-warn', ERROR: 'tag-warn' }
 
+const SIGN_IN_FAILED = 'That sign-in link could not be used. Please try again.'
+
 const toolsLabel = (n: number) => `${n} ${n === 1 ? 'tool' : 'tools'}`
+
+// Only an https address is a place to send the browser; anything else shows the generic error.
+function signIn(url: string, toast: (msg: string, tone?: 'ok' | 'error') => void) {
+  const safe = httpsUrl(url)
+  if (safe) redirectTo(safe)
+  else toast(SIGN_IN_FAILED, 'error')
+}
 
 function ResultNote() {
   const [params] = useSearchParams()
@@ -34,7 +43,7 @@ function CatalogCard({ entry }: { entry: McpCatalogEntry }) {
   const toast = useToast()
   const connect = () =>
     create.mutate({ catalog_id: entry.id }, {
-      onSuccess: (r) => { if (r.authorize_url) redirectTo(r.authorize_url); else toast(`${entry.name} is ready`) },
+      onSuccess: (r) => { if (r.authorize_url) signIn(r.authorize_url, toast); else toast(`${entry.name} is ready`) },
     })
   return (
     <li className="row flex-wrap items-start">
@@ -101,7 +110,7 @@ function ServerRow({ server }: { server: McpServer }) {
   const toast = useToast()
   const reconnect = () => {
     if (server.auth === 'bearer') { setDialog('token'); return }
-    connect.mutate({ id: server.id }, { onSuccess: (r) => { if (r.authorize_url) redirectTo(r.authorize_url) } })
+    connect.mutate({ id: server.id }, { onSuccess: (r) => { if (r.authorize_url) signIn(r.authorize_url, toast) } })
   }
   const err = refresh.error ?? connect.error
   return (
@@ -156,7 +165,7 @@ function CustomForm() {
     create.mutate({ name: name.trim(), url: url.trim(), ...(token.trim() ? { bearer_token: token.trim() } : {}) }, {
       onSettled: () => setToken(''),
       onSuccess: (r) => {
-        if (r.authorize_url) { redirectTo(r.authorize_url); return }
+        if (r.authorize_url) { signIn(r.authorize_url, toast); return }
         toast(`${r.server.name} is ready`)
         setName(''); setUrl(''); setToken('')
       },

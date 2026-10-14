@@ -39,10 +39,22 @@ export const useMcpCatalog = (enabled: boolean) =>
 export const useMcpServers = (enabled: boolean) =>
   useQuery({ queryKey: ['mcp', 'servers'], queryFn: api.mcpServers, enabled })
 
+// A pasted bearer token must not outlive its request: the mutation cache keeps `variables` after the call
+// settles, so the token is wiped from them in place (and the mutation is not kept once unobserved).
+const scrubToken = (vars: unknown) => {
+  if (vars && typeof vars === 'object') {
+    const v = vars as Record<string, unknown>
+    delete v.bearer_token
+    delete v.bearerToken
+  }
+}
+
 export function useCreateMcpServer() {
   const qc = useQueryClient()
   return useMutation({
+    gcTime: 0,
     mutationFn: (body: McpCreateBody) => api.mcpCreate(body),
+    onSettled: (_data, _error, vars) => scrubToken(vars),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mcp', 'servers'] }),
   })
 }
@@ -50,7 +62,9 @@ export function useCreateMcpServer() {
 export function useConnectMcp() {
   const qc = useQueryClient()
   return useMutation({
+    gcTime: 0,
     mutationFn: (v: { id: number; bearerToken?: string }) => api.mcpConnect(v.id, v.bearerToken),
+    onSettled: (_data, _error, vars) => scrubToken(vars),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mcp', 'servers'] }),
   })
 }

@@ -63,7 +63,44 @@ describe('MCP section', () => {
     const user = userEvent.setup()
     renderApp('/workspace')
     await user.click(await screen.findByRole('button', { name: 'Connect Linear' }))
-    await waitFor(() => expect(redirect).toHaveBeenCalledWith('/oauth/mock/mcp/linear'))
+    await waitFor(() => expect(redirect).toHaveBeenCalledWith('https://auth.example.com/oauth/mock/mcp/linear'))
+  })
+
+  it.each(['javascript:alert(1)', 'http://auth.example.com/authorize', '/oauth/relative', 'not a url', 'data:text/html,hi'])(
+    'does not navigate to %s and shows the generic error', async (bad) => {
+      server.use(http.post(`${B}/mcp/servers`, () => HttpResponse.json({
+        server: mcpServer(9, { name: 'Linear', slug: 'linear', auth: 'oauth', status: 'NEEDS_AUTH' }), authorize_url: bad,
+      }, { status: 201 })))
+      const redirect = vi.spyOn(nav, 'redirectTo').mockImplementation(() => {})
+      const user = userEvent.setup()
+      renderApp('/workspace')
+      await user.click(await screen.findByRole('button', { name: 'Connect Linear' }))
+      expect(await screen.findByText('That sign-in link could not be used. Please try again.')).toBeInTheDocument()
+      expect(redirect).not.toHaveBeenCalled()
+    })
+
+  it('does not keep a pasted token in the query cache or on the page', async () => {
+    const user = userEvent.setup()
+    const { qc } = renderApp('/workspace')
+    const form = await screen.findByRole('form', { name: 'Add a custom server' })
+    await user.type(within(form).getByLabelText('Name'), 'My notes')
+    await user.type(within(form).getByLabelText('Address (https)'), 'https://mcp.example.com/mcp')
+    await user.type(within(form).getByLabelText(/Token/), 'secret-token')
+    await user.click(within(form).getByRole('button', { name: 'Add server' }))
+    expect(await screen.findByText('My notes')).toBeInTheDocument()
+    expect(JSON.stringify(qc.getMutationCache().getAll().map((m) => m.state.variables))).not.toContain('secret-token')
+  })
+
+  it('does not keep a reconnect token in the query cache', async () => {
+    db().mcpServers.push(mcpServer(1, { name: 'Notes', auth: 'bearer', status: 'NEEDS_AUTH' }))
+    const user = userEvent.setup()
+    const { qc } = renderApp('/workspace')
+    await user.click(await screen.findByRole('button', { name: 'Reconnect Notes' }))
+    const dlg = screen.getByRole('dialog', { name: 'Reconnect Notes' })
+    await user.type(within(dlg).getByLabelText('Token'), 'new-token')
+    await user.click(within(dlg).getByRole('button', { name: 'Reconnect' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(JSON.stringify(qc.getMutationCache().getAll().map((m) => m.state.variables))).not.toContain('new-token')
   })
 
   it('adds a custom server and clears the form', async () => {
@@ -113,7 +150,7 @@ describe('MCP section', () => {
     expect(screen.getByTestId('mcp-error-2')).toHaveTextContent('Reconnect it.')
     expect(screen.getByText('Needs sign-in')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Reconnect Linear' }))
-    await waitFor(() => expect(redirect).toHaveBeenCalledWith('/oauth/mock/mcp/linear'))
+    await waitFor(() => expect(redirect).toHaveBeenCalledWith('https://auth.example.com/oauth/mock/mcp/linear'))
   })
 
   it('reconnects a token server with a new token', async () => {

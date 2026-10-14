@@ -82,7 +82,7 @@ export const handlers = [
       const oauth = entry.auth === 'oauth'
       const server = mcpServer(d.newMcpId(), { slug: entry.id, name: entry.name, catalog_id: entry.id, auth: entry.auth, status: oauth ? 'NEEDS_AUTH' : 'ACTIVE', tool_count: oauth ? 0 : 2, tools: oauth ? [] : mcpServer(0).tools })
       d.mcpServers.push(server)
-      return HttpResponse.json(oauth ? { server, authorize_url: `/oauth/mock/mcp/${entry.id}` } : { server }, { status: 201 })
+      return HttpResponse.json(oauth ? { server, authorize_url: `https://auth.example.com/oauth/mock/mcp/${entry.id}` } : { server }, { status: 201 })
     }
     if (!body.url?.startsWith('https://')) return err(422, 'invalid_url', 'That address is not allowed. Use a public https address.')
     const server = mcpServer(d.newMcpId(), { name: body.name ?? 'Custom', auth: body.bearer_token ? 'bearer' : 'none', host: new URL(body.url).host })
@@ -93,7 +93,7 @@ export const handlers = [
     const bad = needCsrf(request); if (bad) return bad
     const server = db().mcpServers.find((s) => s.id === Number(params.id))
     if (!server) return err(404, 'not_found', 'That server was not found.')
-    if (server.auth === 'oauth') return HttpResponse.json({ server, authorize_url: `/oauth/mock/mcp/${server.slug}` })
+    if (server.auth === 'oauth') return HttpResponse.json({ server, authorize_url: `https://auth.example.com/oauth/mock/mcp/${server.slug}` })
     const body = (await request.json().catch(() => ({}))) as { bearer_token?: string }
     if (!body.bearer_token) return err(422, 'invalid_bearer_token', 'Paste the server\'s token to reconnect it.')
     server.status = 'ACTIVE'; server.error = null; server.error_text = null
