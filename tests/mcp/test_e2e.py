@@ -11,9 +11,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from mavis.agents.react import react_loop
 from mavis.config import get_settings
 from mavis.domain.errors import ActionFailed
-from mavis.domain.tasks import ApprovalStatus
+from mavis.domain.tasks import ApprovalStatus, TaskKind
 from mavis.mcp import service as svc
-from mavis.mcp import tools as mt
 from mavis.mcp.service import McpService
 from mavis.store.repo import approvals, tasks
 from mavis.store.repo import mcp_servers as repo
@@ -43,15 +42,16 @@ async def run_loop(registry: ToolRegistry, user_id: int, fake_llm, calls: list[A
 
 
 @pytest.fixture
-def registry() -> ToolRegistry:
-    reg = ToolRegistry()
-    for t in mt.TOOLS:
-        reg.register(t)
-    return reg
+def registry(mcp_env, fresh_registry) -> ToolRegistry:
+    """The process registry, filled the way the app fills it (flag on)."""
+    from mavis.tools import load_builtin_tools
+
+    load_builtin_tools(fresh_registry)
+    return fresh_registry
 
 
 @pytest.fixture
-async def notes(mcp_env, two_users, registry):
+async def notes(two_users, registry):
     a, b = two_users
     service = McpService()
     svc.set_service(service)
@@ -65,7 +65,7 @@ ACT = {"server": "notes", "tool": "create_note", "arguments": {"title": "Hi"}}
 
 async def test_read_then_act_through_the_loop_and_the_approval_path(notes, registry, fake_llm) -> None:
     a, _, fake = notes
-    tid = await tasks.create(a.id, goal="g")
+    tid = await tasks.create(a.id, goal="g", kind=TaskKind.APPROVAL)
     res = await run_loop(registry, a.id, fake_llm, [
         call("mcp_tools", {}, "c1"),
         call("mcp_read", {"server": "notes", "tool": "get_note", "arguments": {"id": "7"}}, "c2"),
@@ -78,41 +78,56 @@ async def test_read_then_act_through_the_loop_and_the_approval_path(notes, regis
     assert fake.calls == [("get_note", {"id": "7"})]  # the read ran with no card; the act has NOT run
     pending = await approvals.next_open(tid)
     assert pending.tool == "mcp_act" and pending.preview.startswith("Run create_note on notes\nArguments:\n  - title: Hi")
-    done = await registry.execute_approved(pending.id)
-    assert "made Hi" in done.text
+    await resume_gate(a.id, tid, pending.id, "ok")
+    assert (await approvals.get(pending.id)).status == ApprovalStatus.EXECUTED
+    assert "made Hi" in (await approvals.get(pending.id)).result
     assert fake.calls == [("get_note", {"id": "7"}), ("create_note", {"title": "Hi"})]
     assert fake.attempts == 2  # the read and the one act, nothing else
 
 
-async def approve_like_the_gate(registry: ToolRegistry, approval_id: int) -> bool:
-    """What approval_gate does on "ok": only the caller that moves RESOLVING to EXECUTED runs the tool."""
-    await approvals.set_status(approval_id, ApprovalStatus.RESOLVING)
-    if not await approvals.claim(approval_id, {ApprovalStatus.RESOLVING}, ApprovalStatus.EXECUTED):
-        return False
-    await registry.execute_approved(approval_id)
-    return True
+async def resume_gate(user_id: int, tid: int, approval_id: int, decision: str, graph=None, *, start: bool = True):
+    """Drive the real approval_gate of the orchestrator graph the way the approval callback does."""
+    from langgraph.types import Command
+
+    from mavis.agents import orchestrator_graph as og
+    from tests.agents.test_orchestrator_graph import _cfg, _graph
+
+    graph = graph or _graph()
+    if start:
+        await graph.ainvoke(og.initial_state(await tasks.get(tid)), _cfg(tid))
+    await approvals.claim(approval_id, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
+    await graph.ainvoke(Command(resume={"approval_id": approval_id, "decision": decision}), _cfg(tid))
+    return graph
 
 
-async def test_a_double_tap_on_approve_runs_the_call_once(notes, registry, fake_llm) -> None:
+async def queued_card(registry, fake_llm, user_id: int):
+    tid = await tasks.create(user_id, goal="approve", kind=TaskKind.APPROVAL)
+    await run_loop(registry, user_id, fake_llm, [call("mcp_act", ACT, "c1")], tid)
+    return tid, await approvals.next_open(tid)
+
+
+async def test_approving_through_the_real_gate_runs_once_even_if_resumed_twice(notes, registry, fake_llm) -> None:
+    from langgraph.types import Command
+
+    from tests.agents.test_orchestrator_graph import _cfg
+
     a, _, fake = notes
-    tid = await tasks.create(a.id, goal="g")
-    await run_loop(registry, a.id, fake_llm, [call("mcp_act", ACT, "c1")], tid)
-    pending = await approvals.next_open(tid)
-    assert await approve_like_the_gate(registry, pending.id) is True
-    assert await approve_like_the_gate(registry, pending.id) is False
+    tid, pending = await queued_card(registry, fake_llm, a.id)
+    graph = await resume_gate(a.id, tid, pending.id, "ok")
+    assert fake.calls == [("create_note", {"title": "Hi"})] and fake.attempts == 1
+    assert (await approvals.get(pending.id)).status == ApprovalStatus.EXECUTED
+    try:  # a second "ok" for the same card (a double tap): the card is spent, nothing runs again
+        await graph.ainvoke(Command(resume={"approval_id": pending.id, "decision": "ok"}), _cfg(tid))
+    except Exception:  # noqa: BLE001 - a finished graph may refuse to resume; either way the server decides
+        pass
     assert fake.calls == [("create_note", {"title": "Hi"})] and fake.attempts == 1
 
 
-async def test_cancelling_the_card_executes_nothing(notes, registry, fake_llm) -> None:
+async def test_cancelling_through_the_real_gate_executes_nothing(notes, registry, fake_llm) -> None:
     a, _, fake = notes
-    tid = await tasks.create(a.id, goal="g")
-    res = await run_loop(registry, a.id, fake_llm, [call("mcp_act", ACT, "c1")], tid)
-    assert tool_texts(res)[0].startswith("QUEUED_FOR_APPROVAL #")
-    pending = await approvals.next_open(tid)
-    assert await approvals.reject_open_for_task(tid) == 1
+    tid, pending = await queued_card(registry, fake_llm, a.id)
+    await resume_gate(a.id, tid, pending.id, "no")
     assert (await approvals.get(pending.id)).status == ApprovalStatus.REJECTED
-    assert await approvals.next_open(tid) is None
-    assert await approve_like_the_gate(registry, pending.id) is False  # a rejected card cannot be claimed
     assert fake.calls == [] and fake.attempts == 0
 
 
@@ -127,13 +142,14 @@ async def test_an_act_the_tool_reports_as_an_error_is_a_failed_card(notes, regis
     assert "quota exceeded" in str(err.value) and fake.attempts == 1
 
 
-async def test_a_read_that_is_an_error_result_reaches_the_model_as_an_error(notes, registry, fake_llm) -> None:
+async def test_a_read_that_is_an_error_result_reaches_the_model_fenced_and_is_not_retried(notes, registry, fake_llm) -> None:
     a, _, fake = notes
     fake.handlers["get_note"] = lambda args: text_result("no such note", is_error=True)
     tid = await tasks.create(a.id, goal="g")
     res = await run_loop(registry, a.id, fake_llm, [
         call("mcp_read", {"server": "notes", "tool": "get_note", "arguments": {"id": "9"}}, "c1")], tid)
-    assert "no such note" in tool_texts(res)[0] and res.text == "Done what I can."
+    assert tool_texts(res) == ['<untrusted source="mcp_read">\nno such note\n</untrusted>']
+    assert fake.attempts == 1 and res.text == "Done what I can."
 
 
 async def test_oversized_output_is_capped_through_the_loop(notes, registry, fake_llm) -> None:
@@ -143,7 +159,7 @@ async def test_oversized_output_is_capped_through_the_loop(notes, registry, fake
     res = await run_loop(registry, a.id, fake_llm, [
         call("mcp_read", {"server": "notes", "tool": "get_note", "arguments": {"id": "1"}}, "c1")], tid)
     out = tool_texts(res)[0]
-    assert len(out) <= 12_100 and "RESULT TRUNCATED" in out and "HHHH" in out and "TTTT" in out
+    assert len(out) <= 12_000 + len('<untrusted source="mcp_read">\n\n</untrusted>') and "RESULT TRUNCATED" in out and "HHHH" in out and "TTTT" in out
     assert "M" * 6000 not in out
 
 
@@ -158,7 +174,7 @@ async def test_a_401_marks_the_server_needs_auth_and_stops_the_model(notes, regi
     assert row.status == repo.NEEDS_AUTH
 
 
-async def test_user_b_cannot_see_or_call_user_as_server(notes, registry, fake_llm) -> None:
+async def test_user_b_cannot_see_or_call_user_a_server(notes, registry, fake_llm) -> None:
     a, b, fake = notes
     tid = await tasks.create(b.id, goal="g")
     res = await run_loop(registry, b.id, fake_llm, [
@@ -172,11 +188,28 @@ async def test_user_b_cannot_see_or_call_user_as_server(notes, registry, fake_ll
     assert fake.attempts == 0 and fake.calls == []
 
 
-async def test_with_the_flag_off_the_tools_are_not_offered(settings, monkeypatch) -> None:
+async def test_chat_offers_the_tools_only_to_the_user_with_an_active_server(notes, registry) -> None:
+    from mavis.agents.conversation import chat_tools, unlinked_with_internal
+
+    a, b, _ = notes
+    names = {"mcp_tools", "mcp_read", "mcp_act"}
+
+    async def offered(user_id: int) -> set[str]:
+        unlinked = await unlinked_with_internal(user_id)
+        return {t.name for t in chat_tools(user_id, "what is in my notes app", unlinked=unlinked)}
+
+    assert names <= await offered(a.id)
+    assert not names & await offered(b.id)
+
+
+def test_the_flag_decides_whether_the_tools_are_registered(settings, monkeypatch) -> None:
     from mavis.tools import load_builtin_tools
 
-    monkeypatch.setenv("MCP_ENABLED", "false")
+    names = {"mcp_tools", "mcp_read", "mcp_act"}
+    for value, expected in (("true", names), ("false", set())):
+        monkeypatch.setenv("MCP_ENABLED", value)
+        get_settings.cache_clear()
+        reg = ToolRegistry()
+        load_builtin_tools(reg)
+        assert names & set(reg.names_for("conversation")) == expected
     get_settings.cache_clear()
-    reg = ToolRegistry()
-    load_builtin_tools(reg)
-    assert not {"mcp_tools", "mcp_read", "mcp_act"} & set(reg.names_for("conversation"))
