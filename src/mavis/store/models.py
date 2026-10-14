@@ -552,6 +552,46 @@ class NativeOAuthState(Base):
     session_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class McpServer(Base):
+    """One remote MCP server a user connected (v2 track 1). Secrets are sealed (envelope encryption bound to
+    user, server and column, see mavis.mcp.sealing); `oauth` holds non-secret facts plus a sealed client
+    secret; `tools` is the cached `tools/list` (see mavis.mcp.toolcache)."""
+
+    __tablename__ = "mcp_servers"
+    __table_args__ = (UniqueConstraint("user_id", "slug", name="uq_mcp_servers_user_slug"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    slug: Mapped[str] = mapped_column(String(24))
+    display_name: Mapped[str] = mapped_column(String(80))
+    url: Mapped[str] = mapped_column(String(2048))
+    catalog_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    auth_kind: Mapped[str] = mapped_column(String(8))  # none | bearer | oauth
+    access_token: Mapped[str | None] = mapped_column(Text, nullable=True)  # sealed
+    refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)  # sealed
+    expires_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    oauth: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(12), default="ACTIVE")  # ACTIVE | NEEDS_AUTH | ERROR
+    last_error: Mapped[str | None] = mapped_column(String(32), nullable=True)  # a short code, never a body
+    tools: Mapped[list] = mapped_column(JSON, default=list)
+    tools_fetched_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class McpOAuthState(Base):
+    """An MCP consent redirect we issued. Deleting the row is what consumes the state (single use)."""
+
+    __tablename__ = "mcp_oauth_states"
+
+    state: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    server_id: Mapped[int] = mapped_column(ForeignKey("mcp_servers.id"), index=True)
+    code_verifier: Mapped[str] = mapped_column(Text)  # sealed
+    expires_at: Mapped[datetime] = mapped_column(index=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
 class PersonalLayerRow(Base):
     """The versioned personal layer of one user: a compact, evidence-linked description of who they are."""
 
