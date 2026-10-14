@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import math
 import re
 import secrets
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
@@ -44,6 +46,8 @@ log = structlog.get_logger(__name__)
 
 CLIENT_NAME = "Mavis AI"
 DISCOVERY_TTL_S = 600.0
+DISCOVERY_CACHE_MAX = 256
+MAX_EXPIRES_IN_S = 365 * 86400
 _RESOURCE_METADATA = re.compile(r'resource_metadata="([^"]+)"')
 _SCOPE = re.compile(r'(?<![\w-])scope="([^"]+)"')
 
@@ -75,13 +79,15 @@ class Discovery:
     token_endpoint: str
     registration_endpoint: str | None = None
     scopes: tuple[str, ...] = ()
+    iss_supported: bool = False  # RFC 9207: the callback carries `iss`
 
     def facts(self, client_id: str, client_secret_sealed: str | None, *, registration: str) -> dict[str, Any]:
         """The non-secret OAuth facts stored on the server row (`McpServer.oauth`)."""
         return {"issuer": self.issuer, "authorization_endpoint": self.authorization_endpoint,
                 "token_endpoint": self.token_endpoint, "client_id": client_id,
                 "client_secret": client_secret_sealed, "scopes": list(self.scopes),
-                "resource": self.resource, "registration": registration}
+                "resource": self.resource, "registration": registration,
+                "iss_parameter_supported": self.iss_supported}
 
 
 @dataclass(frozen=True)
@@ -104,7 +110,7 @@ class McpOAuth:
 
     http_factory: Callable[..., AbstractAsyncContextManager[httpx.AsyncClient]] = field(
         default=lambda max_bytes: netguard.guarded_client(max_bytes=max_bytes))
-    _cache: dict[str, tuple[float, Discovery]] = field(default_factory=dict)
+    _cache: OrderedDict[tuple, tuple[float, Discovery]] = field(default_factory=OrderedDict)
 
     # --- one guarded request ----------------------------------------------------------------------
 
@@ -121,6 +127,14 @@ class McpOAuth:
         except (httpx.TimeoutException, httpx.TransportError):
             raise _fail(Kind.TRANSIENT, "unreachable") from None
 
+    @staticmethod
+    def _json(r: httpx.Response) -> Any:
+        """The response as JSON, or None when it is not (including nesting deep enough to overflow)."""
+        try:
+            return r.json()
+        except (ValueError, RecursionError):
+            return None
+
     async def _get_json(self, url: str, *, what: str) -> dict | None:
         """A JSON object at `url`, or None for an answer that is not one (404, HTML, a list)."""
         r = await self._send("GET", url, max_bytes=netguard.DISCOVERY_BYTES, code=what,
@@ -129,10 +143,7 @@ class McpOAuth:
             raise _fail(Kind.TRANSIENT, what)
         if not 200 <= r.status_code < 300:
             return None
-        try:
-            body = r.json()
-        except ValueError:
-            return None
+        body = self._json(r)
         return body if isinstance(body, dict) else None
 
     # --- discovery --------------------------------------------------------------------------------
@@ -162,9 +173,17 @@ class McpOAuth:
 
     async def discover(self, server_url: str, *, www_authenticate: str | None = None,
                        allowed_hosts: tuple[str, ...] = (), scope: str | None = None) -> Discovery:
-        cached = self._cache.get(server_url)
-        if cached and cached[0] > time.monotonic():
-            return cached[1]
+        pointer_url = _RESOURCE_METADATA.search(www_authenticate or "")
+        challenge_scope_text = _SCOPE.search(www_authenticate or "")
+        key = (server_url, pointer_url.group(1) if pointer_url else None,
+               challenge_scope_text.group(1) if challenge_scope_text else scope,
+               tuple(sorted(allowed_hosts)))
+        cached = self._cache.get(key)
+        if cached:
+            if cached[0] > time.monotonic():
+                self._cache.move_to_end(key)
+                return cached[1]
+            del self._cache[key]
         try:
             server = netguard.validate_url(server_url)
         except netguard.UnsafeUrl:
@@ -228,8 +247,11 @@ class McpOAuth:
             token_endpoint=self._endpoint(meta.get("token_endpoint"), issuer, allowed_hosts),
             registration_endpoint=(self._endpoint(meta["registration_endpoint"], issuer, allowed_hosts)
                                    if meta.get("registration_endpoint") else None),
-            scopes=scopes)
-        self._cache[server_url] = (time.monotonic() + DISCOVERY_TTL_S, found)
+            scopes=scopes,
+            iss_supported=meta.get("authorization_response_iss_parameter_supported") is True)
+        self._cache[key] = (time.monotonic() + DISCOVERY_TTL_S, found)  # only successes are cached
+        while len(self._cache) > DISCOVERY_CACHE_MAX:
+            self._cache.popitem(last=False)
         return found
 
     # --- client registration (RFC 7591) -----------------------------------------------------------
@@ -246,10 +268,7 @@ class McpOAuth:
                              code="oauth_registration", json=body)
         if r.status_code >= 500 or r.status_code == 429:
             raise _fail(Kind.TRANSIENT, "oauth_registration")
-        try:
-            data = r.json() if 200 <= r.status_code < 300 else None
-        except ValueError:
-            data = None
+        data = self._json(r) if 200 <= r.status_code < 300 else None
         client_id = data.get("client_id") if isinstance(data, dict) else None
         if not isinstance(client_id, str) or not client_id or len(client_id) > 512:
             raise _fail(Kind.PERMANENT, "oauth_registration")
@@ -279,10 +298,15 @@ class McpOAuth:
         if str(data.get("token_type", "bearer")).lower() != "bearer":
             raise _fail(Kind.PERMANENT, "oauth_token")
         refresh = data.get("refresh_token")
-        try:
-            ttl = int(data["expires_in"]) if data.get("expires_in") is not None else 0
-        except (TypeError, ValueError):
-            ttl = 0
+        ttl = 0
+        raw = data.get("expires_in")
+        if raw is not None and not isinstance(raw, bool):
+            try:
+                seconds = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                seconds = 0.0
+            if math.isfinite(seconds):
+                ttl = int(min(seconds, MAX_EXPIRES_IN_S))
         scope = data.get("scope")
         return TokenResponse(
             access_token=token, refresh_token=refresh if isinstance(refresh, str) and refresh else None,
@@ -302,15 +326,27 @@ class McpOAuth:
             raise _fail(Kind.AUTH, "oauth_token")  # invalid_grant, invalid_client: the user must reconnect
         if not 200 <= r.status_code < 300:
             raise _fail(Kind.PERMANENT, "oauth_token")
-        try:
-            data = r.json()
-        except ValueError:
-            raise _fail(Kind.PERMANENT, "oauth_token") from None
+        data = self._json(r)
+        if data is None:
+            raise _fail(Kind.PERMANENT, "oauth_token")
         return self._tokens(data)
 
-    async def exchange(self, facts: dict, client_secret: str | None, code: str,
-                       verifier: str) -> TokenResponse:
-        """Trade the authorization code (with the PKCE verifier) for tokens."""
+    @staticmethod
+    def check_iss(facts: dict, iss: str | None) -> None:
+        """RFC 9207 mix-up defence: an `iss` on the callback must equal the issuer recorded at connect time,
+        and is required when the authorization server advertises that it sends one."""
+        if iss is None:
+            if facts.get("iss_parameter_supported") is True:
+                raise _fail(Kind.AUTH, "issuer_mismatch")
+            return
+        if not isinstance(iss, str) or iss.rstrip("/") != str(facts.get("issuer", "")).rstrip("/"):
+            raise _fail(Kind.AUTH, "issuer_mismatch")
+
+    async def exchange(self, facts: dict, client_secret: str | None, code: str, verifier: str, *,
+                       iss: str | None = None) -> TokenResponse:
+        """Trade the authorization code (with the PKCE verifier) for tokens. `iss` is the callback's issuer
+        parameter (RFC 9207); a mismatch, or a missing one the server promised, is refused up front."""
+        self.check_iss(facts, iss)
         return await self._token_call(facts, client_secret, {
             "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri(),
             "code_verifier": verifier})

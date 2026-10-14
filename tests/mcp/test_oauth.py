@@ -313,3 +313,77 @@ async def test_a_stored_token_endpoint_that_left_the_issuers_site_is_refused(mcp
             await client.refresh(facts, None, "refresh-1")
     assert err.value.code == "issuer_changed"
     assert not [r for r in auth.requests if r["path"] == "/token"]
+
+
+# --- review fixes: cache keying, hostile numbers and JSON, RFC 9207 --------------------------------
+
+async def test_the_discovery_cache_is_keyed_on_scope_and_hosts_and_is_bounded(mcp_env) -> None:
+    async with stack() as (auth, mcp, url):
+        client = o.McpOAuth()
+        first = await client.discover(url)
+        stepped = await client.discover(url, scope="admin")
+        assert first.scopes == ("read", "write") and stepped.scopes == ("admin",)
+        assert (await client.discover(url, www_authenticate=challenge(mcp) + ', scope="x"')).scopes == ("x",)
+        assert (await client.discover(url)).scopes == ("read", "write")
+        seen = len(auth.requests) + len(mcp.requests)
+        await client.discover(url, allowed_hosts=("localhost",))
+        assert len(auth.requests) + len(mcp.requests) > seen  # different hosts, different entry
+        o.DISCOVERY_CACHE_MAX, keep = 2, o.DISCOVERY_CACHE_MAX
+        try:
+            for i in range(5):
+                await client.discover(url, scope=f"s{i}")
+        finally:
+            o.DISCOVERY_CACHE_MAX = keep
+        assert len(client._cache) <= 3
+
+
+async def test_a_failed_discovery_is_not_cached(mcp_env) -> None:
+    async with stack(pkce_methods=["plain"]) as (auth, mcp, url):
+        client = o.McpOAuth()
+        for _ in range(2):
+            with pytest.raises(McpFailure):
+                await client.discover(url)
+        assert not client._cache
+        auth.pkce_methods = ["S256"]
+        assert (await client.discover(url)).issuer == auth.base
+
+
+@pytest.mark.parametrize("value", [float("inf"), 1e30, 10**30, float("nan"), True, "Infinity", "1e999"])
+def test_hostile_expires_in_values_never_raise(value) -> None:
+    got = o.McpOAuth._tokens({"access_token": "a", "expires_in": value})
+    assert got.expires_at is None or got.expires_at < o.timeutil.now() + o.timedelta(days=366)
+
+
+def test_deeply_nested_json_is_a_classified_failure() -> None:
+    resp = o.httpx.Response(200, content=("[" * 100000).encode())
+    assert o.McpOAuth._json(resp) is None
+    with pytest.raises(McpFailure) as err:
+        o.McpOAuth._tokens(o.McpOAuth._json(resp))
+    assert err.value.code == "oauth_token"
+
+
+def test_the_callback_issuer_is_checked() -> None:
+    facts = {"issuer": "https://as.example.com"}
+    o.McpOAuth.check_iss(facts, None)  # server never promised one
+    o.McpOAuth.check_iss(facts, "https://as.example.com/")
+    with pytest.raises(McpFailure) as err:
+        o.McpOAuth.check_iss(facts, "https://evil.example.net")
+    assert (err.value.kind, err.value.code) == (Kind.AUTH, "issuer_mismatch")
+    required = {**facts, "iss_parameter_supported": True}
+    with pytest.raises(McpFailure):
+        o.McpOAuth.check_iss(required, None)
+    o.McpOAuth.check_iss(required, "https://as.example.com")
+
+
+async def test_exchange_refuses_a_wrong_issuer_before_any_request(mcp_env) -> None:
+    async with stack() as (auth, mcp, url):
+        client = o.McpOAuth()
+        facts = (await client.discover(url)).facts("client-1", None, registration="dcr")
+        verifier = o.new_verifier()
+        code = auth.issue_code(s256(verifier))
+        with pytest.raises(McpFailure) as err:
+            await client.exchange(facts, None, code, verifier, iss="https://evil.example.net")
+        assert err.value.code == "issuer_mismatch"
+        assert not [r for r in auth.requests if r["path"] == "/token"]
+        got = await client.exchange(facts, None, code, verifier, iss=auth.base)
+        assert got.access_token == "access-1"
