@@ -128,7 +128,7 @@ def render_call_result(result: Any, *, secrets: Iterable[str] = (),
             texts.append(rendered)
     structured = getattr(result, "structured_content", None)
     if structured is not None and not (usable and any(_same_json(t, structured) for t in texts)):
-        dumped = _dump(structured)[:_HARD_CAP]
+        dumped = clean_text(_dump(structured)[:_HARD_CAP])
         parts.append(dumped if not usable else f"[structured content]\n{dumped}")
     text = _blank_secrets("\n".join(parts).strip(), secrets)
     if not text:

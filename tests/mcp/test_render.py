@@ -131,3 +131,12 @@ def test_a_success_result_has_held_secrets_blanked_but_keeps_other_text() -> Non
                 is_error=False)
     out = r.render_call_result(result, secrets=("tok-secret-123",))
     assert "tok-secret-123" not in out.text and "[REDACTED]" in out.text and "key=plain" in out.text
+
+
+def test_structured_content_is_stripped_of_tag_and_bidi_characters_like_text() -> None:
+    from types import SimpleNamespace as NS
+
+    sneaky = "hi" + TAG + "\u202e"
+    out = r.render_call_result(NS(content=[], structured_content={"a": sneaky}, is_error=False))
+    assert "hi" in out.text and TAG not in out.text and "\u202e" not in out.text
+    assert not any(0xE0000 <= ord(c) <= 0xE007F for c in out.text)
