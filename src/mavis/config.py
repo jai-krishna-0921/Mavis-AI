@@ -292,6 +292,14 @@ class Settings(BaseSettings):
     local_sandbox_procs: int = 64
     local_sandbox_network: bool = False  # true only for a dev who knowingly wants it
 
+    # --- MCP client (v2 track 1, spec 2026-10-14): off by default ---------------------------------------
+    # false: the three MCP chat tools are not registered, /mcp says it is not available, /api/v1/mcp answers
+    # 404 and the web section is hidden (GET /api/v1/config reports it).
+    mcp_enabled: bool = False
+    # Dev and tests only: lets the net guard accept http://localhost and loopback addresses (a fake server on
+    # this machine). Never honoured when ENV=prod (see mcp_localhost_ok).
+    mcp_allow_localhost: bool = False
+
     # --- observability --------------------------------------------------------
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
@@ -350,6 +358,11 @@ class Settings(BaseSettings):
     @property
     def is_sqlite(self) -> bool:
         return self.db_url.startswith("sqlite")
+
+    @property
+    def mcp_localhost_ok(self) -> bool:
+        """The localhost allowance for MCP servers, forced off in prod whatever the env var says."""
+        return self.mcp_allow_localhost and self.env != "prod"
 
 
 @lru_cache
