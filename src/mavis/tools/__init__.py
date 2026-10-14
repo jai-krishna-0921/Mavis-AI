@@ -21,3 +21,11 @@ def load_builtin_tools(registry: ToolRegistry) -> None:
     from mavis.tools.integrations.tools import register_integration_tools
 
     register_integration_tools(registry)
+
+    from mavis.config import get_settings
+
+    if get_settings().mcp_enabled:  # MCP_ENABLED=false: the three MCP tools do not exist
+        from mavis.mcp import tools as mcp_tools
+
+        for tool in mcp_tools.TOOLS:
+            registry.register(tool)

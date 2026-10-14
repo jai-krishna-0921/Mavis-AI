@@ -70,7 +70,7 @@ from mavis.policy import approvals as approval_flow
 from mavis.policy.risk import UNTRUSTED_NOTE
 from mavis.store.db import Session, utcnow
 from mavis.store.models import Message, PendingApproval, User
-from mavis.store.repo import approvals, messages, outbox, tasks, users
+from mavis.store.repo import approvals, mcp_servers, messages, outbox, tasks, users
 from mavis.tools.chat_tools import TurnInfo, current_turn
 from mavis.tools.registry import CARD_RESULT_PREFIXES
 
@@ -87,7 +87,10 @@ DISCOVER_LIMIT = 4  # tools find_tools adds per call
 CHAT_ALWAYS = ("start_task", "pending", "web_search", "track_loop", "wake_me", "complete_item", "remember",
                # the core reads, whenever their account is linked: a question about mail or the calendar never
                # depends on how a ranking scored the words around it (10 Oct: "any emails today?" lost them)
-               "mail_search", "mail_read", "calendar_list", "drive_search")
+               "mail_search", "mail_read", "calendar_list", "drive_search",
+               # tools from the apps the user connected over MCP; unlinked_with_internal drops them for a
+               # user with no active server (and they are not registered at all while MCP_ENABLED is off)
+               "mcp_tools", "mcp_read", "mcp_act")
 CHAT_EXCLUDED = frozenset({"web_extract"})  # URL fetches would let injected text exfiltrate data
 # Sends the user a link by itself: offered only when they ask to connect something (commands.wants_connect).
 CONNECT_TOOL = "connect_account"
@@ -239,6 +242,8 @@ async def unlinked_with_internal(user_id: int) -> frozenset[Capability]:
                 linked = False
             if not linked:
                 missing.add(capability)
+        if get_settings().mcp_enabled and not await mcp_servers.has_active(user_id):
+            missing.add(Capability.MCP)
         return frozenset(missing)
     except Exception:  # noqa: BLE001 - an extra; unknown means the old behaviour
         log.warning("simple_turn.link_state_failed", exc_info=True)

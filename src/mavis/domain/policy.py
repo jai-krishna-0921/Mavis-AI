@@ -34,6 +34,7 @@ class Capability(StrEnum):
     NOTION = "notion"
     SANDBOX = "sandbox"
     WEB = "web"
+    MCP = "mcp"  # the user has at least one active MCP server (see mavis.mcp.tools)
 
 
 class PolicyVerdict(BaseModel):

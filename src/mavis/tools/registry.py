@@ -53,7 +53,7 @@ _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _terms = terms  # select()'s overlap vocabulary (domain.terms)
 
 
-NEVER_AUTO_APPROVE = frozenset({"add_policy_rule", "forget"})
+NEVER_AUTO_APPROVE = frozenset({"add_policy_rule", "forget", "mcp_act"})
 _PREVIEW_IN_RESULT_CHARS = 500
 SAME_REQUEST_WINDOW = timedelta(minutes=30)  # an older card is stale: a repeat after that is a new request
 ALREADY_WAITING_RESULT = (
@@ -360,6 +360,9 @@ class MavisTool:
     # Code-made "Last:" line for the progress card (Phase 12). Gets the arguments and the raw return
     # value; must never include page text, file contents or model prose (hosts, counts and exit codes only).
     progress_label: Callable[[BaseModel, Any], str] | None = None
+    # The most characters of this tool's output the model gets (None: policy.risk.MAX_TOOL_CHARS). MCP tools
+    # cap their own output at 12,000 (spec D8).
+    max_chars: int | None = None
 
     def effective_risk(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn is not None else self.risk
@@ -648,7 +651,7 @@ class ToolRegistry:
             override = out.untrusted
             user_text, out = out.user_text, out.for_model()
         text = out if isinstance(out, str) else json.dumps(out, default=str, ensure_ascii=False)
-        text = truncate(text)
+        text = truncate(text) if tool.max_chars is None else truncate(text, tool.max_chars)
         if audited and not failed:
             await audit.record(user_id, actor=actor, action=tool.name, detail={**detail, "outcome": "ok"})
         if not (tool.untrusted_output if override is None else override):
