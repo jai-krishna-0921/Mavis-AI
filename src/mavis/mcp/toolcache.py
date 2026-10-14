@@ -45,14 +45,26 @@ MUTATING = frozenset({
     "destroy", "revoke", "create", "update", "add", "write", "set", "put", "move", "upload", "assign",
     "schedule", "approve", "text", "sms", "dm", "call", "archive", "unsubscribe", "edit", "modify", "rename",
     "save", "apply", "enable", "disable", "start", "stop", "run", "execute", "trigger", "join", "leave",
-    "follow", "like", "react", "mark", "reorder", "reject", "merge", "close", "open", "clear", "reset"})
+    "follow", "like", "react", "mark", "reorder", "reject", "merge", "close", "clear", "reset",
+    "drop", "push", "replace", "insert", "deploy", "commit", "truncate", "wipe", "erase", "import", "install",
+    "uninstall", "exec", "grant", "refund", "charge", "order", "sell", "sync", "restore", "patch", "kill",
+    "flag", "star", "subscribe", "block", "ban", "mute", "accept", "decline", "comment", "tag", "label",
+    "pin", "lock", "unlock", "upsert", "store", "purge", "generate", "convert", "translate"})
+# A name that chains two actions ("get_and_send") is never a read, whatever the verbs are.
+CONJUNCTIONS = frozenset({"and", "then", "or", "plus", "also"})
 _WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
-_SAFE_NAME = re.compile(r"^[A-Za-z0-9_.:\-]{1,64}$")
+_SAFE_NAME = re.compile(r"[A-Za-z0-9_.:\-]{1,64}")
 
 
 def _stems(name: str) -> list[str]:
     words = [w.lower() for w in _WORD.findall(name or "")]
     return [w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words]
+
+
+def _chains_actions(name: str) -> bool:
+    words = [w.lower() for w in _WORD.findall(name or "")]
+    return any(w in CONJUNCTIONS for w in words) or any(
+        a == "with" and b in {"side", "sides"} for a, b in zip(words, words[1:], strict=False))
 
 
 def mutating_words(name: str) -> set[str]:
@@ -62,7 +74,9 @@ def mutating_words(name: str) -> set[str]:
 def is_read_name(name: str) -> bool:
     """The name starts with a read stem and contains no mutating verb."""
     stems = _stems(name)
-    return bool(stems) and stems[0] in READ_STEMS and not mutating_words(name)
+    if not stems or stems[0] not in READ_STEMS:
+        return False
+    return not mutating_words(name) and not _chains_actions(name)
 
 
 def kind_of(name: str, read_only_hint: bool | None, destructive_hint: bool | None) -> str:
@@ -77,7 +91,7 @@ def build_entries(raw_tools: list[RawTool]) -> list[dict]:
     entries: dict[str, dict] = {}
     skipped = {"name": 0, "schema": 0, "duplicate": 0}
     for raw in raw_tools:
-        if not isinstance(raw.name, str) or not _SAFE_NAME.match(raw.name):
+        if not isinstance(raw.name, str) or not _SAFE_NAME.fullmatch(raw.name):
             skipped["name"] += 1
             continue
         if raw.name in entries:

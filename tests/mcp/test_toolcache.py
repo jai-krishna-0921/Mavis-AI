@@ -119,3 +119,30 @@ def test_find_returns_the_entry_or_none() -> None:
     entries = tc.build_entries([raw("get_a")])
     assert tc.find(entries, "get_a")["name"] == "get_a"
     assert tc.find(entries, "nope") is None
+
+
+@pytest.mark.parametrize("name", [
+    "list_and_drop", "search_and_push", "get_and_replace", "get_and_insert", "fetch_and_deploy",
+    "read_and_commit", "get_or_create", "list_then_send", "get_plus_notify", "get_also",
+    "get_with_side_effects",
+    "get_truncate", "find_wipe", "read_erase", "get_import", "get_install", "get_exec", "get_grant",
+    "get_ban",
+    "get_kill", "get_sync", "get_restore", "get_patch", "get_upsert", "get_purge", "get_generate",
+    "get_convert", "get_translate", "get_refund", "get_charge", "get_lock", "get_pin", "get_star",
+])
+def test_adversarial_names_are_never_reads(name) -> None:
+    assert not tc.is_read_name(name)
+    assert tc.kind_of(name, True, False) == "act"
+
+
+@pytest.mark.parametrize("name", [
+    "get_issue", "list_projects", "search_docs", "read_page", "query_metrics", "describe_table",
+    "count_open_issues", "check_status",
+])
+def test_ordinary_reads_stay_reads(name) -> None:
+    assert tc.kind_of(name, True, False) == "read"
+
+
+def test_a_name_with_a_newline_is_skipped() -> None:
+    out = tc.build_entries([raw("get_note\n"), raw("get_ok")])
+    assert [e["name"] for e in out] == ["get_ok"]
