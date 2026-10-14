@@ -30,6 +30,30 @@ export type Connector = {
   notice?: string | null
 }
 
+export type McpStatus = 'ACTIVE' | 'NEEDS_AUTH' | 'ERROR'
+export type McpAuth = 'none' | 'bearer' | 'oauth'
+export type McpTool = { name: string; kind: 'read' | 'act'; description: string }
+
+// A tool server the user connected (GET /mcp/servers). `host` has no path or query; secrets never appear.
+export type McpServer = {
+  id: number
+  slug: string
+  name: string
+  host: string
+  catalog_id: string | null
+  auth: McpAuth
+  status: McpStatus
+  error: string | null
+  error_text: string | null
+  tool_count: number
+  tools: McpTool[]
+  tools_fetched_at: string | null
+}
+
+export type McpCatalogEntry = { id: string; name: string; description: string; auth: 'none' | 'oauth'; url: string }
+export type McpCreated = { server: McpServer; authorize_url?: string }
+export type McpCreateBody = { catalog_id: string } | { name: string; url: string; bearer_token?: string }
+
 export type VaultKind = 'person' | 'organisation' | 'project' | 'fact' | 'preference'
 export type VaultSource = 'you' | 'gmail' | 'slack' | 'calendar' | 'dashboard'
 
@@ -73,4 +97,5 @@ export type PublicConfig = {
   bot_url: string | null
   slack_enabled: boolean
   google_signin_enabled: boolean
+  mcp_enabled?: boolean
 }

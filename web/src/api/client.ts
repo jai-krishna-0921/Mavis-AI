@@ -2,8 +2,8 @@
 // Proprietary. Use is governed by LICENSE in the repository root.
 import { setSessionHint } from '../lib/session'
 import type {
-  Connector, PublicConfig, ConnectorId, Invite, Me, PollStatus, Preferences, SourceInfo, TelegramStart,
-  VaultItem, VaultKind, VaultPage, VaultSummary,
+  Connector, PublicConfig, ConnectorId, Invite, McpCatalogEntry, McpCreateBody, McpCreated, McpServer, Me,
+  PollStatus, Preferences, SourceInfo, TelegramStart, VaultItem, VaultKind, VaultPage, VaultSummary,
 } from './types'
 
 export const API_BASE = '/api/v1'
@@ -95,6 +95,13 @@ export const api = {
   connect: (id: ConnectorId) => request<{ url: string }>(`/connectors/${id}/connect`, { method: 'POST', body: {} }),
   disconnect: (id: ConnectorId, forget: boolean) =>
     request<void>(`/connectors/${id}/disconnect`, { method: 'POST', body: { forget } }),
+  mcpCatalog: () => request<McpCatalogEntry[]>('/mcp/catalog'),
+  mcpServers: () => request<McpServer[]>('/mcp/servers'),
+  mcpCreate: (body: McpCreateBody) => request<McpCreated>('/mcp/servers', { method: 'POST', body }),
+  mcpConnect: (id: number, bearerToken?: string) =>
+    request<McpCreated>(`/mcp/servers/${id}/connect`, { method: 'POST', body: bearerToken ? { bearer_token: bearerToken } : {} }),
+  mcpRefresh: (id: number) => request<McpServer>(`/mcp/servers/${id}/refresh`, { method: 'POST', body: {} }),
+  mcpDelete: (id: number) => request<void>(`/mcp/servers/${id}`, { method: 'DELETE' }),
   vaultSummary: () => request<VaultSummary>('/vault/summary'),
   vaultItems: (p: { kind: VaultKind; q?: string; cursor?: string }) =>
     request<VaultPage>(`/vault/items${q({ kind: p.kind, q: p.q, cursor: p.cursor })}`),

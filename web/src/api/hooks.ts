@@ -3,7 +3,7 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError } from './client'
 import { hasSessionHint } from '../lib/session'
-import type { ConnectorId, Preferences, VaultKind } from './types'
+import type { ConnectorId, McpCreateBody, Preferences, VaultKind } from './types'
 
 // `publicPage` is for pages anyone can open: /me is only asked when this browser has signed in before,
 // so anonymous visitors never hit an authenticated endpoint.
@@ -30,6 +30,44 @@ export function useDisconnect() {
       qc.invalidateQueries({ queryKey: ['connectors'] }),
       qc.invalidateQueries({ queryKey: ['vault'] }),
     ]),
+  })
+}
+
+// MCP tool servers (the section is only shown when GET /config says mcp_enabled).
+export const useMcpCatalog = (enabled: boolean) =>
+  useQuery({ queryKey: ['mcp', 'catalog'], queryFn: api.mcpCatalog, enabled, staleTime: 5 * 60_000 })
+export const useMcpServers = (enabled: boolean) =>
+  useQuery({ queryKey: ['mcp', 'servers'], queryFn: api.mcpServers, enabled })
+
+export function useCreateMcpServer() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: McpCreateBody) => api.mcpCreate(body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['mcp', 'servers'] }),
+  })
+}
+
+export function useConnectMcp() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { id: number; bearerToken?: string }) => api.mcpConnect(v.id, v.bearerToken),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['mcp', 'servers'] }),
+  })
+}
+
+export function useRefreshMcp() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => api.mcpRefresh(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['mcp', 'servers'] }),
+  })
+}
+
+export function useDeleteMcp() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => api.mcpDelete(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['mcp', 'servers'] }),
   })
 }
 

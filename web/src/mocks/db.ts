@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Jai Krishna. All rights reserved.
 // Proprietary. Use is governed by LICENSE in the repository root.
-import type { Connector, Invite, Me, Preferences, SourceInfo, VaultItem, VaultSource } from '../api/types'
+import type { Connector, Invite, McpServer, Me, Preferences, SourceInfo, VaultItem, VaultSource } from '../api/types'
 
 const now = Date.parse('2026-10-08T09:00:00Z')
 const ago = (days: number) => new Date(now - days * 86_400_000).toISOString()
@@ -67,11 +67,14 @@ export function createDb() {
   const invites: Invite[] = [
     { code: 'k3m9x2', link: 'https://mavis.example.com/?invite=k3m9x2', name: 'Priya', uses: 1, max_uses: 5 },
   ]
+  const mcpServers: McpServer[] = []
+  let nextMcpId = 1
   let items = seedItems()
   let pollCount = 0
   let nextInvite = 1
   return {
-    me, connectors, preferences, invites,
+    me, connectors, preferences, invites, mcpServers,
+    newMcpId() { return nextMcpId++ },
     get items() { return items },
     set items(v: VaultItem[]) { items = v },
     suppressed: [] as string[],

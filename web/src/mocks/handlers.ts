@@ -2,7 +2,7 @@
 // Proprietary. Use is governed by LICENSE in the repository root.
 import { http, HttpResponse } from 'msw'
 import { db } from './db'
-import type { Preferences, VaultItem, VaultKind } from '../api/types'
+import type { McpServer, Preferences, VaultItem, VaultKind } from '../api/types'
 
 const B = '/api/v1'
 const err = (status: number, error: string, message: string) => HttpResponse.json({ error, message }, { status })
@@ -13,9 +13,24 @@ const needCsrf = (req: Request) =>
 
 const PAGE = 8
 
+export const MCP_CATALOG = [
+  { id: 'linear', name: 'Linear', description: 'Issues, projects and comments in your Linear workspace.', auth: 'oauth' as const, url: 'https://mcp.linear.app/mcp' },
+  { id: 'context7', name: 'Context7', description: 'Current documentation and code examples for libraries.', auth: 'none' as const, url: 'https://mcp.context7.com/mcp' },
+]
+
+export const mcpServer = (id: number, over: Partial<McpServer> = {}): McpServer => ({
+  id, slug: `server_${id}`, name: `Server ${id}`, host: 'mcp.example.com', catalog_id: null, auth: 'none', status: 'ACTIVE',
+  error: null, error_text: null, tool_count: 2, tools_fetched_at: '2026-10-14T09:00:00Z',
+  tools: [
+    { name: 'get_note', kind: 'read', description: 'Read a note.' },
+    { name: 'create_note', kind: 'act', description: 'Make a note.' },
+  ],
+  ...over,
+})
+
 export const handlers = [
   http.get(`${B}/config`, () => HttpResponse.json({
-    bot_username: 'Mavis247_bot', bot_url: 'https://telegram.me/Mavis247_bot', slack_enabled: true, google_signin_enabled: true,
+    bot_username: 'Mavis247_bot', bot_url: 'https://telegram.me/Mavis247_bot', slack_enabled: true, google_signin_enabled: true, mcp_enabled: true,
   })),
   http.post(`${B}/auth/telegram/start`, async ({ request }) => {
     const body = (await request.json().catch(() => ({}))) as { invite?: string }
@@ -53,6 +68,50 @@ export const handlers = [
     c.status = 'none'; c.account = null; c.scopes_granted = []; c.missing_scopes = []; c.connected_at = null
     if (body.forget !== false) db().items = db().items.filter((i) => i.source !== (c.id === 'google' ? 'gmail' : 'slack'))
     return new HttpResponse(null, { status: 204 })
+  }),
+
+  http.get(`${B}/mcp/catalog`, () => HttpResponse.json(MCP_CATALOG)),
+  http.get(`${B}/mcp/servers`, () => HttpResponse.json(db().mcpServers)),
+  http.post(`${B}/mcp/servers`, async ({ request }) => {
+    const bad = needCsrf(request); if (bad) return bad
+    const body = (await request.json()) as { catalog_id?: string; name?: string; url?: string; bearer_token?: string }
+    const d = db()
+    if (body.catalog_id) {
+      const entry = MCP_CATALOG.find((e) => e.id === body.catalog_id)
+      if (!entry) return err(422, 'invalid_catalog_id', 'That server is not in the list.')
+      const oauth = entry.auth === 'oauth'
+      const server = mcpServer(d.newMcpId(), { slug: entry.id, name: entry.name, catalog_id: entry.id, auth: entry.auth, status: oauth ? 'NEEDS_AUTH' : 'ACTIVE', tool_count: oauth ? 0 : 2, tools: oauth ? [] : mcpServer(0).tools })
+      d.mcpServers.push(server)
+      return HttpResponse.json(oauth ? { server, authorize_url: `/oauth/mock/mcp/${entry.id}` } : { server }, { status: 201 })
+    }
+    if (!body.url?.startsWith('https://')) return err(422, 'invalid_url', 'That address is not allowed. Use a public https address.')
+    const server = mcpServer(d.newMcpId(), { name: body.name ?? 'Custom', auth: body.bearer_token ? 'bearer' : 'none', host: new URL(body.url).host })
+    d.mcpServers.push(server)
+    return HttpResponse.json({ server }, { status: 201 })
+  }),
+  http.post(`${B}/mcp/servers/:id/connect`, async ({ request, params }) => {
+    const bad = needCsrf(request); if (bad) return bad
+    const server = db().mcpServers.find((s) => s.id === Number(params.id))
+    if (!server) return err(404, 'not_found', 'That server was not found.')
+    if (server.auth === 'oauth') return HttpResponse.json({ server, authorize_url: `/oauth/mock/mcp/${server.slug}` })
+    const body = (await request.json().catch(() => ({}))) as { bearer_token?: string }
+    if (!body.bearer_token) return err(422, 'invalid_bearer_token', 'Paste the server\'s token to reconnect it.')
+    server.status = 'ACTIVE'; server.error = null; server.error_text = null
+    return HttpResponse.json({ server })
+  }),
+  http.post(`${B}/mcp/servers/:id/refresh`, ({ request, params }) => {
+    const bad = needCsrf(request); if (bad) return bad
+    const server = db().mcpServers.find((s) => s.id === Number(params.id))
+    if (!server) return err(404, 'not_found', 'That server was not found.')
+    server.tools_fetched_at = '2026-10-14T10:00:00Z'
+    return HttpResponse.json(server)
+  }),
+  http.delete(`${B}/mcp/servers/:id`, ({ request, params }) => {
+    const bad = needCsrf(request); if (bad) return bad
+    const d = db()
+    const n = d.mcpServers.length
+    d.mcpServers.splice(0, n, ...d.mcpServers.filter((s) => s.id !== Number(params.id)))
+    return d.mcpServers.length < n ? new HttpResponse(null, { status: 204 }) : err(404, 'not_found', 'That server was not found.')
   }),
 
   http.get(`${B}/vault/summary`, () => {

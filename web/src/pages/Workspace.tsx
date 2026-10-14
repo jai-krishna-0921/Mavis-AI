@@ -13,6 +13,7 @@ import { Modal } from '../components/Modal'
 import { SERVICES, ServiceIcon } from '../components/ServiceIcon'
 import { useToast } from '../components/Toast'
 import { EmptyState, IconTile, PageHead, Panel, SkeletonRows } from '../components/Ui'
+import { McpSection } from './McpSection'
 
 function Contact() {
   const me = useMe()
@@ -227,6 +228,7 @@ function ConnectNote() {
 
 export function Workspace() {
   const conns = useConnectors()
+  const cfg = useConfig()
   return (
     <div>
       <PageHead title="Workspace" lede="Where Mavis lives and what it can see." />
@@ -241,6 +243,7 @@ export function Workspace() {
           {conns.data?.map((c) => <ConnectorRow key={c.id} c={c} />)}
         </ul>
       </Panel>
+      {cfg.data?.mcp_enabled && <McpSection />}
     </div>
   )
 }
