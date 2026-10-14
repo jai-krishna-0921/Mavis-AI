@@ -116,6 +116,13 @@ class Completed:
     code: str = ""
 
 
+# Failures that prove the server did not run the call (nothing was sent, or it answered with a refusal).
+# Any other failure of an act may have happened after the request reached the server, so the outcome is
+# unknown whatever the classification.
+NOT_RUN_CODES = frozenset({"unreachable", "rate_limited", "not_found", "not_mcp", "rejected", "blocked_url",
+                           "rpc_error"})
+
+
 def _clean_name(value: str) -> str:
     name = clean_description(value, NAME_MAX_CHARS)
     if not name:
@@ -194,13 +201,16 @@ class McpService:
         except TimeoutError:
             raise McpFailure(Failure(Kind.TRANSIENT, "rate_limited")) from None
 
-    async def _attempt(self, row: McpServer, op):
+    async def _attempt(self, row: McpServer, op, used: list[str] | None = None):
         """Run `op(endpoint)` with the row's token. A 401 or 403 on an OAuth server gets one forced token
-        refresh and one more try (the request was refused, not run, so repeating it is safe)."""
+        refresh and one more try (the request was refused, not run, so repeating it is safe). `used`, when
+        given, collects every secret sent, so a caller can redact what the live (refreshed) token was."""
         await self._slot()
         try:
             token = await self.tokens.access_token(row.user_id, row.id)
             known = (*sealing.secrets_of(row), *((token,) if token else ()))
+            if used is not None:
+                used.extend(known)
             try:
                 return await op(Endpoint(row.url, bearer=token, secrets=known))
             except McpFailure as exc:
@@ -208,6 +218,8 @@ class McpService:
                     raise
                 token = await self.tokens.access_token(row.user_id, row.id, force=True)
                 known = (*sealing.secrets_of(row), *((token,) if token else ()))
+                if used is not None:
+                    used.extend(known)
                 return await op(Endpoint(row.url, bearer=token, secrets=known))
         finally:
             self._slots.release()
@@ -325,6 +337,9 @@ class McpService:
         stored = row.oauth or {}
         entry = catalog.get(row.catalog_id) if row.catalog_id else None
         same_issuer = stored.get("issuer") == disc.issuer
+        if stored.get("issuer") and (not same_issuer or stored.get("token_endpoint") != disc.token_endpoint):
+            # tokens belong to the issuer that gave them: never let them meet another issuer's endpoint
+            await repo.clear_tokens(row.user_id, row.id)
         client_secret_sealed = stored.get(sealing.CLIENT_SECRET) if same_issuer else None
         if entry is not None and entry.client_id:
             client_id, registration = entry.client_id, "preregistered"
@@ -445,20 +460,22 @@ class McpService:
             return await self.client.call_tool(ep, tool, arguments, deadline_s=deadline_s)
 
         tries = 2 if retry_transient else 1
+        used: list[str] = list(sealing.secrets_of(row))
         for attempt in range(tries):
             try:
-                result = await self._attempt(row, op)
+                result = await self._attempt(row, op, used)
             except McpFailure as exc:
                 await self._apply(row, exc, listing=False)
                 if exc.kind is Kind.TRANSIENT and attempt + 1 < tries:
                     await asyncio.sleep(0.5)
                     continue
-                unknown = exc.failure.unknown_outcome and not retry_transient
+                unknown = not retry_transient and exc.kind is not Kind.AUTH and (
+                    exc.failure.unknown_outcome or exc.code not in NOT_RUN_CODES)
                 text = model_text(row.display_name, exc.code, exc.kind, unknown_outcome=unknown, tool=tool)
                 if exc.code == "rpc_error" and exc.detail:  # the server's own (sanitized, short) reason
                     text += f" The server said: {exc.detail}"
                 return CallResult(text, ok=False, unknown_outcome=unknown, code=exc.code)
-            rendered = render_call_result(result, secrets=sealing.secrets_of(row))
+            rendered = render_call_result(result, secrets=tuple(dict.fromkeys(used)))
             return CallResult(rendered.text, ok=True, tool_error=rendered.is_error)
         raise AssertionError("unreachable")  # pragma: no cover
 

@@ -11,7 +11,7 @@ import pytest
 
 from mavis.mcp import catalog, sealing
 from mavis.mcp import service as svc
-from mavis.mcp.failures import Kind
+from mavis.mcp.failures import Failure, Kind, McpFailure
 from mavis.mcp.service import McpService
 from mavis.store.repo import mcp_servers as repo
 from tests.mcp.fake_auth import FakeAuthServer
@@ -283,6 +283,23 @@ async def test_oauth_discovery_failure_deletes_the_new_server(service, two_users
     assert err.value.code == "oauth_unsupported" and await repo.count(a.id) == 0
 
 
+async def test_a_changed_issuer_drops_the_old_tokens_so_they_never_meet_the_new_one(service, two_users):
+    a, _ = two_users
+    other = FakeAuthServer()
+    async with oauth_server() as (auth, fake, url), serve(other.app) as other_base:
+        other.base = other_base
+        made = await service.create(a.id, name="Auto", url=url)
+        state, code = consent(auth, made.authorize_url)
+        assert (await service.complete_oauth(a.id, state, code)).ok
+        fake.prm = {**fake.prm, "authorization_servers": [other_base]}  # the server moved to another issuer
+        again = await service.connect(a.id, made.server["id"])
+        row = await repo.get(a.id, made.server["id"])
+        assert again.authorize_url and row.oauth["issuer"] == other_base
+        assert (row.access_token, row.refresh_token, row.expires_at) == (None, None, None)
+        await service.refresh_view(a.id, made.server["id"])
+    assert not [r for r in other.requests if r["path"] == "/token"]
+
+
 # --- reconnecting a token server ------------------------------------------------------------------
 
 async def test_a_new_token_reconnects_a_token_server(service, two_users) -> None:
@@ -515,6 +532,39 @@ async def test_a_401_on_an_oauth_act_refreshes_the_token_and_runs_it_once(servic
         fake.token = "access-2"
         out = await service.call(got, {"title": "t"}, retry_transient=False)
     assert out == svc.CallResult("made t", ok=True) and fake.calls == [("create_note", {"title": "t"})]
+
+
+async def test_a_refreshed_token_is_redacted_from_the_result(service, two_users) -> None:
+    a, _ = two_users
+    echo = {"get_note": lambda args: text_result("the token is access-2 ok", is_error=True)}
+    async with oauth_server() as (auth, fake, url):
+        fake.handlers = echo
+        made = await service.create(a.id, name="Auto", url=url)
+        state, code = consent(auth, made.authorize_url)
+        await service.complete_oauth(a.id, state, code)
+        got = await service.resolve(a.id, "auto", "get_note")
+        fake.token = "access-2"  # the call refreshes mid-way; the stale snapshot knows only access-1
+        out = await service.call(got, {"id": "1"}, retry_transient=True)
+    assert out.ok and "access-2" not in out.text and "[REDACTED]" in out.text
+
+
+@pytest.mark.parametrize("failure", [
+    Failure(Kind.TRANSIENT, "connection_lost"), Failure(Kind.PERMANENT, "redirect"),
+    Failure(Kind.PERMANENT, "protocol")])
+async def test_an_act_that_may_have_reached_the_server_says_the_outcome_is_unknown(
+        service, two_users, monkeypatch, failure) -> None:
+    a, _ = two_users
+    async with open_server() as (fake, url):
+        await service.create(a.id, name="Notes", url=url)
+        got = await service.resolve(a.id, "notes", "create_note")
+
+        async def boom(*args, **kwargs):
+            raise McpFailure(failure)
+
+        monkeypatch.setattr(service.client, "call_tool", boom)
+        out = await service.call(got, {"title": "x"}, retry_transient=False)
+    assert out.ok is False and out.unknown_outcome is True
+    assert "outcome is unknown" in out.text and "cannot be used right now" not in out.text
 
 
 async def test_secrets_never_reach_the_model_through_a_result(service, two_users) -> None:

@@ -132,6 +132,15 @@ async def save_tokens(user_id: int, server_id: int, *, access: str, refresh: str
         await s.commit()
 
 
+async def clear_tokens(user_id: int, server_id: int) -> None:
+    """Forget the access and refresh token and the expiry (the issuer that gave them changed)."""
+    async with dbm.Session() as s:
+        await s.execute(update(McpServer).where(McpServer.id == server_id, McpServer.user_id == user_id)
+                        .values(access_token=None, refresh_token=None, expires_at=None,
+                                updated_at=timeutil.now()))
+        await s.commit()
+
+
 async def delete_server(user_id: int, server_id: int) -> bool:
     """Delete the row, its tokens with it, and any consent in flight. True when a row was deleted."""
     async with dbm.Session() as s:
