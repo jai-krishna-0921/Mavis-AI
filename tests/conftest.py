@@ -647,3 +647,13 @@ def localhost_ok(settings, monkeypatch):
     get_settings.cache_clear()
     yield get_settings()
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_mcp_service():
+    """The MCP service is a process singleton (its session slots belong to one event loop)."""
+    from mavis.mcp import service
+
+    service.set_service(None)
+    yield
+    service.set_service(None)
