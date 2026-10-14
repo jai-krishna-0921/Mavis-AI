@@ -28,6 +28,8 @@ from mavis.mcp.text import clean_description, sanitize_error
 
 JSONRPC_METHOD_NOT_FOUND = -32601
 JSONRPC_INTERNAL_ERROR = -32603
+# parse error, invalid request, method not found, invalid params: the server refused before running anything
+SERVER_REFUSAL_CODES = frozenset({-32700, -32600, -32601, -32602})
 # What an SSE-only server (or its load balancer) answers the Streamable HTTP initialize POST with: Bad
 # Request, Method Not Allowed, Not Acceptable, Length Required.
 STREAMABLE_REJECT_STATUSES = (400, 405, 406, 411)
@@ -190,7 +192,12 @@ def classify(exc: BaseException, *, status: int | None = None, phase: str = "con
     if isinstance(root, MCPError):
         if root.code == JSONRPC_METHOD_NOT_FOUND and not call:
             return Failure(Kind.PERMANENT, "not_mcp")
-        return Failure(Kind.TRANSIENT, "rpc_error" if call else "protocol")
+        # Only an error the server itself returned for a malformed request proves the call did not run. The
+        # SDK also raises MCPError for a closed connection and a request timeout; those, and -32603 or any
+        # unknown code, may have followed a call that ran.
+        sent = root.code in SERVER_REFUSAL_CODES
+        return Failure(Kind.TRANSIENT, "rpc_error" if call else "protocol",
+                       unknown_outcome=call and not sent)
     if isinstance(root, (ValidationError, ValueError, KeyError)):
         return Failure(Kind.TRANSIENT if call else Kind.PERMANENT, "protocol")
     if is_session_expired(exc):

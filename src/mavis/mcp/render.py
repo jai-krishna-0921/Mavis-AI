@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mavis.mcp.limits import MAX_RESULT_CHARS
-from mavis.mcp.text import clean_description, clean_text, sanitize_error, truncate_head_tail
+from mavis.mcp.text import REDACTED, clean_description, clean_text, sanitize_error, truncate_head_tail
 
 EMPTY_RESULT = "(the tool returned no content)"
 ERROR_FALLBACK = "The tool returned an error with no message."
@@ -99,6 +99,15 @@ def _error_text(blocks: Iterable[Any]) -> str:
     return "\n".join(parts)
 
 
+def _blank_secrets(text: str, secrets: Iterable[str]) -> str:
+    """Exact-match redaction of the secrets we sent. Success text gets only this, not the credential-shape
+    patterns (they would mangle ordinary results)."""
+    for secret in secrets:
+        if secret and len(secret) >= 6:
+            text = text.replace(secret, REDACTED)
+    return text
+
+
 def render_call_result(result: Any, *, secrets: Iterable[str] = (),
                        limit: int = MAX_RESULT_CHARS) -> Rendered:
     """`result` is an `mcp_types.CallToolResult` (or anything shaped like one)."""
@@ -121,7 +130,7 @@ def render_call_result(result: Any, *, secrets: Iterable[str] = (),
     if structured is not None and not (usable and any(_same_json(t, structured) for t in texts)):
         dumped = _dump(structured)[:_HARD_CAP]
         parts.append(dumped if not usable else f"[structured content]\n{dumped}")
-    text = "\n".join(parts).strip()
+    text = _blank_secrets("\n".join(parts).strip(), secrets)
     if not text:
         return Rendered(EMPTY_RESULT)
     return Rendered(truncate_head_tail(text[:_HARD_CAP], limit, label="RESULT"))

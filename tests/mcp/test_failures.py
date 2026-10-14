@@ -160,3 +160,10 @@ async def test_the_probe_ignores_get_answers_and_a_good_post_clears_an_earlier_e
     assert probe.status == 400
     await probe(_response(200))  # the next one worked
     assert probe.status is None
+
+
+def test_only_a_server_refusal_code_leaves_a_call_outcome_known() -> None:
+    for code in (-32700, -32600, -32601, -32602):
+        assert f.classify(MCPError(code, "no"), phase="call").unknown_outcome is False
+    for code in (-32603, -32000, -32001, 7):
+        assert f.classify(MCPError(code, "no"), phase="call").unknown_outcome is True

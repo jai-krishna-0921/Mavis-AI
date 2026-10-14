@@ -567,6 +567,40 @@ async def test_an_act_that_may_have_reached_the_server_says_the_outcome_is_unkno
     assert "outcome is unknown" in out.text and "cannot be used right now" not in out.text
 
 
+async def test_a_refreshed_token_is_redacted_from_a_successful_result_too(service, two_users) -> None:
+    a, _ = two_users
+    async with oauth_server() as (auth, fake, url):
+        fake.handlers = {"get_note": lambda args: text_result("the token is access-2 ok")}
+        made = await service.create(a.id, name="Auto", url=url)
+        state, code = consent(auth, made.authorize_url)
+        await service.complete_oauth(a.id, state, code)
+        got = await service.resolve(a.id, "auto", "get_note")
+        fake.token = "access-2"
+        out = await service.call(got, {"id": "1"}, retry_transient=True)
+    assert out.ok and not out.tool_error and "access-2" not in out.text and "[REDACTED]" in out.text
+
+
+@pytest.mark.parametrize(("code", "unknown"), [
+    (-32602, False), (-32601, False), (-32603, True), (-32000, True), (-32001, True), (12345, True)])
+async def test_only_a_server_refusal_proves_an_act_did_not_run(
+        service, two_users, monkeypatch, code, unknown) -> None:
+    from mavis.mcp import failures
+    from mcp import MCPError
+
+    a, _ = two_users
+    async with open_server() as (fake, url):
+        await service.create(a.id, name="Notes", url=url)
+        got = await service.resolve(a.id, "notes", "create_note")
+
+        async def boom(*args, **kwargs):
+            raise McpFailure(failures.classify(MCPError(code, "x"), phase="call"))
+
+        monkeypatch.setattr(service.client, "call_tool", boom)
+        out = await service.call(got, {"title": "x"}, retry_transient=False)
+    assert out.ok is False and out.unknown_outcome is unknown
+    assert ("outcome is unknown" in out.text) is unknown
+
+
 async def test_secrets_never_reach_the_model_through_a_result(service, two_users) -> None:
     a, _ = two_users
     said = "auth failed for Bearer good-token-1 key=zzz98765"

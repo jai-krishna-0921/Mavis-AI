@@ -122,3 +122,12 @@ def test_a_secret_straddling_the_truncation_cut_is_never_partly_leaked() -> None
         call = mt.CallToolResult(content=[mt.TextContent(text=text)], is_error=True)
         res = r.render_call_result(call, secrets=[secret], limit=limit)
         assert "S3CR3T" not in res.text and "kkkkk" not in res.text, start
+
+
+def test_a_success_result_has_held_secrets_blanked_but_keeps_other_text() -> None:
+    from types import SimpleNamespace as NS
+
+    result = NS(content=[NS(type="text", text="token tok-secret-123 and key=plain")], structured_content=None,
+                is_error=False)
+    out = r.render_call_result(result, secrets=("tok-secret-123",))
+    assert "tok-secret-123" not in out.text and "[REDACTED]" in out.text and "key=plain" in out.text
