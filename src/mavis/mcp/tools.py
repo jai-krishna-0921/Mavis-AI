@@ -14,6 +14,7 @@ All three return untrusted text (`untrusted_output=True`): the run is tainted li
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -28,7 +29,14 @@ from mavis.mcp import service as svc
 from mavis.mcp.limits import MAX_RESULT_CHARS, PREVIEW_ARGS, PREVIEW_VALUE_CHARS
 from mavis.mcp.schema import argument_summary
 from mavis.mcp.text import clean_description, clean_text
-from mavis.tools.registry import MavisTool, Prepared, ToolContext, contextual
+from mavis.tools.registry import (
+    MavisTool,
+    Prepared,
+    TaintPolicy,
+    ToolContext,
+    contextual,
+    current_run,
+)
 
 AGENTS = frozenset({"conversation"})
 LISTING_BUDGET = 11_000  # characters of tool lines in the mcp_tools listing (the output cap is 12,000)
@@ -135,7 +143,12 @@ async def mcp_read(ctx: ToolContext, args: CallArgs) -> str:
     cleaned, problem = service.check(resolved, args.arguments)
     if problem:
         return problem
-    return (await service.call(resolved, cleaned, retry_transient=True)).text
+    res = await service.call(resolved, cleaned, retry_transient=True)
+    if res.ok and res.tool_error:
+        # Spec D8: the server's isError reaches the model as a tool error, never as a plain result.
+        raise ActionFailed(f"Tool error: {args.tool} returned an error: {res.text}",
+                           reason=failure_text(FailureKind.UNKNOWN, resolved.server.display_name))
+    return res.text
 
 
 async def mcp_act(ctx: ToolContext, args: CallArgs) -> str:
@@ -145,6 +158,7 @@ async def mcp_act(ctx: ToolContext, args: CallArgs) -> str:
     except svc.Refusal as refusal:
         raise ActionFailed(refusal.text, reason="That app or tool is not available any more.") from None
     cleaned, problem = service.check(resolved, args.arguments)
+    problem = problem or _card_problem(args.tool, cleaned, resolved)
     if problem:
         raise ActionFailed(problem, reason="Some of the details were not accepted, so it was not done.")
     if args.pin != _pin(resolved):
@@ -162,34 +176,64 @@ async def mcp_act(ctx: ToolContext, args: CallArgs) -> str:
 
 
 def _pin(resolved: svc.Resolved) -> str:
-    return f"{resolved.server.id}:{resolved.server.url}"
+    """The server row and a digest of its address (never the address: a vendor URL can hold a secret, and the
+    pin is copied into the card, the audit log and the reviser's prompt)."""
+    digest = hashlib.sha256(str(resolved.server.url).encode()).hexdigest()[:16]
+    return f"{resolved.server.id}:{digest}"
 
 
-async def _prepare_act(ctx: ToolContext, args: CallArgs) -> Prepared:
-    """Before a card is queued: the server and tool must exist and the arguments must fit the schema, so
-    the user is never asked to approve a call that cannot work. The note carries facts we verified."""
-    service = svc.get_service()
-    try:
-        resolved = await service.resolve(ctx.user_id, args.server, args.tool)
-    except svc.Refusal as refusal:
-        return Prepared(refusal=refusal.text)
-    cleaned, problem = service.check(resolved, args.arguments)
-    if problem:
-        return Prepared(refusal=problem)
+def _card_problem(tool: str, cleaned: dict, resolved: svc.Resolved) -> str | None:
+    """The rules a card must meet to show every argument it will run with. Checked before a card is queued
+    AND again before it runs, so no path that queued or edited a card can skip them."""
     if len(cleaned) > PREVIEW_ARGS:
-        return Prepared(refusal=f"{args.tool} was given {len(cleaned)} arguments, but the approval card can "
-                                f"show only {PREVIEW_ARGS}. Send fewer arguments.")
+        return (f"{tool} was given {len(cleaned)} arguments, but the approval card can show only "
+                f"{PREVIEW_ARGS}. Send fewer arguments.")
     declared = (resolved.tool.get("input_schema") or {}).get("properties")
     if isinstance(declared, dict) and declared:
         unknown = sorted(str(k) for k in cleaned if k not in declared)
         if unknown:
             shown = ", ".join(clean_description(k, 40) for k in unknown[:5])
-            return Prepared(refusal=f"{args.tool} has no argument called {shown}. Use only the arguments "
-                                    "listed by mcp_tools.")
-    # What the card shows and what is pinned: the real slug, the cleaned arguments, and the exact server row.
-    args.server, args.arguments, args.pin = resolved.server.slug, cleaned, _pin(resolved)
-    name = clean_description(resolved.server.display_name, 80)
-    return Prepared(note=f"Server: {name} ({svc.host_of(resolved.server.url)})")
+            return f"{tool} has no argument called {shown}. Use only the arguments listed by mcp_tools."
+    return None
+
+
+async def _prepare_act(ctx: ToolContext, args: CallArgs) -> Prepared:
+    """Before a card is queued: the server and tool must exist and the arguments must fit the schema, so
+    the user is never asked to approve a call that cannot work. The note carries facts we verified. Any
+    failure here refuses: a card is never queued from unchecked, model-written arguments."""
+    args.pin = None  # only this step may set it, whatever the model sent
+    try:
+        service = svc.get_service()
+        try:
+            resolved = await service.resolve(ctx.user_id, args.server, args.tool)
+        except svc.Refusal as refusal:
+            return Prepared(refusal=refusal.text)
+        cleaned, problem = service.check(resolved, args.arguments)
+        problem = problem or _card_problem(args.tool, cleaned, resolved)
+        if problem:
+            return Prepared(refusal=problem)
+        # What the card shows and what is pinned: the real slug, the cleaned arguments, the exact server row.
+        args.server, args.arguments, args.pin = resolved.server.slug, cleaned, _pin(resolved)
+        name = clean_description(resolved.server.display_name, 80)
+        return Prepared(note=f"Server: {name} ({svc.host_of(resolved.server.url)})")
+    except Exception:  # noqa: BLE001 - fail closed: refuse rather than queue what was not checked
+        args.pin = None
+        return Prepared(refusal=f"{args.tool} on {clean_description(args.server, 24)} could not be checked "
+                                "just now, so no approval was asked for. Try again in a moment.")
+
+
+async def _prepare_read(ctx: ToolContext, args: CallArgs) -> Prepared:
+    """A read on a server the user typed in themselves is not trusted to run on its own once the run has
+    read third-party text (an injected instruction could push private data into its arguments): the
+    taint policy's card applies. Catalog servers and untainted runs stay automatic."""
+    run = current_run.get()
+    if run is None or not run.self_taint():
+        return Prepared(taint_exempt=True)
+    try:
+        resolved = await svc.get_service().resolve(ctx.user_id, args.server, args.tool)
+    except svc.Refusal:
+        return Prepared(taint_exempt=True)  # mcp_read refuses it itself; nothing runs
+    return Prepared(taint_exempt=resolved.server.catalog_id is not None)
 
 
 def _value(value: Any) -> str:
@@ -236,6 +280,7 @@ TOOLS = [
                      "listed arguments. Does not change anything. For an [act] tool use mcp_act."),
         args_model=CallArgs, risk=RiskClass.READ, fn=contextual(mcp_read), agents=AGENTS,
         requires=Capability.MCP, untrusted_output=True, priority=60, timeout_s=35, max_chars=MAX_RESULT_CHARS,
+        on_taint=TaintPolicy.APPROVE, prepare=_prepare_read, preview=preview_act,
         progress_label=_used,
     ),
     MavisTool(
@@ -247,6 +292,6 @@ TOOLS = [
         args_model=CallArgs, risk=RiskClass.OUTWARD, fn=contextual(mcp_act), agents=AGENTS,
         requires=Capability.MCP, untrusted_output=True, priority=60, timeout_s=45, max_chars=MAX_RESULT_CHARS,
         preview=preview_act, prepare=_prepare_act, identity=("server", "tool", "arguments", "pin"),
-        progress_label=_used,
+        editable=False, progress_label=_used,
     ),
 ]

@@ -567,8 +567,14 @@ async def connect_gate(state: OrchestratorState) -> Command:
 # --- approvals -----------------------------------------------------------------------
 
 
+class NotEditable(Exception):
+    """The card's tool does not allow a revision (its pre-step verifies what the card shows)."""
+
+
 async def revise_approval(approval: Any, instructions: str) -> None:
     tool = get_registry().get(approval.tool)
+    if not tool.editable:
+        raise NotEditable(approval.tool)
     ctx = await tool_context(approval.user_id)
     # "move it to tomorrow" needs the user's clock: relative days resolve against now, in their zone
     local = timeutil.to_local(timeutil.now(), ctx.timezone)
@@ -589,6 +595,16 @@ async def revise_approval(approval: Any, instructions: str) -> None:
 
     if (updated := await approvals.get(approval.id)) is not None:
         await approval_flow.sync_action_time_expiry(updated)  # the edit may have moved the action time
+
+
+async def notify_not_editable(user_id: int, approval_id: int, attempt: int) -> None:
+    from mavis.policy import approvals as approval_flow  # lazy: policy.approvals imports the runner
+
+    try:
+        await approval_flow.say(user_id, approval_flow.NOT_EDITABLE_TEXT,
+                                dedupe_key=f"approval:{approval_id}:not_editable:{attempt}")
+    except Exception as exc:  # noqa: BLE001 - the re-prompt still follows
+        log.warning("approval.not_editable_notice_failed", approval_id=approval_id, error=_err(exc))
 
 
 async def notify_revise_failed(user_id: int, approval_id: int, attempt: int) -> None:
@@ -718,6 +734,11 @@ async def approval_gate(state: OrchestratorState) -> Command:
         try:
             await revise_approval(pending, str(answer.get("instructions", "")))
         except Exception as exc:  # noqa: BLE001 - an edit must never strand the approval (F21)
+            if isinstance(exc, NotEditable):
+                await approvals.update_args(pending.id, pending.arguments, pending.preview)
+                attempt = state.get("revise_failures", {}).get(str(pending.id), 0) + 1
+                await notify_not_editable(pending.user_id, pending.id, attempt)
+                return Command(goto="approval_gate", update={"revise_failures": {str(pending.id): attempt}})
             log.warning("approval.revise_failed", approval_id=pending.id, error=_err(exc))
             await approvals.update_args(pending.id, pending.arguments, pending.preview)
             attempt = state.get("revise_failures", {}).get(str(pending.id), 0) + 1

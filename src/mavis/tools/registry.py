@@ -363,6 +363,9 @@ class MavisTool:
     # The most characters of this tool's output the model gets (None: policy.risk.MAX_TOOL_CHARS). MCP tools
     # cap their own output at 12,000 (spec D8).
     max_chars: int | None = None
+    # False: the card has no Edit (a revision would skip the pre-step that verified it). The user is told to
+    # ask again instead.
+    editable: bool = True
 
     def effective_risk(self, args: BaseModel) -> RiskClass:
         return self.risk_fn(args) if self.risk_fn is not None else self.risk
@@ -396,6 +399,8 @@ class Prepared:
     risk: RiskClass | None = None
     refusal: str | None = None
     note: str | None = None
+    # True: the tool's on_taint=APPROVE card does not apply to this call (MCP reads on a catalog server).
+    taint_exempt: bool = False
 
 
 PrepareFn = Callable[[ToolContext, BaseModel], Awaitable[Prepared]]
@@ -507,7 +512,7 @@ class ToolRegistry:
             log.info("tool.refused_before_approval", tool=tool.name)
             return Prepared(risk=risk, refusal=prepared.refusal)
         escalated = higher_risk(risk, prepared.risk) if prepared.risk is not None else risk
-        return Prepared(risk=escalated, note=prepared.note)
+        return Prepared(risk=escalated, note=prepared.note, taint_exempt=prepared.taint_exempt)
 
     async def invoke(self, tool: MavisTool, user_id: int, args: BaseModel) -> str:
         # Capability first: the user is asked to connect BEFORE being asked to approve.
@@ -520,7 +525,8 @@ class ToolRegistry:
         risk = prepared.risk or tool.effective_risk(args)
         note = f"\n{prepared.note}" if prepared.note else ""
         tainted = _run_tainted()  # outward: standing rules never auto-approve after third-party text
-        if _gate_tainted(tool, args, risk) and tool.on_taint is TaintPolicy.APPROVE:
+        if (_gate_tainted(tool, args, risk) and tool.on_taint is TaintPolicy.APPROVE
+                and not prepared.taint_exempt):
             log.info("tool.taint_needs_approval", tool=tool.name)
             preview = tool.render_preview(args, await tool_context(user_id)) + note
             raise ApprovalRequired(tool.name, preview, payload)

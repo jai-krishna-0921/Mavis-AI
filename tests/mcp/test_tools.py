@@ -188,12 +188,13 @@ async def test_mcp_read_on_unknown_things_says_so(notes, registry) -> None:
     assert fake.attempts == 0
 
 
-async def test_a_tool_error_from_the_server_is_still_fenced_text(notes, registry) -> None:
+async def test_a_tool_error_from_the_server_reaches_the_model_marked_as_a_tool_error(notes, registry) -> None:
     a, fake, _ = notes
     fake.handlers["get_note"] = lambda args: text_result("no such note", is_error=True)
     out = await lc(registry, a.id, "mcp_read").ainvoke({"server": "notes", "tool": "get_note",
                                                         "arguments": {"id": "1"}})
-    assert out == '<untrusted source="mcp_read">\nno such note\n</untrusted>'
+    assert out == '<untrusted source="mcp_read">\nTool error: get_note returned an error: no such note\n</untrusted>'
+    assert fake.attempts == 1
 
 
 async def test_a_read_is_retried_once_when_the_connection_hiccups(notes, registry) -> None:
@@ -446,3 +447,156 @@ async def test_a_server_deleted_and_re_added_under_the_same_name_is_not_run(note
         with pytest.raises(ActionFailed) as err:
             await registry.execute_approved(pending.id)
     assert "changed after the user was asked" in str(err.value) and fake.attempts == 0
+
+
+# --- final review: the card's guarantees hold at execute, on edit and when the pre-step fails -------------------
+
+async def test_a_pin_the_model_sends_is_ignored_and_the_real_one_holds_no_address(notes, registry) -> None:
+    a, fake, service = notes
+    tid, out = await queue(registry, a.id, {**ACT, "pin": "7:https://evil.example/x"})
+    pending = await approvals.next_open(tid)
+    row = (await service.list_servers_rows(a.id))[0]
+    pin = pending.arguments["pin"]
+    assert out.startswith("QUEUED_FOR_APPROVAL #") and pin != "7:https://evil.example/x"
+    assert pin.startswith(f"{row.id}:") and len(pin.split(":", 1)[1]) == 16 and row.url not in pin
+    assert "127.0.0.1" not in pin
+    await registry.execute_approved(pending.id)
+    assert fake.attempts == 1
+
+
+async def test_an_approved_card_with_too_many_arguments_is_refused_at_execute(notes, registry) -> None:
+    a, fake, _ = notes
+    tid, _ = await queue(registry, a.id, ACT)
+    pending = await approvals.next_open(tid)
+    many = {"title": "x", **{f"k{i}": i for i in range(12)}}
+    await approvals.update_args(pending.id, {**pending.arguments, "arguments": many}, pending.preview)
+    with pytest.raises(ActionFailed) as err:
+        await registry.execute_approved(pending.id)
+    assert "can show only 12" in str(err.value) and fake.attempts == 0
+
+
+async def test_an_approved_card_with_an_undeclared_argument_is_refused_at_execute(notes, registry) -> None:
+    a, fake, _ = notes
+    tid, _ = await queue(registry, a.id, ACT)
+    pending = await approvals.next_open(tid)
+    await approvals.update_args(pending.id, {**pending.arguments, "arguments": {"title": "x", "visibility": "public"}},
+                                pending.preview)
+    with pytest.raises(ActionFailed) as err:
+        await registry.execute_approved(pending.id)
+    assert "no argument called visibility" in str(err.value) and fake.attempts == 0
+
+
+async def test_a_card_without_the_pre_steps_pin_does_not_run(notes, registry) -> None:
+    a, fake, _ = notes
+    tid, _ = await queue(registry, a.id, ACT)
+    pending = await approvals.next_open(tid)
+    await approvals.update_args(pending.id, {**pending.arguments, "pin": None}, pending.preview)
+    with pytest.raises(ActionFailed) as err:
+        await registry.execute_approved(pending.id)
+    assert "changed after the user was asked" in str(err.value) and fake.attempts == 0
+
+
+async def test_a_pre_step_that_throws_queues_no_card(notes, registry, monkeypatch) -> None:
+    a, fake, service = notes
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(service, "resolve", boom)
+    tid, out = await queue(registry, a.id, ACT)
+    assert "could not be checked" in out and not out.startswith("QUEUED")
+    assert await approvals.next_open(tid) is None and fake.attempts == 0
+
+
+async def test_a_throwing_pre_step_still_queues_a_card_for_other_tools(mcp_env, user) -> None:
+    from pydantic import BaseModel
+
+    from mavis.domain.policy import RiskClass
+    from mavis.tools.registry import MavisTool, Prepared
+
+    class A(BaseModel):
+        x: str = "a"
+
+    async def bad(_ctx, _args) -> Prepared:
+        raise RuntimeError("boom")
+
+    async def fn(_uid, _args) -> str:
+        return "done"
+
+    reg = ToolRegistry()
+    reg.register(MavisTool(name="other", description="d", args_model=A, risk=RiskClass.OUTWARD, fn=fn,
+                           agents=frozenset({"conversation"}), prepare=bad))
+    tid = await tasks.create(user.id, goal="g")
+    token = current_task_id.set(tid)
+    try:
+        out = await next(t for t in reg.for_agent("conversation", user.id)).ainvoke({"x": "a"})
+    finally:
+        current_task_id.reset(token)
+    assert out.startswith("QUEUED_FOR_APPROVAL #")
+
+
+async def test_an_mcp_act_card_cannot_be_edited(notes, registry, monkeypatch) -> None:
+    from mavis.agents import orchestrator_graph as og
+    from mavis.policy.approvals import approval_buttons, is_editable
+
+    a, fake, _ = notes
+    monkeypatch.setattr("mavis.tools.registry.get_registry", lambda: registry)
+    monkeypatch.setattr(og, "get_registry", lambda: registry)
+    tid, _ = await queue(registry, a.id, ACT)
+    pending = await approvals.next_open(tid)
+    assert registry.get("mcp_act").editable is False and is_editable(pending) is False
+    labels = [b.label for b in approval_buttons(pending.id, pending)[0]]
+    assert len(labels) == 2 and not any("Edit" in x for x in labels)
+    with pytest.raises(og.NotEditable):
+        await og.revise_approval(pending, "make it 20 arguments")
+    assert (await approvals.get(pending.id)).arguments == pending.arguments
+
+
+async def test_other_cards_keep_their_edit_button(monkeypatch) -> None:
+    from mavis.policy.approvals import approval_buttons
+
+    assert [b.label for b in approval_buttons(5)[0]][1] == "✏️ Edit"
+
+
+# --- final review: reads on a custom server after untrusted text need a card ------------------------------------
+
+READ = {"server": "notes", "tool": "get_note", "arguments": {"id": "1"}}
+
+
+async def read_in_run(registry, user_id, args, *, tainted: bool) -> str:
+    token = current_run.set(ToolRun(tainted=tainted))
+    task_token = current_task_id.set(await tasks.create(user_id, goal="g"))
+    try:
+        return await lc(registry, user_id, "mcp_read").ainvoke(args)
+    finally:
+        current_task_id.reset(task_token)
+        current_run.reset(token)
+
+
+async def test_a_tainted_run_needs_a_card_to_read_from_a_custom_server(notes, registry) -> None:
+    a, fake, _ = notes
+    out = await read_in_run(registry, a.id, READ, tainted=True)
+    assert out.startswith("QUEUED_FOR_APPROVAL #") and fake.attempts == 0
+    pending = (await approvals.open_for_user(a.id))[0]
+    assert pending.tool == "mcp_read" and pending.preview.splitlines()[0] == "Run get_note on notes"
+    done = await registry.execute_approved(pending.id)  # approving runs the read
+    assert "note 1" in done.text and fake.attempts == 1
+
+
+async def test_a_tainted_run_reads_from_a_catalog_server_on_its_own(notes, registry) -> None:
+    from mavis.store import db as dbm
+    from mavis.store.models import McpServer
+
+    a, fake, service = notes
+    row = (await service.list_servers_rows(a.id))[0]
+    async with dbm.Session() as s:
+        (await s.get(McpServer, row.id)).catalog_id = "linear"
+        await s.commit()
+    out = await read_in_run(registry, a.id, READ, tainted=True)
+    assert "note 1" in out and fake.attempts == 1 and not await approvals.open_for_user(a.id)
+
+
+async def test_an_untainted_run_reads_from_a_custom_server_on_its_own(notes, registry) -> None:
+    a, fake, _ = notes
+    out = await read_in_run(registry, a.id, READ, tainted=False)
+    assert "note 1" in out and fake.attempts == 1 and not await approvals.open_for_user(a.id)

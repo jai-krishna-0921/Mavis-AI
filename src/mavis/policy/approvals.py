@@ -32,6 +32,9 @@ from mavis.timers import service as timers_service
 
 log = structlog.get_logger()
 
+NOT_EDITABLE_TEXT = ("That one can't be edited. Cancel it and ask me again with the change, and I'll "
+                     "show a new card.")
+
 
 def _approve_label(approval: Any) -> str:
     """"Send" only for an action that reaches someone else (outward); anything else is "Approve"."""
@@ -48,12 +51,25 @@ def _approve_label(approval: Any) -> str:
         return "✅ Approve"
 
 
+def is_editable(approval: Any) -> bool:
+    """Can the user revise this card? A tool whose card is verified by its pre-step says no."""
+    if approval is None:
+        return True
+    try:
+        from mavis.tools.registry import get_registry  # lazy: the registry loads every tool module
+
+        tool = get_registry().find(approval.tool)
+        return tool is None or tool.editable
+    except Exception:  # noqa: BLE001 - a button must never block the card
+        return True
+
+
 def approval_buttons(approval_id: int, approval: Any = None) -> list[list[Button]]:
-    return [[
-        Button(label=_approve_label(approval), data=f"ap:{approval_id}:ok"),
-        Button(label="✏️ Edit", data=f"ap:{approval_id}:edit"),
-        Button(label="❌ Cancel", data=f"ap:{approval_id}:no"),
-    ]]
+    row = [Button(label=_approve_label(approval), data=f"ap:{approval_id}:ok")]
+    if is_editable(approval):
+        row.append(Button(label="✏️ Edit", data=f"ap:{approval_id}:edit"))
+    row.append(Button(label="❌ Cancel", data=f"ap:{approval_id}:no"))
+    return [row]
 
 
 async def say(user_id: int, text: str, buttons: list[list[Button]] | None = None,
@@ -315,6 +331,9 @@ async def handle_approval_button(event: Event) -> None:
     if approval is None or approval.user_id != event.user_id:
         return
     if action == "edit":
+        if not is_editable(approval):
+            await say(event.user_id, NOT_EDITABLE_TEXT, dedupe_key=f"approval:{approval_id}:not_editable")
+            return
         if await approvals.claim(approval_id, {ApprovalStatus.PENDING}, ApprovalStatus.AWAITING_EDIT):
             await say(event.user_id, EDIT_QUESTION)
         return

@@ -67,12 +67,12 @@ async def test_read_then_act_through_the_loop_and_the_approval_path(notes, regis
     a, _, fake = notes
     tid = await tasks.create(a.id, goal="g", kind=TaskKind.APPROVAL)
     res = await run_loop(registry, a.id, fake_llm, [
-        call("mcp_tools", {}, "c1"),
-        call("mcp_read", {"server": "notes", "tool": "get_note", "arguments": {"id": "7"}}, "c2"),
+        call("mcp_read", {"server": "notes", "tool": "get_note", "arguments": {"id": "7"}}, "c1"),
+        call("mcp_tools", {}, "c2"),
         call("mcp_act", ACT, "c3")], tid)
-    assert res.tools_called == ["mcp_tools", "mcp_read", "mcp_act"]
+    assert res.tools_called == ["mcp_read", "mcp_tools", "mcp_act"]
     assert res.tainted is True  # third-party text reached the model
-    listing, read, act = tool_texts(res)
+    read, listing, act = tool_texts(res)
     assert "get_note [read]" in listing and "create_note [act]" in listing
     assert "note 7" in read and act.startswith("QUEUED_FOR_APPROVAL #")
     assert fake.calls == [("get_note", {"id": "7"})]  # the read ran with no card; the act has NOT run
@@ -145,13 +145,13 @@ async def test_an_act_the_tool_reports_as_an_error_is_a_failed_card(notes, regis
     assert "quota exceeded" in str(err.value) and fake.attempts == 1
 
 
-async def test_a_read_that_is_an_error_result_reaches_the_model_fenced_and_is_not_retried(notes, registry, fake_llm) -> None:
+async def test_a_read_that_is_an_error_result_reaches_the_model_as_a_tool_error_and_is_not_retried(notes, registry, fake_llm) -> None:
     a, _, fake = notes
     fake.handlers["get_note"] = lambda args: text_result("no such note", is_error=True)
     tid = await tasks.create(a.id, goal="g")
     res = await run_loop(registry, a.id, fake_llm, [
         call("mcp_read", {"server": "notes", "tool": "get_note", "arguments": {"id": "9"}}, "c1")], tid)
-    assert tool_texts(res) == ['<untrusted source="mcp_read">\nno such note\n</untrusted>']
+    assert tool_texts(res) == ['<untrusted source="mcp_read">\nTool error: get_note returned an error: no such note\n</untrusted>']
     assert fake.attempts == 1 and res.text == "Done what I can."
 
 
