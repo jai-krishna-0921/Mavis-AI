@@ -78,26 +78,24 @@ async def test_read_then_act_through_the_loop_and_the_approval_path(notes, regis
     assert fake.calls == [("get_note", {"id": "7"})]  # the read ran with no card; the act has NOT run
     pending = await approvals.next_open(tid)
     assert pending.tool == "mcp_act" and pending.preview.startswith("Run create_note on notes\nArguments:\n  - title: Hi")
-    await resume_gate(a.id, tid, pending.id, "ok")
+    await resume_gate(tid, pending.id, "ok")
     assert (await approvals.get(pending.id)).status == ApprovalStatus.EXECUTED
     assert "made Hi" in (await approvals.get(pending.id)).result
     assert fake.calls == [("get_note", {"id": "7"}), ("create_note", {"title": "Hi"})]
     assert fake.attempts == 2  # the read and the one act, nothing else
 
 
-async def resume_gate(user_id: int, tid: int, approval_id: int, decision: str, graph=None, *, start: bool = True):
+async def resume_gate(tid: int, approval_id: int, decision: str):
     """Drive the real approval_gate of the orchestrator graph the way the approval callback does."""
     from langgraph.types import Command
 
     from mavis.agents import orchestrator_graph as og
     from tests.agents.test_orchestrator_graph import _cfg, _graph
 
-    graph = graph or _graph()
-    if start:
-        await graph.ainvoke(og.initial_state(await tasks.get(tid)), _cfg(tid))
+    graph = _graph()
+    await graph.ainvoke(og.initial_state(await tasks.get(tid)), _cfg(tid))
     await approvals.claim(approval_id, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
     await graph.ainvoke(Command(resume={"approval_id": approval_id, "decision": decision}), _cfg(tid))
-    return graph
 
 
 async def queued_card(registry, fake_llm, user_id: int):
@@ -106,27 +104,32 @@ async def queued_card(registry, fake_llm, user_id: int):
     return tid, await approvals.next_open(tid)
 
 
-async def test_approving_through_the_real_gate_runs_once_even_if_resumed_twice(notes, registry, fake_llm) -> None:
+async def test_two_resumes_racing_for_one_approval_run_the_call_once(notes, registry, fake_llm) -> None:
+    """Two gate runs (two graph threads, as when a duplicate tap and a retry both resume the same task) both
+    hold the card in RESOLVING; only the one that wins the RESOLVING to EXECUTED claim may run the tool."""
+    import asyncio
+
     from langgraph.types import Command
 
-    from tests.agents.test_orchestrator_graph import _cfg
+    from mavis.agents import orchestrator_graph as og
+    from tests.agents.test_orchestrator_graph import _cfg, _graph
 
     a, _, fake = notes
     tid, pending = await queued_card(registry, fake_llm, a.id)
-    graph = await resume_gate(a.id, tid, pending.id, "ok")
+    graphs = [(_graph(), _cfg(tid, f":{i}")) for i in range(2)]
+    for graph, cfg in graphs:  # both reach the gate and wait on the same open card
+        await graph.ainvoke(og.initial_state(await tasks.get(tid)), cfg)
+    assert await approvals.claim(pending.id, {ApprovalStatus.PENDING}, ApprovalStatus.RESOLVING)
+    resume = Command(resume={"approval_id": pending.id, "decision": "ok"})
+    await asyncio.gather(*(graph.ainvoke(resume, cfg) for graph, cfg in graphs))
     assert fake.calls == [("create_note", {"title": "Hi"})] and fake.attempts == 1
     assert (await approvals.get(pending.id)).status == ApprovalStatus.EXECUTED
-    try:  # a second "ok" for the same card (a double tap): the card is spent, nothing runs again
-        await graph.ainvoke(Command(resume={"approval_id": pending.id, "decision": "ok"}), _cfg(tid))
-    except Exception:  # noqa: BLE001 - a finished graph may refuse to resume; either way the server decides
-        pass
-    assert fake.calls == [("create_note", {"title": "Hi"})] and fake.attempts == 1
 
 
 async def test_cancelling_through_the_real_gate_executes_nothing(notes, registry, fake_llm) -> None:
     a, _, fake = notes
     tid, pending = await queued_card(registry, fake_llm, a.id)
-    await resume_gate(a.id, tid, pending.id, "no")
+    await resume_gate(tid, pending.id, "no")
     assert (await approvals.get(pending.id)).status == ApprovalStatus.REJECTED
     assert fake.calls == [] and fake.attempts == 0
 
