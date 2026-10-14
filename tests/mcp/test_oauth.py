@@ -282,6 +282,21 @@ async def test_refresh_sends_the_refresh_token_and_returns_the_new_pair(mcp_env)
     assert form["resource"] == url and form["client_id"] == "client-1"
 
 
+async def test_refresh_runs_discovery_with_the_401s_pointer(mcp_env) -> None:
+    async with stack(rotate_refresh=True) as (auth, mcp, url):
+        client = o.McpOAuth()
+        facts = (await client.discover(url)).facts("client-1", None, registration="dcr")
+        seen, real = {}, client.discover
+
+        async def spy(server_url, **kw):
+            seen.update(kw)
+            return await real(server_url, **kw)
+
+        client.discover = spy
+        await client.refresh(facts, None, "refresh-1", www_authenticate=challenge(mcp))
+    assert seen["www_authenticate"] == challenge(mcp)
+
+
 async def test_a_refused_refresh_token_means_reconnect(mcp_env) -> None:
     async with stack() as (auth, mcp, url):
         client = o.McpOAuth()

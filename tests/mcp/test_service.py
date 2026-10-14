@@ -363,6 +363,25 @@ async def test_an_oauth_401_refreshes_the_token_once_and_tries_again(service, tw
     assert sealing.tokens_of(row).access == "access-2"
 
 
+async def test_the_forced_refresh_after_a_401_carries_the_401s_pointer(service, two_users) -> None:
+    a, _ = two_users
+    async with oauth_server() as (auth, fake, url):
+        made = await service.create(a.id, name="Auto", url=url)
+        state, code = consent(auth, made.authorize_url)
+        assert (await service.complete_oauth(a.id, state, code)).ok
+        fake.token = "access-2"
+        seen, real = [], service.tokens.access_token
+
+        async def spy(*args, **kw):
+            seen.append(kw)
+            return await real(*args, **kw)
+
+        service.tokens.access_token = spy
+        await service.refresh_view(a.id, made.server["id"])
+    forced = [kw for kw in seen if kw.get("force")]
+    assert len(forced) == 1 and "resource_metadata=" in (forced[0]["www_authenticate"] or "")
+
+
 async def test_an_oauth_server_whose_refresh_is_refused_needs_sign_in(service, two_users) -> None:
     a, _ = two_users
     async with oauth_server() as (auth, fake, url):

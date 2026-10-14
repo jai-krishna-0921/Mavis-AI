@@ -40,6 +40,7 @@ class TokenProvider:
         self._allowed_hosts_for = allowed_hosts_for  # the catalog's declared hosts for a row
         self._locks: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
         self._generation: dict[int, int] = {}
+        self._tasks: set[asyncio.Future] = set()
 
     def _lock(self, server_id: int) -> asyncio.Lock:
         lock = self._locks.get(server_id)
@@ -51,9 +52,15 @@ class TokenProvider:
     def _fresh(expires_at) -> bool:
         return expires_at is None or timeutil.ensure_utc(expires_at) - REFRESH_AHEAD > timeutil.now()
 
-    async def access_token(self, user_id: int, server_id: int, *, force: bool = False) -> str | None:
-        """The token to send, or None for a server that needs none. `force` refreshes now (after a 401).
-        Raises McpFailure(AUTH) when the user must reconnect."""
+    async def access_token(self, user_id: int, server_id: int, *, force: bool = False,
+                           www_authenticate: str | None = None) -> str | None:
+        """The token to send, or None for a server that needs none. `force` refreshes now (after a 401;
+        `www_authenticate` is that 401's challenge, whose resource_metadata pointer starts discovery).
+        Raises McpFailure(AUTH) when the user must reconnect.
+
+        The refresh and the save of the rotated tokens run as their own task that the caller only waits on
+        through `asyncio.shield`: a caller that times out or is cancelled stops waiting, never the refresh,
+        so a provider that already rotated the refresh token cannot lose the new one."""
         row = await repo.get(user_id, server_id)
         if row is None:
             raise McpFailure(Failure(Kind.PERMANENT, "not_found"))
@@ -61,7 +68,19 @@ class TokenProvider:
             return None
         if row.auth_kind == "bearer":
             return sealing.tokens_of(row).access
-        seen = self._generation.get(server_id, 0)
+        task = asyncio.ensure_future(
+            self._fenced(user_id, server_id, force, self._generation.get(server_id, 0), www_authenticate))
+        self._tasks.add(task)  # a strong reference until it finishes
+        task.add_done_callback(self._finished)
+        return await asyncio.shield(task)
+
+    def _finished(self, task: asyncio.Future) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled():
+            task.exception()  # retrieved: an abandoned waiter must not leave "never retrieved" noise
+
+    async def _fenced(self, user_id: int, server_id: int, force: bool, seen: int,
+                      www_authenticate: str | None) -> str | None:
         async with self._lock(server_id):
             if force and self._generation.get(server_id, 0) != seen:
                 force = False  # a refresh finished while this caller waited: its token is the fresh one
@@ -81,7 +100,8 @@ class TokenProvider:
                 try:
                     got = await self.oauth.refresh(
                         locked.oauth, sealing.client_secret_of(locked), tokens.refresh,
-                        allowed_hosts=tuple(self._allowed_hosts_for(locked)))
+                        allowed_hosts=tuple(self._allowed_hosts_for(locked)),
+                        www_authenticate=www_authenticate)
                 except McpFailure as exc:
                     if exc.kind is Kind.AUTH:
                         await self._mark(s, locked, exc.code)

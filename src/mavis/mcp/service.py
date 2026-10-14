@@ -216,7 +216,8 @@ class McpService:
             except McpFailure as exc:
                 if exc.kind is not Kind.AUTH or row.auth_kind != "oauth":
                     raise
-                token = await self.tokens.access_token(row.user_id, row.id, force=True)
+                token = await self.tokens.access_token(row.user_id, row.id, force=True,
+                                                       www_authenticate=exc.www_authenticate)
                 known = (*sealing.secrets_of(row), *((token,) if token else ()))
                 if used is not None:
                     used.extend(known)

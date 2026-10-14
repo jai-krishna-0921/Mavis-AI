@@ -352,11 +352,13 @@ class McpOAuth:
             "code_verifier": verifier})
 
     async def refresh(self, facts: dict, client_secret: str | None, refresh_token: str, *,
-                      allowed_hosts: tuple[str, ...] = ()) -> TokenResponse:
+                      allowed_hosts: tuple[str, ...] = (),
+                      www_authenticate: str | None = None) -> TokenResponse:
         """Refresh an access token. The issuer recorded at connect time must still be the one the server
         names, and the token endpoint must still sit on the issuer's site: a server cannot move our
         refresh token to another issuer."""
-        disc = await self.discover(facts["resource"], allowed_hosts=allowed_hosts)
+        disc = await self.discover(facts["resource"], www_authenticate=www_authenticate,
+                                   allowed_hosts=allowed_hosts)
         if disc.issuer != facts["issuer"]:
             raise _fail(Kind.AUTH, "issuer_changed")
         try:

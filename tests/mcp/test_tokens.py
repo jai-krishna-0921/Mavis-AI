@@ -175,3 +175,40 @@ async def test_another_users_server_id_finds_nothing(mcp_env, two_users) -> None
             await provider().access_token(b.id, row.id)
         assert err.value.code == "not_found"
         assert auth.refresh_calls == 0
+
+
+async def test_a_caller_cancelled_mid_refresh_still_saves_the_new_refresh_token(mcp_env, two_users) -> None:
+    a, _ = two_users
+    async with stack(rotate_refresh=True, refresh_delay_s=0.6) as (auth, mcp, url):
+        row = await oauth_row(a.id, auth, url, expires_in_s=0)
+        shared = provider()
+        caller = asyncio.create_task(shared.access_token(a.id, row.id))
+        await asyncio.sleep(0.25)  # inside the token POST: the provider has the old refresh token
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        for _ in range(100):
+            t = sealing.tokens_of(await repo.get(a.id, row.id))
+            if t.refresh == "refresh-2":
+                break
+            await asyncio.sleep(0.05)
+        stored = await repo.get(a.id, row.id)
+    assert (t.access, t.refresh) == ("access-1", "refresh-2") and stored.status == repo.ACTIVE
+    assert auth.refresh_calls == 1
+
+
+async def test_a_forced_refresh_passes_the_401s_challenge_to_discovery(mcp_env, two_users) -> None:
+    a, _ = two_users
+    async with stack() as (auth, mcp, url):
+        row = await oauth_row(a.id, auth, url)
+        shared, seen = provider(), {}
+        real = shared.oauth.refresh
+
+        async def spy(*args, **kw):
+            seen.update(kw)
+            return await real(*args, **kw)
+
+        shared.oauth.refresh = spy
+        challenge = f'Bearer resource_metadata="{mcp.resource_metadata}"'
+        await shared.access_token(a.id, row.id, force=True, www_authenticate=challenge)
+    assert seen["www_authenticate"] == challenge
