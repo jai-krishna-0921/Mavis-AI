@@ -623,3 +623,27 @@ def _reset_machine_runtime():
     machine.set_runtime(None)
     yield
     machine.set_runtime(None)
+
+
+@pytest.fixture(autouse=True)
+def connector_public_dns(monkeypatch):
+    """Connector and MCP HTTP calls resolve every host first (SSRF guard): in tests every name is a public
+    address unless a test patches `netguard._resolver`. The localhost names resolve to loopback, which the
+    guard only lets through under `localhost_ok`."""
+    from mavis.connectors import netguard
+
+    async def resolver(host, port):
+        return ["127.0.0.1"] if host.strip("[]") in netguard.LOCAL_HOSTS else ["93.184.216.34"]
+
+    monkeypatch.setattr(netguard, "_resolver", resolver)
+
+
+@pytest.fixture
+def localhost_ok(settings, monkeypatch):
+    """MCP_ALLOW_LOCALHOST=true for one test, so the net guard reaches a fake server on this machine."""
+    from mavis.config import get_settings
+
+    monkeypatch.setenv("MCP_ALLOW_LOCALHOST", "true")
+    get_settings.cache_clear()
+    yield get_settings()
+    get_settings.cache_clear()
