@@ -200,3 +200,32 @@ async def test_no_session_is_kept_between_calls(localhost_ok, client) -> None:
         await client.list_tools(Endpoint(f"{base}/mcp"))
     # each list repeats the handshake: initialize, initialized, tools/list (plus a discover probe and a GET)
     assert len(fake.requests) >= 2 * first - 1
+
+
+async def test_a_malformed_reply_never_puts_the_server_text_in_the_error(localhost_ok, client) -> None:
+    bad = {"content": "LEAKMARKER-9f3", "isError": "LEAKMARKER-9f3"}
+    fake = FakeMcpServer(handlers={"bad": lambda a: bad})
+    async with serve(fake.app) as base:
+        with pytest.raises(McpFailure) as err:
+            await client.call_tool(Endpoint(f"{base}/mcp"), "bad", {}, deadline_s=10)
+    assert err.value.code == "protocol"
+    assert "LEAKMARKER" not in err.value.detail and "LEAKMARKER" not in repr(err.value)
+    assert "LEAKMARKER" not in str(err.value)
+
+
+async def test_a_timeout_mid_initialize_leaks_no_tasks(localhost_ok, client) -> None:
+    """The client tasks (SDK transport, task group, reader) must all be gone. The test server's
+    own handler for the never-answered request is not the client's and is ignored."""
+    def client_tasks() -> set[asyncio.Task]:
+        ours = {"RequestResponseCycle.run_asgi", "Server.serve"}
+        return {t for t in asyncio.all_tasks() if t.get_coro().__qualname__ not in ours}
+
+    fake = FakeMcpServer(hang_initialize=True)
+    async with serve(fake.app) as base:
+        before = client_tasks()
+        with pytest.raises(McpFailure) as err:
+            await client.call_tool(Endpoint(f"{base}/mcp"), "x", {}, deadline_s=0.5)
+        await asyncio.sleep(0.2)
+        leaked = client_tasks() - before
+    assert err.value.code == "timeout"
+    assert not leaked, [t.get_coro().__qualname__ for t in leaked]

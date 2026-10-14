@@ -60,6 +60,7 @@ class FakeMcpServer:
     attempts: int = 0  # tools/call requests seen (counted even when the answer is a failure)
     in_flight: int = 0
     max_in_flight: int = 0
+    hang_initialize: bool = False  # never answer initialize (the connection just sits open)
     drop_calls: bool = False  # cut the connection during tools/call
     capabilities: dict = field(default_factory=lambda: {"tools": {}})
     prm: dict | None = None  # the RFC 9728 protected-resource metadata this server publishes
@@ -105,6 +106,8 @@ class FakeMcpServer:
     async def _handle(self, body: dict) -> dict | Response | None:
         if body.get("method", "").startswith("notifications/"):
             return None
+        if body.get("method") == "initialize" and self.hang_initialize:
+            await asyncio.sleep(3600)
         if body.get("method") == "tools/list" and self.list_delay_s:
             await asyncio.sleep(self.list_delay_s)
         if body.get("method") == "tools/call":

@@ -22,7 +22,7 @@ import asyncio
 import functools
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import mcp_types as mt
@@ -57,8 +57,8 @@ class Endpoint:
     secrets of the row, so error text can blank them."""
 
     url: str
-    bearer: str | None = None
-    secrets: tuple[str, ...] = ()
+    bearer: str | None = field(default=None, repr=False)
+    secrets: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True)
@@ -150,7 +150,7 @@ class McpClient:
             return root
         failure = classify(exc, status=probe.status, phase="call" if stage == "call" else "connect")
         detail = ""
-        if failure.code in ("rpc_error", "protocol"):
+        if failure.code == "rpc_error":  # a malformed reply would embed its body
             detail = safe_detail(exc, ep.secrets)
         log.info("mcp.failed", code=failure.code, kind=failure.kind.value, stage=stage, status=probe.status)
         return McpFailure(failure, detail,
