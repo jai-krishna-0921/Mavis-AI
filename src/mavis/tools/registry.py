@@ -513,10 +513,10 @@ class ToolRegistry:
         # Capability first: the user is asked to connect BEFORE being asked to approve.
         await self._require_capability(tool, user_id)
         args = await _localized(args, user_id)  # wall-clock times get their zone here, for every tool
-        payload = args.model_dump(mode="json")
         prepared = await self._prepared(tool, user_id, args)
         if prepared.refusal is not None:
             return prepared.refusal  # refused before approval: nothing runs and nothing is queued
+        payload = args.model_dump(mode="json")  # after the pre-step: it may pin what the card was shown for
         risk = prepared.risk or tool.effective_risk(args)
         note = f"\n{prepared.note}" if prepared.note else ""
         tainted = _run_tainted()  # outward: standing rules never auto-approve after third-party text

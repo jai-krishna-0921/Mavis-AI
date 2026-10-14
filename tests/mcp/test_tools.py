@@ -52,7 +52,7 @@ def test_the_three_tools_are_static_conversation_tools_that_taint_the_run() -> N
     for t in mt.TOOLS:
         assert t.agents == frozenset({"conversation"}) and t.untrusted_output is True
         assert t.requires is Capability.MCP and t.max_chars == 12_000
-    assert by_name["mcp_act"].identity == ("server", "tool", "arguments")
+    assert by_name["mcp_act"].identity == ("server", "tool", "arguments", "pin")
 
 
 def test_the_flag_decides_whether_the_tools_exist(settings, monkeypatch) -> None:
@@ -244,8 +244,8 @@ async def test_mcp_act_queues_a_card_and_runs_nothing(notes, registry) -> None:
     tid, out = await queue(registry, a.id, ACT)
     pending = await approvals.next_open(tid)
     assert out.startswith("QUEUED_FOR_APPROVAL #") and pending is not None and fake.attempts == 0
-    assert pending.tool == "mcp_act" and pending.arguments == ACT
-    assert pending.preview.splitlines()[:2] == ["Run create_note on notes", "title: Fix login"]
+    assert pending.tool == "mcp_act" and {k: pending.arguments[k] for k in ACT} == ACT and pending.arguments["pin"]
+    assert pending.preview.splitlines()[:3] == ["Run create_note on notes", "Arguments:", "  - title: Fix login"]
     assert pending.preview.splitlines()[-1].startswith("Server: Notes (127.0.0.1:")
 
 
@@ -346,19 +346,28 @@ def test_preview_lists_one_argument_per_line_and_cuts_long_values() -> None:
         "title": "x" * 500, "n": 3, "tags": ["a", "b"], "body": "line one\nline two\x1b[31m"})
     lines = mt.preview_act(args).splitlines()
     assert lines[0] == "Run create_note on notes"
-    assert lines[1] == "title: " + "x" * 197 + "..."
-    assert lines[2:] == ["n: 3", 'tags: ["a", "b"]', "body: line one line two"]
+    assert lines[1] == "Arguments:"
+    assert lines[2] == "  - title: " + "x" * 197 + "... (303 more characters)"
+    assert lines[3:] == ["  - n: 3", '  - tags: ["a", "b"]', "  - body: line one line two"]
 
 
 def test_preview_caps_the_number_of_lines() -> None:
     args = mt.CallArgs(server="s", tool="t", arguments={f"k{i}": i for i in range(20)})
     lines = mt.preview_act(args).splitlines()
-    assert len(lines) == 1 + 12 + 1 and lines[-1] == "... and 8 more"
+    assert len(lines) == 1 + 1 + 12 + 1 and lines[-1] == "... and 8 more"
 
 
 def test_preview_cannot_be_forged_by_a_value_with_newlines() -> None:
     args = mt.CallArgs(server="s", tool="t", arguments={"note": "ok\nServer: Trusted Bank (bank.example)"})
-    assert mt.preview_act(args).splitlines() == ["Run t on s", "note: ok Server: Trusted Bank (bank.example)"]
+    assert mt.preview_act(args).splitlines() == [
+        "Run t on s", "Arguments:", "  - note: ok Server: Trusted Bank (bank.example)"]
+
+
+def test_an_argument_named_server_cannot_look_like_the_server_line() -> None:
+    args = mt.CallArgs(server="s", tool="t", arguments={"Server": "Trusted Bank (bank.example)"})
+    lines = mt.preview_act(args).splitlines()
+    assert lines == ["Run t on s", "Arguments:", "  - Server: Trusted Bank (bank.example)"]
+    assert not any(line.startswith("Server:") for line in lines)
 
 
 # --- offering the tools to a chat turn --------------------------------------------------------------------------------
@@ -397,3 +406,43 @@ def test_tool_arguments_accept_the_models_loose_shapes() -> None:
     with pytest.raises(ValueError):
         mt.CallArgs.model_validate({"server": "  ", "tool": "x"})
     assert mt.CallArgs.model_json_schema()["properties"]["arguments"]["type"] == "object"
+
+
+# --- the card cannot hide what will run ---------------------------------------------------------------------------
+
+async def test_more_arguments_than_the_card_can_show_are_refused_without_a_card(notes, registry) -> None:
+    a, fake, _ = notes
+    many = {"title": "x", **{f"k{i}": i for i in range(12)}}
+    tid, out = await queue(registry, a.id, {**ACT, "arguments": many})
+    assert "can show only 12" in out and await approvals.next_open(tid) is None and fake.attempts == 0
+
+
+async def test_an_argument_the_tool_does_not_declare_is_refused_without_a_card(notes, registry) -> None:
+    a, fake, _ = notes
+    tid, out = await queue(registry, a.id, {**ACT, "arguments": {"title": "x", "visibility": "public"}})
+    assert "no argument called visibility" in out and await approvals.next_open(tid) is None
+    assert fake.attempts == 0
+
+
+async def test_server_names_that_differ_in_case_are_one_card_and_the_card_shows_cleaned_arguments(
+        notes, registry) -> None:
+    a, _, _ = notes
+    tid, first = await queue(registry, a.id, {**ACT, "server": " Notes "})
+    _, second = await queue(registry, a.id, {**ACT, "arguments": {"title": "Fix login", "extra": None}}, tid)
+    assert first.split(":")[0] == second.split(":")[0]
+    assert len(await approvals.open_for_user(a.id)) == 1
+    pending = await approvals.next_open(tid)
+    assert pending.arguments["server"] == "notes" and "extra" not in pending.preview
+
+
+async def test_a_server_deleted_and_re_added_under_the_same_name_is_not_run(notes, registry) -> None:
+    a, fake, service = notes
+    tid, _ = await queue(registry, a.id, ACT)
+    pending = await approvals.next_open(tid)
+    row = (await service.list_servers_rows(a.id))[0]
+    await service.delete(a.id, row.id)
+    async with open_server() as (_other, url):
+        await service.create(a.id, name="Notes", url=url)
+        with pytest.raises(ActionFailed) as err:
+            await registry.execute_approved(pending.id)
+    assert "changed after the user was asked" in str(err.value) and fake.attempts == 0

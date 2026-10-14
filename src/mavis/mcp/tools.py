@@ -17,7 +17,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from mavis.config import get_settings
 from mavis.domain.args import ToolArgs
@@ -44,6 +45,17 @@ class CallArgs(ToolArgs):
     server: str = Field(min_length=1, max_length=24, description="The server's short name from mcp_tools")
     tool: str = Field(min_length=1, max_length=64, description="The tool's name from mcp_tools")
     arguments: dict[str, Any] = Field(default_factory=dict, description="The tool's arguments, as listed")
+    # Set by the pre-step, never by the model: the row id and address the card was shown for, so an approved
+    # call cannot run against a server that was deleted and re-added under the same short name.
+    pin: SkipJsonSchema[str | None] = Field(default=None, max_length=600)
+
+    @field_validator("server")
+    @classmethod
+    def _slug(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not value:
+            raise ValueError("server must not be empty")
+        return value
 
 
 # --- the listing ----------------------------------------------------------------------------------------
@@ -135,6 +147,11 @@ async def mcp_act(ctx: ToolContext, args: CallArgs) -> str:
     cleaned, problem = service.check(resolved, args.arguments)
     if problem:
         raise ActionFailed(problem, reason="Some of the details were not accepted, so it was not done.")
+    if args.pin != _pin(resolved):
+        raise ActionFailed(
+            f"The connection to {args.server} changed after the user was asked, so nothing was run. "
+            "Ask the user again.",
+            reason="That app was removed or changed since you were asked, so it was not done.")
     res = await service.call(resolved, cleaned, retry_transient=False)
     if not res.ok:
         raise _failed(res, resolved.server.display_name)
@@ -142,6 +159,10 @@ async def mcp_act(ctx: ToolContext, args: CallArgs) -> str:
         raise ActionFailed(f"{args.tool} reported an error: {res.text}",
                            reason=failure_text(FailureKind.UNKNOWN, resolved.server.display_name))
     return res.text
+
+
+def _pin(resolved: svc.Resolved) -> str:
+    return f"{resolved.server.id}:{resolved.server.url}"
 
 
 async def _prepare_act(ctx: ToolContext, args: CallArgs) -> Prepared:
@@ -152,9 +173,21 @@ async def _prepare_act(ctx: ToolContext, args: CallArgs) -> Prepared:
         resolved = await service.resolve(ctx.user_id, args.server, args.tool)
     except svc.Refusal as refusal:
         return Prepared(refusal=refusal.text)
-    _, problem = service.check(resolved, args.arguments)
+    cleaned, problem = service.check(resolved, args.arguments)
     if problem:
         return Prepared(refusal=problem)
+    if len(cleaned) > PREVIEW_ARGS:
+        return Prepared(refusal=f"{args.tool} was given {len(cleaned)} arguments, but the approval card can "
+                                f"show only {PREVIEW_ARGS}. Send fewer arguments.")
+    declared = (resolved.tool.get("input_schema") or {}).get("properties")
+    if isinstance(declared, dict) and declared:
+        unknown = sorted(str(k) for k in cleaned if k not in declared)
+        if unknown:
+            shown = ", ".join(clean_description(k, 40) for k in unknown[:5])
+            return Prepared(refusal=f"{args.tool} has no argument called {shown}. Use only the arguments "
+                                    "listed by mcp_tools.")
+    # What the card shows and what is pinned: the real slug, the cleaned arguments, and the exact server row.
+    args.server, args.arguments, args.pin = resolved.server.slug, cleaned, _pin(resolved)
     name = clean_description(resolved.server.display_name, 80)
     return Prepared(note=f"Server: {name} ({svc.host_of(resolved.server.url)})")
 
@@ -162,15 +195,19 @@ async def _prepare_act(ctx: ToolContext, args: CallArgs) -> Prepared:
 def _value(value: Any) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
     flat = clean_text(text).replace("\n", " ")
-    return flat if len(flat) <= PREVIEW_VALUE_CHARS else flat[: PREVIEW_VALUE_CHARS - 3] + "..."
+    if len(flat) <= PREVIEW_VALUE_CHARS:
+        return flat
+    cut = len(flat) - (PREVIEW_VALUE_CHARS - 3)
+    return f"{flat[: PREVIEW_VALUE_CHARS - 3]}... ({cut:,} more characters)"
 
 
 def preview_act(args: CallArgs) -> str:
     """The card's text: what will run, where, and every argument, one per line, long values cut."""
     lines = [f"Run {clean_description(args.tool, 64)} on {clean_description(args.server, 24)}"]
     items = list(args.arguments.items())
+    lines.append("Arguments:" if items else "Arguments: none")
     for key, value in items[:PREVIEW_ARGS]:
-        lines.append(f"{clean_description(str(key), 40)}: {_value(value)}")
+        lines.append(f"  - {clean_description(str(key), 40)}: {_value(value)}")
     if len(items) > PREVIEW_ARGS:
         lines.append(f"... and {len(items) - PREVIEW_ARGS} more")
     return "\n".join(lines)
@@ -209,7 +246,7 @@ TOOLS = [
                      "approved."),
         args_model=CallArgs, risk=RiskClass.OUTWARD, fn=contextual(mcp_act), agents=AGENTS,
         requires=Capability.MCP, untrusted_output=True, priority=60, timeout_s=45, max_chars=MAX_RESULT_CHARS,
-        preview=preview_act, prepare=_prepare_act, identity=("server", "tool", "arguments"),
+        preview=preview_act, prepare=_prepare_act, identity=("server", "tool", "arguments", "pin"),
         progress_label=_used,
     ),
 ]
