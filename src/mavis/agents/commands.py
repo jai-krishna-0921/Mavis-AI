@@ -22,7 +22,7 @@ from mavis.tools.integrations.composio_map import LEGACY_ALIASES
 from mavis.tools.integrations.connect_flow import ConnectFlow
 
 NOT_CONFIGURED_TEXT = "Connections aren't set up on this Mavis yet."
-COMMANDS = ("connect", "connections", "disconnect", "mute", "unmute", "channel")
+COMMANDS = ("connect", "connections", "disconnect", "mute", "unmute", "channel", "mcp")
 MUTE_COMMANDS = ("mute", "unmute")
 
 _KEYWORDS: tuple[tuple[re.Pattern[str], Capability], ...] = (
@@ -247,7 +247,44 @@ async def run_channel(f: ConnectFlow, user_id: int, args: list[str]) -> None:
     await f.send(user_id, f"Done. My own messages now go to {CHANNEL_NAMES[choice]}.")
 
 
+MCP_OFF_TEXT = "Tools from other apps (MCP) are not available on this Mavis."
+MCP_STATUS = {"ACTIVE": "ready", "NEEDS_AUTH": "needs sign-in", "ERROR": "not working"}
+
+
+async def run_mcp(f: ConnectFlow, user_id: int) -> None:
+    """/mcp: the user's MCP servers (name, status, tool count) and a dashboard link to add or fix one."""
+    from mavis.config import get_settings
+    from mavis.domain.messages import Button
+
+    s = get_settings()
+    if not s.mcp_enabled:
+        await f.send(user_id, MCP_OFF_TEXT)
+        return
+    from mavis.mcp import service as mcp_service
+    from mavis.mcp.text import clean_description
+
+    link = f"{s.public_base_url.rstrip('/')}/workspace"
+    servers = await mcp_service.get_service().list_servers(user_id)
+    if servers:
+        lines = ["Your apps over MCP:"]
+        for sv in servers:
+            n = sv["tool_count"]
+            tail = (f"{MCP_STATUS[sv['status']]}, {n} tool{'s' if n != 1 else ''}"
+                    if sv["status"] == "ACTIVE" else MCP_STATUS[sv["status"]])
+            if sv["status"] == "ERROR" and sv["error_text"]:
+                tail += f" ({sv['error_text']})"
+            lines.append(f"{clean_description(sv['name'], 80)}: {tail}")
+        lines.append(f"Add or fix one on the Workspace page: {link}")
+    else:
+        lines = [f"You have not connected any apps over MCP yet. Add one on the Workspace page: {link}"]
+    buttons = [[Button(label="Open Workspace", url=link)]] if link.startswith("https://") else None
+    await f.send(user_id, "\n".join(lines), buttons)
+
+
 async def _run(f: ConnectFlow, event: Event, name: str, args: list[str]) -> None:
+    if name == "mcp":
+        await run_mcp(f, event.user_id)
+        return
     if name == "channel":
         await run_channel(f, event.user_id, args)
         return
