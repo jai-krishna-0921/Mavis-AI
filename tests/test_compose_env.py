@@ -33,6 +33,8 @@ PASSTHROUGH: set[str] = {
     "INVITE_CAP_STANDARD", "INVITE_CAP_TRUSTED", "INVITE_WEB_USES",
     # MCP client (spec 2026-10-14)
     "MCP_ENABLED",
+    # Provider registry (spec 2026-10-15)
+    "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET",
 }
 
 
@@ -105,3 +107,37 @@ def test_deploy_forces_the_native_provider_after_copying_local_values():
     assert "set_key INTEGRATION_PROVIDER native force" in text
     forced = text.index("set_key INTEGRATION_PROVIDER native force")
     assert forced > text.index("SLACK_SIGNING_SECRET INTEGRATION_PROVIDER")
+
+
+def _shell_words(text: str, name: str) -> set[str]:
+    """The words of `NAME="..."` (secrets.sh) spanning several lines."""
+    block = text.split(f'{name}="', 1)[1].split('"', 1)[0]
+    return set(block.split())
+
+
+def _deploy_owner_loop() -> set[str]:
+    """The words of the multi-line owner-key `for k in ...; do` loop (the one with line continuations)."""
+    text = (ROOT / "deploy" / "aws" / "deploy.sh").read_text()
+    m = re.search(r"^for k in ([^\n;]*\\\n(?:[^\n;]*\\\n)*[^\n;]*); do", text, flags=re.M)
+    assert m, "owner loop not found in deploy.sh"
+    return set(m.group(1).replace("\\", " ").split())
+
+
+def test_every_registered_provider_credential_reaches_prod():
+    from mavis.config import Settings
+    from mavis.tools.integrations.native import providers
+
+    fields = set(Settings.model_fields)
+    owner = _shell_words((ROOT / "deploy" / "aws" / "secrets.sh").read_text(), "OWNER_KEYS")
+    loop = _deploy_owner_loop()
+    env_example = (ROOT / ".env.example").read_text()
+    wanted = {s.client_id_setting for s in providers.user_providers() if s.client_id_setting}
+    wanted |= {s.client_secret_setting for s in providers.user_providers() if s.client_secret_setting}
+    wanted |= {"microsoft_client_id", "microsoft_client_secret"}  # registered by the Microsoft spec in Part B
+    for setting in sorted(wanted):
+        env = setting.upper()
+        assert setting in fields, f"Settings.{setting} missing"
+        assert env in app_env_keys(), f"{env} missing from x-app-env"
+        assert env in owner, f"{env} missing from secrets.sh OWNER_KEYS"
+        assert env in loop, f"{env} missing from the deploy.sh owner loop"
+        assert f"{env}=" in env_example, f"{env} missing from .env.example"

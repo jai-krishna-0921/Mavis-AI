@@ -164,6 +164,8 @@ class Settings(BaseSettings):
     google_oauth_client_secret: str = ""
     slack_client_id: str = ""
     slack_client_secret: str = ""
+    microsoft_client_id: str = ""  # Entra app (multi-tenant); empty hides the Microsoft card (Part B)
+    microsoft_client_secret: str = ""
     slack_signing_secret: str = ""
     native_token_kek: str = ""  # 32 random bytes, base64: wraps the data key of every sealed grant token
     # The Google OAuth app is External and unverified until Google reviews it; the connect prompt warns about
