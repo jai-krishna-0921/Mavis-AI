@@ -75,6 +75,8 @@ class CatalogEntry:
     services: Mapping[str, frozenset[str]]  # chip name -> any-of scopes that count as having it
     icon: str  # web icon id, e.g. "google", "slack"
     always_listed: bool = False  # True: shown on the dashboard even when not configured (Google, Slack)
+    name: str = ""  # dashboard title; empty falls back to the spec's display_name
+    chips: bool = False  # True: the dashboard shows one chip per service
 
 
 def clean_text(value: object, limit: int = 60) -> str:

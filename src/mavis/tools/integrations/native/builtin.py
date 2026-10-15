@@ -213,7 +213,8 @@ register(ProviderSpec(
     forget_prefixes=("gmail:",),
     memory_sources={"gmail": ("gmail:",), "calendar": ("calendar:",)},
     catalog=CatalogEntry(description="Mail, calendar, drive, docs and more, read and act on your behalf.",
-                         services=GOOGLE_SERVICES, icon="google", always_listed=True),
+                         services=GOOGLE_SERVICES, icon="google", always_listed=True,
+                         name="Google Workspace", chips=True),
 ))
 register(ProviderSpec(
     id="slack", display_name="Slack", brand="Slack",
@@ -230,7 +231,8 @@ register(ProviderSpec(
     pollers={Capability.SLACK: "mavis.tools.integrations.poller:poll_slack"},
     forget_prefixes=("slack:",), memory_sources={"slack": ("slack:",)},
     catalog=CatalogEntry(description="Read channels you invite Mavis to and message you there.",
-                         services=SLACK_SERVICES, icon="slack", always_listed=True),
+                         services=SLACK_SERVICES, icon="slack", always_listed=True,
+                         name="Slack", chips=False),
 ))
 register(ProviderSpec(id="slack_bot", display_name="Slack", brand="Slack", internal=True,
                       account_key=_slack_key))
