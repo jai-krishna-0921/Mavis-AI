@@ -26,17 +26,14 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from mavis.access import admission
-from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.domain.errors import IntegrationError
 from mavis.store import db as dbm
 from mavis.store.models import NativeGrant, User
-from mavis.tools.integrations.native import crypto
+from mavis.tools.integrations.native import crypto, providers
 from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired
 from mavis.tools.integrations.native.builtin import (  # noqa: F401  (re-exported: moved to builtin)
-    GOOGLE_GONE,
     GOOGLE_TOKEN_URL,
-    SLACK_GONE,
     SLACK_TOKEN_URL,
 )
 from mavis.tools.integrations.native.http import TOKEN_BYTES, ResponseTooLarge, send_capped
@@ -87,12 +84,9 @@ class AccountTaken(Exception):
 
 def account_key(provider: NativeProvider, account: dict[str, Any]) -> str | None:
     """The vendor's id for the account behind a grant: what must be unique per provider."""
-    if provider is NativeProvider.GOOGLE:
-        key = str(account.get("email") or "").lower()
-    else:
-        user, team = str(account.get("user_id") or ""), str(account.get("team_id") or "")
-        key = f"{team}/{user}" if user and team else user
-    return key[:255] or None
+    spec = providers.spec_of(provider)
+    key = spec.account_key(account) if spec is not None else None
+    return (key or "")[:255] or None
 
 
 class _Gone(Exception):
@@ -129,6 +123,13 @@ class NativeTokenStore:
     async def account(self, user_id: int, provider: NativeProvider) -> dict | None:
         g = await self.grant(user_id, provider)
         return g.account if g is not None and g.status == ACTIVE else None
+
+    async def owner_of_key(self, provider: NativeProvider, key: str) -> int | None:
+        """The user whose ACTIVE grant holds this account key (the unique (provider, account_key) index)."""
+        async with dbm.Session() as s:
+            return await s.scalar(select(NativeGrant.user_id).where(
+                NativeGrant.provider == provider.value, NativeGrant.account_key == key,
+                NativeGrant.status == ACTIVE))
 
     async def owner_of(self, provider: NativeProvider, account_key: str, value: str,
                        team: str | None = None) -> int | None:
@@ -304,17 +305,15 @@ class NativeTokenStore:
     # --- vendor refresh ------------------------------------------------------------------------------
 
     async def _refresh(self, provider: NativeProvider, refresh_token: str) -> dict:
-        st = get_settings()
-        if provider is NativeProvider.GOOGLE:
-            url, gone = GOOGLE_TOKEN_URL, GOOGLE_GONE
-            data = {"grant_type": "refresh_token", "refresh_token": refresh_token,
-                    "client_id": st.google_oauth_client_id, "client_secret": st.google_oauth_client_secret}
-        else:
-            url, gone = SLACK_TOKEN_URL, SLACK_GONE
-            data = {"grant_type": "refresh_token", "refresh_token": refresh_token,
-                    "client_id": st.slack_client_id, "client_secret": st.slack_client_secret}
+        spec = providers.spec_of(provider)
+        if spec is None or not spec.token_url:
+            raise IntegrationError(f"{provider.value} has no token endpoint")
+        client_id, client_secret = providers.client_credentials(spec)
+        data = {"grant_type": "refresh_token", "refresh_token": refresh_token,
+                "client_id": client_id, "client_secret": client_secret, **spec.refresh_params}
+        gone = spec.gone_codes
         try:
-            r = await send_capped(self._http, "POST", url, data=data, max_bytes=TOKEN_BYTES)
+            r = await send_capped(self._http, "POST", spec.token_url, data=data, max_bytes=TOKEN_BYTES)
         except ResponseTooLarge:
             raise IntegrationError(f"{provider.value} token endpoint: response too large") from None
         except httpx.HTTPError:
@@ -326,7 +325,7 @@ class NativeTokenStore:
         body = body if isinstance(body, dict) else {}
         error = body.get("error")
         error = error if isinstance(error, str) else ""
-        if provider is NativeProvider.SLACK and r.status_code == 200 and body.get("ok") is False:
+        if spec.soft_errors and r.status_code == 200 and body.get("ok") is False:
             if error in gone:
                 raise _Gone
             raise IntegrationError(f"{provider.value} token endpoint refused the refresh")
