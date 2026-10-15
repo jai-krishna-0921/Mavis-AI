@@ -21,9 +21,10 @@ from mavis.domain.errors import FailureKind, IntegrationError, NoSuchConnection
 from mavis.domain.events import Event
 from mavis.domain.integrations import ConnectionState, Toolkit, ToolResult, UserRef
 from mavis.domain.policy import Capability
-from mavis.tools.integrations.actions import ACTIONS, GOOGLE_CAPABILITIES
+from mavis.tools.integrations.actions import ACTIONS
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.native import oauth as oauth_mod
+from mavis.tools.integrations.native import providers
 from mavis.tools.integrations.native.base import NativeExecutor, NativeProvider
 from mavis.tools.integrations.native.google_scopes import (  # noqa: F401 - re-exported for tests and the dashboard
     _CAL_FREEBUSY,
@@ -58,36 +59,51 @@ from mavis.tools.integrations.native.http import make_client
 from mavis.tools.integrations.native.oauth import NativeOAuth
 from mavis.tools.integrations.native.tokens import ACTIVE, REVOKED, Grant, NativeTokenStore
 
-_GOOGLE_CAPABILITIES = frozenset(ACTIONS[a].capability for a in ACTION_SCOPES)
-_GOOGLE_TOOLKITS = frozenset({"google", "googlesuper", *(c.value for c in GOOGLE_CAPABILITIES)})
-_SLACK_TOOLKITS = frozenset({"slack"})
+
+def _spec(provider) -> providers.ProviderSpec | None:
+    return providers.spec_of(provider)
 
 
-def google_features(grant: Grant) -> tuple[list[str], list[str]]:
+def feature_access(grant: Grant) -> tuple[list[str], list[str]]:
     """(what this grant lets Mavis do, what it does not), by the grant's own scopes."""
-    can = [label for label, action in GOOGLE_FEATURES if allows(grant, action)]
-    return can, [label for label, _ in GOOGLE_FEATURES if label not in can]
+    spec = _spec(grant.provider)
+    feats = spec.features if spec is not None else ()
+    can = [label for label, action in feats if allows(grant, action)]
+    return can, [label for label, _ in feats if label not in can]
+
+
+google_features = feature_access  # name kept for callers and tests
 
 
 def provider_of(capability: Capability) -> NativeProvider | None:
-    if capability in GOOGLE_CAPABILITIES:
-        return NativeProvider.GOOGLE
-    if capability is Capability.SLACK:
-        return NativeProvider.SLACK
-    return None
+    spec = providers.provider_of_capability(capability)
+    try:
+        return NativeProvider(spec.id) if spec is not None else None
+    except ValueError:
+        return None
 
 
 def allows(grant: Grant, action: str) -> bool:
-    """Do this Google grant's scopes cover everything the action needs?"""
-    groups = ACTION_SCOPES.get(action)
-    return bool(groups) and all(grant.scopes & group for group in groups)
+    """Do this grant's scopes cover everything the action needs? No scope table: any ACTIVE grant covering
+    the action's capability."""
+    spec = _spec(grant.provider)
+    if spec is None:
+        return False
+    if spec.action_scopes:
+        groups = spec.action_scopes.get(action)
+        return bool(groups) and all(grant.scopes & group for group in groups)
+    found = ACTIONS.get(action)
+    return found is not None and covers(grant, found.capability)
 
 
 def covers(grant: Grant, capability: Capability) -> bool:
-    """Can this grant do at least one thing in the capability? Slack: any ACTIVE grant."""
-    if grant.provider is NativeProvider.SLACK:
-        return capability is Capability.SLACK
-    return any(ACTIONS[a].capability is capability and allows(grant, a) for a in ACTION_SCOPES)
+    """Can this grant do at least one thing in the capability?"""
+    spec = _spec(grant.provider)
+    if spec is None or capability not in spec.caps_for(grant):
+        return False
+    if not spec.action_scopes:
+        return True
+    return any(ACTIONS[a].capability is capability and allows(grant, a) for a in spec.action_scopes)
 
 
 class NativeRouter:
@@ -149,12 +165,20 @@ class NativeRouter:
                               f"{action} needs; the user must reconnect and allow it")
         return await self.fallback.execute(user, action, args)
 
-    async def google_access(self, user_id: int) -> tuple[list[str], list[str]] | None:
-        """What the user's native Google grant allows and does not, or None when they have no active one."""
-        if not self._ready(NativeProvider.GOOGLE):
+    async def provider_access(self, user_id: int, provider: NativeProvider
+                              ) -> tuple[list[str], list[str]] | None:
+        """What the user's native grant allows and does not, or None when they have no active one (or the
+        provider words no features)."""
+        if not self._ready(provider):
             return None
-        grant = await self._active_grant(user_id, NativeProvider.GOOGLE)
-        return None if grant is None else google_features(grant)
+        spec = _spec(provider)
+        grant = await self._active_grant(user_id, provider)
+        if grant is None or spec is None or not spec.features:
+            return None
+        return feature_access(grant)
+
+    async def google_access(self, user_id: int) -> tuple[list[str], list[str]] | None:
+        return await self.provider_access(user_id, NativeProvider.GOOGLE)
 
     async def slack_chat_ready(self, user_id: int) -> bool:
         """Can this user talk to Mavis in a Slack DM? True when the workspace bot is installed for them."""
@@ -171,9 +195,8 @@ class NativeRouter:
 
     @staticmethod
     def _permitted(grant: Grant, action: str, capability: Capability) -> bool:
-        if grant.provider is NativeProvider.SLACK:
-            return covers(grant, capability)
-        return allows(grant, action)
+        spec = _spec(grant.provider)
+        return allows(grant, action) if spec is not None and spec.action_scopes else covers(grant, capability)
 
     async def _composio_active(self, user: UserRef, capability: Capability) -> bool:
         try:
@@ -195,8 +218,8 @@ class NativeRouter:
         for grant in await self.tokens.grants(user.user_id):
             if not self._ready(grant.provider):
                 continue
-            google = grant.provider is NativeProvider.GOOGLE
-            for cap in (_GOOGLE_CAPABILITIES if google else (Capability.SLACK,)):
+            spec = _spec(grant.provider)
+            for cap in (spec.capabilities if spec is not None else ()):
                 if grant.status == ACTIVE and covers(grant, cap):
                     states[cap.value] = ConnectionState.ACTIVE
                 elif grant.status == REVOKED and states.get(cap.value) is not ConnectionState.ACTIVE:
@@ -205,13 +228,14 @@ class NativeRouter:
 
     def _native_target(self, toolkit: str) -> NativeProvider | None:
         name = (toolkit or "").strip().lower()
-        if name in _GOOGLE_TOOLKITS:
-            provider = NativeProvider.GOOGLE
-        elif name in _SLACK_TOOLKITS:
-            provider = NativeProvider.SLACK
-        else:
-            return None
-        return provider if oauth_mod.configured(provider) else None
+        for spec in providers.user_providers():
+            if name in spec.toolkits:
+                try:
+                    provider = NativeProvider(spec.id)
+                except ValueError:
+                    return None
+                return provider if oauth_mod.configured(provider) else None
+        return None
 
     async def connect_link(self, user: UserRef, toolkit: str, callback_url: str) -> str:
         provider = self._native_target(toolkit)
@@ -251,14 +275,14 @@ class NativeRouter:
         return getattr(self.fallback, name)
 
 
-_EXECUTORS = (("google", "GoogleExecutor"), ("slack", "SlackExecutor"))
-
-
 def _load_executors(tokens: NativeTokenStore, client: httpx.AsyncClient) -> list[NativeExecutor]:
     """Executors are optional at construction: a module that is not on this build is skipped (its actions
     route to Composio). An import error from inside an existing module is a real bug and propagates."""
     found: list[NativeExecutor] = []
-    for module, cls in _EXECUTORS:
+    for spec in providers.user_providers():
+        if spec.executor is None:
+            continue
+        module, cls = spec.executor
         name = f"mavis.tools.integrations.native.{module}"
         try:
             mod = importlib.import_module(name)
