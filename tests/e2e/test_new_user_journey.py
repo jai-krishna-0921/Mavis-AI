@@ -339,10 +339,13 @@ UNVERIFIED = "Google will say it has not verified Mavis yet. Tap Advanced, then 
 
 
 async def test_connect_google_from_telegram_end_to_end(j, memory):
-    from mavis.api.dashboard.connectors import GOOGLE_SERVICES  # noqa: F401
     from mavis.memory.graph import is_third_party
     from mavis.tools.integrations.native.base import NativeProvider
     from mavis.tools.integrations.native.oauth import GOOGLE_SCOPES
+    from mavis.tools.integrations.native.providers import spec_of
+
+    google_services = spec_of("google").catalog.services  # the table the dashboard API lists from
+    assert "mail" in google_services
 
     link, _ = await j.owner_invite("uses=2")
     await j.onboard(6101, "Priya", link)
