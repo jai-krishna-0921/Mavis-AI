@@ -22,6 +22,7 @@ from mavis.domain.integrations import ToolResult, UserRef
 from mavis.tools.integrations.actions import ACTIONS
 from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired, TokenSource
 from mavis.tools.integrations.native.graph import GRAPH, GraphClient, GraphError, bad_segment
+from mavis.tools.integrations.native.graph_mail import mail_handlers
 
 ID_ARGS = ("message_id", "thread_id", "event_id", "calendar_id", "chat_id", "item_id", "file_id",
            "message_ids", "thread_ids")
@@ -36,6 +37,7 @@ class MicrosoftExecutor:
         self.graph = GraphClient(tokens, client, sleep=sleep)
         self._tokens = tokens
         self._handlers: dict[str, Callable[[int, Any], Awaitable[Any]]] = {"mail.profile": self._mail_profile}
+        self._handlers.update(mail_handlers(self))
 
     def handles(self, action: str) -> bool:
         return action in self._handlers
