@@ -109,3 +109,110 @@ def test_nested_hidden_content_and_mso_hide():
     text = html_to_text('<div style="visibility:hidden"><p>a<b>b</b></p></div>shown'
                         '<span style="mso-hide:all">gone</span>')
     assert text == "shown"
+
+
+def unquote(param):
+    """What a KQL parser would read back: the outer quoted string with its escapes undone."""
+    import re
+    m = re.fullmatch(r'"((?:[^"\\]|\\.)*)"', param)
+    assert m, f"quoted string closed early: {param}"
+    return re.sub(r"\\(.)", r"\1", m[1])
+
+
+@pytest.mark.parametrize("q", [
+    '"x\\"', "back\\", "a\\ OR b", 'subject:"q\\"', 'hello" OR from:ceo@corp.test "'])
+def test_kql_param_cannot_be_closed_early(q):
+    r = t(q)
+    assert unquote(kql_param(r.search)) == " ".join(r.search.split())
+
+
+def test_kql_param_escapes_backslash_before_quote():
+    assert kql_param('a\\') == '"a\\\\"'
+    assert kql_param('say "hi" \\') == '"say \\"hi\\" \\\\"'
+
+
+def test_kql_keywords_and_operator_characters_are_only_search_terms():
+    r = t("do NOT reply AND size>1000 near budget* NEAR x")
+    assert r.search == 'do "NOT" reply "AND" "size>1000" "near" "budget*" "NEAR" x'
+    assert r.notes == ("search operators were searched as plain words: NOT, AND, size>1000, budget*, NEAR",)
+
+
+def test_or_stays_an_operator_and_unsafe_operator_values_are_quoted():
+    assert t("invoice OR bill").search == "invoice OR bill"
+    assert t("from:a>b").search == 'from:"a>b"'
+
+
+def test_parentheses_are_reported_not_dropped_silently():
+    r = t("(invoice OR bill) from:bob")
+    assert r.search == "invoice OR bill from:bob"
+    assert r.notes == ("parentheses grouping is not supported; the terms were combined without grouping",)
+    assert t("plain").notes == ()
+
+
+# --- hidden content ---
+
+HIDING = [
+    "font-size:1px", "font-size:0.5px", "font-size:0.01px", "font-size:0", "font-size:2pt", "color:#fff",
+    "color:#FFFFFF", "color:white", "color:rgb(255,255,255)", "color:transparent",
+    "color:rgba(255,255,255,0)",
+    "color:#ffffff00", "width:0", "height:0px", "max-height:0;overflow:hidden", "line-height:0",
+    "position:absolute;left:-9999px", "position:absolute;top:-5000px", "text-indent:-9999px", "opacity:0",
+    "opacity:0.05", "visibility:hidden", "display:none", "display:/**/none", "DISPLAY : NONE !important",
+    "display:\\6e one", "mso-hide:all", "clip:rect(0,0,0,0)", "transform:scale(0)",
+    "background:#fff;color:#fff", "background-color:#336699;color:#369", "color:#fffffe",
+]
+
+
+@pytest.mark.parametrize("style", HIDING)
+def test_hidden_inline_styles_are_dropped(style):
+    text = html_to_text(f'<p>seen</p><span style="{style}">SECRET <b>inner</b></span><p>after</p>')
+    assert "SECRET" not in text and "inner" not in text and "seen" in text and "after" in text
+
+
+@pytest.mark.parametrize("style", [
+    "font-size:12px", "color:#333", "color:red", "opacity:0.9", "position:absolute;left:10px",
+    "background:#0078d4;color:#fff", "color:#fff;background-image:url(x.png)", "font-size:8px",
+])
+def test_visible_styles_are_kept(style):
+    assert "VISIBLE" in html_to_text(f'<span style="{style}">VISIBLE</span>')
+
+
+def test_white_text_on_a_dark_ancestor_background_is_visible():
+    assert "VISIBLE" in html_to_text('<table><tr><td bgcolor="#000000"><font color="#ffffff">VISIBLE</font>'
+                                     '</td></tr></table>')
+    assert "SECRET" not in html_to_text('<td bgcolor="#ffffff"><font color="#ffffff">SECRET</font></td>')
+
+
+@pytest.mark.parametrize("css,html", [
+    (".h{display:none}", '<p class="x h">SECRET</p>'),
+    ("#pre{font-size:0}", '<div id="pre">SECRET</div>'),
+    (".a .b, .c{opacity:0}", '<p class="b">SECRET</p>'),
+    (".a .b, .c{opacity:0}", '<p class="c">SECRET</p>'),
+    ("span{display:none}", "<span>SECRET</span>"),
+    (".h { /* c */ display:\\none }", '<i class="h">SECRET</i>'),
+])
+def test_class_id_and_tag_rules_from_style_blocks_hide_content(css, html):
+    text = html_to_text(f"<html><head><style>{css}</style></head><body><p>seen</p>{html}</body></html>")
+    assert "SECRET" not in text and "seen" in text
+
+
+def test_media_query_rules_are_not_evaluated_and_colour_only_classes_do_not_hide():
+    css = "@media (max-width:480px){.desk{display:none}} .w{color:#fff}"
+    text = html_to_text(f'<style>{css}</style><p class="desk">DESK</p><p class="w">WHITE</p>')
+    assert "DESK" in text and "WHITE" in text
+
+
+def test_html_to_text_is_bounded_and_fast():
+    import time
+
+    from mavis.tools.integrations.native.graph_html import MAX_HTML, html_to_text_limited
+    start = time.perf_counter()
+    text, cut = html_to_text_limited("<p>a</p>" * 200_000, 10_000)
+    assert cut is True and len(text) <= 10_100
+    flat = "<b>x</b>" * 60_000
+    html_to_text(flat)
+    deep, cut = html_to_text_limited("<div>" * 5000 + "deep" + "</div>" * 5000, 10_000)
+    assert cut is True and "deep" not in deep
+    _, cut = html_to_text_limited("a" * (MAX_HTML + 1), 10 * MAX_HTML)
+    assert cut is True
+    assert time.perf_counter() - start < 5

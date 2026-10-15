@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from email.utils import parseaddr
 from typing import Any
@@ -39,6 +40,46 @@ def sender_authenticated(headers: dict[str, str], from_address: str) -> bool:
             continue
         for m in _AUTH_DOMAIN.finditer(clause):
             d = m["v"].rpartition("@")[2].lower().strip(".")
+            if d and (domain == d or domain.endswith("." + d)):
+                return True
+    return False
+
+
+_MS_AUTHSERV = re.compile(r"[a-z0-9.-]+\.outlook\.com")  # includes *.protection.outlook.com
+_MS_METHOD_FIRST = re.compile(r"\s*(?:spf|dkim|dmarc)\s*=", re.I)
+_MS_CLAUSE = re.compile(r"\s*(dmarc|dkim)\s*=\s*pass\b", re.I)
+MS_AUTH_AS = "x-ms-exchange-organization-authas"
+
+
+def ms_sender_authenticated(headers: dict[str, str], from_address: str, labels: Iterable[str] = ()) -> bool:
+    """Outlook / Exchange Online mail (ids prefixed `ms:`). True only for the topmost Authentication-Results
+    header of a message Exchange itself stamped as received from outside (X-MS-Exchange-Organization-AuthAs:
+    Anonymous, which Exchange sets and strips from senders), from an outlook.com authserv-id or a header that
+    begins directly with an spf/dkim/dmarc result, with dmarc=pass and header.from aligned to the From domain
+    or dkim=pass and header.d aligned. Never for Sent Items or drafts (no receiving server wrote the header).
+    Header order and the authserv-id format are checked by the live script, not assumed here."""
+    if {"SENT", "DRAFT"} & set(labels):
+        return False
+    if str(headers.get(MS_AUTH_AS, "")).strip().lower() != "anonymous":
+        return False
+    value = str(headers.get("authentication-results", "") or "")
+    domain = from_address.rpartition("@")[2].strip().lower().strip(".")
+    if not value or not domain:
+        return False
+    if _MS_METHOD_FIRST.match(value):
+        results = value
+    else:
+        authserv, _, results = value.partition(";")
+        tokens = authserv.split()
+        if not tokens or not _MS_AUTHSERV.fullmatch(tokens[0].lower().strip(".")):
+            return False
+    for clause in results.split(";"):
+        m = _MS_CLAUSE.match(clause)
+        if not m:
+            continue
+        key = "from" if m[1].lower() == "dmarc" else "d"
+        for h in re.finditer(rf"\bheader\.{key}\s*=\s*\"?(?P<v>[^\s;\"()]+)", clause, re.I):
+            d = h["v"].rpartition("@")[2].lower().strip(".")
             if d and (domain == d or domain.endswith("." + d)):
                 return True
     return False
@@ -88,6 +129,16 @@ def _headers(d: dict) -> dict[str, str]:
     }
 
 
+def _first_header(d: dict, name: str) -> dict[str, str]:
+    raw = pick(d, "payload.headers", "headers", default=[])
+    items = ([{"name": k, "value": v} for k, v in raw.items()] if isinstance(raw, dict)
+             else [h for h in raw if isinstance(h, dict) and "name" in h])
+    for h in items:
+        if str(h["name"]).lower() == name:
+            return {name: str(h.get("value", ""))}
+    return {}
+
+
 def _first_auth_results(d: dict) -> dict[str, str]:
     """The topmost Authentication-Results header only: the receiving server prepends its own, so a copy
     lower down was written by the sender and must never override it (the `_headers` dict keeps the last)."""
@@ -108,8 +159,14 @@ def normalize_email(d: dict) -> dict[str, Any]:
     name, address = parseaddr(sender)
     labels = pick(d, "labelIds", "label_ids", "labels", default=[])
     label_list = [str(x) for x in labels] if isinstance(labels, list) else []
+    message_id = str(pick(d, "messageId", "message_id", "id", default=""))
+    if message_id.startswith("ms:"):  # Outlook: its own rule, never Gmail's authserv-id list
+        authenticated = ms_sender_authenticated(
+            {**_first_auth_results(d), **_first_header(d, MS_AUTH_AS)}, address.lower(), label_list)
+    else:  # parsed to a bool here: the raw Authentication-Results header is never stored
+        authenticated = sender_authenticated(_first_auth_results(d), address.lower())
     return {
-        "message_id": str(pick(d, "messageId", "message_id", "id", default="")),
+        "message_id": message_id,
         "thread_id": str(pick(d, "threadId", "thread_id", default="")),
         "from": sender,
         "from_name": name or address,
@@ -126,8 +183,7 @@ def normalize_email(d: dict) -> dict[str, Any]:
         ),
         "headers": {k: v for k, v in headers.items() if k in HEADER_KEYS},
         "from_me": "SENT" in label_list,
-        # parsed to a bool here: the raw Authentication-Results header is never stored
-        "sender_authenticated": sender_authenticated(_first_auth_results(d), address.lower()),
+        "sender_authenticated": authenticated,
     }
 
 

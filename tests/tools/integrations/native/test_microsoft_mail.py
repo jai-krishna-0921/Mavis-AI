@@ -135,7 +135,9 @@ async def test_reply_posts_to_the_newest_message_of_the_conversation():
     r = await ex.execute(U, "mail.reply", {"thread_id": "ms:c9", "to": "alice@acme.com", "body": "Thanks"})
     assert r.ok
     req = g.calls("GET", r"/me/messages$")[0]
-    assert query_of(req)["$filter"] == "conversationId eq 'c9'" and "$orderby" not in query_of(req)
+    # newest first from the server: the date term leads the filter so Graph accepts the $orderby
+    assert query_of(req)["$filter"] == "receivedDateTime ge 1900-01-01T00:00:00Z and conversationId eq 'c9'"
+    assert query_of(req)["$orderby"] == "receivedDateTime desc"
     body = json.loads(g.calls("POST", r"/reply$")[0].content)
     assert body["comment"] == "Thanks"
     assert body["message"]["toRecipients"][0]["emailAddress"]["address"] == "alice@acme.com"
@@ -237,3 +239,147 @@ async def test_hostile_ids_never_reach_the_network(action, args):
     ex, _ = g.executor()
     r = await ex.execute(U, action, args)
     assert r.error_kind is K.INVALID_ARGUMENT and g.requests == []
+
+
+def long_thread(g, total_pages=6):
+    pages = [httpx.Response(200, json=page(
+        [{"id": f"x{p * 50 + i}"} for i in range(50)],
+        next_link=f"https://graph.microsoft.com/v1.0/me/messages?$skiptoken=t{p}"))
+        for p in range(total_pages)]
+    g.on("GET", r"/v1.0/me/messages$", pages)
+    g.on("PATCH", r"/v1.0/me/messages/x\d+$", httpx.Response(200, json={}))
+
+
+async def test_organising_a_thread_over_the_cap_reports_partial_with_the_count():
+    g = with_folders(FakeGraph())
+    long_thread(g)
+    ex, _ = g.executor()
+    r = await ex.execute(U, "mail.mark_read", {"thread_ids": ["ms:c1"]})
+    assert r.ok and r.data["partial"] is True and r.data["messages"] == 200 and r.data["threads"] == 0
+    assert "PARTIAL" in r.data["verb"] and len(g.calls("PATCH", r"/messages/x")) == 200
+    assert "200 email(s)" in RENDERERS["mail.mark_read"](r.data)
+
+
+async def test_organising_a_short_thread_is_not_partial():
+    g = with_folders(FakeGraph())
+    g.on("GET", r"/v1.0/me/messages$", httpx.Response(200, json=page([{"id": "x1"}, {"id": "x2"}])))
+    g.on("PATCH", r"/v1.0/me/messages/x\d$", httpx.Response(200, json={}))
+    ex, _ = g.executor()
+    r = await ex.execute(U, "mail.mark_read", {"thread_ids": ["ms:c1"]})
+    assert r.data["partial"] is False and r.data["threads"] == 1 and r.data["messages"] == 2
+
+
+async def test_reading_a_long_thread_says_it_is_cut():
+    g = with_folders(FakeGraph())
+    g.on("GET", r"/v1.0/me/messages$", [httpx.Response(200, json=page(
+        [graph_message(f"m{p * 50 + i}", thread="c1") for i in range(50)],
+        next_link=f"https://graph.microsoft.com/v1.0/me/messages?$skiptoken=t{p}")) for p in range(6)])
+    ex, _ = g.executor()
+    r = await ex.execute(U, "mail.thread", {"thread_id": "ms:c1"})
+    assert len(r.data["messages"]) == 200 and "only the first 200" in r.data["notes"][0]
+
+
+async def test_large_bodies_are_converted_off_the_event_loop(monkeypatch):
+    from mavis.tools.integrations.native import graph_mail
+    seen = []
+    real = graph_mail.asyncio.to_thread
+
+    async def spy(fn, *a, **k):
+        seen.append(fn)
+        return await real(fn, *a, **k)
+    monkeypatch.setattr(graph_mail.asyncio, "to_thread", spy)
+    big = "<p>" + "word " * 20000 + "</p>"
+    g = with_folders(FakeGraph()).on("GET", r"/v1.0/me/messages/m1$", httpx.Response(
+        200, json=graph_message("m1", html=big)))
+    ex, _ = g.executor()
+    assert (await ex.execute(U, "mail.read", {"message_id": "m1"})).ok and len(seen) == 1
+
+
+async def test_oversize_and_deeply_nested_html_is_cut_and_flagged():
+    nested = "<div>" * 500 + "deep text" + "</div>" * 500
+    g = with_folders(FakeGraph()).on("GET", r"/v1.0/me/messages/m1$", httpx.Response(
+        200, json=graph_message("m1", html="<p>top</p>" + nested)))
+    ex, _ = g.executor()
+    r = await ex.execute(U, "mail.read", {"message_id": "m1"})
+    assert "top" in r.data["messageText"] and "deep text" not in r.data["messageText"]
+    assert r.data["bodyTruncated"] is True
+
+
+# --- sender authentication (Outlook rule) ---
+
+ACME = "Alice <alice@acme.com>"
+GOOD = "spf=pass smtp.mailfrom=acme.com; dkim=pass header.d=acme.com; dmarc=pass header.from=acme.com"
+
+
+def authed(headers, *, folder="F-inbox", sender=ACME, mid="m1"):
+    msg = graph_message(mid, sender=sender, folder=folder)
+    msg["internetMessageHeaders"] = [{"name": n, "value": v} for n, v in headers]
+    return msg
+
+
+async def authenticated(msg, folder_label="inbox"):
+    g = with_folders(FakeGraph()).on("GET", rf"/v1.0/me/messages/{msg['id']}$", httpx.Response(200, json=msg))
+    ex, _ = g.executor()
+    r = await ex.execute(U, "mail.read", {"message_id": msg["id"]})
+    return r.data, normalize_email(r.data)["sender_authenticated"]
+
+
+EXO = [("Authentication-Results", "ACME.protection.outlook.com; " + GOOD),
+       ("X-MS-Exchange-Organization-AuthAs", "Anonymous")]
+
+
+async def test_exchange_stamped_external_mail_is_authenticated():
+    data, ok = await authenticated(authed(EXO))
+    assert ok is True and data["payload"]["headers"][0]["name"] == "Authentication-Results"
+    assert data["payload"]["headers"][1]["name"] == "X-MS-Exchange-Organization-AuthAs"
+
+
+async def test_header_that_starts_with_a_method_is_accepted():
+    _, ok = await authenticated(authed([("Authentication-Results", GOOD), EXO[1]]))
+    assert ok is True
+
+
+@pytest.mark.parametrize("name,headers", [
+    ("forged google header topmost",
+     [("Authentication-Results", "mx.google.com; dmarc=pass header.from=acme.com"), EXO[1]]),
+    ("missing AuthAs", [EXO[0]]),
+    ("internal AuthAs", [EXO[0], ("X-MS-Exchange-Organization-AuthAs", "Internal")]),
+    ("unaligned dkim", [("Authentication-Results", "x.protection.outlook.com; dkim=pass header.d=evil.test"),
+                        EXO[1]]),
+    ("unaligned dmarc", [("Authentication-Results",
+                          "x.protection.outlook.com; dmarc=pass header.from=evil.test"), EXO[1]]),
+    ("dmarc fail", [("Authentication-Results", "x.protection.outlook.com; dmarc=fail header.from=acme.com"),
+                    EXO[1]]),
+    ("foreign authserv", [("Authentication-Results", "mail.evil.test; dmarc=pass header.from=acme.com"),
+                          EXO[1]]),
+    ("lookalike authserv", [("Authentication-Results",
+                             "outlook.com.evil.test; dmarc=pass header.from=acme.com"), EXO[1]]),
+])
+async def test_untrusted_authentication_headers_are_refused(name, headers):
+    _, ok = await authenticated(authed(headers))
+    assert ok is False, name
+
+
+async def test_a_sender_header_below_the_exchange_one_never_counts():
+    below = [("Authentication-Results", "x.protection.outlook.com; dmarc=fail header.from=acme.com"),
+             ("Authentication-Results", "mx.google.com; dmarc=pass header.from=acme.com"), EXO[1]]
+    _, ok = await authenticated(authed(below))
+    assert ok is False
+
+
+async def test_sent_and_draft_items_are_never_authenticated_and_carry_no_auth_headers():
+    data, ok = await authenticated(authed(EXO, folder="F-sentitems"))
+    assert ok is False
+    assert [h["name"] for h in data["payload"]["headers"]][0] == "From"
+    msg = authed(EXO)
+    msg["isDraft"] = True
+    data, ok = await authenticated(msg)
+    assert ok is False and "Authentication-Results" not in [h["name"] for h in data["payload"]["headers"]]
+
+
+def test_gmail_rule_is_unchanged_for_google_ids():
+    g = {"messageId": "abc", "sender": ACME, "payload": {"headers": [
+        {"name": "Authentication-Results", "value": "mx.google.com; dmarc=pass header.from=acme.com"}]}}
+    assert normalize_email(g)["sender_authenticated"] is True
+    g["messageId"] = "ms:abc"  # the same header on an Outlook id has no AuthAs: refused
+    assert normalize_email(g)["sender_authenticated"] is False

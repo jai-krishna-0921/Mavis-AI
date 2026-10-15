@@ -16,14 +16,13 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from html.parser import HTMLParser
 from typing import Any
 
 from mavis.domain import timeutil
 from mavis.domain.errors import FailureKind
-from mavis.tools.integrations.actions import MAX_MAIL_IDS
 from mavis.tools.integrations.native import gmail_mime
 from mavis.tools.integrations.native.graph import GRAPH, GraphError, seg, strip_ms, with_ms
+from mavis.tools.integrations.native.graph_html import html_to_text, html_to_text_limited  # noqa: F401
 from mavis.tools.integrations.normalize import to_datetime
 
 BODY_CAP = gmail_mime.BODY_CAP
@@ -31,6 +30,7 @@ SEARCH_BODY_CAP = 2000  # body chars kept per message in a list (the full text i
 THREAD_BODY_CAP = 8000
 FETCH_CONCURRENCY = 5
 MAX_THREAD_MESSAGES = 200
+OFFLOAD_CHARS = 50_000  # more body text than this is converted off the event loop
 FOLDER_TTL_S = 600.0
 ANCHOR = "receivedDateTime ge 1900-01-01T00:00:00Z"  # $orderby properties must lead the $filter
 SELECT = (
@@ -45,6 +45,7 @@ WELL_KNOWN = {"inbox": "INBOX", "sentitems": "SENT", "drafts": "DRAFT", "deleted
               "junkemail": "SPAM", "archive": "ARCHIVE"}
 _RESERVED_LABELS = frozenset({"INBOX", "SENT", "DRAFT", "TRASH", "SPAM"})
 _KEPT_HEADERS = ("list-unsubscribe", "precedence", "auto-submitted")
+AUTH_AS = "x-ms-exchange-organization-authas"
 
 # --- query translation ---------------------------------------------------------------------------------
 
@@ -56,6 +57,19 @@ KQL_OPS = frozenset({"from", "to", "subject"})
 FOLDERS = {"inbox": "inbox", "sent": "sentitems", "drafts": "drafts", "trash": "deleteditems",
            "spam": "junkemail", "anywhere": None}
 _CLOSERS = {")": "(", "}": "{"}
+_SAFE_TERM = re.compile(r"[\w@.'+&%#/-]+")
+_KQL_WORDS = frozenset({"AND", "NOT", "NEAR", "ONEAR", "XRANK"})
+
+
+def _term(text: str, neutralised: list[str]) -> str:
+    """A free-text word as it may appear in `$search`: KQL operators and operator characters (`NOT`, `size>1`,
+    `a*`) become a quoted phrase, so user and model text can only ever be search terms."""
+    if text in _KQL_WORDS or not _SAFE_TERM.fullmatch(text):
+        neutralised.append(text)
+        return '"' + text + '"'
+    if text.upper() in _KQL_WORDS:  # lowercase and/not/near are ordinary words, quoted without a note
+        return '"' + text + '"'
+    return text
 
 
 @dataclass(frozen=True)
@@ -67,6 +81,7 @@ class Translation:
     unapplied: tuple[str, ...]
     since: datetime | None
     anywhere: bool = False  # `in:anywhere`: junk and deleted items are searched too
+    notes: tuple[str, ...] = ()  # what the translation changed or could not do, for the caller to report
 
 
 def _stamp(moment: datetime) -> str:
@@ -121,6 +136,8 @@ def translate_query(query: str, *, now: datetime) -> Translation:
         tokens.pop()
     parts: list[str] = []
     unapplied: list[str] = []
+    neutralised: list[str] = []
+    grouped = False
     dates: list[tuple[str, datetime]] = []
     flags: list[tuple[str, Callable[[dict], bool]]] = []
     order: list[tuple[str, int]] = []  # input order across dates and flags, for the local predicates
@@ -133,6 +150,8 @@ def translate_query(query: str, *, now: datetime) -> Translation:
         if "{" in tok or "}" in tok:
             unapplied.append(tok)
             continue
+        if re.search(r"[()]", re.sub(r'"[^"]*"', "", tok)):
+            grouped = True
         m = _OPERATOR.match(core)
         if m is None:
             if neg:
@@ -144,7 +163,7 @@ def translate_query(query: str, *, now: datetime) -> Translation:
             else:
                 text = core.replace('"', "")
                 if text:
-                    parts.append(text)
+                    parts.append(_term(text, neutralised))
             continue
         op, val = m["op"].lower(), m["val"]
         if neg:
@@ -154,8 +173,10 @@ def translate_query(query: str, *, now: datetime) -> Translation:
             inner = val.strip('"').replace('"', "")
             if not inner:
                 unapplied.append(tok)
+            elif quoted or not _SAFE_TERM.fullmatch(inner):
+                parts.append(f'{op}:"{inner}"')
             else:
-                parts.append(f'{op}:"{inner}"' if quoted else f"{op}:{inner}")
+                parts.append(f"{op}:{inner}")
         elif op in ("newer_than", "older_than", "after", "before"):
             term = _date_term(op, val.strip('"'), now)
             if term is None:
@@ -193,90 +214,23 @@ def translate_query(query: str, *, now: datetime) -> Translation:
         return (lambda r: (d := _received(r)) is not None and (d >= bound if op == "ge" else d < bound))
 
     since = max((b for op, b in dates if op == "ge"), default=None)
+    notes: list[str] = []
+    if neutralised:
+        notes.append("search operators were searched as plain words: " + ", ".join(neutralised))
+    if grouped:
+        notes.append("parentheses grouping is not supported; the terms were combined without grouping")
     if search is not None:
         return Translation(search, (), tuple(predicate(k, i) for k, i in order), folder,
-                           tuple(unapplied), since, anywhere)
+                           tuple(unapplied), since, anywhere, tuple(notes))
     filters = [f"receivedDateTime {op} {_stamp(b)}" for op, b in dates] or [ANCHOR]
     filters += [f for f, _ in flags]
-    return Translation(None, tuple(filters), (), folder, tuple(unapplied), since, anywhere)
+    return Translation(None, tuple(filters), (), folder, tuple(unapplied), since, anywhere, tuple(notes))
 
 
 def kql_param(search: str) -> str:
-    """The `$search` value: the whole expression in double quotes, inner phrase quotes backslash-escaped."""
-    return '"' + " ".join(search.split()).replace('"', '\\"') + '"'
-
-
-# --- body to text --------------------------------------------------------------------------------------
-
-_VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
-                   "source", "track", "wbr"})
-_SKIP = frozenset({"script", "style", "head", "title", "template", "noscript", "iframe", "object", "svg"})
-_BLOCK = gmail_mime._BLOCK_TAGS
-_HIDDEN_STYLE = re.compile(
-    r"display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all|opacity\s*:\s*0(?![.\d])"
-    r"|font-size\s*:\s*0+(?:\.0+)?\s*(?:px|pt|em|rem|%)?\s*(?:[;!]|$)", re.I)
-
-
-def _is_hidden(attrs: list[tuple[str, str | None]]) -> bool:
-    for name, value in attrs:
-        if name == "hidden":
-            return True
-        if name == "style" and value and _HIDDEN_STYLE.search(value):
-            return True
-    return False
-
-
-class _Extractor(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-        self._stack: list[tuple[str, bool]] = []
-        self._hidden = 0
-
-    def _emit(self, text: str) -> None:
-        if not self._hidden:
-            self.parts.append(text)
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _VOID:
-            if tag in ("br", "hr"):
-                self._emit("\n")
-            return
-        hide = tag in _SKIP or _is_hidden(attrs)
-        self._stack.append((tag, hide))
-        if hide:
-            self._hidden += 1
-        elif tag in _BLOCK:
-            self._emit("\n- " if tag == "li" else "\n")
-
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in ("br", "hr") or tag in _BLOCK:
-            self._emit("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        names = [t for t, _ in self._stack]
-        if tag not in names:
-            return
-        cut = len(names) - 1 - names[::-1].index(tag)
-        for _, hid in self._stack[cut:]:
-            if hid:
-                self._hidden -= 1
-        del self._stack[cut:]
-        if tag in _BLOCK:
-            self._emit("\n")
-
-    def handle_data(self, data: str) -> None:
-        self._emit(data)
-
-
-def html_to_text(html: str) -> str:
-    parser = _Extractor()
-    try:
-        parser.feed(html)
-        parser.close()
-    except Exception:  # noqa: BLE001 - malformed markup degrades to whatever text was seen
-        pass
-    return gmail_mime.tidy("".join(parser.parts))
+    """The `$search` value: the whole expression in double quotes, with backslashes and then inner quotes
+    backslash-escaped, so no text can close the quoted string early."""
+    return '"' + " ".join(search.split()).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 # --- message mapping -----------------------------------------------------------------------------------
@@ -322,13 +276,18 @@ def _labels(raw: dict, folders: Mapping[str, str]) -> list[str]:
     return labels
 
 
-def _headers(raw: dict) -> list[dict[str, str]]:
+def _headers(raw: dict, own: bool) -> list[dict[str, str]]:
+    """The headers normalize.py reads. `own` (Sent Items and drafts) withholds the authentication headers: no
+    receiving server stamped them, so anything there was written by the sender."""
     held = [h for h in raw.get("internetMessageHeaders") or [] if isinstance(h, dict) and h.get("name")]
     value = lambda h: str(h.get("value", ""))[:1000]  # noqa: E731
     out: list[dict[str, str]] = []
     first = next((h for h in held if str(h["name"]).lower() == "authentication-results"), None)
-    if first is not None:  # the topmost one is the receiving server's own
+    if first is not None and not own:  # the topmost one; ms_sender_authenticated decides whether to trust it
         out.append({"name": "Authentication-Results", "value": value(first)})
+        auth_as = next((h for h in held if str(h["name"]).lower() == AUTH_AS), None)
+        if auth_as is not None:
+            out.append({"name": "X-MS-Exchange-Organization-AuthAs", "value": value(auth_as)})
     out += [{"name": "From", "value": _address(raw.get("from") or raw.get("sender"))},
             {"name": "To", "value": _addresses(raw.get("toRecipients"))},
             {"name": "Subject", "value": str(raw.get("subject") or "")}]
@@ -343,12 +302,16 @@ def _body(raw: dict, cap: int) -> tuple[str, bool]:
     body = raw.get("body") if isinstance(raw.get("body"), dict) else {}
     content = str(body.get("content") or "")
     is_html = str(body.get("contentType", "")).lower() == "html"
-    text = html_to_text(content) if is_html else gmail_mime.tidy(content)
-    return (text[:cap].rstrip(), True) if len(text) > cap else (text, False)
+    if is_html:
+        text, cut = html_to_text_limited(content, cap * 4)
+    else:
+        text, cut = gmail_mime.tidy(content[:cap * 4]), len(content) > cap * 4
+    return (text[:cap].rstrip(), True) if (cut or len(text) > cap) else (text, False)
 
 
 def map_message(raw: dict, folders: Mapping[str, str], cap: int) -> dict[str, Any]:
     text, truncated = _body(raw, cap)
+    labels = _labels(raw, folders)
     snippet = str(raw.get("bodyPreview") or "")
     when = raw.get("receivedDateTime") or raw.get("sentDateTime")
     return {
@@ -360,13 +323,13 @@ def map_message(raw: dict, folders: Mapping[str, str], cap: int) -> dict[str, An
         "subject": str(raw.get("subject") or ""),
         "date": when, "rfc822MessageId": str(raw.get("internetMessageId") or ""),
         "messageText": text or snippet, "bodyTruncated": truncated, "snippet": snippet,
-        "labelIds": _labels(raw, folders), "messageTimestamp": when,
+        "labelIds": labels, "messageTimestamp": when,
         "attachments": [
             {"filename": str(a.get("name") or "(unnamed)"), "mimeType": str(a.get("contentType") or ""),
              "size": int(a.get("size") or 0)}
             for a in raw.get("attachments") or [] if isinstance(a, dict)
         ],
-        "payload": {"headers": _headers(raw)},
+        "payload": {"headers": _headers(raw, bool({"SENT", "DRAFT"} & set(labels)))},
     }
 
 
@@ -424,7 +387,7 @@ class MailActions:
             params["$orderby"] = "receivedDateTime desc"
         items, _, _ = await self._pages(uid, url, params, top)
         folders = await self.folder_ids(uid)
-        notes: list[str] = []
+        notes: list[str] = list(tr.notes)
         if tr.unapplied:
             notes.append("part of the query was not applied: " + ", ".join(tr.unapplied))
         if tr.local and len(items) >= top:
@@ -436,11 +399,20 @@ class MailActions:
             items = [m for m in items if keep(m)]
         items.sort(key=lambda m: _received(m) or datetime.min.replace(tzinfo=UTC), reverse=True)
         items = items[: a.max_results]
-        out: dict[str, Any] = {"messages": [map_message(m, folders, SEARCH_BODY_CAP) for m in items],
+        out: dict[str, Any] = {"messages": await self._mapped(items, folders, SEARCH_BODY_CAP),
                                "resultSizeEstimate": len(items)}
         if notes:
             out["notes"] = notes
         return out
+
+    @staticmethod
+    async def _mapped(items: list[dict], folders: Mapping[str, str], cap: int) -> list[dict]:
+        """map_message over a page; a lot of body text is converted in a worker thread, not on the loop."""
+        def run() -> list[dict]:
+            return [map_message(m, folders, cap) for m in items]
+
+        size = sum(len(str((m.get("body") or {}).get("content") or "")) for m in items)
+        return await asyncio.to_thread(run) if size > OFFLOAD_CHARS else run()
 
     async def _pages(self, uid: int, url: str, params: dict, limit: int) -> tuple[list[dict], Any, Any]:
         return await self.graph.pages(uid, url, params, limit)
@@ -448,21 +420,33 @@ class MailActions:
     async def read(self, uid: int, a: Any) -> dict:
         raw = await self._call(uid, "GET", f"{GRAPH}/me/messages/{seg(a.message_id)}", params={
             "$select": SELECT, "$expand": "attachments($select=name,contentType,size)"})
-        return map_message(raw, await self.folder_ids(uid), BODY_CAP)
+        return (await self._mapped([raw], await self.folder_ids(uid), BODY_CAP))[0]
 
-    async def _conversation(self, uid: int, thread_id: str, select: str, limit: int) -> list[dict]:
+    async def _conversation(
+        self, uid: int, thread_id: str, select: str, limit: int, *, newest_first: bool = False
+    ) -> tuple[list[dict], bool]:
+        """(messages of the conversation up to `limit`, whether there are more). Pages are followed until
+        `limit` is passed, so "more" is known and never guessed. `newest_first` leads the filter with the
+        date term, which Graph needs to accept an $orderby on a filtered list."""
         conv = strip_ms(thread_id).replace("'", "''")
-        items, _, _ = await self._pages(
-            uid, f"{GRAPH}/me/messages", {"$filter": f"conversationId eq '{conv}'", "$select": select,
-                                          "$top": 50}, limit)
-        return items
+        params: dict[str, Any] = {"$select": select, "$top": min(limit + 1, 50)}
+        if newest_first:
+            params["$filter"] = f"{ANCHOR} and conversationId eq '{conv}'"
+            params["$orderby"] = "receivedDateTime desc"
+        else:
+            params["$filter"] = f"conversationId eq '{conv}'"
+        items, more, _ = await self._pages(uid, f"{GRAPH}/me/messages", params, limit + 1)
+        return items[:limit], len(items) > limit or more is not None
 
     async def thread(self, uid: int, a: Any) -> dict:
-        items = await self._conversation(uid, a.thread_id, SELECT, MAX_THREAD_MESSAGES)
+        items, more = await self._conversation(uid, a.thread_id, SELECT, MAX_THREAD_MESSAGES)
         items.sort(key=lambda m: _received(m) or datetime.min.replace(tzinfo=UTC))
-        folders = await self.folder_ids(uid)
-        return {"threadId": with_ms(strip_ms(a.thread_id)),
-                "messages": [map_message(m, folders, THREAD_BODY_CAP) for m in items]}
+        out: dict[str, Any] = {"threadId": with_ms(strip_ms(a.thread_id)),
+                               "messages": await self._mapped(items, await self.folder_ids(uid),
+                                                              THREAD_BODY_CAP)}
+        if more:
+            out["notes"] = [f"only the first {len(items)} messages of this conversation are shown"]
+        return out
 
     async def draft(self, uid: int, a: Any) -> dict:
         made = await self._call(uid, "POST", f"{GRAPH}/me/messages", body=self._message(a))
@@ -481,9 +465,10 @@ class MailActions:
                 "toRecipients": _recipients(list(a.to)), "ccRecipients": _recipients(list(a.cc))}
 
     async def reply(self, uid: int, a: Any) -> dict:
-        items = [m for m in await self._conversation(
-            uid, a.thread_id, "id,conversationId,receivedDateTime,sentDateTime,isDraft", MAX_THREAD_MESSAGES)
-            if not m.get("isDraft")]
+        got, _ = await self._conversation(
+            uid, a.thread_id, "id,conversationId,receivedDateTime,sentDateTime,isDraft", 10,
+            newest_first=True)
+        items = [m for m in got if not m.get("isDraft")]
         if not items:
             raise GraphError(FailureKind.NOT_FOUND, "microsoft conversation has no messages")
         floor = datetime.min.replace(tzinfo=UTC)
@@ -494,17 +479,20 @@ class MailActions:
 
     # --- organising ---
 
-    async def _ids(self, uid: int, a: Any) -> list[str]:
-        """message_ids plus every message of each thread_id, de-duplicated."""
+    async def _ids(self, uid: int, a: Any) -> tuple[list[str], bool]:
+        """(message ids to act on, partial). message_ids plus the messages of each thread_id, de-duplicated
+        and capped at MAX_THREAD_MESSAGES in all; `partial` is True when a conversation holds more."""
         ids = [strip_ms(m) for m in a.message_ids]
+        partial = False
         for t in a.thread_ids:
-            ids += [str(m["id"]) for m in await self._conversation(uid, t, "id", MAX_MAIL_IDS)]
-        ids = list(dict.fromkeys(ids))
-        if len(ids) > MAX_THREAD_MESSAGES:
-            raise GraphError(FailureKind.INVALID_ARGUMENT,
-                             "those conversations hold too many messages; pass fewer thread_ids",
-                             "thread_ids")
-        return ids
+            room = MAX_THREAD_MESSAGES - len(ids)
+            if room <= 0:
+                return ids, True
+            got, more = await self._conversation(uid, t, "id", room)
+            ids += [str(m["id"]) for m in got]
+            ids = list(dict.fromkeys(ids))
+            partial = partial or more
+        return ids, partial
 
     @staticmethod
     async def _each(items: list[str], call: Callable[[str], Awaitable[Any]]) -> None:
@@ -519,19 +507,27 @@ class MailActions:
                 raise r
 
     @staticmethod
-    def _summary(a: Any, verb: str, added: list[str], removed: list[str]) -> dict:
-        return {"verb": verb, "messages": len(a.message_ids), "threads": len(a.thread_ids),
-                "added": added, "removed": removed}
+    def _summary(
+        a: Any, ids: list[str], partial: bool, verb: str, added: list[str], removed: list[str]
+    ) -> dict:
+        """Counts what was acted on. A conversation over the cap is reported as partial with the message
+        count, never as the whole conversation."""
+        if partial:
+            verb += f" (PARTIAL: the conversation is longer than {MAX_THREAD_MESSAGES} messages, only these)"
+        return {"verb": verb, "messages": len(ids), "threads": 0 if partial else len(a.thread_ids),
+                "added": added, "removed": removed, "partial": partial}
 
     async def _move(self, uid: int, a: Any, dest: str, verb: str) -> dict:
-        await self._each(await self._ids(uid, a), lambda m: self._call(
+        ids, partial = await self._ids(uid, a)
+        await self._each(ids, lambda m: self._call(
             uid, "POST", f"{GRAPH}/me/messages/{seg(m)}/move", idempotent=True, body={"destinationId": dest}))
-        return self._summary(a, verb, [], [])
+        return self._summary(a, ids, partial, verb, [], [])
 
     async def _patch(self, uid: int, a: Any, body: dict, verb: str) -> dict:
-        await self._each(await self._ids(uid, a), lambda m: self._call(
+        ids, partial = await self._ids(uid, a)
+        await self._each(ids, lambda m: self._call(
             uid, "PATCH", f"{GRAPH}/me/messages/{seg(m)}", idempotent=True, body=body))
-        return self._summary(a, verb, [], [])
+        return self._summary(a, ids, partial, verb, [], [])
 
     async def archive(self, uid: int, a: Any) -> dict:
         return await self._move(uid, a, "archive", "Archived")
@@ -585,8 +581,9 @@ class MailActions:
             if patch:
                 await self._call(uid, "PATCH", f"{GRAPH}/me/messages/{seg(mid)}", idempotent=True, body=patch)
 
-        await self._each(await self._ids(uid, a), one)
-        return self._summary(a, "Updated labels on", list(a.add), list(a.remove))
+        ids, partial = await self._ids(uid, a)
+        await self._each(ids, one)
+        return self._summary(a, ids, partial, "Updated labels on", list(a.add), list(a.remove))
 
 
 def mail_handlers(ex: Any) -> dict[str, Callable[[int, Any], Awaitable[Any]]]:
