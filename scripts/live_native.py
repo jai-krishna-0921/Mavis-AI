@@ -183,6 +183,7 @@ async def ncall(provider: Any, user_id: int, action: str, args: dict, out: Out, 
     return None, kind
 
 
+PROBE_TIMEOUT_S = 30.0   # on top of the shared client's own httpx timeouts
 Probe = Callable[..., Awaitable[tuple[Any, str]]]
 
 
@@ -198,7 +199,9 @@ def graph_probe(provider: Any, user_id: int) -> Probe | None:
 
     async def probe(path: str, params: dict | None = None, headers: dict | None = None):
         try:
-            return await graph.json(user_id, "GET", GRAPH + path, params=params, headers=headers), ""
+            data = await asyncio.wait_for(
+                graph.json(user_id, "GET", GRAPH + path, params=params, headers=headers), PROBE_TIMEOUT_S)
+            return data, ""
         except GraphError as exc:
             return None, exc.kind.value
         except Exception:  # noqa: BLE001 - reauth, transport: unknown, never printed
@@ -311,17 +314,16 @@ async def check_delta_baseline(probe: Probe) -> Verdict:
 
 
 async def check_chat_list(probe: Probe) -> Verdict:
-    steps = (
-        ("expand members and orderby",
-         {"$expand": "members", "$orderby": "lastMessagePreview/createdDateTime desc"}),
-        ("expand members, no orderby", {"$expand": "members"}),
-        ("no expand, no orderby", {}),
-    )
-    for n, (label, extra) in enumerate(steps):
-        _, kind = await probe("/me/chats", {"$top": "5", **extra})
+    from mavis.tools.integrations.native.graph_teams import chat_list_steps
+
+    labels = ("members and lastMessagePreview with $orderby", "lastMessagePreview with $orderby",
+              "lastMessagePreview without $orderby")
+    steps = list(zip(labels, chat_list_steps(5), strict=True))
+    for n, (label, params) in enumerate(steps):
+        _, kind = await probe("/me/chats", params)
         if not kind:
-            return "PASS", ("the chat list works with $expand=members and $orderby" if n == 0
-                            else f"fallback step {n + 1} was needed ({label})")
+            return "PASS", ("the production chat list request works (members, preview and $orderby)" if n == 0
+                            else f"fallback step {n + 1} of 3 works ({label}); steps before it were rejected")
         if kind in ("permission_missing", "not_found"):
             return "UNKNOWN", "Teams chats are not available for this account"
         if kind not in _BAD_REQUEST:

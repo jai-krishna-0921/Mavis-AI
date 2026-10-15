@@ -249,21 +249,40 @@ async def test_item5_delta_baseline_filter():
     assert await verdict_of(live_native.check_delta_baseline, ("/delta", None, (None, "auth"))) == "UNKNOWN"
 
 
-async def test_item6_chat_list_names_the_fallback_step():
+async def test_item6_probes_the_production_chat_requests_in_order():
+    from mavis.tools.integrations.native.graph_teams import chat_list_steps
+
     full = probe_of([("/me/chats", None, ({}, ""))])
     verdict, hint = await live_native.check_chat_list(full)
-    assert verdict == "PASS" and "$orderby" in hint
-    no_order = probe_of([("/me/chats", lambda q: "$orderby" in q, (None, "invalid_argument")),
-                         ("/me/chats", None, ({}, ""))])
-    verdict, hint = await live_native.check_chat_list(no_order)
-    assert verdict == "PASS" and "fallback step 2" in hint
-    bare = probe_of([("/me/chats", lambda q: "$orderby" in q or "$expand" in q, (None, "invalid_argument")),
-                     ("/me/chats", None, ({}, ""))])
-    assert "fallback step 3" in (await live_native.check_chat_list(bare))[1]
+    assert verdict == "PASS" and "production chat list request works" in hint
+    assert full.seen[0][1] == chat_list_steps(5)[0]
+    members_bad = ("/me/chats", lambda q: "members" in q["$expand"], (None, "invalid_argument"))
+    rejects_members = probe_of([members_bad, ("/me/chats", None, ({}, ""))])
+    verdict, hint = await live_native.check_chat_list(rejects_members)
+    assert verdict == "PASS" and "fallback step 2 of 3" in hint
+    assert [q for _, q, _ in rejects_members.seen] == list(chat_list_steps(5)[:2])
+    rejects_order = probe_of([("/me/chats", lambda q: "$orderby" in q, (None, "invalid_argument")),
+                              ("/me/chats", None, ({}, ""))])
+    verdict, hint = await live_native.check_chat_list(rejects_order)
+    assert verdict == "PASS" and "fallback step 3 of 3" in hint and "without $orderby" in hint
+    assert [q for _, q, _ in rejects_order.seen] == list(chat_list_steps(5))
     bad = ("/me/chats", None, (None, "invalid_argument"))
     assert await verdict_of(live_native.check_chat_list, bad) == "FAIL"
     denied = ("/me/chats", None, (None, "permission_missing"))
     assert await verdict_of(live_native.check_chat_list, denied) == "UNKNOWN"
+
+
+async def test_a_hung_graph_call_times_out_as_unknown(monkeypatch):
+    import asyncio
+
+    class Hung:
+        async def json(self, *a, **k):
+            await asyncio.sleep(60)
+
+    monkeypatch.setattr(live_native, "PROBE_TIMEOUT_S", 0.01)
+    provider = SimpleNamespace(executors={NativeProvider.MICROSOFT: SimpleNamespace(graph=Hung())})
+    probe = live_native.graph_probe(provider, 1)
+    assert await probe("/me/chats") == (None, "error")
 
 
 def test_item7_shared_with_me_verdicts():

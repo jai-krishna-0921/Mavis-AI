@@ -111,12 +111,7 @@ class TeamsActions:
 
     async def chats(self, uid: int, a: Any) -> dict:
         me_oid, me_mail = await self._me(uid)
-        orderby = "lastMessagePreview/createdDateTime desc"
-        steps = (
-            {"$expand": "members,lastMessagePreview", "$orderby": orderby, "$top": str(a.limit)},
-            {"$expand": "lastMessagePreview", "$orderby": orderby, "$top": str(a.limit)},
-            {"$expand": "lastMessagePreview", "$top": str(LIST_TOP)},
-        )
+        steps = chat_list_steps(a.limit)
         raw: list[dict] = []
         try:
             for n, params in enumerate(steps):
@@ -190,6 +185,16 @@ class TeamsActions:
         made = made if isinstance(made, dict) else {}
         return {"messageId": str(made.get("id") or ""), "chatId": with_ms(a.chat_id),
                 "at": str(made.get("createdDateTime") or "")}
+
+
+def chat_list_steps(limit: int) -> tuple[dict, dict, dict]:
+    """The three /me/chats requests `chats` tries in order (the live check probes the same ones)."""
+    orderby = "lastMessagePreview/createdDateTime desc"
+    return (
+        {"$expand": "members,lastMessagePreview", "$orderby": orderby, "$top": str(limit)},
+        {"$expand": "lastMessagePreview", "$orderby": orderby, "$top": str(limit)},
+        {"$expand": "lastMessagePreview", "$top": str(LIST_TOP)},
+    )
 
 
 def teams_handlers(ex: Any) -> dict[str, Callable[[int, Any], Awaitable[Any]]]:
