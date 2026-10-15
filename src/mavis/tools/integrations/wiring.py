@@ -39,10 +39,12 @@ from mavis.tools.integrations.actions import (
     GOOGLE_CAPABILITIES,
     active_capabilities,
     display_name,
+    serving,
     workspace_enabled,
 )
 from mavis.tools.integrations.activation import Activator
 from mavis.tools.integrations.connect_flow import CHECK_KIND, ConnectFlow, RepoUserState
+from mavis.tools.integrations.connections import failed_alias
 from mavis.tools.integrations.first_sync import FirstSync
 from mavis.tools.integrations.poller import POLL_KIND, WORKSPACE_POLL_KIND, Poller
 from mavis.worker.runner import register_event_handler, register_job_handler, register_startup_hook
@@ -320,15 +322,17 @@ async def capability_check(user_id: int, capability: Capability) -> bool:
     from mavis.tools import integrations  # module lookup at call time (tests swap the singletons)
 
     try:
-        state = (await integrations.get_connection_cache().status(user_id)).get(capability.value)
+        states = await integrations.get_connection_cache().status(user_id)
     except IntegrationError as exc:
         log.warning("integrations.capability_check_failed", capability=capability.value,
                     error=type(exc).__name__)
         return True
-    if state is ConnectionState.ACTIVE:
+    aliases = serving(capability)  # an Outlook account serves the mail and calendar gates too
+    if any(states.get(c.value) is ConnectionState.ACTIVE for c in aliases):
         return True
-    if state is ConnectionState.FAILED:
-        raise ConnectionRequired(capability, capability_reason(capability), revoked=True)
+    failed = failed_alias(states, aliases)
+    if failed is not None:
+        raise ConnectionRequired(failed, capability_reason(failed), revoked=True)
     return False
 
 

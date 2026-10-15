@@ -28,6 +28,7 @@ from mavis.tools.integrations.native import providers
 from mavis.tools.integrations.native.base import NativeExecutor, NativeProvider
 from mavis.tools.integrations.native.google_scopes import ACTION_SCOPES  # noqa: F401  (re-exported)
 from mavis.tools.integrations.native.http import make_client
+from mavis.tools.integrations.native.merge import NEW_ITEM, MailCalendarMerge
 from mavis.tools.integrations.native.oauth import NativeOAuth
 from mavis.tools.integrations.native.tokens import ACTIVE, REVOKED, Grant, NativeTokenStore
 
@@ -81,6 +82,7 @@ class NativeRouter:
         self.fallback, self.tokens, self.oauth = fallback, tokens, oauth
         self.executors: dict[NativeProvider, NativeExecutor] = {e.provider: e for e in executors}
         self._client = client
+        self.merge = MailCalendarMerge(self)
 
     async def aclose(self) -> None:
         if self._client is not None:
@@ -115,6 +117,36 @@ class NativeRouter:
         return g if g is not None and g.status == ACTIVE else None
 
     async def execute(self, user: UserRef, action: str, args: dict) -> ToolResult:
+        merged = await self.merge.execute(user, action, args)
+        if merged is not None:
+            return merged
+        if action in NEW_ITEM and "account" in args:  # only the merge layer reads it; no single provider does
+            args = {k: v for k, v in args.items() if k != "account"}
+        return await self._execute_single(user, action, args)
+
+    async def execute_native(self, user: UserRef, provider: NativeProvider, action: str, args: dict
+                             ) -> ToolResult:
+        """Run an action on ONE provider's own executor: no merge, no Composio fallback. Sync and poll use
+        this so an Outlook read can never be answered from Gmail (or the reverse)."""
+        spec = ACTIONS.get(action)
+        executor = self.executors.get(provider)
+        grant = await self._active_grant(user.user_id, provider) if self._ready(provider) else None
+        if spec is None or executor is None or not executor.handles(action) or grant is None:
+            return ToolResult(ok=False, error_kind=FailureKind.AUTH,
+                              error=f"the {provider.value} account is not connected; "
+                                    "the user must reconnect it")
+        if not self._permitted(grant, action, spec.capability):
+            return ToolResult(ok=False, error_kind=FailureKind.PERMISSION_MISSING,
+                              error=f"the connected {provider.value} account was not granted the permission "
+                                    f"{action} needs; the user must reconnect and allow it")
+        return await executor.execute(user, action, args)
+
+    async def execute_single(self, user: UserRef, action: str, args: dict) -> ToolResult:
+        """Like `execute` but never merged: Google's own mail and calendar (Composio fallback included). The
+        Gmail and Google Calendar polls and syncs use it so they never ingest Outlook items as Gmail's."""
+        return await self._execute_single(user, action, args)
+
+    async def _execute_single(self, user: UserRef, action: str, args: dict) -> ToolResult:
         spec = ACTIONS.get(action)
         provider = provider_of(spec.capability) if spec is not None else None
         if spec is not None and self._ready(provider):

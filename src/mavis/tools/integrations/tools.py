@@ -31,10 +31,11 @@ from mavis.tools.integrations.actions import (
     ActionSpec,
     display_name,
     localize,
+    serving,
     workspace_enabled,
 )
 from mavis.tools.integrations.base import IntegrationProvider, render_result
-from mavis.tools.integrations.connections import ConnectionCache
+from mavis.tools.integrations.connections import ConnectionCache, failed_alias
 from mavis.tools.integrations.failures import adapter_kind, classify
 from mavis.tools.integrations.mail_render import RENDERERS
 from mavis.tools.integrations.workspace_render import RENDERERS as WORKSPACE_RENDERERS
@@ -60,10 +61,13 @@ async def call_action(
     ctx: ToolContext, action: str, args: BaseModel, *, provider: IntegrationProvider, cache: ConnectionCache
 ) -> ToolResult:
     spec = ACTIONS[action]
-    await cache.ensure(ctx.user_id, spec.capability, CAPABILITY_PURPOSE[spec.capability])
+    aliases = serving(spec.capability)
+    await cache.ensure_any(ctx.user_id, aliases, CAPABILITY_PURPOSE[spec.capability])
     result = await provider.execute(UserRef(user_id=ctx.user_id), action, provider_args(args))
-    if not result.ok and not await cache.is_active(ctx.user_id, spec.capability, fresh=True):
-        raise ConnectionRequired(spec.capability, REVOKED_REASON, revoked=True)
+    if not result.ok and not await cache.is_active_any(ctx.user_id, aliases, fresh=True):
+        states = await cache.status(ctx.user_id)  # just fetched fresh above
+        needs = failed_alias(states, aliases) or spec.capability
+        raise ConnectionRequired(needs, REVOKED_REASON, revoked=True)
     return result
 
 

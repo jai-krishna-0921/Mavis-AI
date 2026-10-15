@@ -22,6 +22,13 @@ def is_auth_error(error: str | None) -> bool:
     return any(m in text for m in _AUTH_MARKERS)
 
 
+def failed_alias(
+    states: dict[str, ConnectionState], capabilities: tuple[Capability, ...]
+) -> Capability | None:
+    """The first of the capabilities whose account existed and stopped working, if any."""
+    return next((c for c in capabilities if states.get(c.value) is ConnectionState.FAILED), None)
+
+
 class ConnectionCache:
     def __init__(
         self, provider: IntegrationProvider, ttl_s: float = 60.0, clock: Callable[[], float] = time.monotonic
@@ -58,3 +65,17 @@ class ConnectionCache:
         if state is not ConnectionState.ACTIVE:
             # FAILED means the account existed and stopped working: ask to reconnect, not to connect.
             raise ConnectionRequired(capability, reason, revoked=revoked or state is ConnectionState.FAILED)
+
+    async def is_active_any(self, user_id: int, capabilities: tuple[Capability, ...], *,
+                            fresh: bool = False) -> bool:
+        states = await self.status(user_id, fresh=fresh)
+        return any(states.get(c.value) is ConnectionState.ACTIVE for c in capabilities)
+
+    async def ensure_any(self, user_id: int, capabilities: tuple[Capability, ...], reason: str) -> None:
+        """Pass when any of the capabilities is ACTIVE. Otherwise ask for the FAILED one (reconnect it, not
+        a different service), else for the first."""
+        states = await self.status(user_id)
+        if any(states.get(c.value) is ConnectionState.ACTIVE for c in capabilities):
+            return
+        failed = failed_alias(states, capabilities)
+        raise ConnectionRequired(failed or capabilities[0], reason, revoked=failed is not None)

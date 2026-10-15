@@ -35,3 +35,9 @@ def render_result(result: ToolResult, limit: int = MAX_RESULT_CHARS) -> str:
     data = result.data
     text = data if isinstance(data, str) else json.dumps(data, default=str, ensure_ascii=False)
     return text if len(text) <= limit else text[:limit] + " …[truncated]"
+
+
+def single(provider: IntegrationProvider):
+    """The provider's un-merged execute: with a Microsoft account connected, `execute` fans mail and calendar
+    reads across both vendors, but a Gmail or Google Calendar poll or sync must see only Google's."""
+    return getattr(provider, "execute_single", provider.execute)

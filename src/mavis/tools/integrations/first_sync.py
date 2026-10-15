@@ -23,7 +23,7 @@ from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.integrations import UserRef
 from mavis.domain.loops import LoopUpsert
 from mavis.domain.policy import Capability
-from mavis.tools.integrations.base import IntegrationProvider
+from mavis.tools.integrations.base import IntegrationProvider, single
 from mavis.tools.integrations.normalize import (
     extract_calendar_items,
     extract_list,
@@ -121,7 +121,7 @@ class FirstSync:
         return noticed
 
     async def _execute(self, user_id: int, action: str, args: dict) -> Any:
-        res = await self.provider.execute(UserRef(user_id=user_id), action, args)
+        res = await single(self.provider)(UserRef(user_id=user_id), action, args)
         return res.data if res.ok else None
 
     async def _learn_batches(

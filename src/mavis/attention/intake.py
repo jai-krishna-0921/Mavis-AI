@@ -35,7 +35,7 @@ from mavis.loops.service import LoopService
 from mavis.store.repo import attention as repo
 from mavis.store.repo import messages, users
 from mavis.timers.service import WakeupService
-from mavis.tools.integrations.base import IntegrationProvider
+from mavis.tools.integrations.base import IntegrationProvider, single
 from mavis.tools.integrations.normalize import email_event, extract_messages, to_datetime
 
 log = structlog.get_logger()
@@ -338,7 +338,7 @@ class Intake:
         for _ in range(-(-total // BACKFILL_PAGE)):
             want = min(BACKFILL_PAGE, total - fetched)
             query = BACKFILL_TEMPLATE.format(days=days) + (f" before:{before}" if before else "")
-            res = await self._provider.execute(
+            res = await single(self._provider)(
                 UserRef(user_id=user_id), "mail.search", {"query": query, "max_results": want}
             )
             if not res.ok:

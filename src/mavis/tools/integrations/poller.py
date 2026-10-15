@@ -15,7 +15,7 @@ from mavis.domain import timeutil
 from mavis.domain.integrations import ConnectionState, UserRef
 from mavis.domain.policy import Capability
 from mavis.domain.wakeups import WakeupKind
-from mavis.tools.integrations.base import IntegrationProvider
+from mavis.tools.integrations.base import IntegrationProvider, single
 from mavis.tools.integrations.connect_flow import Schedule, UserState
 from mavis.tools.integrations.connections import ConnectionCache, is_auth_error
 from mavis.tools.integrations.native import providers
@@ -183,7 +183,7 @@ class Poller:
 
 async def poll_gmail(poller: Poller, user_id: int, st: dict) -> int:
     after = int(st.get("cursors", {}).get("gmail_after") or (poller.clock() - INITIAL_LOOKBACK).timestamp())
-    res = await poller.provider.execute(
+    res = await single(poller.provider)(
         UserRef(user_id=user_id), "mail.search",
         {"query": f"after:{after} -in:sent -in:drafts", "max_results": 25},
     )
@@ -223,7 +223,7 @@ async def poll_slack(poller: Poller, user_id: int, st: dict) -> int:
 async def poll_calendar(poller: Poller, user_id: int, st: dict) -> int:
     now = poller.clock()
     updated_min = st.get("cursors", {}).get("gcal_updated_min") or (now - INITIAL_LOOKBACK).isoformat()
-    res = await poller.provider.execute(UserRef(user_id=user_id), "calendar.list", {
+    res = await single(poller.provider)(UserRef(user_id=user_id), "calendar.list", {
         "time_min": now.isoformat(), "time_max": (now + timedelta(days=30)).isoformat(),
         "max_results": 50, "updated_min": updated_min,
     })

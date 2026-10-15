@@ -83,19 +83,24 @@ def _one_line(text: str) -> str:
 
 def render_search(data: Any, args: Any = None) -> str:
     msgs = extract_messages(data)
+    # several accounts: which one could not be reached
+    notes = [f"Note: {n}" for n in (data.get("notes") if isinstance(data, dict) else None) or []
+             if isinstance(n, str)]
     if not msgs:
         # a neutral fact naming the query; what to make of it is in the chat rules (TOOL_RULES)
         query = " ".join(str(getattr(args, "query", "") or "").split())
-        return f"No emails matched the query {query!r}." if query else "No emails matched the query."
-    lines = [f"{len(msgs)} email(s). Call mail_read with a message_id to read one in full."]
+        none = f"No emails matched the query {query!r}." if query else "No emails matched the query."
+        return "\n".join([none, *notes])
+    lines = [f"{len(msgs)} email(s). Call mail_read with a message_id to read one in full.", *notes]
     for raw in msgs:
         m = normalize_email(raw)
         unread = " (unread)" if "UNREAD" in m["labels"] else ""
         preview = _clip(_one_line(body_text(raw)), PREVIEW_CHARS)
+        account = f"\n  Account: {raw['account']}" if raw.get("account") else ""
         lines.append(
             f"- message_id={m['message_id']} thread_id={m['thread_id']}{unread}\n"
-            f"  From: {m['from']}\n  Subject: {m['subject']}\n  Date: {m['received_at'] or 'unknown'}\n"
-            f"  Preview: {preview}"
+            f"  From: {m['from']}\n  Subject: {m['subject']}\n  Date: {m['received_at'] or 'unknown'}"
+            f"{account}\n  Preview: {preview}"
         )
     return "\n".join(lines)
 

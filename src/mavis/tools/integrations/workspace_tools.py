@@ -23,7 +23,7 @@ import httpx
 from pydantic import BaseModel
 
 from mavis.config import get_settings
-from mavis.domain.errors import ActionFailed
+from mavis.domain.errors import ActionFailed, IntegrationError
 from mavis.domain.messages import Outbound
 from mavis.domain.policy import RiskClass
 from mavis.domain.results import ToolOutput
@@ -32,6 +32,7 @@ from mavis.store.repo import outbox, users
 from mavis.store.repo import tasks as tasks_repo
 from mavis.tools import web
 from mavis.tools.integrations.actions import (
+    CalendarCreateArgs,
     CalendarGetArgs,
     DocAppendArgs,
     DocArgs,
@@ -43,6 +44,7 @@ from mavis.tools.integrations.actions import (
     DriveUploadArgs,
     DriveUploadFileArgs,
     FileArgs,
+    MailReplyArgs,
     TaskCompleteArgs,
     TaskPatchArgs,
     TaskUpdateArgs,
@@ -436,6 +438,30 @@ async def prepare_event_update(ctx: ToolContext, args: BaseModel) -> Prepared:
     return Prepared(risk=RiskClass.OUTWARD if guests else None, note=note)
 
 
+async def prepare_sender(ctx: ToolContext, args: BaseModel) -> Prepared:
+    """Which account a new mail or event goes out from. The approval card always names it ("From: ...");
+    with two accounts and no default nothing is queued and the model asks the user. A user without a
+    Microsoft account keeps today's card."""
+    from mavis.tools import integrations  # module lookup at call time (tests swap the singletons)
+    from mavis.tools.integrations.native import merge as merging
+
+    try:
+        merge = getattr(integrations.get_provider(), "merge", None)
+    except IntegrationError:
+        return Prepared()
+    kind = "calendar" if isinstance(args, CalendarCreateArgs) else "mail"
+    if merge is None or not await merge.engaged(ctx.user_id, kind):
+        return Prepared()
+    if isinstance(args, MailReplyArgs):  # a reply goes out from the account the thread lives in
+        want = merging.MICROSOFT if merging.is_ms(args.thread_id) else merging.GOOGLE
+        picked = next((a for a in await merge.accounts(ctx.user_id, kind) if a.provider is want), None)
+    else:
+        picked = await merge.resolve_sender(ctx.user_id, kind, getattr(args, "account", ""))
+        if isinstance(picked, merging.AskWhich):
+            return Prepared(refusal=picked.text)
+    return Prepared(note=f"From: {picked.address}") if picked is not None and picked.address else Prepared()
+
+
 CREATES = ("drive.create_folder", "docs.create", "sheets.create", "tasks.add", "slides.create",
            "contacts.create")
 CUSTOM_FNS: dict[str, CustomFn] = {
@@ -450,6 +476,7 @@ CUSTOM_FNS: dict[str, CustomFn] = {
 _STEPS: dict[str, PrepareFn] = {**ESCALATIONS, **VERIFIERS}
 PREPARES: dict[str, PrepareFn] = {
     "calendar.update_event": prepare_event_update,
+    **dict.fromkeys(("mail.send", "mail.draft", "mail.reply", "calendar.create_event"), prepare_sender),
     **_STEPS,
     **{name: guarded(name, _STEPS.get(name)) for name in (*FILE_TARGETS, *DESTINATIONS)},
 }

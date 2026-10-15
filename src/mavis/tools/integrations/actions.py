@@ -97,6 +97,20 @@ def active_capabilities() -> tuple[Capability, ...]:
     return INTEGRATION_CAPABILITIES
 
 
+# A Microsoft account serves the same mail and calendar tools as Google, so either one satisfies a gate.
+ALIASES: dict[Capability, tuple[Capability, ...]] = {
+    Capability.GMAIL: (Capability.GMAIL, Capability.OUTLOOK),
+    Capability.OUTLOOK: (Capability.GMAIL, Capability.OUTLOOK),
+    Capability.CALENDAR: (Capability.CALENDAR, Capability.OUTLOOK_CALENDAR),
+    Capability.OUTLOOK_CALENDAR: (Capability.CALENDAR, Capability.OUTLOOK_CALENDAR),
+}
+
+
+def serving(capability: Capability) -> tuple[Capability, ...]:
+    """Every capability whose connection lets a tool declared with `capability` run."""
+    return ALIASES.get(capability, (capability,))
+
+
 def is_google(capability: Capability) -> bool:
     """Routed through the one Google consent (only while the Workspace flag is on)."""
     return workspace_enabled() and capability in GOOGLE_CAPABILITIES
@@ -130,6 +144,9 @@ class MailComposeArgs(ToolArgs):
     subject: str
     body: str
     cc: list[Email] = Field(default_factory=list)
+    account: str = Field(
+        default="", description="Only when several mail/calendar accounts are connected: the address to use "
+        "(work or personal). Leave empty to use the default.")
 
 
 class MailReplyArgs(ToolArgs):
@@ -174,6 +191,9 @@ class CalendarCreateArgs(LocalTimes):
     )
     description: str = ""
     location: str = Field(default="", max_length=300, description="Where it happens: a place or address")
+    account: str = Field(
+        default="", description="Only when several mail/calendar accounts are connected: the address to use "
+        "(work or personal). Leave empty to use the default.")
 
 
 class CalendarUpdateArgs(LocalTimes):

@@ -117,7 +117,7 @@ async def test_injection_doc_cannot_share_delete_or_send(google, user, fake_llm)
     assert results["c4"].startswith("QUEUED_FOR_APPROVAL")  # mail stays behind the user's OK
     executed = [e[1] for e in google.executed]
     assert not {"drive.share", "tasks.delete", "mail.send"} & set(executed)
-    mail = {"to": ["attacker@evil.example"], "subject": "Budget", "body": "attached", "cc": []}
+    mail = {"to": ["attacker@evil.example"], "subject": "Budget", "body": "attached", "cc": [], "account": ""}
     queued = await approvals.find_open(user.id, tid, "mail_send", mail)
     assert queued is not None and queued.tainted  # never merged with an untainted request
     assert await open_approvals(user.id, tid, "drive_share") == []
