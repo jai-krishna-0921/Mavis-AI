@@ -75,7 +75,11 @@ async def spawn_agent(
     dropped = sorted(set(tools) - allowed)
     if dropped:
         log.warning("spawn.tools_dropped", role=role, dropped=dropped)
-    lc_tools = registry.for_agent("spawn", user_id, names=granted) if granted else []
+    from mavis.tools.integrations.wiring import microsoft_unserved
+
+    lc_tools = (registry.for_agent("spawn", user_id, names=granted,
+                                   exclude_capabilities=await microsoft_unserved(user_id))
+                if granted else [])
     messages = [
         SystemMessage(f"{SPAWN_PROMPT.format(role=role)}\n\n{UNTRUSTED_NOTE}"),
         HumanMessage(f"Goal:\n{goal}\n\nContext:\n{context or '(none)'}"),

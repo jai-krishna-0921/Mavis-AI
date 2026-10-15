@@ -244,6 +244,9 @@ async def unlinked_with_internal(user_id: int) -> frozenset[Capability]:
                 missing.add(capability)
         if get_settings().mcp_enabled and not await mcp_servers.has_active(user_id):
             missing.add(Capability.MCP)
+        from mavis.tools.integrations.wiring import microsoft_unserved
+
+        missing |= await microsoft_unserved(user_id)  # e.g. no Teams tools on a personal Microsoft account
         return frozenset(missing)
     except Exception:  # noqa: BLE001 - an extra; unknown means the old behaviour
         log.warning("simple_turn.link_state_failed", exc_info=True)

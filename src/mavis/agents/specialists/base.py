@@ -94,7 +94,10 @@ async def run_specialist(
     """
     if spec.runner is not None:
         return await spec.runner(user_id, instruction, context)
-    tools = get_registry().for_agent(spec.name, user_id, names=spec.tool_names or None)
+    from mavis.tools.integrations.wiring import microsoft_unserved
+
+    tools = get_registry().for_agent(spec.name, user_id, names=spec.tool_names or None,
+                                     exclude_capabilities=await microsoft_unserved(user_id))
     messages = [
         SystemMessage(f"{spec.prompt}\n\n{UNTRUSTED_NOTE}\nCurrent UTC time: {timeutil.now().isoformat()}"),
         HumanMessage(f"Task:\n{instruction}\n\nContext:\n{context or '(none)'}"),

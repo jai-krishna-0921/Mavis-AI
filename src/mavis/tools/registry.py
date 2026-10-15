@@ -454,13 +454,15 @@ class ToolRegistry:
     def _excluded(tool: MavisTool) -> bool:
         return tool.requires is not None and tool.requires in excluded_capabilities.get()
 
-    def for_agent(self, agent: str, user_id: int, names: Iterable[str] | None = None) -> list[BaseTool]:
+    def for_agent(self, agent: str, user_id: int, names: Iterable[str] | None = None,
+                  exclude_capabilities: Iterable[Capability] = ()) -> list[BaseTool]:
         wanted = set(names) if names is not None else None
+        no_caps = set(exclude_capabilities)
         return [
             self._as_langchain(t, user_id)
             for t in self._tools.values()
             if agent in t.agents and self.available(t) and (wanted is None or t.name in wanted)
-            and not self._excluded(t)
+            and not self._excluded(t) and (t.requires is None or t.requires not in no_caps)
         ]
 
     def select(

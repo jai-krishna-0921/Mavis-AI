@@ -343,6 +343,32 @@ def capability_reason(capability: Capability) -> str:
     return CAPABILITY_PURPOSE.get(capability, f"use your {capability.value}")
 
 
+async def microsoft_unserved(user_id: int) -> frozenset[Capability]:
+    """Microsoft capabilities this user's connected account can never serve (Teams on a personal account, a
+    service whose permission was refused), so their tools are not offered. No active grant: nothing is hidden,
+    the connect prompt is the way in. Never raises."""
+    if not microsoft_enabled():
+        return frozenset()
+    try:
+        from sqlalchemy import select
+
+        from mavis.store import db as dbm
+        from mavis.store.models import NativeGrant
+        from mavis.tools.integrations.native import providers
+        from mavis.tools.integrations.native.tokens import ACTIVE, _grant
+
+        spec = providers.spec_of("microsoft")
+        async with dbm.Session() as s:
+            row = await s.scalar(select(NativeGrant).where(
+                NativeGrant.user_id == user_id, NativeGrant.provider == "microsoft"))
+        if spec is None or row is None or row.status != ACTIVE:
+            return frozenset()
+        return frozenset(MICROSOFT_CAPABILITIES) - set(spec.caps_for(_grant(row)))
+    except Exception:  # noqa: BLE001 - an extra filter: unknown means offer the tools
+        log.warning("integrations.microsoft_unserved_failed", exc_info=True)
+        return frozenset()
+
+
 def tool_available(tool: MavisTool) -> bool:
     """Integration tools are offered only when a provider is configured (a dev box without a key
     does not waste tool rounds on them)."""

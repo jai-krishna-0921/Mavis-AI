@@ -29,11 +29,27 @@ MUTE_COMMANDS = ("mute", "unmute")
 
 # Every Microsoft word opens the one Microsoft consent, so each maps to the anchor (like Google's Drive).
 MICROSOFT_ANCHOR = Capability.OUTLOOK
-_MS_WORDS = re.compile(
-    r"\b(outlook|office\s?365|o365|m365|microsoft(\s?365)?|ms\s?365|teams|one\s?drive|share\s?point)\b", re.I
+_MS_STRONG = re.compile(
+    r"\b(outlook|office\s?365|o365|m365|microsoft(\s?365)?|ms\s?365|one\s?drive|share\s?point"
+    r"|(microsoft|ms)\s+teams|teams\s+(chats?|messages?|dms?|channels?))\b", re.I
 )
+# "teams" is also an ordinary word ("our teams met"): alone it counts only beside a connect-type verb, or as
+# the whole text (/connect teams).
+_TEAMS_BARE = re.compile(r"\bteams\b", re.I)
+_LINK_VERB = re.compile(
+    r"\b(connect|link|relink|reconnect|authori[sz]e|integrate|sign\s?in|log\s?in|add|set\s?up)\b", re.I)
+
+
+class _MicrosoftWords:
+    def search(self, text: str) -> bool:
+        if _MS_STRONG.search(text):
+            return True
+        return bool(_TEAMS_BARE.search(text) and (text.strip().lower() == "teams" or _LINK_VERB.search(text)))
+
+
+_MS_WORDS = _MicrosoftWords()
 _KEYWORDS: tuple[tuple[re.Pattern[str], Capability], ...] = (
-    (_MS_WORDS, MICROSOFT_ANCHOR),
+    (_MS_WORDS, MICROSOFT_ANCHOR),  # type: ignore[arg-type]
     (re.compile(r"\b(g?cal(endar)?|meetings?|schedule)\b", re.I), Capability.CALENDAR),
     (re.compile(r"\b(gmail|e-?mails?|mail|inbox)\b", re.I), Capability.GMAIL),
     (re.compile(r"\bslack\b", re.I), Capability.SLACK),
@@ -128,7 +144,9 @@ _GOOGLE_WORDS = re.compile(
 )
 
 
-_EXPLICIT_GOOGLE = re.compile(r"\b(gmail|google|gcal|g-?suite|workspace|drive)\b", re.I)
+_EXPLICIT_GOOGLE = re.compile(
+    r"\b(gmail|google|gcal|g-?suite|workspace|drive|docs?|sheets?|spreadsheets?|tasks?|to-?dos?|contacts?|meet)\b",
+    re.I)
 _GENERIC_GOOGLE = frozenset({Capability.GMAIL, Capability.CALENDAR})
 
 
@@ -168,11 +186,32 @@ def capabilities_named(text: str) -> set[Capability]:
     return named
 
 
+_MS_FAMILY = re.compile(r"\b(office\s?365|o365|m365|microsoft(\s?365)?|ms\s?365)\b", re.I)
+_MS_MEMBER: dict[Capability, re.Pattern[str]] = {
+    Capability.TEAMS: re.compile(r"\bteams\b", re.I),
+    Capability.ONEDRIVE: re.compile(r"\b(one\s?drive|share\s?point|files?|documents?|decks?)\b", re.I),
+    Capability.OUTLOOK_CALENDAR: re.compile(r"\b(g?cal(endar)?|meetings?|schedule|events?|outlook)\b", re.I),
+    Capability.OUTLOOK: re.compile(r"\b(e-?mails?|mail|inbox|outlook)\b", re.I),
+}
+
+
+def _microsoft_member_requested(capability: Capability, text: str) -> bool:
+    """The Microsoft consent covers four services: a Microsoft word asks for the one it points at ("my Teams
+    chats" is Teams, "my Outlook calendar" the calendar), and a family word ("Microsoft 365") asks for all."""
+    if _MS_FAMILY.search(text):
+        return True
+    if capability is Capability.ONEDRIVE:
+        return bool(re.search(r"\b(one\s?drive|share\s?point)\b", text, re.I))
+    return bool(_MS_MEMBER[capability].search(text))
+
+
 def capability_requested(capability: Capability, text: str) -> bool:
     """Did the text ask for this account? Google capabilities count as one family when Workspace is on."""
     named = capabilities_named(text)
     if capability in named:
         return True
+    if capability in MICROSOFT_CAPABILITIES and MICROSOFT_ANCHOR in named:
+        return _microsoft_member_requested(capability, text or "")
     return workspace_enabled() and is_google(capability) and any(is_google(c) for c in named)
 
 
@@ -327,7 +366,9 @@ async def _run(f: ConnectFlow, event: Event, name: str, args: list[str]) -> None
         return
     capability = capability_from_text(words) if args else None
     if name == "connect":
-        if capability is not None:
+        if capability is not None and _either_provider(words, capability):
+            await _offer_either(f, event.user_id, capability)
+        elif capability is not None:
             await f.start(event.user_id, capability, "")
         else:
             await f.offer_menu(event.user_id)
@@ -344,6 +385,24 @@ async def _run(f: ConnectFlow, event: Event, name: str, args: list[str]) -> None
         await f.disconnect(event.user_id, capability)
 
 
+def _either_provider(text: str, capability: Capability) -> bool:
+    """A bare "email" or "calendar" where both Google and Microsoft can serve it: ask which one."""
+    return (microsoft_enabled() and capability in _GENERIC_GOOGLE
+            and not _EXPLICIT_GOOGLE.search(text or "") and not _MS_STRONG.search(text or ""))
+
+
+async def _offer_either(f: ConnectFlow, user_id: int, capability: Capability) -> None:
+    from mavis.domain.messages import Button
+    from mavis.tools.integrations.connect_flow import START_PREFIX
+
+    google = GOOGLE_ANCHOR if workspace_enabled() else capability
+    word = "email" if capability is Capability.GMAIL else "calendar"
+    await f.send(user_id, f"Which {word} should I hook up?", [
+        [Button(label="Connect Google", data=f"{START_PREFIX}{google.value}")],
+        [Button(label="Connect Microsoft 365", data=f"{START_PREFIX}{MICROSOFT_ANCHOR.value}")],
+    ])
+
+
 async def handle_connect(user_id: int, text: str, flow: ConnectFlow | None = None) -> str | None:
     """Natural-language connect request (Phase 4's CONNECT route; not routed in the slice).
 
@@ -354,7 +413,9 @@ async def handle_connect(user_id: int, text: str, flow: ConnectFlow | None = Non
         await f.send(user_id, NOT_CONFIGURED_TEXT)
         return None
     capability = capability_from_text(text)
-    if capability is None:
+    if capability is not None and _either_provider(text, capability):
+        await _offer_either(f, user_id, capability)
+    elif capability is None:
         await f.offer_menu(user_id)
     else:
         await f.start(user_id, capability, "")
