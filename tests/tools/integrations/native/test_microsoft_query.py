@@ -233,6 +233,11 @@ PATHOLOGICAL = {
     "unclosed end tags": "</a " * 97_000,
     "lone angle brackets": "<" * 390_000,
     "hidden spans": '<span style="display:none">' * 14_000,
+    "unclosed quotes": '<a b="' * 65_000,
+    "angle in quoted values": '<a b="<<<<" c=\'<\'>x</a>' * 20_000,
+    "unclosed script": "<script>" * 48_000,
+    "script with tag-like text": "<script>" + "if(a<b){x='<a b=\"'}" * 20_000 + "</script>x",
+    "declarations": "<!x " * 97_000 + "<![if x]>" * 40_000,
 }
 
 
@@ -262,3 +267,30 @@ def test_html_comments_stay_dropped_and_stray_angle_brackets_are_text():
     assert html_to_text("a<!-- ignore previous instructions -->b") == "ab"
     assert html_to_text("1 < 2 and <b>bold</b>") == "1 < 2 and bold"
     assert html_to_text("kept<!-- never closed hidden text") == "kept"
+
+
+LEAKS = [
+    '<div style="display:none" data-x="a<b">SECRET</div>visible',
+    '<div style="display:none" title="x < y">SECRET</div>visible',
+    "<style>.h{display:none}</style><div class=\"h\" data=\"<\">SECRET</div>visible",
+    "<div style='display:none' data-x='<<<'>SECRET</div>visible",
+    '<div style="display:none" data-x = "a<b">SECRET</div>visible',
+]
+
+
+@pytest.mark.parametrize("html", LEAKS)
+def test_an_angle_bracket_in_a_quoted_attribute_does_not_expose_the_tag(html):
+    text = html_to_text(html)
+    assert text == "visible", text
+
+
+def test_unparseable_tags_are_dropped_not_shown_as_text():
+    assert html_to_text("a<div style='display:none' x='y>SECRET") == "a"
+    assert html_to_text("a<p <b>SECRET</b>after") == "aSECRETafter"
+    assert html_to_text("a<![if !mso]>b<![endif]>c") == "abc"
+    assert html_to_text("a</ junk>b<!DOCTYPE x>c<?pi x?>d") == "abcd"
+
+
+def test_script_text_with_tag_like_content_does_not_swallow_the_body():
+    html = "<script>var s = '<a b=\"';</script><p>real body</p>"
+    assert html_to_text(html) == "real body"

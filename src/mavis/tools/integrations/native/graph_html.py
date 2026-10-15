@@ -27,7 +27,11 @@ _BLOCK = gmail_mime._BLOCK_TAGS
 
 _CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})\s?|\\(.)", re.S)
 _BRACES = re.compile(r"[{}]")
-_ANGLE = re.compile(r"[<>]")
+_ASCII_LETTER = re.compile(r"[A-Za-z]")
+_TAG_NAME = re.compile(r"<([A-Za-z][^\s/>]*)")
+_RAW_TEXT = {"script": re.compile(r"</script", re.I), "style": re.compile(r"</style", re.I)}
+_STYLE_OPEN = re.compile(r"<style", re.I)
+_STYLE_CLOSE = re.compile(r"</style", re.I)
 _NUMBER = re.compile(r"^\s*(-?(?:\d+\.?\d*|\.\d+))\s*([a-z%]*)\s*$")
 _COLOR_TOKEN = re.compile(r"#[0-9a-f]{3,8}\b|(?:rgb|hsl)a?\([^)]*\)|\b[a-z]+\b", re.I)
 _NAMED = {"white": (255, 255, 255), "ivory": (255, 255, 240), "snow": (255, 250, 250),
@@ -154,20 +158,16 @@ def style_hides(d: dict[str, str], bg: Bg) -> bool:
 
 
 def _style_texts(markup: str) -> list[str]:
-    """The text of each closed <style> block, found with str.find (linear), at most MAX_STYLE_TEXT in all."""
-    low = markup.lower()
+    """The text of each closed <style> block, found with linear scans, at most MAX_STYLE_TEXT in all."""
     out: list[str] = []
     total = pos = 0
-    while total < MAX_STYLE_TEXT and (i := low.find("<style", pos)) != -1:
-        start = low.find(">", i)
-        if start == -1:
+    while total < MAX_STYLE_TEXT and (m := _STYLE_OPEN.search(markup, pos)):
+        start = markup.find(">", m.end())
+        if start == -1 or not (end := _STYLE_CLOSE.search(markup, start)):
             break
-        end = low.find("</style", start)
-        if end == -1:
-            break
-        out.append(markup[start + 1:end][:MAX_STYLE_TEXT - total])
-        total += end - start
-        pos = end + 7
+        out.append(markup[start + 1:end.start()][:MAX_STYLE_TEXT - total])
+        total += end.start() - start
+        pos = end.end()
     return out
 
 
@@ -283,28 +283,75 @@ class _Extractor(HTMLParser):
         self._emit(data)
 
 
+def _tag_end(markup: str, i: int) -> int:
+    """Index of the `>` closing the tag that starts at `i`, honouring quoted attribute values (a quote opens
+    a value only right after `=`). -1: input ended first; -2: an unquoted `<` came first (unterminated)."""
+    quote = ""
+    prev = ""
+    for j in range(i + 1, len(markup)):
+        ch = markup[j]
+        if quote:
+            if ch == quote:
+                quote = ""
+                prev = ch
+            continue
+        if ch == ">":
+            return j
+        if ch == "<":
+            return -2
+        if ch in "\"'" and prev == "=":
+            quote = ch
+        if not ch.isspace():
+            prev = ch
+    return -1
+
+
 def defang(markup: str) -> str:
     """Make the markup safe for HTMLParser, which rescans the rest of its input for every unclosed construct
-    (`<a <a <a ...`, `<!--` repeated) and so goes quadratic. One linear pass: comments are removed (an
-    unclosed one ends the markup), `<![` sections and any `<` with no `>` before the next `<` become literal
-    text. Complete tags are left exactly as they were."""
+    (`<a <a <a ...`, `<!--` repeated) and so goes quadratic. One linear pass, failing toward hiding:
+    comments, declarations, `<![if x]>` sections and processing instructions are dropped; a tag whose end
+    cannot be found, or that meets an unquoted `<` first, is dropped up to the next `>` (the rest of the
+    markup if there is none); a `<` that cannot start a tag becomes literal text. A `<` inside a quoted
+    attribute value belongs to its tag, and complete tags are passed through exactly as they were."""
     out: list[str] = []
     pos = 0
     while (i := markup.find("<", pos)) != -1:
         out.append(markup[pos:i])
+        nxt = markup[i + 1:i + 2]
         if markup.startswith("<!--", i):
-            j = markup.find("-->", i + 4)
+            j = markup.find("-->", i + 2)
             if j == -1:
                 return "".join(out)
             pos = j + 3
-            continue
-        m = None if markup.startswith("<![", i) else _ANGLE.search(markup, i + 1)
-        if m is None or m[0] == "<":
-            out.append("&lt;")
+        elif nxt in ("!", "?") or (nxt == "/" and not _ASCII_LETTER.match(markup, i + 2)):
+            j = markup.find(">", i + 1)  # a bogus comment, declaration or marked section: never content
+            if j == -1:
+                return "".join(out)
+            pos = j + 1
+        elif not (nxt == "/" or _ASCII_LETTER.match(markup, i + 1)):
+            out.append("&lt;")  # `1 < 2`: text
             pos = i + 1
         else:
-            out.append(markup[i:m.end()])
-            pos = m.end()
+            end = _tag_end(markup, i)
+            if end == -1:
+                return "".join(out)
+            if end == -2:
+                j = markup.find(">", i + 1)
+                if j == -1:
+                    return "".join(out)
+                pos = j + 1
+                continue
+            out.append(markup[i:end + 1])
+            pos = end + 1
+            name = _TAG_NAME.match(markup, i)
+            raw = _RAW_TEXT.get(name[1].lower()) if name else None
+            if raw is not None and markup[end - 1] != "/":  # script/style: its text is not markup
+                m = raw.search(markup, pos)
+                if m is None:
+                    out.append(markup[pos:])
+                    return "".join(out)
+                out.append(markup[pos:m.start()])
+                pos = m.start()
     out.append(markup[pos:])
     return "".join(out)
 
