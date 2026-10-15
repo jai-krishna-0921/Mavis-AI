@@ -567,6 +567,14 @@ async def connect_gate(state: OrchestratorState) -> Command:
 # --- approvals -----------------------------------------------------------------------
 
 
+SENDER_LOCKED_TEXT = ("I can't switch which account this goes from by editing it. Cancel it and ask me again "
+                      "from the other account.")
+
+
+class SenderChange(Exception):
+    """An edit tried to move a mail or invite to another account than the card showed."""
+
+
 class NotEditable(Exception):
     """The card's tool does not allow a revision (its pre-step verifies what the card shows)."""
 
@@ -588,9 +596,17 @@ async def revise_approval(approval: Any, instructions: str) -> None:
     # the same wall-clock normalisation invoke/execute_approved use, BEFORE the preview is rendered and
     # the args stored, so the card shows exactly what will run
     revised = localize_args(revised, ctx.timezone)
-    await approvals.update_args(
-        approval.id, revised.model_dump(mode="json"), tool.render_preview(revised, ctx)
-    )
+    preview = tool.render_preview(revised, ctx)
+    if hasattr(revised, "sender_pin"):
+        # The card named the sending account: an edit keeps exactly that, whatever the model returned.
+        was = approval.arguments or {}
+        asked = str(getattr(revised, "account", "") or "").strip().lower()
+        if asked != str(was.get("account") or "").strip().lower():
+            raise SenderChange
+        revised.sender_pin = was.get("sender_pin")
+        if revised.sender_pin:
+            preview += f"\nFrom: {str(revised.sender_pin).partition(':')[2]}"
+    await approvals.update_args(approval.id, revised.model_dump(mode="json"), preview)
     from mavis.policy import approvals as approval_flow  # lazy: policy.approvals imports the runner
 
     if (updated := await approvals.get(approval.id)) is not None:
@@ -605,6 +621,16 @@ async def notify_not_editable(user_id: int, approval_id: int, attempt: int) -> N
                                 dedupe_key=f"approval:{approval_id}:not_editable:{attempt}")
     except Exception as exc:  # noqa: BLE001 - the re-prompt still follows
         log.warning("approval.not_editable_notice_failed", approval_id=approval_id, error=_err(exc))
+
+
+async def notify_sender_locked(user_id: int, approval_id: int, attempt: int) -> None:
+    try:
+        from mavis.policy import approvals as approval_flow  # lazy: policy.approvals imports the runner
+
+        await approval_flow.say(user_id, SENDER_LOCKED_TEXT,
+                                dedupe_key=f"approval:{approval_id}:sender_locked:{attempt}")
+    except Exception as exc:  # noqa: BLE001 - the re-prompt still follows
+        log.warning("approval.sender_notice_failed", approval_id=approval_id, error=_err(exc))
 
 
 async def notify_revise_failed(user_id: int, approval_id: int, attempt: int) -> None:
@@ -738,6 +764,11 @@ async def approval_gate(state: OrchestratorState) -> Command:
                 await approvals.update_args(pending.id, pending.arguments, pending.preview)
                 attempt = state.get("revise_failures", {}).get(str(pending.id), 0) + 1
                 await notify_not_editable(pending.user_id, pending.id, attempt)
+                return Command(goto="approval_gate", update={"revise_failures": {str(pending.id): attempt}})
+            if isinstance(exc, SenderChange):
+                await approvals.update_args(pending.id, pending.arguments, pending.preview)
+                attempt = state.get("revise_failures", {}).get(str(pending.id), 0) + 1
+                await notify_sender_locked(pending.user_id, pending.id, attempt)
                 return Command(goto="approval_gate", update={"revise_failures": {str(pending.id): attempt}})
             log.warning("approval.revise_failed", approval_id=pending.id, error=_err(exc))
             await approvals.update_args(pending.id, pending.arguments, pending.preview)
