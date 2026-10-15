@@ -11,7 +11,7 @@ import httpx
 
 from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired
 
-DEFAULT_ACCOUNT = {"upn": "me@orbit.test", "tid": "t-1", "oid": "u-me"}
+DEFAULT_ACCOUNT = {"upn": "me@orbit.test", "mail": "me@orbit.test", "tid": "t-1", "oid": "u-me"}
 
 
 class GraphTokens:
@@ -240,13 +240,31 @@ def graph_event(
     start: str = "2026-10-06T09:00:00",
     end: str = "2026-10-06T09:30:00",
     tz: str = "UTC",
-    attendees: tuple[str, ...] = (),
+    attendees: tuple[str | tuple[str, str, str], ...] = (),
     organizer: str = "Alice <alice@acme.com>",
     is_online: bool = False,
     cancelled: bool = False,
     response: str = "accepted",
     all_day: bool = False,
+    modified: str = "2026-10-01T08:00:00Z",
+    show_as: str = "busy",
+    organizer_is_me: bool = False,
+    series_master: str | None = None,
+    location: str = "",
 ) -> dict:
+    """An attendee is an address string or a (name, address, response) triple; `organizer_is_me` makes the
+    signed-in user (me@orbit.test) the organiser."""
+    if organizer_is_me:
+        organizer = "Me <me@orbit.test>"
+
+    def guest(spec: str | tuple[str, str, str]) -> dict:
+        if isinstance(spec, tuple):
+            name, address, state = spec
+            who = {"name": name, "address": address}
+        else:
+            who, state = _address(spec), "none"
+        return {"emailAddress": who, "status": {"response": state}, "type": "required"}
+
     def stamp(value: str) -> dict:
         if "T" not in value:
             value += "T00:00:00"
@@ -261,19 +279,21 @@ def graph_event(
         "end": stamp(end),
         "isAllDay": all_day,
         "isCancelled": cancelled,
-        "showAs": "busy",
-        "location": {"displayName": ""},
+        "showAs": show_as,
+        "location": {"displayName": location},
         "organizer": {"emailAddress": _address(organizer)},
-        "attendees": [
-            {"emailAddress": _address(a), "status": {"response": "none"}, "type": "required"}
-            for a in attendees
-        ],
+        "isOrganizer": organizer_is_me,
+        "attendees": [guest(a) for a in attendees],
         "isOnlineMeeting": is_online,
         "onlineMeeting": (
             {"joinUrl": f"https://teams.microsoft.com/l/meetup-join/{eid}"} if is_online else None
         ),
         "responseStatus": {"response": response, "time": "2026-10-01T08:00:00Z"},
         "webLink": f"https://outlook.office.com/calendar/item/{eid}",
+        "lastModifiedDateTime": modified,
+        "type": "occurrence" if series_master else "singleInstance",
+        "seriesMasterId": series_master,
+        "iCalUId": f"ical-{eid}",
     }
 
 

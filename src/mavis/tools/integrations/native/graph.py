@@ -211,9 +211,12 @@ class GraphClient:
         except ValueError:
             raise GraphError(FailureKind.UNKNOWN, "microsoft returned a body that is not JSON") from None
 
-    async def pages(self, uid: int, url: str, params: dict | None, limit: int, *,
-                    max_pages: int = MAX_PAGES) -> tuple[list[dict], str | None, str | None]:
+    async def pages(
+        self, uid: int, url: str, params: dict | None, limit: int, *, max_pages: int = MAX_PAGES,
+        headers: dict | None = None,
+    ) -> tuple[list[dict], str | None, str | None]:
         """Follow @odata.nextLink (verbatim, params only on the first request) until `limit` items.
+        `headers` (e.g. a Prefer timezone) are sent on every page.
         Returns (items, nextLink if more, deltaLink if present)."""
         items: list[dict] = []
         next_link: str | None = None
@@ -221,7 +224,7 @@ class GraphClient:
         target, query = url, params
         total = 0
         for _ in range(max_pages):
-            _, raw, cut = await self.raw(uid, "GET", target, params=query)
+            _, raw, cut = await self.raw(uid, "GET", target, params=query, headers=headers)
             total += len(raw)
             if cut:
                 raise GraphError(FailureKind.UNKNOWN, "microsoft response larger than the size limit")
