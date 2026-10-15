@@ -30,6 +30,10 @@ _BRACES = re.compile(r"[{}]")
 _ASCII_LETTER = re.compile(r"[A-Za-z]")
 _TAG_NAME = re.compile(r"<([A-Za-z][^\s/>]*)")
 _RAW_TEXT = {"script": re.compile(r"</script", re.I), "style": re.compile(r"</style", re.I)}
+# Raw-text and RCDATA elements HTMLParser does not know: their content is text up to the closer, never markup.
+_ESCAPED_RAW = {name: re.compile(rf"</{name}(?=[\s/>])", re.I)
+                for name in ("textarea", "xmp", "noembed", "noframes", "title")}
+_PLAINTEXT = "plaintext"  # swallows the rest of the document
 _STYLE_OPEN = re.compile(r"<style", re.I)
 _STYLE_CLOSE = re.compile(r"</style", re.I)
 _NUMBER = re.compile(r"^\s*(-?(?:\d+\.?\d*|\.\d+))\s*([a-z%]*)\s*$")
@@ -263,8 +267,7 @@ class _Extractor(HTMLParser):
             self._emit("\n- " if tag == "li" else "\n")
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in ("br", "hr") or tag in _BLOCK:
-            self._emit("\n")
+        self.handle_starttag(tag, attrs)  # HTML5 ignores the "/" on a non-void element: `<div/>` opens a div
 
     def handle_endtag(self, tag: str) -> None:
         if not self._open.get(tag):
@@ -285,7 +288,8 @@ class _Extractor(HTMLParser):
 
 def _tag_end(markup: str, i: int) -> int:
     """Index of the `>` closing the tag that starts at `i`, honouring quoted attribute values (a quote opens
-    a value only right after `=`). -1: input ended first; -2: an unquoted `<` came first (unterminated)."""
+    a value only right after `=`). A `<` is an ordinary character inside a tag, as in a browser. -1: the
+    input ended first."""
     quote = ""
     prev = ""
     for j in range(i + 1, len(markup)):
@@ -297,8 +301,6 @@ def _tag_end(markup: str, i: int) -> int:
             continue
         if ch == ">":
             return j
-        if ch == "<":
-            return -2
         if ch in "\"'" and prev == "=":
             quote = ch
         if not ch.isspace():
@@ -309,10 +311,11 @@ def _tag_end(markup: str, i: int) -> int:
 def defang(markup: str) -> str:
     """Make the markup safe for HTMLParser, which rescans the rest of its input for every unclosed construct
     (`<a <a <a ...`, `<!--` repeated) and so goes quadratic. One linear pass, failing toward hiding:
-    comments, declarations, `<![if x]>` sections and processing instructions are dropped; a tag whose end
-    cannot be found, or that meets an unquoted `<` first, is dropped up to the next `>` (the rest of the
-    markup if there is none); a `<` that cannot start a tag becomes literal text. A `<` inside a quoted
-    attribute value belongs to its tag, and complete tags are passed through exactly as they were."""
+    comments, declarations, `<![if x]>` sections and processing instructions are dropped; a tag whose `>` is
+    missing drops the rest of the markup (at most once, so the pass stays linear); a `<` that cannot start a
+    tag becomes literal text. A `<` inside a tag belongs to it, and complete tags are passed through exactly
+    as they were. The text of textarea, xmp, noembed, noframes and title (up to their closer) and of
+    plaintext (to the end) is escaped so it can only be text."""
     out: list[str] = []
     pos = 0
     while (i := markup.find("<", pos)) != -1:
@@ -335,16 +338,11 @@ def defang(markup: str) -> str:
             end = _tag_end(markup, i)
             if end == -1:
                 return "".join(out)
-            if end == -2:
-                j = markup.find(">", i + 1)
-                if j == -1:
-                    return "".join(out)
-                pos = j + 1
-                continue
             out.append(markup[i:end + 1])
             pos = end + 1
             name = _TAG_NAME.match(markup, i)
-            raw = _RAW_TEXT.get(name[1].lower()) if name else None
+            tag = name[1].lower() if name and nxt != "/" else ""
+            raw = _RAW_TEXT.get(tag)
             if raw is not None and markup[end - 1] != "/":  # script/style: its text is not markup
                 m = raw.search(markup, pos)
                 if m is None:
@@ -352,6 +350,14 @@ def defang(markup: str) -> str:
                     return "".join(out)
                 out.append(markup[pos:m.start()])
                 pos = m.start()
+            elif tag == _PLAINTEXT:
+                out.append(markup[pos:].replace("<", "&lt;"))
+                return "".join(out)
+            elif (raw := _ESCAPED_RAW.get(tag) or raw) is not None:
+                m = raw.search(markup, pos)
+                stop = m.start() if m else len(markup)
+                out.append(markup[pos:stop].replace("<", "&lt;"))
+                pos = stop
     out.append(markup[pos:])
     return "".join(out)
 

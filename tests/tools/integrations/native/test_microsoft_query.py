@@ -286,7 +286,9 @@ def test_an_angle_bracket_in_a_quoted_attribute_does_not_expose_the_tag(html):
 
 def test_unparseable_tags_are_dropped_not_shown_as_text():
     assert html_to_text("a<div style='display:none' x='y>SECRET") == "a"
-    assert html_to_text("a<p <b>SECRET</b>after") == "aSECRETafter"
+    # `<b` is an attribute of a real p, as in a browser: the tag is kept (a paragraph break), not dropped
+    assert html_to_text("a<p <b>SECRET</b>after") == "a\nSECRETafter"
+    assert html_to_text("a<p hidden <b>SECRET</b>after</p>b") == "a\nb"
     assert html_to_text("a<![if !mso]>b<![endif]>c") == "abc"
     assert html_to_text("a</ junk>b<!DOCTYPE x>c<?pi x?>d") == "abcd"
 
@@ -294,3 +296,107 @@ def test_unparseable_tags_are_dropped_not_shown_as_text():
 def test_script_text_with_tag_like_content_does_not_swallow_the_body():
     html = "<script>var s = '<a b=\"';</script><p>real body</p>"
     assert html_to_text(html) == "real body"
+
+
+UNQUOTED_ANGLE_LEAKS = [
+    "<div style=display:none title=a<b>SECRET</div>visible",
+    '<div style="display:none" <b>SECRET</div>visible',
+    '<div style="display:none" a=<b>SECRET</div>visible',
+    "<div style=display:none title=`a<b`>SECRET</div>visible",
+    "<div style=display:none title=a<b<c<d>SECRET</div>visible",
+]
+
+
+@pytest.mark.parametrize("html", UNQUOTED_ANGLE_LEAKS)
+def test_an_unquoted_angle_bracket_inside_a_tag_does_not_expose_the_tag(html):
+    text = html_to_text(html)
+    assert text == "visible", text
+
+
+SELF_CLOSING_LEAKS = [
+    '<div style="display:none"/>SECRET</div>visible',
+    '<p style="display:none"/>SECRET</p>visible',
+    "<div style=display:none />SECRET</div>visible",
+    '<span hidden/>SECRET</span>visible',
+    '<div style="display:none" />SECRET</div>visible',
+]
+
+
+@pytest.mark.parametrize("html", SELF_CLOSING_LEAKS)
+def test_a_self_closing_non_void_element_still_hides_its_content(html):
+    text = html_to_text(html)
+    assert text == "visible", text
+
+
+def test_self_closing_void_and_nested_elements_keep_their_meaning():
+    assert html_to_text("a<br/>b<hr/>c") == "a\nb\nc"
+    text = html_to_text('<div style="display:none"><div/>SECRET</div>STILL</div>visible')
+    assert text == "visible", text
+
+
+RAW_TEXT_LEAKS = [
+    "<div style=display:none><textarea></div>SECRET</textarea></div>visible",
+    "<div style=display:none><xmp></div>SECRET</xmp></div>visible",
+    "<div style=display:none><noembed></div>SECRET</noembed></div>visible",
+    "<div style=display:none><noframes></div>SECRET</noframes></div>visible",
+    "<div style=display:none><title></div>SECRET</title></div>visible",
+    "<div style=display:none><plaintext></div>SECRET</div>visible",
+    "<div style=display:none><TEXTAREA></div>SECRET</TEXTAREA></div>visible",
+    "<div style=display:none><textarea/></div>SECRET</textarea></div>visible",
+    "<div style=display:none><textarea><div>SECRET</textarea></div>visible",
+    "<div style=display:none><textarea></textareax></div>SECRET</textarea></div>visible",
+]
+
+
+@pytest.mark.parametrize("html", RAW_TEXT_LEAKS)
+def test_raw_text_elements_cannot_close_a_hidden_wrapper_early(html):
+    text = html_to_text(html)
+    assert "SECRET" not in text, text
+    if "plaintext" not in html:
+        assert text == "visible", text
+
+
+def test_raw_text_content_is_text_when_visible_and_plaintext_swallows_the_rest():
+    assert html_to_text("a<textarea><b>x</b></textarea>b") == "a<b>x</b>b"
+    assert html_to_text("a<plaintext>b<i>c</i>") == "ab<i>c</i>"
+    assert html_to_text("a<textarea>unclosed<b>x") == "aunclosed<b>x"
+
+
+def test_the_new_defang_rules_stay_linear():
+    import time
+
+    from mavis.tools.integrations.native.graph_html import MAX_HTML
+    cases = ["<div " * (MAX_HTML // 5), "<div a=<b " * (MAX_HTML // 10), "<div/>" * (MAX_HTML // 6),
+             "<textarea>" * (MAX_HTML // 10), "<textarea></textareax>" * (MAX_HTML // 22),
+             "<xmp></xmp>" * (MAX_HTML // 11), "<plaintext>" * (MAX_HTML // 11),
+             '<div a="' * (MAX_HTML // 8), "<title>" * (MAX_HTML // 7)]
+    for html in cases:
+        start = time.perf_counter()
+        html_to_text(html)
+        assert time.perf_counter() - start < 1.0, html[:20]
+
+
+def test_random_hidden_fragments_never_leak_their_markers():
+    import random
+    rng = random.Random(20261015)
+    hiders = ["style=display:none", 'style="display:none"', "style='display:none'", "hidden",
+              'style = "visibility:hidden"', 'style="font-size:0"', "style=display:none;color:red",
+              'style="opacity:0"']
+    noise = ["", "title=a<b", 'title="x<y"', "data-q='<<'", "a=`<b`", "<b", "title=a>b"]
+    # `title=a>b` ends the tag early in a browser too, so only the safe ones go inside a tag
+    noise = [n for n in noise if ">" not in n]
+    wrappers = ["div", "span", "p", "td", "section", "DIV"]
+    fillers = ["x", "<b>y</b>", "<textarea>t</textarea>", "<!-- c -->", "<br>", "<p>z", "<xmp>q</xmp>"]
+    for n in range(400):
+        tag = rng.choice(wrappers)
+        attrs = " ".join(rng.sample([rng.choice(hiders)] + noise, k=rng.randint(1, 3)))
+        if not any(h in attrs for h in ("display:none", "visibility", "font-size", "opacity", "hidden")):
+            attrs += " hidden"
+        marker = f"MARK{n}X"
+        inner = "".join(rng.choice(fillers) for _ in range(rng.randint(0, 3)))
+        tail = rng.choice([f"</{tag}>", f"</{tag.lower()}>"])
+        opener = f"<{tag} {attrs}{rng.choice(['', ' /'])}>"
+        html = f"vis0{opener}{inner}{marker}{inner}{tail}vis1"
+        text = html_to_text(html)
+        assert marker not in text, html
+        assert "vis0" in text, html
