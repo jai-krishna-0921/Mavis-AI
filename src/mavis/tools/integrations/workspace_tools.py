@@ -447,6 +447,8 @@ async def prepare_sender(ctx: ToolContext, args: BaseModel) -> Prepared:
     from mavis.tools import integrations  # module lookup at call time (tests swap the singletons)
     from mavis.tools.integrations.native import merge as merging
 
+    if hasattr(args, "sender_pin"):
+        args.sender_pin = None  # only this step may set it, whatever the model sent
     try:
         merge = getattr(integrations.get_provider(), "merge", None)
     except IntegrationError:
@@ -463,7 +465,11 @@ async def prepare_sender(ctx: ToolContext, args: BaseModel) -> Prepared:
             return Prepared(refusal=picked.text)
     if picked is not None and not picked.active:  # reconnect before a card is queued, never send from Gmail
         raise ConnectionRequired(picked.capability, CAPABILITY_PURPOSE[picked.capability], revoked=True)
-    return Prepared(note=f"From: {picked.address}") if picked is not None and picked.address else Prepared()
+    if picked is None or not picked.address:
+        return Prepared()
+    if hasattr(args, "sender_pin"):  # the card and the send are for this account, whatever changes meanwhile
+        args.sender_pin = f"{picked.provider.value}:{picked.address}"
+    return Prepared(note=f"From: {picked.address}")
 
 
 def _who(member: dict) -> str:

@@ -220,6 +220,8 @@ class MailCalendarMerge:
             return await self._by_id(user, kind, action, args)
         if action not in READ_MERGE and action not in NEW_ITEM:
             return None
+        if action in NEW_ITEM and args.get("sender_pin"):
+            return await self._pinned(user, kind, action, args)
         if await self._microsoft(user.user_id, kind) is None:
             return None
         if action in NEW_ITEM:
@@ -254,6 +256,22 @@ class MailCalendarMerge:
         if result.ok and wanted and not stored:
             await self.remember_default(user.user_id, kind, picked)
         return result
+
+    async def _pinned(self, user: UserRef, kind: str, action: str, args: dict) -> ToolResult | None:
+        """Send from exactly the account the card named. If it is gone or stopped working, ask to reconnect
+        it; never pick another account (the card said who it was from)."""
+        provider, _, address = str(args["sender_pin"]).partition(":")
+        accounts = await self.accounts(user.user_id, kind)
+        hit = next((a for a in accounts
+                    if a.provider.value == provider and a.address.lower() == address.lower()), None)
+        has_ms = any(a.provider is MICROSOFT for a in accounts)
+        if hit is None and provider != MICROSOFT.value and not has_ms:
+            return None  # no Microsoft account in play: Google's own path, as for any Google-only user
+        if hit is None or not hit.active:
+            cap = MERGED[kind][1 if provider == MICROSOFT.value else 0]
+            raise ConnectionRequired(cap, _purpose(cap), revoked=True)
+        return await self._run(user, hit, action,
+                               {k: v for k, v in args.items() if k not in ("account", "sender_pin")})
 
     # --- existing items ---------------------------------------------------------------------------
 

@@ -14,7 +14,8 @@ from datetime import date, datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_serializer, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from mavis.config import get_settings
 from mavis.domain.args import Email, ToolArgs
@@ -139,7 +140,21 @@ class MailThreadArgs(ToolArgs):
     thread_id: str
 
 
-class MailComposeArgs(ToolArgs):
+class SenderPin(BaseModel):
+    """The account a card was shown for ("microsoft:me@corp.test"). Only prepare_sender sets it, so the model
+    cannot choose it; it is left out of the stored arguments while unset."""
+
+    sender_pin: SkipJsonSchema[str | None] = Field(default=None, max_length=300)
+
+    @model_serializer(mode="wrap")
+    def _leave_out_unset_pin(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("sender_pin") is None:
+            data.pop("sender_pin", None)
+        return data
+
+
+class MailComposeArgs(SenderPin, ToolArgs):
     to: list[Email] = Field(min_length=1, description="Recipient email addresses")
     subject: str
     body: str
@@ -179,7 +194,7 @@ class CalendarSlotsArgs(LocalTimes):
     time_max: datetime = Field(description=wall_clock("Window end"))
 
 
-class CalendarCreateArgs(LocalTimes):
+class CalendarCreateArgs(SenderPin, LocalTimes):
     summary: str
     start: datetime = Field(description=wall_clock("Start time"))
     # Only a start given: the configured default length (hotfix4 H6), never a question about the length.
@@ -886,7 +901,7 @@ _SPECS: tuple[ActionSpec, ...] = (
                MailComposeArgs, RiskClass.WRITE_SELF, _a("inbox", "conversation"), preview=_preview_draft),
     ActionSpec("mail.send", Capability.GMAIL, "Send an email. The user is asked to approve first.",
                MailComposeArgs, RiskClass.OUTWARD, _a("inbox", "conversation"), preview=_preview_mail,
-               identity=("to", "cc", "subject", "body"), target=("to", "subject")),
+               identity=("to", "cc", "subject", "body", "?sender_pin"), target=("to", "subject")),
     ActionSpec("mail.reply", Capability.GMAIL,
                "Reply on an existing thread. The user is asked to approve first.",
                MailReplyArgs, RiskClass.OUTWARD, _a("inbox", "conversation"), preview=_preview_reply),
@@ -903,7 +918,7 @@ _SPECS: tuple[ActionSpec, ...] = (
                "Create a calendar event or meeting. With guests, invites are sent after the user approves.",
                CalendarCreateArgs, RiskClass.WRITE_SELF, _a("calendar", "conversation"),
                risk_fn=_attendee_risk, preview=_preview_create,
-               identity=("start", "duration_minutes", "attendees", "summary", "?location"),
+               identity=("start", "duration_minutes", "attendees", "summary", "?location", "?sender_pin"),
                target=("start", "attendees"), action_time="start"),
     ActionSpec("calendar.update_event", Capability.CALENDAR,
                "Change an event. The user is asked to approve first (guests may be notified).",

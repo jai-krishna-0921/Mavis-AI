@@ -120,8 +120,8 @@ class NativeRouter:
         merged = await self.merge.execute(user, action, args)
         if merged is not None:
             return merged
-        if action in NEW_ITEM and "account" in args:  # only the merge layer reads it; no single provider does
-            args = {k: v for k, v in args.items() if k != "account"}
+        if action in NEW_ITEM:  # only the merge layer reads these; no single provider does
+            args = {k: v for k, v in args.items() if k not in ("account", "sender_pin")}
         return await self._execute_single(user, action, args)
 
     async def execute_native(self, user: UserRef, provider: NativeProvider, action: str, args: dict
