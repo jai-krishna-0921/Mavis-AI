@@ -30,6 +30,7 @@ async def test_second_401_is_an_auth_failure_and_carries_no_vendor_text():
     ex, _ = g.executor()
     r = await ex.execute(U, "mail.profile", {})
     assert not r.ok and r.error_kind is K.AUTH and "secret-corp-name" not in r.error
+    g.assert_all_routed()
 
 
 async def test_revoked_grant_maps_to_auth():
@@ -42,6 +43,7 @@ async def test_429_waits_retry_after_once():
         "GET", PROFILE, [graph_error(429, "TooManyRequests", headers={"Retry-After": "3"}), ok_me()])
     ex, sleeps = g.executor()
     assert (await ex.execute(U, "mail.profile", {})).ok and sleeps == [3.0]
+    g.assert_all_routed()
 
 
 async def test_long_retry_after_is_rate_limited_without_waiting():
@@ -49,6 +51,7 @@ async def test_long_retry_after_is_rate_limited_without_waiting():
     ex, sleeps = g.executor()
     r = await ex.execute(U, "mail.profile", {})
     assert r.error_kind is K.RATE_LIMITED and sleeps == []
+    g.assert_all_routed()
 
 
 async def test_503_with_retry_after_repeats_even_a_write_but_504_does_not():
@@ -63,6 +66,7 @@ async def test_503_with_retry_after_repeats_even_a_write_but_504_does_not():
         await ex2.graph.json(1, "POST", SEND, body={})
     assert e.value.kind is K.UNCONFIRMED and "may or may not" in e.value.detail
     assert len(g2.requests) == 1
+    g.assert_all_routed()
 
 
 async def test_5xx_on_a_get_repeats_once_then_unavailable():
@@ -70,6 +74,7 @@ async def test_5xx_on_a_get_repeats_once_then_unavailable():
     ex, sleeps = g.executor()
     r = await ex.execute(U, "mail.profile", {})
     assert r.error_kind is K.UNAVAILABLE and len(g.requests) == 2 and sleeps == [1.0]
+    g.assert_all_routed()
 
 
 async def test_read_error_on_a_write_is_unconfirmed_and_connect_error_repeats():
@@ -95,6 +100,7 @@ async def test_read_error_on_a_write_is_unconfirmed_and_connect_error_repeats():
     ex2, _ = g2.executor()
     await ex2.graph.json(1, "POST", SEND, body={})
     assert attempts["n"] == 2
+    g.assert_all_routed()
 
 
 async def test_oversized_response_is_cut_and_reported():
@@ -103,6 +109,7 @@ async def test_oversized_response_is_cut_and_reported():
     ex.graph.max_json = 1000
     r = await ex.execute(U, "mail.profile", {})
     assert not r.ok and "size limit" in r.error
+    g.assert_all_routed()
 
 
 @pytest.mark.parametrize("status,code,kind", [
@@ -161,6 +168,7 @@ async def test_pages_follow_next_link_and_expose_delta_link():
     ex, _ = g.executor()
     items, more, delta = await ex.graph.pages(1, base, {"$top": 1}, 10)
     assert [i["id"] for i in items] == ["1", "2"] and more is None and delta.endswith("deltatoken=z")
+    g.assert_all_routed()
 
 
 async def test_next_link_to_another_host_is_not_followed():
@@ -170,3 +178,6 @@ async def test_next_link_to_another_host_is_not_followed():
     with pytest.raises(GraphError):
         await ex.graph.pages(1, "https://graph.microsoft.com/v1.0/me/messages", {}, 10)
     assert all(r.url.host == "graph.microsoft.com" for r in g.requests)
+    g.assert_all_routed()
+
+
