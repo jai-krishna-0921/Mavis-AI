@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 
@@ -17,6 +18,8 @@ from mavis.domain.wakeups import WakeupKind
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connect_flow import Schedule, UserState
 from mavis.tools.integrations.connections import ConnectionCache, is_auth_error
+from mavis.tools.integrations.native import providers
+from mavis.tools.integrations.native.providers import PollAuthError
 from mavis.tools.integrations.normalize import (
     calendar_event,
     email_event,
@@ -32,12 +35,33 @@ POLL_KIND = "system_poll"
 # the webhook fallback chain above, so they have their own kind (reasons "tasks" and "drive").
 WORKSPACE_POLL_KIND = WakeupKind.SYSTEM_WORKSPACE_POLL.value
 POLL_INTERVAL = timedelta(minutes=2)
-POLLABLE = frozenset({Capability.GMAIL, Capability.CALENDAR, Capability.SLACK})
 INITIAL_LOOKBACK = timedelta(minutes=10)
 
 
-class _AuthError(Exception):
-    """The provider rejected the call as unauthorised; the connection may have been revoked."""
+PollHook = Callable[["Poller", int, dict], Awaitable[int]]
+_hooks: dict[str, PollHook] = {}
+
+
+def pollable() -> frozenset[Capability]:
+    """Every capability whose provider spec names a poll hook."""
+    return frozenset(c for spec in providers.user_providers() for c in spec.pollers)
+
+
+def hook_for(capability: Capability) -> PollHook | None:
+    spec = providers.provider_of_capability(capability)
+    path = spec.pollers.get(capability) if spec is not None else None
+    if path is None:
+        return None
+    if path not in _hooks:
+        module, attr = path.split(":", 1)
+        _hooks[path] = getattr(importlib.import_module(module), attr)
+    return _hooks[path]
+
+
+def __getattr__(name: str):
+    if name == "POLLABLE":  # old callers
+        return pollable()
+    raise AttributeError(name)
 
 
 OnFailed = Callable[[int, Capability], Awaitable[object]]
@@ -71,7 +95,7 @@ class Poller:
         polling = dict((await self.state.get(user_id)).get("polling", {}))
         native = getattr(self.provider, "uses_native", None)
         armed, healed = 0, False
-        for capability in sorted(POLLABLE, key=lambda c: c.value):
+        for capability in sorted(pollable(), key=lambda c: c.value):
             wanted = bool(polling.get(capability.value))
             if not wanted and native is not None:
                 # An ACTIVE native grant has no triggers: it is polled even if activation never recorded it.
@@ -119,7 +143,7 @@ class Poller:
             log.warning("poller.state_failed", user_id=user_id, error=type(exc).__name__)
             await self._reschedule(user_id, capability)
             return 0
-        if capability not in POLLABLE or not st.get("polling", {}).get(capability.value):
+        if capability not in pollable() or not st.get("polling", {}).get(capability.value):
             return 0
         try:
             states = None
@@ -138,12 +162,9 @@ class Poller:
             return 0
         reschedule = True
         try:
-            if capability is Capability.GMAIL:
-                return await self._poll_gmail(user_id, st)
-            if capability is Capability.SLACK:
-                return await self._poll_slack(user_id, st)
-            return await self._poll_calendar(user_id, st)
-        except _AuthError:
+            hook = hook_for(capability)
+            return await hook(self, user_id, st)
+        except PollAuthError:
             reschedule = not await self._auth_failed(user_id, st, capability)
             return 0
         finally:
@@ -160,67 +181,71 @@ class Poller:
             log.warning("poller.status_failed", user_id=user_id, error=type(exc).__name__)
         return False
 
-    async def _set_cursor(self, user_id: int, st: dict, key: str, value: object) -> None:
+    async def set_cursor(self, user_id: int, st: dict, key: str, value: object) -> None:
         cursors = dict(st.get("cursors", {}))
         cursors[key] = value
         await self.state.update(user_id, {"cursors": cursors})
 
-    async def _poll_gmail(self, user_id: int, st: dict) -> int:
-        after = int(st.get("cursors", {}).get("gmail_after") or (self.clock() - INITIAL_LOOKBACK).timestamp())
-        res = await self.provider.execute(
-            UserRef(user_id=user_id), "mail.search",
-            {"query": f"after:{after} -in:sent -in:drafts", "max_results": 25},
+
+async def poll_gmail(poller: Poller, user_id: int, st: dict) -> int:
+    after = int(st.get("cursors", {}).get("gmail_after") or (poller.clock() - INITIAL_LOOKBACK).timestamp())
+    res = await poller.provider.execute(
+        UserRef(user_id=user_id), "mail.search",
+        {"query": f"after:{after} -in:sent -in:drafts", "max_results": 25},
+    )
+    if not res.ok:
+        log.warning("poller.gmail_failed", user_id=user_id, error=res.error)
+        if is_auth_error(res.error):
+            raise PollAuthError
+        return 0
+    ceiling = int(poller.clock().timestamp())
+    newest, published = after, 0
+    for raw in extract_messages(res.data):
+        event = email_event(user_id, raw, source="poller")
+        if event is None:
+            continue
+        if normalize_email(raw)["received_at"]:  # no timestamp: leave the cursor alone
+            newest = max(newest, min(int(event.occurred_at.timestamp()), ceiling))
+        if await poller.bus.publish(event):
+            published += 1
+    await poller.set_cursor(user_id, st, "gmail_after", newest)
+    return published
+
+
+async def poll_slack(poller: Poller, user_id: int, st: dict) -> int:
+    """Safety net for missed Events API deliveries: per-channel latest-ts cursors, a batch a tick."""
+    from mavis.tools.integrations.native.slack_events import PollAuthError as SlackPollAuthError
+    from mavis.tools.integrations.native.slack_events import poll_messages
+
+    cursors = st.get("cursors", {})
+    try:
+        published, ts_by_channel, offset = await poll_messages(
+            poller.provider, poller.bus, user_id, dict(cursors.get("slack_ts") or {}),
+            int(cursors.get("slack_offset") or 0), now=poller.clock(),
         )
-        if not res.ok:
-            log.warning("poller.gmail_failed", user_id=user_id, error=res.error)
-            if is_auth_error(res.error):
-                raise _AuthError
-            return 0
-        ceiling = int(self.clock().timestamp())
-        newest, published = after, 0
-        for raw in extract_messages(res.data):
-            event = email_event(user_id, raw, source="poller")
-            if event is None:
-                continue
-            if normalize_email(raw)["received_at"]:  # no timestamp: leave the cursor alone
-                newest = max(newest, min(int(event.occurred_at.timestamp()), ceiling))
-            if await self.bus.publish(event):
-                published += 1
-        await self._set_cursor(user_id, st, "gmail_after", newest)
-        return published
+    except SlackPollAuthError:
+        raise PollAuthError from None
+    merged = {**cursors, "slack_ts": ts_by_channel, "slack_offset": offset}
+    await poller.state.update(user_id, {"cursors": merged})
+    return published
 
-    async def _poll_slack(self, user_id: int, st: dict) -> int:
-        """Safety net for missed Events API deliveries: per-channel latest-ts cursors, a batch a tick."""
-        from mavis.tools.integrations.native.slack_events import PollAuthError, poll_messages
 
-        cursors = st.get("cursors", {})
-        try:
-            published, ts_by_channel, offset = await poll_messages(
-                self.provider, self.bus, user_id, dict(cursors.get("slack_ts") or {}),
-                int(cursors.get("slack_offset") or 0), now=self.clock(),
-            )
-        except PollAuthError:
-            raise _AuthError from None
-        merged = {**cursors, "slack_ts": ts_by_channel, "slack_offset": offset}
-        await self.state.update(user_id, {"cursors": merged})
-        return published
-
-    async def _poll_calendar(self, user_id: int, st: dict) -> int:
-        now = self.clock()
-        updated_min = st.get("cursors", {}).get("gcal_updated_min") or (now - INITIAL_LOOKBACK).isoformat()
-        res = await self.provider.execute(UserRef(user_id=user_id), "calendar.list", {
-            "time_min": now.isoformat(), "time_max": (now + timedelta(days=30)).isoformat(),
-            "max_results": 50, "updated_min": updated_min,
-        })
-        if not res.ok:
-            log.warning("poller.calendar_failed", user_id=user_id, error=res.error)
-            if is_auth_error(res.error):
-                raise _AuthError
-            return 0
-        published = 0
-        for raw in extract_calendar_items(res.data):
-            event = calendar_event(user_id, raw, source="poller")
-            if event is not None and await self.bus.publish(event):
-                published += 1
-        await self._set_cursor(user_id, st, "gcal_updated_min", now.isoformat())
-        return published
+async def poll_calendar(poller: Poller, user_id: int, st: dict) -> int:
+    now = poller.clock()
+    updated_min = st.get("cursors", {}).get("gcal_updated_min") or (now - INITIAL_LOOKBACK).isoformat()
+    res = await poller.provider.execute(UserRef(user_id=user_id), "calendar.list", {
+        "time_min": now.isoformat(), "time_max": (now + timedelta(days=30)).isoformat(),
+        "max_results": 50, "updated_min": updated_min,
+    })
+    if not res.ok:
+        log.warning("poller.calendar_failed", user_id=user_id, error=res.error)
+        if is_auth_error(res.error):
+            raise PollAuthError
+        return 0
+    published = 0
+    for raw in extract_calendar_items(res.data):
+        event = calendar_event(user_id, raw, source="poller")
+        if event is not None and await poller.bus.publish(event):
+            published += 1
+    await poller.set_cursor(user_id, st, "gcal_updated_min", now.isoformat())
+    return published

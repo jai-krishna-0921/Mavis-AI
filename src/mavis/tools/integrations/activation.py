@@ -18,7 +18,7 @@ from mavis.tools.integrations.actions import workspace_enabled
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.composio_map import TRIGGER_CONFIGS, triggers_for
 from mavis.tools.integrations.connect_flow import Schedule, UserState
-from mavis.tools.integrations.poller import POLL_KIND, POLLABLE
+from mavis.tools.integrations.poller import POLL_KIND, pollable
 
 log = structlog.get_logger()
 
@@ -38,7 +38,7 @@ class Activator:
         """An ACTIVE native grant serves this capability: there are no push triggers for it, polling is the
         inbound path (Slack's poll is the safety net behind the Events API)."""
         check = getattr(self.provider, "uses_native", None)
-        if check is None or capability not in POLLABLE:
+        if check is None or capability not in pollable():
             return False
         try:
             return bool(await check(user_id, capability))
@@ -61,7 +61,7 @@ class Activator:
                     subscribed = False
                     if user_id in self._fanout:
                         self._google_subscribe_failed.add(user_id)
-        poll = not subscribed and capability in POLLABLE
+        poll = not subscribed and capability in pollable()
         polling = dict((await self.state.get(user_id)).get("polling", {}))
         polling[capability.value] = poll
         await self.state.update(user_id, {"polling": polling})
