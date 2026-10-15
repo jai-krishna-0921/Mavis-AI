@@ -247,6 +247,18 @@ Safety controls (all on by default):
 
 Roll back by setting `MACHINE_ENABLED=false` and restarting the worker. Slack does not forward files to the machine yet; Telegram documents and photos do.
 
+### Microsoft 365 owner setup (Entra app)
+
+1. Entra admin center, App registrations, New registration. Name "Mavis AI". Supported account types: "Accounts in any organizational directory and personal Microsoft accounts". Redirect URI (Web): `https://<MAVIS_DOMAIN>/oauth/microsoft/callback`.
+2. Manifest check: `"signInAudience": "AzureADandPersonalMicrosoftAccount"` and `"requestedAccessTokenVersion": 2` under `api`. Personal accounts only work with v2 tokens.
+3. Certificates and secrets, New client secret (24 months is the maximum). Copy the VALUE now. Put a reminder in your calendar 3 weeks before it expires: an expired secret disconnects nobody (refresh tokens keep working until the secret is needed again) but blocks every new sign-in and every token refresh.
+4. API permissions, Microsoft Graph, Delegated: openid, profile, email, offline_access, User.Read, Mail.ReadWrite, Mail.Send, Calendars.ReadWrite, Chat.ReadWrite, ChatMessage.Send, Files.Read.All. Then "Grant admin consent for <your org>". Do NOT add any channel-message permission.
+5. Branding: name, logo, privacy and terms URLs (the dashboard's). Publisher verification (Microsoft Partner Network id) is recommended before inviting people from other companies: without it many tenants block user consent for multi-tenant apps and their admins must approve first (Mavis shows them a forwardable link).
+6. Keys: `MICROSOFT_CLIENT_ID` (Application (client) ID) and `MICROSOFT_CLIENT_SECRET` into your local `.env`, then `deploy/aws/secrets.sh push --apply` and `deploy/aws/deploy.sh`. The Microsoft card and tools appear only when both are set.
+7. Check: connect your own account in Telegram, then `uv run python -m scripts.live_native <your user id> --sync` and confirm the Microsoft lines are all ok. The script is read-only and prints counts and masked accounts only. It also prints seven `live-check` lines, each PASS, FAIL or UNKNOWN with a one-line hint: (1) a quoted phrase in mail search, (2) the reply lookup filter with `$orderby`, (3) Exchange's `Authentication-Results` and `X-MS-Exchange-Organization-AuthAs` headers, (4) all-day events as midnight dates in UTC, (5) the mail delta baseline with a date filter, (6) the Teams chat list (or which fallback step it needed), (7) `sharedWithMe`. UNKNOWN usually means the mailbox lacks a sample (a received message, an all-day event, a Teams chat); add one and run again. A FAIL on 1 to 6 is a bug to report; a FAIL on 7 is informational (Microsoft is retiring that endpoint; everything else should pass).
+
+Rotate the client secret: create the new secret in Entra, `secrets.sh set MICROSOFT_CLIENT_SECRET --apply`, redeploy, delete the old secret in Entra.
+
 ## Documentation
 
 Design specs, implementation plans and the operations runbooks (secrets, onboarding, limitations) are kept
