@@ -18,6 +18,7 @@ from mavis.domain.integrations import ToolResult, UserRef
 class NativeProvider(StrEnum):
     GOOGLE = "google"
     SLACK = "slack"
+    MICROSOFT = "microsoft"
     SLACK_BOT = "slack_bot"  # the workspace bot token (chat as Mavis); never a user-data capability
     TESTING = "testing"  # reserved for the registry test fake; never present in PROVIDERS in production
 

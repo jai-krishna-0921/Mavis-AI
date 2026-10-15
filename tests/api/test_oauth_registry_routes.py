@@ -196,3 +196,16 @@ async def test_a_failing_admin_link_never_raises_on_the_callback(web, oauth, iso
     assert r.status_code == 400
     [text] = await outbox()
     assert "https://" not in text and "approve Mavis AI first" in text
+
+
+async def test_microsoft_admin_approval_return_is_acknowledged(web):
+    c, _ = web
+    r = await c.get("/oauth/microsoft/callback", params={
+        "admin_consent": "True", "tenant": "t", "state": "admin"})
+    assert r.status_code == 200 and "recorded" in r.text and "Approved" in r.text
+
+
+async def test_admin_consent_flag_alone_is_not_an_approval(web):
+    c, _ = web
+    r = await c.get("/oauth/microsoft/callback", params={"admin_consent": "False", "state": "admin"})
+    assert r.status_code == 400

@@ -119,7 +119,7 @@ async def test_quiet_hours_and_checkin_time_change_behaviour(app):
 async def test_connectors_report_status_and_service_scopes(app, tokens):
     c, _ = await signed_in(app, 1)
     async with c:
-        google, slack = (await c.get(f"{API}/connectors")).json()
+        google, slack, _microsoft = (await c.get(f"{API}/connectors")).json()
         assert (google["id"], google["status"], slack["status"]) == ("google", "none", "none")
         await tokens.save(1, G, account={"email": "a@x.com", "scopes": [
             "openid", "https://www.googleapis.com/auth/gmail.readonly",
@@ -209,8 +209,11 @@ async def test_vault_items_map_to_ui_kinds_with_source_and_trust(app, data):
         s = (await c.get(f"{API}/vault/summary")).json()
         assert s["counts"]["organisations"] == 1 and s["counts"]["projects"] == 1 and s["counts"]["sources"] == 1
         assert s["profile"]["timezone"] and "token" not in str(s).lower()
-        assert s["connectors"] == [{"name": "calendar", "label": "Calendar"}, {"name": "gmail", "label": "Gmail"},
-                                   {"name": "slack", "label": "Slack"}]
+        assert s["connectors"] == [
+            {"name": "calendar", "label": "Calendar"}, {"name": "gmail", "label": "Gmail"},
+            {"name": "onedrive", "label": "Onedrive"}, {"name": "outlook", "label": "Outlook"},
+            {"name": "outlook_calendar", "label": "Outlook Calendar"}, {"name": "slack", "label": "Slack"},
+            {"name": "teams", "label": "Teams"}]
 
 
 async def test_vault_pagination_and_search(app, memory):

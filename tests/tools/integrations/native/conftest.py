@@ -21,7 +21,8 @@ def native_env(settings, monkeypatch):
     for key, value in {
         "NATIVE_TOKEN_KEK": new_kek(), "GOOGLE_OAUTH_CLIENT_ID": "gid",
         "GOOGLE_OAUTH_CLIENT_SECRET": "gsecret",
-        "SLACK_CLIENT_ID": "sid", "SLACK_CLIENT_SECRET": "ssecret", "PUBLIC_BASE_URL": "https://mavis.test",
+        "SLACK_CLIENT_ID": "sid", "SLACK_CLIENT_SECRET": "ssecret",
+        "MICROSOFT_CLIENT_ID": "mid", "MICROSOFT_CLIENT_SECRET": "msecret", "PUBLIC_BASE_URL": "https://mavis.test",
     }.items():
         monkeypatch.setenv(key, value)
     get_settings.cache_clear()

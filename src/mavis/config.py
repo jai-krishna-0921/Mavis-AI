@@ -180,6 +180,8 @@ class Settings(BaseSettings):
     dashboard_session_days: int = 30
     sync_gmail_days: int = 14
     sync_slack_days: int = 7
+    sync_outlook_days: int = 14
+    sync_teams_days: int = 7
     sync_calendar_back_days: int = 7
     sync_calendar_ahead_days: int = 30
     tavily_api_key: str = ""

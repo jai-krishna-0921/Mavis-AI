@@ -40,11 +40,15 @@ DISPLAY_NAMES: dict[Capability, str] = {
     Capability.SLACK: "Slack", Capability.NOTION: "Notion",
     Capability.DRIVE: "Google Drive", Capability.DOCS: "Google Docs", Capability.SHEETS: "Google Sheets",
     Capability.TASKS: "Google Tasks", Capability.CONTACTS: "Google Contacts", Capability.MEET: "Google Meet",
+    Capability.OUTLOOK: "Outlook", Capability.OUTLOOK_CALENDAR: "Outlook Calendar",
+    Capability.TEAMS: "Teams", Capability.ONEDRIVE: "OneDrive",
 }
 BRANDS: dict[Capability, str] = {
     Capability.GMAIL: "Google", Capability.CALENDAR: "Google",
     Capability.SLACK: "Slack", Capability.NOTION: "Notion",
     **{c: "Google" for c in WORKSPACE_CAPABILITIES},
+    **{c: "Microsoft" for c in (Capability.OUTLOOK, Capability.OUTLOOK_CALENDAR, Capability.TEAMS,
+                                Capability.ONEDRIVE)},
 }
 GOOGLE_UNVERIFIED_NOTICE = "Google will say it has not verified Mavis yet. Tap Advanced, then Go to Mavis AI."
 
@@ -69,6 +73,10 @@ CAPABILITY_PURPOSE: dict[Capability, str] = {
     Capability.TASKS: "manage your to-do list in Google Tasks",
     Capability.CONTACTS: "look up your contacts",
     Capability.MEET: "set up Google Meet calls",
+    Capability.OUTLOOK: "check and handle your Outlook email",
+    Capability.OUTLOOK_CALENDAR: "work with your Outlook calendar",
+    Capability.TEAMS: "read and send your Teams chats",
+    Capability.ONEDRIVE: "find and read your OneDrive files",
 }
 
 

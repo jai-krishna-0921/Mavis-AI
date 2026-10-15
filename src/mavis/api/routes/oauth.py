@@ -183,7 +183,7 @@ async def oauth_go(provider: str, t: str = "", ok: str = "") -> HTMLResponse | R
 @router.get("/oauth/{provider}/callback", response_class=HTMLResponse)
 async def oauth_callback(
     provider: str, request: Request, code: str | None = None, state: str | None = None,
-    error: str | None = None, error_description: str | None = None,
+    error: str | None = None, error_description: str | None = None, admin_consent: str | None = None,
     bus: EventBus = Depends(get_bus), integrations: IntegrationProvider = Depends(get_provider),
 ) -> HTMLResponse:
     oauth = getattr(integrations, "oauth", None)
@@ -196,6 +196,10 @@ async def oauth_callback(
     # link started from Telegram has no session to match.
     active = await sessions.lookup(request.cookies.get(sessions.COOKIE))
     session_hash = active.session_id if active is not None else None
+
+    approved = spec.user_text.get("admin_approved")
+    if not code and (admin_consent or "").lower() == "true" and approved:
+        return _page("Approved", approved, 200)  # the admin's browser returns here; no Mavis state exists
 
     if error or not code or not state:
         # Denied, or a malformed return. We learn whose it was only from a valid state; never echo `error`.

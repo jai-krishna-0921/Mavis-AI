@@ -49,8 +49,11 @@ def test_memory_sources_extend_vault_and_controls(isolated_registry):
 
 def test_builtin_memory_sources_unchanged():
     assert vault.connector_prefixes() == {
-        "gmail": ("gmail:",), "slack": ("slack:",), "calendar": ("calendar:",)}
-    assert set(controls.connectors()) == {"gmail", "slack", "calendar"}
+        "gmail": ("gmail:",), "slack": ("slack:",), "calendar": ("calendar:",),
+        "outlook": ("outlook:",), "outlook_calendar": ("ocal:",), "teams": ("teams:",),
+        "onedrive": ("onedrive:",)}
+    assert set(controls.connectors()) == {"gmail", "slack", "calendar", "outlook", "outlook_calendar",
+                                          "teams", "onedrive"}
 
 
 async def test_account_deletion_revokes_every_registered_provider(

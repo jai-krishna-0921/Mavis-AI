@@ -309,7 +309,11 @@ class NativeOAuth:
         except Exception as exc:  # a vendor hook (parsing a claim, say) must not 500 the public callback
             log.warning("oauth.exchange_hook_failed", provider=spec.id, error=type(exc).__name__)
             raise OAuthError("exchange_failed", user_id=st.user_id, pending_id=pending) from None
-        key = spec.account_key(ex.account)
+        try:
+            key = spec.account_key(ex.account)
+        except Exception as exc:  # a vendor key hook (a missing claim, say) must not 500 the public callback
+            log.warning("oauth.account_key_failed", provider=spec.id, error=type(exc).__name__)
+            raise OAuthError("exchange_failed", user_id=st.user_id, pending_id=pending) from None
         owner = await self.tokens.owner_of_key(provider, key[:255]) if key else None
         if owner is not None and owner != st.user_id:
             raise OAuthError("account_taken", user_id=st.user_id, pending_id=pending)

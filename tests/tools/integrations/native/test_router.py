@@ -259,7 +259,7 @@ def test_load_executors_skips_absent_modules_but_not_broken_ones(monkeypatch, cl
         seen.append(name)
         raise ModuleNotFoundError(name=name)
     monkeypatch.setattr(importlib, "import_module", fake_import)
-    assert _load_executors(None, client) == [] and len(seen) == 2
+    assert _load_executors(None, client) == [] and len(seen) == 3  # google, slack, microsoft
 
     def broken(name):
         raise ModuleNotFoundError(name="some_missing_dependency")

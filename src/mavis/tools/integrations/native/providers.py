@@ -248,4 +248,4 @@ def configured(spec: ProviderSpec) -> bool:
     return bool(cid and secret)
 
 
-from mavis.tools.integrations.native import builtin  # noqa: E402,F401  (registers google and slack)
+from mavis.tools.integrations.native import builtin, microsoft_spec  # noqa: E402,F401  (register the vendors)

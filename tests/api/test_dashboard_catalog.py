@@ -30,13 +30,13 @@ async def test_registered_provider_appears_with_icon_services_and_label(app, tok
     c, _ = await signed_in(app, 1)
     async with c:
         rows = (await c.get(f"{API}/connectors")).json()
-        assert [r["id"] for r in rows] == ["google", "slack", "testing"]
-        testco = rows[2]
+        assert [r["id"] for r in rows] == ["google", "slack", "microsoft", "testing"]
+        testco = rows[3]
         assert (testco["name"], testco["icon"], testco["services"], testco["status"]) == (
             "Testco Suite", "testco", ["notes", "boxes"], "none")
         await tokens.save(1, T, account={"k": "k1", "mail": "me@corp.test", "scopes": ["n.read"]},
                           access_token="a", refresh_token="r", expires_at=None)
-        testco = (await c.get(f"{API}/connectors")).json()[2]
+        testco = (await c.get(f"{API}/connectors")).json()[3]
         assert testco["status"] == "active" and testco["account"] == "me@corp.test"
         assert testco["scopes_granted"] == ["notes"] and testco["missing_scopes"] == ["boxes"]
 
@@ -44,7 +44,7 @@ async def test_registered_provider_appears_with_icon_services_and_label(app, tok
 async def test_builtin_rows_carry_icon_and_chip_names(app):
     c, _ = await signed_in(app, 1)
     async with c:
-        google, slack = (await c.get(f"{API}/connectors")).json()
+        google, slack, _microsoft = (await c.get(f"{API}/connectors")).json()
         assert google["icon"] == "google" and google["name"] == "Google Workspace"
         assert google["services"] == ["mail", "calendar", "drive", "docs", "sheets", "tasks", "meet",
                                       "contacts"]
@@ -55,7 +55,8 @@ async def test_unconfigured_provider_is_hidden_unless_always_listed(app, isolate
     isolated_registry.register(fake(client_id_setting="no_such_setting"))
     c, _ = await signed_in(app, 1)
     async with c:
-        assert [r["id"] for r in (await c.get(f"{API}/connectors")).json()] == ["google", "slack"]
+        rows = (await c.get(f"{API}/connectors")).json()
+        assert [r["id"] for r in rows] == ["google", "slack", "microsoft"]
 
 
 async def test_connect_uses_the_spec_url_and_unknown_is_404(app, oauth, isolated_registry):
