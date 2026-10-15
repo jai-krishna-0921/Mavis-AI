@@ -288,6 +288,7 @@ def register_attention() -> None:
     intake, pipeline = get_intake(), get_pipeline()
     register_event_handler(EventType.EMAIL_RECEIVED, intake.on_email, replace=True)
     register_event_handler(EventType.SLACK_MESSAGE, get_connector_ingest().on_slack_event)
+    register_event_handler(EventType.TEAMS_MESSAGE, get_connector_ingest().on_teams_event)
     register_event_handler(EventType.TASK_COMPLETED, intake.on_task_completed)
     # the one shared dispatcher (deduped: register_integrations already registered this same function)
     register_event_handler(EventType.BUTTON_PRESSED, dispatch_button)

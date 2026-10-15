@@ -28,7 +28,7 @@ from mavis.tools.integrations.native import providers
 from mavis.tools.integrations.native.base import NativeExecutor, NativeProvider
 from mavis.tools.integrations.native.google_scopes import ACTION_SCOPES  # noqa: F401  (re-exported)
 from mavis.tools.integrations.native.http import make_client
-from mavis.tools.integrations.native.merge import NEW_ITEM, MailCalendarMerge
+from mavis.tools.integrations.native.merge import MERGED, NEW_ITEM, MailCalendarMerge
 from mavis.tools.integrations.native.oauth import NativeOAuth
 from mavis.tools.integrations.native.tokens import ACTIVE, REVOKED, Grant, NativeTokenStore
 
@@ -124,7 +124,7 @@ class NativeRouter:
             args = {k: v for k, v in args.items() if k not in ("account", "sender_pin")}
         return await self._execute_single(user, action, args)
 
-    async def execute_native(self, user: UserRef, provider: NativeProvider, action: str, args: dict
+    async def execute_native(self, provider: NativeProvider, user: UserRef, action: str, args: dict
                              ) -> ToolResult:
         """Run an action on ONE provider's own executor: no merge, no Composio fallback. Sync and poll use
         this so an Outlook read can never be answered from Gmail (or the reverse)."""
@@ -135,7 +135,10 @@ class NativeRouter:
             return ToolResult(ok=False, error_kind=FailureKind.AUTH,
                               error=f"the {provider.value} account is not connected; "
                                     "the user must reconnect it")
-        if not self._permitted(grant, action, spec.capability):
+        cap = spec.capability  # mail.* and calendar.* carry Google's capability; Outlook's serves them
+        if provider is NativeProvider.MICROSOFT:
+            cap = next((ms for google, ms in MERGED.values() if google is cap), cap)
+        if not self._permitted(grant, action, cap):
             return ToolResult(ok=False, error_kind=FailureKind.PERMISSION_MISSING,
                               error=f"the connected {provider.value} account was not granted the permission "
                                     f"{action} needs; the user must reconnect and allow it")

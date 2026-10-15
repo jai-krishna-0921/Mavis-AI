@@ -250,10 +250,13 @@ def get_first_sync() -> FirstSync:
     # Phase 4 / later: loops stay unused, third-party content never creates loops.
     from mavis.attention.wiring import get_connector_ingest  # lazy: attention is wired after integrations
     from mavis.loops.service import LoopService
+    from mavis.tools.integrations.microsoft_sync import MicrosoftSync
 
-    return FirstSync(provider=get_provider(), memory=JobLearner(), loops=LoopService(get_bus()),
-                     bus=_LazyBus(), tz_of=user_timezone, connectors=get_connector_ingest(),
-                     meetings=personal_layer.record_meetings, after_sync=personal_layer.schedule)
+    fs = FirstSync(provider=get_provider(), memory=JobLearner(), loops=LoopService(get_bus()),
+                   bus=_LazyBus(), tz_of=user_timezone, connectors=get_connector_ingest(),
+                   meetings=personal_layer.record_meetings, after_sync=personal_layer.schedule)
+    MicrosoftSync(fs).register()  # harmless unconfigured: only an ACTIVE Microsoft capability runs a sync
+    return fs
 
 
 @lru_cache
@@ -403,6 +406,7 @@ def register_integrations(registry: ToolRegistry | None = None) -> None:
     from mavis.attention.wiring import get_connector_ingest  # lazy: attention is wired after integrations
 
     register_event_handler(EventType.SLACK_MESSAGE, get_connector_ingest().on_slack_event)
+    register_event_handler(EventType.TEAMS_MESSAGE, get_connector_ingest().on_teams_event)
     from mavis.attention import slack_replies  # DMs the user has not answered: nudge and offer a draft
 
     slack_replies.register()

@@ -62,9 +62,10 @@ class ConnectorIngest:
         card = await profile_repo.get(user_id)
         return [n for n in (user.name, card.name) if n]
 
-    async def email(self, user_id: int, n: dict) -> IngestDecision:
+    async def email(self, user_id: int, n: dict, *, source: str = "gmail") -> IngestDecision:
         """Queue one normalized email for learning. Returns the decision (graph, bulk or drop). Mail the user
-        sent is their own words: it teaches their address and goes to the self-authored path."""
+        sent is their own words: it teaches their address and goes to the self-authored path. `source` is the
+        mailbox ("gmail" or "outlook"): it names the record and decides which pause switch applies."""
         try:
             ident = await load_identities(user_id)
             labels = {str(x).upper() for x in n.get("labels") or []}
@@ -72,18 +73,20 @@ class ConnectorIngest:
             if own and n.get("from_address"):
                 await remember_identity(user_id, emails=(str(n["from_address"]),))
                 ident = await load_identities(user_id)
-            if "gmail" in await controls.paused(user_id):
+            if source in await controls.paused(user_id):
                 return IngestDecision("drop", "paused")
             mute = await guard.load_mute(user_id)
             if own:
                 if not labels & (guard.EXCLUDED_LABELS | {"DRAFT"}):
-                    job = records.email_record(user_id, n, self_ids=ident, self_names=await self._names(user_id))
+                    job = records.email_record(user_id, n, self_ids=ident, self_names=await self._names(user_id),
+                                              source=source)
                     if job is not None and job.authored:
                         await self._authored(job, mute)
                 return IngestDecision("drop", "own_mail")
             decision = guard.should_ingest_email(n, mute)
             if decision:
-                job = records.email_record(user_id, n, self_ids=ident, self_names=await self._names(user_id))
+                job = records.email_record(user_id, n, self_ids=ident, self_names=await self._names(user_id),
+                                              source=source)
                 if job is not None:
                     await self._offer(job, mute)
             return decision
@@ -133,6 +136,22 @@ class ConnectorIngest:
             log.warning("connector_ingest.slack_failed", error=type(exc).__name__, exc_info=True)
             return IngestDecision("drop", "error")
 
+    async def teams(self, user_id: int, n: dict) -> IngestDecision:
+        try:
+            if "teams" in await controls.paused(user_id):
+                return IngestDecision("drop", "paused")
+            ident = await load_identities(user_id)
+            mute = await guard.load_mute(user_id)
+            decision = guard.should_ingest_teams(n, mute)
+            if decision:
+                job = records.teams_record(user_id, n, self_ids=ident, self_names=await self._names(user_id))
+                if job is not None:
+                    await self._offer(job, mute)
+            return decision
+        except Exception as exc:  # noqa: BLE001
+            log.warning("connector_ingest.teams_failed", error=type(exc).__name__, exc_info=True)
+            return IngestDecision("drop", "error")
+
     async def _names_for(self, user_id: int, team: str, n: dict) -> Mapping[str, Mapping[str, str]] | None:
         """Display names for the author and the people mentioned, when the directory can say. A failure only
         costs the names: the record is still learned."""
@@ -157,11 +176,17 @@ class ConnectorIngest:
             await self.slack(event.user_id, event.payload)
 
 
+    async def on_teams_event(self, event: Event) -> None:
+        if event.type is EventType.TEAMS_MESSAGE:
+            await self.teams(event.user_id, event.payload)
+
+
 def register(ingest: ConnectorIngest | None = None) -> ConnectorIngest:
-    """Worker wiring: every SLACK_MESSAGE event is also offered to the graph (Gmail goes through
+    """Worker wiring: every SLACK_MESSAGE and TEAMS_MESSAGE event is also offered to the graph (Gmail goes through
     Intake.on_email, which takes this object as `connectors`)."""
     from mavis.worker.runner import register_event_handler
 
     ingest = ingest or ConnectorIngest()
     register_event_handler(EventType.SLACK_MESSAGE, ingest.on_slack_event)
+    register_event_handler(EventType.TEAMS_MESSAGE, ingest.on_teams_event)
     return ingest

@@ -586,7 +586,8 @@ def redact(text: str) -> str:
 # --- source filters ----------------------------------------------------------------------------------
 
 EXCLUDED_LABELS = frozenset({"SPAM", "TRASH"})
-BULK_LABELS = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS"})
+# CATEGORY_OTHER is Outlook's "Other" inbox tab (Gmail never emits it)
+BULK_LABELS = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS", "CATEGORY_OTHER"})
 SLACK_SYSTEM_SUBTYPES_KEEP = frozenset({"", "thread_broadcast", "file_share", "me_message"})
 SLACK_USER_MESSAGE_SUBTYPES = SLACK_SYSTEM_SUBTYPES_KEEP
 
@@ -667,6 +668,21 @@ def should_ingest_slack(n: dict, mute: Mute | None = None) -> IngestDecision:
     if not str(n.get("text") or "").strip():
         return IngestDecision("drop", "empty")
     rule = (mute or Mute()).hits(slack_ids=(str(n.get("channel", "")), str(n.get("user", ""))))
+    if rule:
+        return IngestDecision("drop", rule)
+    return IngestDecision("graph")
+
+
+def should_ingest_teams(n: dict, mute: Mute | None = None) -> IngestDecision:
+    """Structural decision for one normalized Teams chat message. The user's own messages are kept (the
+    record marks them authored); system events, authorless (bot or app) and empty messages are not."""
+    if str(n.get("kind") or "message") != "message":
+        return IngestDecision("drop", "system_event")
+    if not str(n.get("from_id") or "").strip():
+        return IngestDecision("drop", "no_author")
+    if not str(n.get("text") or "").strip():
+        return IngestDecision("drop", "empty")
+    rule = (mute or Mute()).hits(address=str(n.get("from_address") or ""))
     if rule:
         return IngestDecision("drop", rule)
     return IngestDecision("graph")

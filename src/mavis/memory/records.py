@@ -128,7 +128,7 @@ class RecordJob:
     user_id: int
     source_ref: str
     text: str
-    kind: str  # email | slack
+    kind: str  # email | slack | teams
     trust: str  # medium | low
     anchor_at: datetime
     people: list[Person] = field(default_factory=list)
@@ -148,8 +148,9 @@ class RecordJob:
 
 
 def email_record(user_id: int, n: dict, *, self_ids: Mapping[str, Iterable[str]],
-                 self_names: Iterable[str] = ()) -> RecordJob | None:
-    """A RecordJob for one normalized email (normalize_email's keys), or None if it has no id."""
+                 self_names: Iterable[str] = (), source: str = "gmail") -> RecordJob | None:
+    """A RecordJob for one normalized email (normalize_email's keys), or None if it has no id. `source` names
+    the mailbox in the record reference: "gmail" (the default) or "outlook" (a leading ms: is dropped)."""
     mid = str(n.get("message_id") or "")
     if not mid:
         return None
@@ -186,7 +187,7 @@ def email_record(user_id: int, n: dict, *, self_ids: Mapping[str, Iterable[str]]
     head.append(f"Subject: {subject}")
     text = ("\n".join(head) + "\n\n" + body)[:RECORD_TEXT_CAP]
     return RecordJob(
-        user_id=user_id, source_ref=f"gmail:{mid}", text=text, kind="email",
+        user_id=user_id, source_ref=f"gmail:{mid}" if source == "gmail" else f"{source}:{mid.removeprefix('ms:')}", text=text, kind="email",
         trust=TRUST_MEDIUM if (n.get("sender_authenticated") or authored) else TRUST_LOW, anchor_at=received,
         people=list(people.values()),
         label=("email you sent" if authored else f"email from {who.canonical()}"), subject=subject,
@@ -240,6 +241,48 @@ def slack_record(user_id: int, n: dict, *, team: str, self_ids: Mapping[str, Ite
         label=("Slack message you wrote" if sender.is_user else
                ("Slack DM from " if channel[:1] == "D" else "Slack message from ") + sender.canonical()),
         subject="", self_names=[x for x in self_names if x], authored=bool(sender.is_user) and not foreign,
+    )
+
+
+def teams_record(user_id: int, n: dict, *, self_ids: Mapping[str, Iterable[str]],
+                 self_names: Iterable[str] = ()) -> RecordJob | None:
+    """A RecordJob for one normalized Teams chat message (the teams_message payload). People are the author
+    and the other chat members; the message is the user's own when `from_me` says so (set by our intake from
+    the signed-in account) or the author's address is one of theirs."""
+    chat, mid = str(n.get("chat_id") or "").removeprefix("ms:"), str(n.get("message_id") or "")
+    if not (chat and mid):
+        return None
+    people: dict[str, Person] = {}
+
+    def person(name: str, email: str, role: str, *, me: bool = False) -> None:
+        key = email.lower() or name.lower()
+        if key and key not in people and len(people) < MAX_PEOPLE:
+            people[key] = Person(name=name if name.lower() != email.lower() else "", email=email.lower(),
+                                 role=role, is_user=me or _is_self(email, "", self_ids))
+
+    from_addr = str(n.get("from_address") or "")
+    person(str(n.get("from") or ""), from_addr, "sender", me=bool(n.get("from_me")))
+    for m in n.get("members") or []:
+        if isinstance(m, dict):
+            person(str(m.get("name") or ""), str(m.get("email") or ""), "recipient")
+    sender = people.get(from_addr.lower() or str(n.get("from") or "").lower()) or Person(name=str(n.get("from") or ""))
+    body = redact(str(n.get("text") or ""))[:BODY_CAP]
+    when = timeutil.ensure_utc(_dt(n.get("at"))) or timeutil.now()
+    direct = str(n.get("chat_type") or "") == "oneOnOne"
+    topic = redact(" ".join(str(n.get("topic") or "").split()))[:100]
+    where = "a direct message" if direct else "a group chat" + (f" '{topic}'" if topic else "")
+    head = [f"Teams message in {where} on {when:%a %d %b %Y %H:%M} UTC"]
+    for p in people.values():
+        head.append(f"{'Author' if p.role == 'sender' else 'Member'}: {p.canonical()}"
+                    + (f" <{p.email}>" if p.email else "") + (" (the user)" if p.is_user else ""))
+    return RecordJob(
+        user_id=user_id, source_ref=f"teams:{chat}:{mid}", text=("\n".join(head) + "\n\n" + body)[:RECORD_TEXT_CAP],
+        kind="teams", trust=TRUST_LOW if n.get("external") else TRUST_MEDIUM, anchor_at=when,
+        people=list(people.values()),
+        label=("Teams message you wrote" if sender.is_user else
+               ("Teams DM from " if direct else "Teams message from ") + sender.canonical()),
+        subject="", self_names=[x for x in self_names if x],
+        authored=bool(sender.is_user) and not n.get("external"),
     )
 
 

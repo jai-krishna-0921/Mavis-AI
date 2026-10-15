@@ -22,7 +22,10 @@ log = structlog.get_logger()
 Embed = Callable[[list[str]], Awaitable[list[list[float]]]]
 
 EXTERNAL_TYPES = frozenset(
-    {EventType.EMAIL_RECEIVED, EventType.SLACK_MESSAGE, EventType.NOTION_CHANGED, EventType.CALENDAR_CHANGED}
+    {
+        EventType.EMAIL_RECEIVED, EventType.SLACK_MESSAGE, EventType.TEAMS_MESSAGE, EventType.NOTION_CHANGED,
+        EventType.CALENDAR_CHANGED,
+    }
 )
 PROMO_LABELS = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS", "SPAM"})
 URGENT = re.compile(
@@ -53,6 +56,8 @@ def summarize_event(event: Event, tz: str = "UTC", now: datetime | None = None) 
             text = f"Email from {p.get('from', '?')}: {p.get('subject', '')}: {p.get('snippet', '')}"
         case EventType.SLACK_MESSAGE:
             text = f"Slack message from {p.get('from', '?')} in {p.get('channel', '?')}: {p.get('text', '')}"
+        case EventType.TEAMS_MESSAGE:
+            text = f"Teams message from {p.get('from', '?')}: {p.get('text', '')}"
         case EventType.CALENDAR_CHANGED:
             cancelled = " (cancelled)" if str(p.get("status", "")).lower() == "cancelled" else ""
             text = f"Calendar event '{p.get('title', '')}'{cancelled} at {p.get('starts_at', '?')}"

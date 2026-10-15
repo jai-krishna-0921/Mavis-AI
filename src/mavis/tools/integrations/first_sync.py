@@ -161,6 +161,12 @@ class FirstSync:
                 f"first_sync:{user_id}:gmail",
                 GMAIL_LEARN_JOBS,
             )
+        return self._mail_notices(mails, lines)
+
+    @staticmethod
+    def _mail_notices(mails: list[dict], lines: list[str]) -> list[str]:
+        """What the first mail skim noticed (shared by Gmail and Outlook): threads waiting on the user,
+        security alerts, and how many mails were skimmed."""
         latest_by_thread: dict[str, dict] = {}
         for m in sorted(mails, key=lambda x: x["received_at"] or ""):
             latest_by_thread[m["thread_id"] or m["message_id"]] = m
@@ -194,9 +200,12 @@ class FirstSync:
             noticed.append(f"Skimmed {len(lines)} recent emails to learn who you talk to")
         return noticed
 
-    async def _calendar(self, user_id: int) -> list[str]:
+    async def _calendar(self, user_id: int, *, execute: Callable[..., Awaitable[Any]] | None = None,
+                        ref: str | None = None) -> list[str]:
+        """`execute(user_id, action, args)` and the LEARN `ref` default to Google's; Outlook passes its own so
+        its events are read natively and learned under the forgettable `ocal:` prefix."""
         now = self.clock()
-        data = await self._execute(
+        data = await (execute or self._execute)(
             user_id,
             "calendar.list",
             {
@@ -217,8 +226,8 @@ class FirstSync:
                 f"Calendar: {e['summary']} on {when}"
                 + (f" with {', '.join(e['attendees'])}" if e["attendees"] else "")
             )
-        await self._learn_batches(user_id, "Upcoming calendar:", lines, f"first_sync:{user_id}:calendar",
-                                 CALENDAR_LEARN_JOBS)
+        await self._learn_batches(user_id, "Upcoming calendar:", lines,
+                                 ref or f"first_sync:{user_id}:calendar", CALENDAR_LEARN_JOBS)
         if self.meetings is not None:
             await self.meetings(user_id, events, str(tz))
         noticed: list[str] = []
