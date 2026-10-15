@@ -91,11 +91,24 @@ def workspace_enabled() -> bool:
     return get_settings().google_workspace_enabled
 
 
+# Microsoft 365 (spec B2/B9): one consent covers all four; offered only where the sign-in is set up.
+MICROSOFT_CAPABILITIES: tuple[Capability, ...] = (
+    Capability.OUTLOOK, Capability.OUTLOOK_CALENDAR, Capability.TEAMS, Capability.ONEDRIVE,
+)
+
+
+def microsoft_enabled() -> bool:
+    """The Microsoft provider is registered and has its client id, secret and token key."""
+    from mavis.tools.integrations.native import providers
+
+    spec = providers.spec_of("microsoft")
+    return spec is not None and providers.configured(spec)
+
+
 def active_capabilities() -> tuple[Capability, ...]:
     """Capabilities Mavis offers right now. With the Workspace flag off this is exactly the old four."""
-    if workspace_enabled():
-        return INTEGRATION_CAPABILITIES + WORKSPACE_CAPABILITIES
-    return INTEGRATION_CAPABILITIES
+    caps = INTEGRATION_CAPABILITIES + (WORKSPACE_CAPABILITIES if workspace_enabled() else ())
+    return caps + MICROSOFT_CAPABILITIES if microsoft_enabled() else caps
 
 
 # A Microsoft account serves the same mail and calendar tools as Google, so either one satisfies a gate.

@@ -14,8 +14,10 @@ from mavis.domain.terms import terms
 from mavis.tools.integrations.actions import (
     DISPLAY_NAMES,
     GOOGLE_ANCHOR,
+    MICROSOFT_CAPABILITIES,
     active_capabilities,
     is_google,
+    microsoft_enabled,
     workspace_enabled,
 )
 from mavis.tools.integrations.composio_map import LEGACY_ALIASES
@@ -25,7 +27,13 @@ NOT_CONFIGURED_TEXT = "Connections aren't set up on this Mavis yet."
 COMMANDS = ("connect", "connections", "disconnect", "mute", "unmute", "channel", "mcp")
 MUTE_COMMANDS = ("mute", "unmute")
 
+# Every Microsoft word opens the one Microsoft consent, so each maps to the anchor (like Google's Drive).
+MICROSOFT_ANCHOR = Capability.OUTLOOK
+_MS_WORDS = re.compile(
+    r"\b(outlook|office\s?365|o365|m365|microsoft(\s?365)?|ms\s?365|teams|one\s?drive|share\s?point)\b", re.I
+)
 _KEYWORDS: tuple[tuple[re.Pattern[str], Capability], ...] = (
+    (_MS_WORDS, MICROSOFT_ANCHOR),
     (re.compile(r"\b(g?cal(endar)?|meetings?|schedule)\b", re.I), Capability.CALENDAR),
     (re.compile(r"\b(gmail|e-?mails?|mail|inbox)\b", re.I), Capability.GMAIL),
     (re.compile(r"\bslack\b", re.I), Capability.SLACK),
@@ -42,6 +50,8 @@ _SLASH = re.compile(r"(?<![\w/:.@\\])/([A-Za-z][A-Za-z_-]*)(?:([^\S\n]+)([A-Za-z
 
 def connect_word(capability: Capability) -> str:
     """The word /connect takes for a capability: what capability_from_text reads back as it."""
+    if capability in MICROSOFT_CAPABILITIES:
+        return "microsoft"
     if is_google(capability) and workspace_enabled():
         return "google"
     return "calendar" if capability is Capability.CALENDAR else capability.value
@@ -118,15 +128,28 @@ _GOOGLE_WORDS = re.compile(
 )
 
 
+_EXPLICIT_GOOGLE = re.compile(r"\b(gmail|google|gcal|g-?suite|workspace|drive)\b", re.I)
+_GENERIC_GOOGLE = frozenset({Capability.GMAIL, Capability.CALENDAR})
+
+
+def _keywords() -> tuple[tuple[re.Pattern[str], Capability], ...]:
+    """The keyword table; the Microsoft words count only where Microsoft is set up ("teams" elsewhere is
+    just a word)."""
+    if microsoft_enabled():
+        return _KEYWORDS
+    return tuple(entry for entry in _KEYWORDS if entry[0] is not _MS_WORDS)
+
+
 def capability_from_text(text: str) -> Capability | None:
+    keywords = _keywords()
     if workspace_enabled():
-        for pattern, capability in _KEYWORDS:  # Slack and Notion first: "notion docs" is Notion
+        for pattern, capability in keywords:  # Slack and Notion first: "notion docs" is Notion
             if not is_google(capability) and pattern.search(text or ""):
                 return capability
-        if _GOOGLE_WORDS.search(text or "") or any(p.search(text or "") for p, _ in _KEYWORDS):
+        if _GOOGLE_WORDS.search(text or "") or any(p.search(text or "") for p, _ in keywords):
             return GOOGLE_ANCHOR  # only Google keywords are left (gmail, calendar...)
         return None
-    for pattern, capability in _KEYWORDS:
+    for pattern, capability in keywords:
         if pattern.search(text or ""):
             return capability
     return None
@@ -135,9 +158,13 @@ def capability_from_text(text: str) -> Capability | None:
 def capabilities_named(text: str) -> set[Capability]:
     """Every account the text names (an email, the calendar, Slack, Notion, a Google app). What a user
     asked for is what they named: a capability outside this set was never requested."""
-    named = {capability for pattern, capability in _KEYWORDS if pattern.search(text or "")}
+    named = {capability for pattern, capability in _keywords() if pattern.search(text or "")}
     if _GOOGLE_WORDS.search(text or ""):
         named.add(GOOGLE_ANCHOR)
+    if MICROSOFT_ANCHOR in named and not _EXPLICIT_GOOGLE.search(text or ""):
+        # "outlook mail" names Outlook only: the generic mail/calendar words belong to the Microsoft word
+        named -= _GENERIC_GOOGLE
+        named.discard(GOOGLE_ANCHOR)
     return named
 
 

@@ -36,6 +36,9 @@ CURRENCY = "I'll show money in {money}. Say 'use USD' any time to change it."
 FIRST_VALUE = "What's one thing you want off your mind this week? A bill, a call, a deadline."
 CONNECT = "Want me to keep an eye on your Gmail and calendar too?"
 CONNECT_WITH_SLACK = "Want me to keep an eye on your email, calendar and Slack too?"
+CONNECT_WITH_MICROSOFT = "Want me to keep an eye on your email, calendar and Microsoft 365 too?"
+CONNECT_WITH_SLACK_AND_MICROSOFT = ("Want me to keep an eye on your email, calendar, Slack and Microsoft 365 "
+                                    "too?")
 
 
 async def _say(user_id: int, text: str, key: str, buttons: list[list[Button]] | None = None) -> None:
@@ -98,6 +101,10 @@ async def on_button(event: Event, data: str) -> None:
         from mavis.tools.integrations.actions import GOOGLE_ANCHOR
 
         await _flow(None).start(uid, GOOGLE_ANCHOR, "")
+    elif data == "ob:conn:microsoft":
+        from mavis.agents.commands import MICROSOFT_ANCHOR, _flow
+
+        await _flow(None).start(uid, MICROSOFT_ANCHOR, "")
     elif data == "ob:conn:slack":
         from mavis.agents.commands import _flow
 
@@ -147,10 +154,16 @@ async def after_first_value(user_id: int, reason: str = "") -> None:
     from mavis.tools.integrations.native.oauth import configured
 
     slack = configured(NativeProvider.SLACK)  # offered only where the Slack sign-in is set up
+    from mavis.tools.integrations.actions import microsoft_enabled
+
+    microsoft = microsoft_enabled()
     row = [Button(label="Connect Google", data="ob:conn:google"),
+           *([Button(label="Connect Microsoft 365", data="ob:conn:microsoft")] if microsoft else []),
            *([Button(label="Connect Slack", data="ob:conn:slack")] if slack else []),
            Button(label="Later", data="ob:conn:later")]
-    await _say(user_id, CONNECT_WITH_SLACK if slack else CONNECT, "connect", [row])
+    text = {(False, False): CONNECT, (True, False): CONNECT_WITH_SLACK, (False, True): CONNECT_WITH_MICROSOFT,
+            (True, True): CONNECT_WITH_SLACK_AND_MICROSOFT}[(slack, microsoft)]
+    await _say(user_id, text, "connect", [row])
 
 
 async def onboarding_gate(event: Event) -> bool:

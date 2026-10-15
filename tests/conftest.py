@@ -90,6 +90,19 @@ def _no_task_llm_backoff(monkeypatch) -> None:
 
 
 @pytest.fixture
+def ms_env(settings, monkeypatch) -> Iterator:
+    """Microsoft 365 configured on the native provider (client id, secret and token key)."""
+    from mavis.config import get_settings
+
+    for key, value in {"MICROSOFT_CLIENT_ID": "mid", "MICROSOFT_CLIENT_SECRET": "ms",
+                       "NATIVE_TOKEN_KEK": "a" * 44, "INTEGRATION_PROVIDER": "native"}.items():
+        monkeypatch.setenv(key, value)
+    get_settings.cache_clear()
+    yield get_settings()
+    get_settings.cache_clear()
+
+
+@pytest.fixture
 def settings(tmp_path, monkeypatch) -> Iterator:
     """Isolated Settings: temp data dir, temp SQLite, no external services, no developer .env."""
     from mavis.config import get_settings
