@@ -11,6 +11,7 @@ third-party content, so sending it always waits for a tap.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -26,6 +27,8 @@ from mavis.store.repo import users
 log = structlog.get_logger()
 
 OWED_KEY = "slack_owed"  # users.state: {channel id: {"team", "from", "ts", "notified"}}
+# Teams 1:1 chats share the dict and the wakeup kind: key teams_key(chat id), entry
+# {"source": "teams", "chat", "from", "ts", "notified"}; an entry without "source" is a Slack DM.
 REPLY_AFTER = timedelta(hours=2)
 FORGET_AFTER = timedelta(days=3)  # an unanswered DM older than this is not raised any more
 PREFIX = "sr:"
@@ -89,24 +92,96 @@ async def on_slack_event(event: Event) -> None:
     if sent is None or timeutil.now() - sent > FORGET_AFTER:
         return
     name = sender_name(p)
+    await _open(event.user_id, channel, {"team": str(p.get("team") or ""), "from": name, "ts": ts,
+                                         "notified": False}, sent, f"Slack DM from {name} unanswered",
+                f"slack_reply:{channel}:{ts}", {"channel": channel, "ts": ts})
+
+
+async def _open(user_id: int, key: str, entry: dict, sent: datetime, reason: str, dedupe_key: str,
+                payload: dict[str, Any]) -> bool:
+    """Record the first unanswered message of a conversation and book the one nudge for it."""
     opened = False
 
     def open_entry(cur: dict) -> dict:
         nonlocal opened
-        if channel in cur:  # still waiting on the first unanswered message: keep its time
+        if key in cur:  # still waiting on the first unanswered message: keep its time
             return cur
         opened = True
-        return {**cur, channel: {"team": str(p.get("team") or ""), "from": name, "ts": ts, "notified": False}}
+        return {**cur, key: entry}
 
-    await users.modify_nested(event.user_id, OWED_KEY, open_entry)
+    await users.modify_nested(user_id, OWED_KEY, open_entry)
     if not opened:
-        return
+        return False
     from mavis.timers.service import WakeupService
 
     await WakeupService().wake_me(
-        event.user_id, sent + REPLY_AFTER, f"Slack DM from {name} unanswered",
-        kind=WakeupKind.SYSTEM_SLACK_REPLY, payload={"channel": channel, "ts": ts}, scale=False,
-        dedupe_key=f"slack_reply:{channel}:{ts}")
+        user_id, sent + REPLY_AFTER, reason, kind=WakeupKind.SYSTEM_SLACK_REPLY, payload=payload,
+        scale=False, dedupe_key=dedupe_key)
+    return True
+
+
+def teams_key(chat_id: str) -> str:
+    """Short owed-dict key for a Teams chat (Telegram callback data is capped at 64 bytes)."""
+    return "teams:" + hashlib.sha1(chat_id.encode()).hexdigest()[:10]
+
+
+def _teams_chat(chat_id: object) -> str:
+    chat = str(chat_id or "")
+    return chat if not chat or chat.startswith("ms:") else f"ms:{chat}"
+
+
+async def on_teams_event(event: Event) -> None:
+    """Track the Teams 1:1 chats the user owes a reply: open on theirs, close on the user's own."""
+    if event.type is not EventType.TEAMS_MESSAGE:
+        return
+    p = event.payload
+    chat = _teams_chat(p.get("chat_id"))
+    if not chat or p.get("chat_type") != "oneOnOne":
+        return
+    key = teams_key(chat)
+    if p.get("from_me"):
+        await _close(event.user_id, key)
+        return
+    try:
+        sent = datetime.fromisoformat(str(p.get("at") or ""))
+    except ValueError:
+        return
+    if sent.tzinfo is None:
+        sent = sent.replace(tzinfo=UTC)
+    if not p.get("from_id") or timeutil.now() - sent > FORGET_AFTER:
+        return
+    name, ts = sender_name(p), f"{sent.timestamp():.6f}"
+    await _open(event.user_id, key, {"source": "teams", "chat": chat, "from": name, "ts": ts,
+                                     "notified": False}, sent, f"Teams message from {name} unanswered",
+                f"teams_reply:{key}:{ts}", {"channel": key, "ts": ts, "source": "teams"})
+
+
+async def catch_up_teams(provider: Any, user_id: int, *, limit: int = 20) -> int:
+    """1:1 chats already waiting when Teams is connected: the newest message of each recent chat, when it is
+    someone else's, opens an entry as if it had just arrived. Returns how many were opened; never raises."""
+    from mavis.tools.integrations.microsoft_sync import native_call
+    from mavis.tools.integrations.normalize import extract_list
+
+    try:
+        res = await native_call(provider, user_id, "teams.chats", {"limit": limit})
+        if not res.ok:
+            return 0
+        before = len(await _owed_now(user_id))
+        for chat in extract_list(res.data, "chats", "data.chats")[:limit]:
+            last = chat.get("lastMessage")
+            if chat.get("type") != "oneOnOne" or not isinstance(last, dict) or last.get("fromMe"):
+                continue
+            at = str(last.get("at") or "")
+            payload = {"chat_id": chat.get("id"), "message_id": last.get("id"), "from": last.get("from"),
+                       "from_id": last.get("fromId"), "from_me": False, "at": at, "chat_type": "oneOnOne"}
+            await on_teams_event(Event(
+                id=f"teams:{user_id}:{chat.get('id')}:{last.get('id')}", user_id=user_id,
+                type=EventType.TEAMS_MESSAGE, occurred_at=timeutil.now(), source="catch_up",
+                payload=payload, trust=Trust.UNTRUSTED))
+        return len(await _owed_now(user_id)) - before
+    except Exception:  # noqa: BLE001 - the nudge is an extra
+        log.warning("slack_replies.teams_catch_up_failed", user_id=user_id)
+        return 0
 
 
 async def catch_up(provider: Any, user_id: int, *, limit: int = 20) -> int:
@@ -163,11 +238,14 @@ async def on_wakeup(user_id: int, reason: str, payload: dict[str, Any]) -> None:
     user = await users.get(user_id)
     hours = max(1, round((timeutil.now() - sent).total_seconds() / 3600))
     who = entry.get("from") or "Someone"
-    intent = (f"{who} sent them a Slack DM about {hours} hour(s) ago and they have "
+    teams = entry.get("source") == "teams"
+    what = "a Teams message in a 1:1 chat" if teams else "a Slack DM"
+    prefix = "teams_reply" if teams else "slack_reply"
+    intent = (f"{who} sent them {what} about {hours} hour(s) ago and they have "
               "not replied. Say that plainly in one or two short lines and offer to draft a reply they can "
-              "send (the buttons do it). Do not guess what the DM says.")
+              f"send (the buttons do it). Do not guess what the {'message' if teams else 'DM'} says.")
     sent_ok = await current().executor.notify(
-        user, NotifyIntent(urgency=3, intent=intent, dedupe_key=f"slack_reply:{channel}:{ts}"),
+        user, NotifyIntent(urgency=3, intent=intent, dedupe_key=f"{prefix}:{channel}:{ts}"),
         untrusted=True, buttons=nudge_buttons(channel))
     if sent_ok:
         await users.modify_nested(user_id, OWED_KEY, lambda cur: {
@@ -185,8 +263,14 @@ async def on_button(event: Event, data: str) -> None:
     if action != DRAFT:
         return
     name = str(entry.get("from") or "them")
-    text = (f"Draft a reply to the Slack DM {name} sent me (Slack conversation {channel}): read what they "
-            "wrote, write a short reply in my voice, and queue it to send in that DM for my approval.")
+    if entry.get("source") == "teams":
+        text = (f"Draft a reply to the Teams message {name} sent me (Teams chat {entry.get('chat')}): "
+                "read the chat with teams_history, write a short reply in my voice, and queue it with "
+                "teams_send for my approval.")
+    else:
+        text = (f"Draft a reply to the Slack DM {name} sent me (Slack conversation {channel}): "
+                "read what they wrote, write a short reply in my voice, and queue it to send in that DM "
+                "for my approval.")
     body: dict[str, Any] = {"text": text}
     if event.payload.get("reply_chat"):
         body["reply_chat"] = event.payload["reply_chat"]
@@ -201,5 +285,6 @@ def register() -> None:
     from mavis.worker.runner import register_event_handler
 
     register_event_handler(EventType.SLACK_MESSAGE, on_slack_event)
+    register_event_handler(EventType.TEAMS_MESSAGE, on_teams_event)
     register_system_wakeup(WakeupKind.SYSTEM_SLACK_REPLY.value, on_wakeup, with_payload=True)
     register_button_handler(PREFIX, on_button)
