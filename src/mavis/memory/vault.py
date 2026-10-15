@@ -46,7 +46,24 @@ if TYPE_CHECKING:
 log = structlog.get_logger()
 
 KINDS = ("fact", "signal", "person", "routine", "profile", "layer", "suppression")
-CONNECTOR_PREFIXES = {"gmail": ("gmail:",), "slack": ("slack:",), "calendar": ("calendar:",)}
+
+
+def connector_prefixes() -> dict[str, tuple[str, ...]]:
+    """Memory connector name -> origin prefixes, merged from every registered provider."""
+    from mavis.tools.integrations.native import providers
+
+    merged: dict[str, tuple[str, ...]] = {}
+    for spec in providers.user_providers():
+        merged.update(spec.memory_sources)
+    return merged
+
+
+def __getattr__(name: str):
+    if name == "CONNECTOR_PREFIXES":
+        return connector_prefixes()
+    raise AttributeError(name)
+
+
 MAX_CORRECTION = 300
 MIN_SUBSTRING_FORGET = 4  # vectors are forgotten by text; shorter needles would take unrelated memories
 
@@ -96,7 +113,7 @@ def _trust(tier: str) -> str:
 def _connector(sources: list[str]) -> str:
     for s in sources:
         head = s.split(":", 1)[0]
-        if head in CONNECTOR_PREFIXES:
+        if head in connector_prefixes():
             return head
     return ""
 
@@ -250,10 +267,11 @@ class Vault:
     async def forget_source(self, user_id: int, connector: str) -> int:
         """Everything learned from one connector ("gmail", "slack", "calendar"): graph facts (third-party and
         self-authored), vectors, interaction and calendar signals. Returns the records removed."""
-        if connector not in CONNECTOR_PREFIXES:
+        prefixes = connector_prefixes()
+        if connector not in prefixes:
             raise VaultError(f"Unknown connector: {connector}")
         removed = 0
-        for prefix in (*CONNECTOR_PREFIXES[connector], f"first_sync:{user_id}:{connector}"):
+        for prefix in (*prefixes[connector], f"first_sync:{user_id}:{connector}"):
             removed += await self.memory.forget_source(user_id, prefix)
             removed += await personal_repo.delete_signals_by_source(user_id, prefix)
         await self._after_change(user_id)
@@ -261,7 +279,7 @@ class Vault:
 
     async def pause_connector(self, user_id: int, connector: str, paused: bool = True) -> list[str]:
         """Stop (or resume) learning from a connector. Returns the paused connectors."""
-        if connector not in controls.CONNECTORS:
+        if connector not in controls.connectors():
             raise VaultError(f"Unknown connector: {connector}")
         return sorted(await controls.set_paused(user_id, connector, paused))
 

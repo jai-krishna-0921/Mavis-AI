@@ -109,27 +109,31 @@ async def _markers(user_id: int) -> dict:
 
 
 async def _native(user_id: int) -> dict:
-    """Native Google and Slack grants: tell the vendor to drop each one (best effort), then erase the rows
-    (user grants, the workspace bot grant, in-flight consent states). The sweep at the end also covers a
-    deployment that no longer runs the native router."""
+    """Every registered native provider's grant: tell the vendor to drop each one (best effort), then erase
+    the rows (user grants, the workspace bot grant, in-flight consent states). The sweep at the end also
+    covers a deployment that no longer runs the native router."""
     from sqlalchemy import delete, func, select
 
     from mavis.store.db import Session
     from mavis.store.models import NativeGrant, NativeOAuthState
     from mavis.tools.integrations import get_provider
+    from mavis.tools.integrations.native import providers
     from mavis.tools.integrations.native.base import NativeProvider
 
     oauth = getattr(get_provider(), "oauth", None)
     revoked = 0
     if oauth is not None:
-        for provider in (NativeProvider.GOOGLE, NativeProvider.SLACK):
+        for spec in providers.user_providers():  # companions (slack_bot) go with their owner's revoke
+            try:
+                provider = NativeProvider(spec.id)
+            except ValueError:
+                continue  # an id without an enum member cannot hold a grant
             try:
                 if await oauth.tokens.grant(user_id, provider) is not None:
                     await oauth.revoke(user_id, provider)
                     revoked += 1
             except Exception as exc:  # noqa: BLE001 - the local erase below still removes the grant
-                log.warning("deletion.native_revoke_failed", provider=provider.value,
-                            error=type(exc).__name__)
+                log.warning("deletion.native_revoke_failed", provider=spec.id, error=type(exc).__name__)
     async with Session() as s:
         left = int(await s.scalar(select(func.count()).select_from(NativeGrant).where(
             NativeGrant.user_id == user_id)) or 0)

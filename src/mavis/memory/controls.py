@@ -13,19 +13,31 @@ from mavis.domain import timeutil
 from mavis.store.repo import users
 
 KEY = "learning"
-CONNECTORS = ("gmail", "slack", "calendar")
 AUTHORED_LEARN_PER_DAY = 40  # LEARN jobs from the user's own mail and messages, per user per day
 MIN_AUTHORED_WORDS = 5  # shorter own messages feed the style measure but are not worth an extraction
 
 
+def connectors() -> tuple[str, ...]:
+    """Connector names that can be paused, from every registered provider's memory sources."""
+    from mavis.tools.integrations.native import providers
+
+    return tuple(sorted({name for spec in providers.user_providers() for name in spec.memory_sources}))
+
+
+def __getattr__(name: str):
+    if name == "CONNECTORS":
+        return connectors()
+    raise AttributeError(name)
+
+
 async def paused(user_id: int) -> set[str]:
     raw = (await users.get_state(user_id)).get(KEY) or {}
-    return {str(c) for c in raw.get("paused", [])} & set(CONNECTORS)
+    return {str(c) for c in raw.get("paused", [])} & set(connectors())
 
 
 async def set_paused(user_id: int, connector: str, value: bool) -> set[str]:
     """Pause or resume learning from one connector ("gmail", "slack", "calendar")."""
-    if connector not in CONNECTORS:
+    if connector not in connectors():
         raise ValueError(f"unknown connector: {connector}")
 
     def change(cur: dict) -> dict:
