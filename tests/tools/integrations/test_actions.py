@@ -40,6 +40,8 @@ def test_catalog_covers_spec_actions():
         "forms.responses", "meet.recent",
         # Docs, Sheets and Slides sent to the user as files (2026-10-10)
         "drive.export", "drive.export_file",
+        # Microsoft Teams (native only)
+        "teams.chats", "teams.history", "teams.send", "teams.chat",
     }
     assert set(ACTIONS) == expected
 
@@ -81,7 +83,7 @@ def test_capabilities_match_action_prefix():
                    "slack": Capability.SLACK, "notion": Capability.NOTION,
                    "drive": Capability.DRIVE, "docs": Capability.DOCS, "sheets": Capability.SHEETS,
                    "tasks": Capability.TASKS, "contacts": Capability.CONTACTS, "meet": Capability.MEET,
-                   "slides": Capability.DOCS, "forms": Capability.DOCS}
+                   "slides": Capability.DOCS, "forms": Capability.DOCS, "teams": Capability.TEAMS}
     for name, spec in ACTIONS.items():
         assert spec.capability is prefix_caps[name.split(".")[0]]
 

@@ -103,7 +103,7 @@ def test_chat_builders_match_graph_shape():
     c = graph_chat("c1", topic="Launch", chat_type="group")
     assert c["chatType"] == "group" and c["topic"] == "Launch"
     assert c["members"][0]["displayName"] == "Alice" and c["members"][0]["userId"] == "u-alice"
-    assert c["members"][-1]["userId"] == "u-me"
+    assert c["members"][-1]["userId"] == "oid-me"
     assert c["members"][0]["email"] == "alice@acme.com"
     assert c["lastMessagePreview"]["from"]["user"]["id"] == "u-alice"
     assert c["lastMessagePreview"]["createdDateTime"] == "2026-10-05T10:00:00Z"
@@ -174,11 +174,11 @@ async def test_on_request_fields_follow_select_and_expand():
 
 def test_one_on_one_lists_both_participants_and_me_is_configurable():
     c = graph_chat("c1")
-    assert [m["userId"] for m in c["members"]] == ["u-alice", "u-me"]
+    assert [m["userId"] for m in c["members"]] == ["u-alice", "oid-me"]
     other = graph_chat("c2", me=("Zed", "zed@acme.com", "u-zed"))
     assert other["members"][-1]["email"] == "zed@acme.com"
-    solo = graph_chat("c3", members=(("Me", "me@orbit.test", "u-me"),))
-    assert [m["userId"] for m in solo["members"]] == ["u-me"]
+    solo = graph_chat("c3", members=(("Me", "me@orbit.test", "oid-me"),))
+    assert [m["userId"] for m in solo["members"]] == ["oid-me"]
 
 
 def test_drive_item_folder_and_shared_variants():

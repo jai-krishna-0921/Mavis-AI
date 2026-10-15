@@ -252,6 +252,26 @@ class SlackSendArgs(ToolArgs):
     thread_ts: str = Field(default="", description="Reply inside the thread that starts at this ts")
 
 
+class TeamsChatsArgs(ToolArgs):
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class TeamsHistoryArgs(ToolArgs):
+    chat_id: str = Field(description="Chat id from teams_chats")
+    limit: int = Field(default=20, ge=1, le=50)
+    before: str = Field(default="", description="Only messages older than this ISO time (the 'next' of the "
+                                                "previous page)")
+
+
+class TeamsSendArgs(ToolArgs):
+    chat_id: str = Field(description="Chat id from teams_chats")
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class TeamsChatArgs(ToolArgs):
+    chat_id: str
+
+
 class NotionSearchArgs(ToolArgs):
     query: str = ""
 
@@ -657,6 +677,10 @@ def _preview_slack(args: SlackSendArgs, tz: str) -> str:
     return f"💬 #{args.channel.lstrip('#')}\n{args.text}"
 
 
+def _preview_teams(args: TeamsSendArgs, tz: str) -> str:
+    return f"💬 Teams message\n{args.text}"
+
+
 def _preview_notion(args: NotionCreateArgs, tz: str) -> str:
     return f"🗒️ New Notion page: {args.title}\n{args.content[:400]}"
 
@@ -942,6 +966,18 @@ _SPECS: tuple[ActionSpec, ...] = (
                "thread. The user approves it first.",
                SlackSendArgs, RiskClass.OUTWARD, _a("comms", "conversation", "spawn"),
                preview=_preview_slack),
+    ActionSpec("teams.chats", Capability.TEAMS,
+               "List the user's recent Microsoft Teams chats (1:1 and group chats, not channels): ids, who "
+               "is in each and the newest message. Use it to find the chat with someone by name.",
+               TeamsChatsArgs, RiskClass.READ, _a("comms", "conversation", "spawn")),
+    ActionSpec("teams.history", Capability.TEAMS,
+               "Read recent messages in one Teams chat (id from teams_chats). Shows who wrote what and when.",
+               TeamsHistoryArgs, RiskClass.READ, _a("comms", "conversation", "spawn")),
+    ActionSpec("teams.send", Capability.TEAMS,
+               "Send a message in a Teams chat (1:1 or group, not channels) as the user. The user approves "
+               "it first.",
+               TeamsSendArgs, RiskClass.OUTWARD, _a("comms", "conversation", "spawn"),
+               preview=_preview_teams, identity=("chat_id", "text"), target=("chat_id",)),
     ActionSpec("notion.search", Capability.NOTION, "Search Notion pages by text.",
                NotionSearchArgs, RiskClass.READ, _a("knowledge", "conversation", "spawn")),
     ActionSpec("notion.read", Capability.NOTION, "Read a Notion page.",
@@ -1084,6 +1120,8 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
                _INTERNAL),
     ActionSpec("contacts.list", Capability.CONTACTS, "The user's contacts (emails only).", NoArgs,
                RiskClass.READ, _INTERNAL),
+    ActionSpec("teams.chat", Capability.TEAMS, "One Teams chat with its members (approval pre-step).",
+               TeamsChatArgs, RiskClass.READ, _INTERNAL),
 )
 
 ACTIONS: dict[str, ActionSpec] = {s.name: s for s in (*_SPECS, *_WORKSPACE_SPECS)}

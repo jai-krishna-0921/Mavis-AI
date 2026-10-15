@@ -214,6 +214,7 @@ NATIVE_ONLY_ACTIONS: frozenset[str] = frozenset({
     "calendar.calendars", "calendar.get", "calendar.delete_event", "calendar.respond",
     "contacts.create", "contacts.update", "slides.read", "slides.create", "forms.read", "forms.responses",
     "meet.recent", "drive.export_file",
+    "teams.chats", "teams.history", "teams.send", "teams.chat",
 })
 
 COMPOSIO_ACTIONS: dict[str, SlugMapping] = {

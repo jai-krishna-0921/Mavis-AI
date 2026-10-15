@@ -48,6 +48,7 @@ from mavis.tools.integrations.actions import (
     TaskCompleteArgs,
     TaskPatchArgs,
     TaskUpdateArgs,
+    TeamsChatArgs,
 )
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connections import ConnectionCache
@@ -462,6 +463,33 @@ async def prepare_sender(ctx: ToolContext, args: BaseModel) -> Prepared:
     return Prepared(note=f"From: {picked.address}") if picked is not None and picked.address else Prepared()
 
 
+def _who(member: dict) -> str:
+    return one_line(member.get("name") or member.get("email"), 40)
+
+
+async def prepare_teams_send(ctx: ToolContext, args: BaseModel) -> Prepared:
+    """Name the chat and its members on the approval card from the CURRENT chat (read now), never from model
+    text. A chat that cannot be read queues nothing."""
+    try:
+        chat = await action_data(ctx, "teams.chat", TeamsChatArgs(chat_id=getattr(args, "chat_id", "")))
+    except ActionFailed:
+        return Prepared(refusal="I could not open that Teams chat, so I did not queue the message.")
+    chat = chat if isinstance(chat, dict) else {}
+    others = [m for m in chat.get("members") or [] if isinstance(m, dict) and not m.get("me")]
+    names = [n for n in map(_who, others) if n]
+    topic = one_line(chat.get("topic"), 60)
+    if chat.get("type") == "oneOnOne" and len(others) == 1 and names:
+        email = one_line(others[0].get("email"), 80)
+        return Prepared(note=f"Chat: {names[0]}" + (f" ({email})" if email else ""))
+    shown = names[:3]
+    rest = len(names) - len(shown)
+    who = ", ".join(shown[:-1]) + " and " + shown[-1] if len(shown) > 1 and rest == 0 else ", ".join(shown)
+    if rest:
+        who += f" and {rest} other{'s' if rest != 1 else ''}"
+    title = f" '{topic}'" if topic else ""
+    return Prepared(note=f"Group chat{title}" + (f" with {who}" if who else ""))
+
+
 CREATES = ("drive.create_folder", "docs.create", "sheets.create", "tasks.add", "slides.create",
            "contacts.create")
 CUSTOM_FNS: dict[str, CustomFn] = {
@@ -476,6 +504,7 @@ CUSTOM_FNS: dict[str, CustomFn] = {
 _STEPS: dict[str, PrepareFn] = {**ESCALATIONS, **VERIFIERS}
 PREPARES: dict[str, PrepareFn] = {
     "calendar.update_event": prepare_event_update,
+    "teams.send": prepare_teams_send,
     **dict.fromkeys(("mail.send", "mail.draft", "mail.reply", "calendar.create_event"), prepare_sender),
     **_STEPS,
     **{name: guarded(name, _STEPS.get(name)) for name in (*FILE_TARGETS, *DESTINATIONS)},

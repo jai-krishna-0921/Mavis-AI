@@ -95,14 +95,18 @@ def _error_code(data: bytes) -> str:
     return code if isinstance(code, str) and _CODE_OK.fullmatch(code) else ""
 
 
-def classify(status: int, code: str, detail: str, url: str = "") -> GraphError:
-    """Map a Graph status and error.code to a FailureKind. `detail` is passed through unchanged."""
+def classify(status: int, code: str, detail: str, url: str = "",
+             on_forbidden: FailureKind | None = None) -> GraphError:
+    """Map a Graph status and error.code to a FailureKind. `detail` is passed through unchanged.
+    `on_forbidden` is the kind a 403 gets when the caller knows what it means (else the URL decides)."""
     if status == 400:
         kind = FailureKind.NOT_FOUND if code == "ErrorInvalidIdMalformed" else FailureKind.INVALID_ARGUMENT
         return GraphError(kind, detail)
     if status == 401:
         return GraphError(FailureKind.AUTH, detail)
     if status == 403:
+        if on_forbidden is not None:
+            return GraphError(on_forbidden, detail)
         path = httpx.URL(url).path if url else ""
         if any(part in path for part in _ACCESS_SCOPED):
             return GraphError(FailureKind.PERMISSION_MISSING, detail)
@@ -145,6 +149,7 @@ class GraphClient:
     async def raw(
         self, uid: int, method: str, url: str, *, params: dict | None = None, body: Any = None,
         headers: dict | None = None, cap: int | None = None, idempotent: bool | None = None,
+        on_forbidden: FailureKind | None = None,
     ) -> tuple[httpx.Headers, bytes, bool]:
         """One authorised call with the retry rules (see GoogleExecutor._raw). A 429 or a 503 with Retry-After
         was rejected before it ran, so any call may repeat after waiting once. A 504 or other 5xx or a read
@@ -198,7 +203,7 @@ class GraphClient:
                 backed_off = True
                 await self._sleep(SERVER_BACKOFF_S)
                 continue
-            raise classify(status, code, detail, url)
+            raise classify(status, code, detail, url, on_forbidden)
 
     async def json(self, uid: int, method: str, url: str, **kw: Any) -> Any:
         _, data, cut = await self.raw(uid, method, url, **kw)
@@ -213,7 +218,7 @@ class GraphClient:
 
     async def pages(
         self, uid: int, url: str, params: dict | None, limit: int, *, max_pages: int = MAX_PAGES,
-        headers: dict | None = None,
+        headers: dict | None = None, on_forbidden: FailureKind | None = None,
     ) -> tuple[list[dict], str | None, str | None]:
         """Follow @odata.nextLink (verbatim, params only on the first request) until `limit` items.
         `headers` (e.g. a Prefer timezone) are sent on every page.
@@ -224,7 +229,8 @@ class GraphClient:
         target, query = url, params
         total = 0
         for _ in range(max_pages):
-            _, raw, cut = await self.raw(uid, "GET", target, params=query, headers=headers)
+            _, raw, cut = await self.raw(uid, "GET", target, params=query, headers=headers,
+                                          on_forbidden=on_forbidden)
             total += len(raw)
             if cut:
                 raise GraphError(FailureKind.UNKNOWN, "microsoft response larger than the size limit")

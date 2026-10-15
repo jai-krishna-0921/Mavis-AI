@@ -11,7 +11,7 @@ import httpx
 
 from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired
 
-DEFAULT_ACCOUNT = {"upn": "me@orbit.test", "mail": "me@orbit.test", "tid": "t-1", "oid": "u-me"}
+DEFAULT_ACCOUNT = {"upn": "me@orbit.test", "mail": "me@orbit.test", "tid": "tenant-1", "oid": "oid-me"}
 
 
 class GraphTokens:
@@ -306,12 +306,13 @@ def graph_chat(
     last_text: str = "hi",
     last_from: str = "u-alice",
     last_at: str = "2026-10-05T10:00:00Z",
-    me: tuple[str, str, str] = ("Me", "me@orbit.test", "u-me"),
+    me: tuple[str, str, str] = ("Me", "me@orbit.test", "oid-me"),
+    with_members: bool = True,
 ) -> dict:
     """`me` is the signed-in user (name, email, user id); Graph lists them among the members too."""
     members = (*members, *(() if any(m[2] == me[2] for m in members) else (me,)))
     names = {uid: name for name, _, uid in members}
-    return {
+    chat = {
         "id": cid,
         "chatType": chat_type,
         "topic": topic,
@@ -327,38 +328,45 @@ def graph_chat(
             "id": f"{cid}-last",
             "createdDateTime": last_at,
             "messageType": "message",
-            "body": {"contentType": "text", "content": last_text},
+            "body": {"contentType": "html" if last_text.startswith("<") else "text", "content": last_text},
             "from": {"user": {"id": last_from, "displayName": names.get(last_from, ""),
                               "userIdentityType": "aadUser"}},
         },
     }
+    if not with_members:
+        del chat["members"]
+    return chat
 
 
 def graph_chat_message(
     mid: str,
     chat: str,
     *,
-    from_id: str = "u-alice",
-    name: str = "Alice",
+    from_id: str | None = "u-alice",
+    name: str | None = "Alice",
     text: str = "hi",
     at: str = "2026-10-05T10:00:00Z",
     kind: str = "message",
     html: bool = False,
+    deleted: bool = False,
+    mentions: tuple[str, ...] = (),
 ) -> dict:
+    """`from_id=None` builds an app/bot message (no user author); `mentions` are mentioned user ids."""
     return {
         "id": mid,
         "chatId": chat,
         "messageType": kind,
         "createdDateTime": at,
         "lastModifiedDateTime": at,
-        "deletedDateTime": None,
+        "deletedDateTime": at if deleted else None,
         "importance": "normal",
         "webUrl": f"https://teams.microsoft.com/l/message/{chat}/{mid}",
         "body": {"contentType": "html" if html else "text", "content": text},
-        "from": None if kind != "message"
+        "from": None if kind != "message" or from_id is None
         else {"user": {"id": from_id, "displayName": name, "userIdentityType": "aadUser"}},
         "attachments": [],
-        "mentions": [],
+        "mentions": [{"id": i, "mentionText": "x", "mentioned": {"user": {"id": uid}}}
+                     for i, uid in enumerate(mentions)],
     }
 
 

@@ -24,6 +24,7 @@ from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired,
 from mavis.tools.integrations.native.graph import GRAPH, GraphClient, GraphError, bad_segment
 from mavis.tools.integrations.native.graph_calendar import calendar_handlers
 from mavis.tools.integrations.native.graph_mail import mail_handlers
+from mavis.tools.integrations.native.graph_teams import teams_handlers
 
 ID_ARGS = ("message_id", "thread_id", "event_id", "calendar_id", "chat_id", "item_id", "file_id",
            "message_ids", "thread_ids")
@@ -40,6 +41,7 @@ class MicrosoftExecutor:
         self._handlers: dict[str, Callable[[int, Any], Awaitable[Any]]] = {"mail.profile": self._mail_profile}
         self._handlers.update(mail_handlers(self))
         self._handlers.update(calendar_handlers(self))
+        self._handlers.update(teams_handlers(self))
 
     def handles(self, action: str) -> bool:
         return action in self._handlers
