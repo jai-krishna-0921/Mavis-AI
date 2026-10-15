@@ -4,7 +4,7 @@ import { ConnectorIcon } from './ConnectorIcon'
 
 describe('ConnectorIcon', () => {
   it('renders an svg for known and unknown ids', () => {
-    for (const id of ['google', 'slack', 'testco']) {
+    for (const id of ['google', 'slack', 'microsoft', 'testco']) {
       const { container, unmount } = render(<ConnectorIcon icon={id} />)
       expect(container.querySelector('svg')).not.toBeNull()
       unmount()

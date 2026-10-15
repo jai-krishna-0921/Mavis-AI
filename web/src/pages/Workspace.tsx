@@ -7,7 +7,7 @@ import { useConfig, useConnectors, useDisconnect, useMe } from '../api/hooks'
 import { api } from '../api/client'
 import type { Connector } from '../api/types'
 import { normalizeChannel, fmtDate } from '../lib/channels'
-import { redirectTo } from '../lib/nav'
+import { httpsUrl, redirectTo } from '../lib/nav'
 import { CopyButton } from '../components/CopyButton'
 import { Modal } from '../components/Modal'
 import { ConnectorIcon } from '../components/ConnectorIcon'
@@ -120,6 +120,7 @@ function GettingStarted() {
   const tg = normalizeChannel('telegram', me.data.channels.telegram, cfg.data?.bot_url)
   const google = conns.data.find((c) => c.id === 'google')
   const slack = conns.data.find((c) => c.id === 'slack')
+  const microsoft = conns.data.find((c) => c.id === 'microsoft')
   const steps = [
     {
       key: 'telegram', title: 'Say hi to Mavis on Telegram', done: tg.connected,
@@ -137,6 +138,10 @@ function GettingStarted() {
     ...(slack ? [{
       key: 'slack', title: 'Connect Slack (optional)', done: slack.status === 'active',
       sub: 'Message Mavis from Slack too, in any workspace.', action: <StartConnect c={slack} />,
+    }] : []),
+    ...(microsoft ? [{
+      key: 'microsoft', title: 'Connect Microsoft 365 (optional)', done: microsoft.status === 'active',
+      sub: 'Outlook mail and calendar, Teams chats and OneDrive.', action: <StartConnect c={microsoft} />,
     }] : []),
   ]
   const done = steps.filter((st) => st.done).length
@@ -198,6 +203,7 @@ function ConnectorRow({ c }: { c: Connector }) {
             })}
           </ul>
         )}
+        {c.note && <p className="row-sub mt-3">{c.note}</p>}
         {c.missing_scopes.length > 0 && <div className="row-sub mt-3">Not allowed yet: {c.missing_scopes.join(', ')}.</div>}
         {c.notice && <div className="row-sub mt-3" data-testid={`${c.id}-notice`}>{c.notice}</div>}
         {err && <p className="error" role="alert">{err}</p>}
@@ -215,11 +221,26 @@ function ConnectorRow({ c }: { c: Connector }) {
   )
 }
 
+function AdminConsentNote() {
+  const conns = useConnectors()
+  const link = httpsUrl(conns.data?.find((c) => c.id === 'microsoft')?.admin_link ?? '')
+  return (
+    <div className="mb-4 flex items-start gap-2 rounded-2xl border border-danger/30 bg-danger-soft p-3 text-sm text-danger" role="alert">
+      <WarningCircle size={20} weight="light" className="shrink-0" aria-hidden="true" />
+      <p className="m-0 min-w-0">
+        Your organisation needs an admin to approve Mavis AI first. Send this link to your IT admin, then connect again:
+        {link && <> <a className="break-all underline" href={link} target="_blank" rel="noopener noreferrer">{link}</a></>}
+      </p>
+    </div>
+  )
+}
+
 function ConnectNote() {
   const [params] = useSearchParams()
   if (params.get('connected')) {
     return <p className="mb-4 flex items-center gap-2 rounded-2xl border border-ok/30 bg-ok-soft p-3 text-sm" role="status"><CheckCircle size={20} weight="light" className="text-ok" aria-hidden="true" />Connected. Mavis is reading it now.</p>
   }
+  if (params.get('error') === 'microsoft_admin_consent') return <AdminConsentNote />
   if (params.get('error')) {
     return <p className="mb-4 flex items-center gap-2 rounded-2xl border border-danger/30 bg-danger-soft p-3 text-sm text-danger" role="alert"><WarningCircle size={20} weight="light" aria-hidden="true" />That account was not connected. You can try again.</p>
   }

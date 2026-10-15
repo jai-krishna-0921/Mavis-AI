@@ -63,7 +63,9 @@ def _entry(spec: providers.ProviderSpec, grant: Grant | None) -> dict:
             "account": account, "scopes_granted": granted if status == "active" else [],
             "missing_scopes": [n for n in services if n not in granted] if status == "active" else [],
             "connected_at": grant.updated_at.isoformat() if grant and grant.updated_at else None,
-            "notice": consent_notice(spec.anchor) or None}
+            "notice": consent_notice(spec.anchor) or None,
+            "note": spec.grant_note(grant.account) if spec.grant_note and grant else None,
+            "admin_link": spec.admin_link() if spec.admin_link else None}
 
 
 async def connector_list(user_id: int, provider: Any) -> list[dict]:

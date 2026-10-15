@@ -119,6 +119,57 @@ describe('workspace connectors', () => {
     expect(within(chips).getByText('boxes')).toBeInTheDocument()
   })
 
+  it('shows the Microsoft card with chips and the personal-account note', async () => {
+    db().connectors.push({
+      id: 'microsoft', name: 'Microsoft 365', description: 'Outlook mail, Outlook Calendar, Teams chats and OneDrive files.',
+      icon: 'microsoft', services: ['outlook', 'calendar', 'teams', 'onedrive'], status: 'active', account: 'me@outlook.com',
+      scopes_granted: [], missing_scopes: [], connected_at: null,
+      note: 'Teams is not available for personal Microsoft accounts.', admin_link: null,
+    })
+    renderApp('/workspace')
+    const card = (await screen.findByText('Outlook mail, Outlook Calendar, Teams chats and OneDrive files.')).closest('li')!
+    const chips = within(card).getByLabelText('Microsoft 365 services')
+    for (const s of ['outlook', 'calendar', 'teams', 'onedrive']) expect(within(chips).getByText(s)).toBeInTheDocument()
+    expect(within(card).getByText('Teams is not available for personal Microsoft accounts.')).toBeInTheDocument()
+  })
+
+  it('explains admin approval with a forwardable link', async () => {
+    db().connectors.push({
+      id: 'microsoft', name: 'Microsoft 365', description: 'x', icon: 'microsoft', services: [], status: 'none',
+      account: null, scopes_granted: [], missing_scopes: [], connected_at: null, note: null,
+      admin_link: 'https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=abc',
+    })
+    renderApp('/workspace?error=microsoft_admin_consent')
+    expect(await screen.findByText(/needs an admin to approve Mavis AI/)).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: /adminconsent/ })).toHaveAttribute('href', expect.stringMatching(/^https:/))
+  })
+
+  it('never links a non-https admin link', async () => {
+    db().connectors.push({
+      id: 'microsoft', name: 'Microsoft 365', description: 'x', icon: 'microsoft', services: [], status: 'none',
+      account: null, scopes_granted: [], missing_scopes: [], connected_at: null, note: null,
+      admin_link: 'javascript:alert(1)',
+    })
+    renderApp('/workspace?error=microsoft_admin_consent')
+    expect(await screen.findByText(/needs an admin to approve Mavis AI/)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /alert/ })).toBeNull()
+  })
+
+  it('offers a Microsoft step in Getting started only when the connector is listed', async () => {
+    renderApp('/workspace')
+    await screen.findByText('Get started')
+    expect(screen.queryByText('Connect Microsoft 365 (optional)')).toBeNull()
+  })
+
+  it('shows the optional Microsoft step when the connector is listed', async () => {
+    db().connectors.push({
+      id: 'microsoft', name: 'Microsoft 365', description: 'x', icon: 'microsoft', services: [], status: 'none',
+      account: null, scopes_granted: [], missing_scopes: [], connected_at: null, note: null, admin_link: null,
+    })
+    renderApp('/workspace')
+    expect(await screen.findByText('Connect Microsoft 365 (optional)')).toBeInTheDocument()
+  })
+
   it('shows contact rows with copy, and connects Slack via redirect', async () => {
     const redirect = vi.spyOn(nav, 'redirectTo').mockImplementation(() => {})
     const user = userEvent.setup()

@@ -414,6 +414,9 @@ class ConnectFlow:
 
     async def _family_announcement(self, user_id: int, spec: providers.ProviderSpec) -> str:
         full = f"Connected ✓ I can now work with your {spec.abilities or spec.display_name}."
+        noted = await self._grant_note(user_id, spec)
+        if noted is not None:
+            return noted
         access = getattr(self.provider, "provider_access", None)
         if access is None:
             return full
@@ -427,6 +430,24 @@ class ConnectFlow:
         can, cannot = found
         return (f"Connected ✓ I can {_join(can)}. Not allowed on {spec.display_name}'s screen: "
                 f"{', '.join(cannot)}. To add them, {spec.reconnect_hint}.")
+
+    async def _grant_note(self, user_id: int, spec: providers.ProviderSpec) -> str | None:
+        """The announcement for a grant that serves less than the whole family: only what it serves, then the
+        provider's note. None when the provider words no note for this account."""
+        getter = getattr(self.provider, "provider_grant", None)
+        if spec.grant_note is None or getter is None:
+            return None
+        try:
+            grant = await getter(user_id, NativeProvider(spec.id))
+            note = spec.grant_note(grant.account) if grant is not None else None
+            if not note:
+                return None
+            names = [spec.ability_labels[c] for c in spec.caps_for(grant) if c in spec.ability_labels]
+        except Exception as exc:  # noqa: BLE001 - the announcement must not fail the activation
+            log.warning("connect.grant_note_failed", error=type(exc).__name__)
+            return None
+        served = _join(names) if names else spec.abilities or spec.display_name
+        return f"Connected ✓ I can now work with your {served}. Note: {note}"
 
     async def _fan_out(self, user_id: int, capability: Capability) -> list[Capability]:
         """The account covers a whole family (one of its capabilities is ACTIVE): every live member activates.

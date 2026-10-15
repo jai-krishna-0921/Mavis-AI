@@ -181,6 +181,10 @@ class NativeRouter:
             return None
         return feature_access(grant)
 
+    async def provider_grant(self, user_id: int, provider: NativeProvider) -> Grant | None:
+        """The user's active native grant for the provider, or None."""
+        return await self._active_grant(user_id, provider) if self._ready(provider) else None
+
     async def slack_chat_ready(self, user_id: int) -> bool:
         """Can this user talk to Mavis in a Slack DM? True when the workspace bot is installed for them."""
         return await self.tokens.account(user_id, NativeProvider.SLACK_BOT) is not None

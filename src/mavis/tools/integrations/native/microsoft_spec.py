@@ -117,6 +117,16 @@ async def remember_microsoft_identity(user_id: int, account: dict) -> None:
         await remember_identity(user_id, emails=(str(account["mail"]),))
 
 
+def grant_note(account: dict) -> str | None:
+    """A short line about what this account cannot do, for the card and the announcement."""
+    if account.get("tid") == PERSONAL_TENANT:
+        return "Teams is not available for personal Microsoft accounts."
+    scopes = account.get("scopes")
+    if isinstance(scopes, list) and "chat.readwrite" not in {str(s).lower() for s in scopes}:
+        return "Teams was not allowed on this account."
+    return None
+
+
 def caps_for_grant(grant) -> tuple[C, ...]:
     have = {s.lower() for s in grant.scopes}
     personal = grant.account.get("tid") == PERSONAL_TENANT
@@ -147,7 +157,9 @@ MS_SPEC = providers.register(ProviderSpec(
     executor=("microsoft", "MicrosoftExecutor"),
     pollers={C.OUTLOOK: f"{_POLL}:poll_mail", C.OUTLOOK_CALENDAR: f"{_POLL}:poll_calendar",
              C.TEAMS: f"{_POLL}:poll_teams", C.ONEDRIVE: f"{_POLL}:poll_onedrive"},
-    abilities="Outlook mail, Outlook Calendar, Teams chats and OneDrive",
+    abilities="Outlook mail, Outlook Calendar, Teams chats and OneDrive", grant_note=grant_note,
+    ability_labels={C.OUTLOOK: "Outlook mail", C.OUTLOOK_CALENDAR: "Outlook Calendar",
+                    C.TEAMS: "Teams chats", C.ONEDRIVE: "OneDrive"},
     reconnect_hint="send /connect microsoft and accept every permission",
     forget_prefixes=("outlook:", "ocal:", "teams:", "onedrive:"),
     memory_sources={"outlook": ("outlook:",), "outlook_calendar": ("ocal:",),

@@ -30,6 +30,8 @@ export type Connector = {
   missing_scopes: string[]
   connected_at: string | null
   notice?: string | null
+  note?: string | null
+  admin_link?: string | null
 }
 
 export type McpStatus = 'ACTIVE' | 'NEEDS_AUTH' | 'ERROR'

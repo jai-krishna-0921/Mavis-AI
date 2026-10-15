@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Jai Krishna. All rights reserved.
 // Proprietary. Use is governed by LICENSE in the repository root.
 import {
-  AddressBook, CalendarDots, CheckSquare, EnvelopeSimple, FileText, GoogleDriveLogo, Table, VideoCamera, Square,
+  AddressBook, CalendarDots, ChatsCircle, Cloud, CheckSquare, EnvelopeSimple, FileText, GoogleDriveLogo, Table, VideoCamera, Square,
   type Icon,
 } from '@phosphor-icons/react'
 
@@ -14,6 +14,9 @@ const ICONS: Record<string, Icon> = {
   tasks: CheckSquare,
   meet: VideoCamera,
   contacts: AddressBook,
+  outlook: EnvelopeSimple,
+  teams: ChatsCircle,
+  onedrive: Cloud,
 }
 
 export function ServiceIcon({ name, size = 20 }: { name: string; size?: number }) {

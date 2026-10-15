@@ -87,6 +87,9 @@ def make_spec(**kw) -> ProviderSpec:
         toolkits=frozenset({"testco", "notion", "sandbox"}),
         features=(("search notes", "notion.search"), ("run boxes", "sandbox.run")),
         abilities="notes and boxes",
+        ability_labels={Capability.NOTION: "notes", Capability.SANDBOX: "boxes"},
+        grant_note=lambda a: ("Boxes are not available on a personal plan."
+                              if a.get("plan") == "personal" else None),
         reconnect_hint="send /connect testing",
         nothing_allowed="You signed in with {account} but allowed nothing.",
         pollers={Capability.SANDBOX: "tests.tools.integrations.native.fake_provider:poll"},
@@ -186,6 +189,8 @@ COVERAGE = {
     "toolkits": _E + "test_connect_url_and_callback_page",
     "features": _E + "test_features_split_into_allowed_and_not",
     "abilities": _E + "test_announcement_uses_abilities_and_the_reconnect_hint",
+    "ability_labels": _E + "test_announcement_names_only_what_the_grant_serves_with_the_note",
+    "grant_note": _E + "test_announcement_names_only_what_the_grant_serves_with_the_note",
     "reconnect_hint": _E + "test_announcement_uses_abilities_and_the_reconnect_hint",
     "nothing_allowed": _E + "test_nothing_allowed_copy_and_revoke",
     "pollers": _E + "test_poll_hook_runs",

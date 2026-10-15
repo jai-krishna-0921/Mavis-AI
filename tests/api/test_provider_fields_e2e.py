@@ -311,6 +311,13 @@ async def test_announcement_uses_abilities_and_the_reconnect_hint(fake_env):
         "To add them, send /connect testing.")
 
 
+async def test_announcement_names_only_what_the_grant_serves_with_the_note(fake_env):
+    await fp.grant(fake_env.tokens, plan="personal")
+    flow, _ = flow_for(fake_env)
+    assert await flow._family_announcement(1, providers.spec_of("testing")) == (
+        "Connected ✓ I can now work with your notes. Note: Boxes are not available on a personal plan.")
+
+
 async def test_menu_and_status_use_the_family_label(fake_env):
     await fp.grant(fake_env.tokens)
     flow, _ = flow_for(fake_env)
