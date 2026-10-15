@@ -51,13 +51,14 @@ export function createDb() {
   const connectors: Connector[] = [
     {
       id: 'google', name: 'Google Workspace', description: 'Mail, calendar, drive, docs and more, read and act on your behalf.',
+      icon: 'google', services: ['mail', 'calendar', 'drive', 'docs', 'sheets', 'tasks', 'meet', 'contacts'],
       status: 'active', account: 'jai@example.com',
       scopes_granted: ['mail', 'calendar', 'drive', 'docs', 'sheets', 'tasks'], missing_scopes: ['meet', 'contacts'],
       connected_at: ago(40),
     },
     {
       id: 'slack', name: 'Slack', description: 'Read channels you invite Mavis to and message you there.',
-      status: 'none', account: null, scopes_granted: [], missing_scopes: [], connected_at: null,
+      icon: 'slack', services: [], status: 'none', account: null, scopes_granted: [], missing_scopes: [], connected_at: null,
     },
   ]
   const preferences: Preferences = {

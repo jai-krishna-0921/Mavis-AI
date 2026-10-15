@@ -2,7 +2,7 @@
 // Proprietary. Use is governed by LICENSE in the repository root.
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { ArrowSquareOut, GoogleLogo, Plugs, SlackLogo, TelegramLogo, WarningCircle, CheckCircle, Circle } from '@phosphor-icons/react'
+import { ArrowSquareOut, Plugs, SlackLogo, TelegramLogo, WarningCircle, CheckCircle, Circle } from '@phosphor-icons/react'
 import { useConfig, useConnectors, useDisconnect, useMe } from '../api/hooks'
 import { api } from '../api/client'
 import type { Connector } from '../api/types'
@@ -10,7 +10,8 @@ import { normalizeChannel, fmtDate } from '../lib/channels'
 import { redirectTo } from '../lib/nav'
 import { CopyButton } from '../components/CopyButton'
 import { Modal } from '../components/Modal'
-import { SERVICES, ServiceIcon } from '../components/ServiceIcon'
+import { ConnectorIcon } from '../components/ConnectorIcon'
+import { ServiceIcon } from '../components/ServiceIcon'
 import { useToast } from '../components/Toast'
 import { EmptyState, IconTile, PageHead, Panel, SkeletonRows } from '../components/Ui'
 import { McpSection } from './McpSection'
@@ -171,10 +172,9 @@ function ConnectorRow({ c }: { c: Connector }) {
   const [confirm, setConfirm] = useState(false)
   const { busy, err, connect } = useStartConnect(c.id)
   const active = c.status === 'active'
-  const Icon = c.id === 'google' ? GoogleLogo : SlackLogo
   return (
     <li className="row flex-wrap items-start">
-      <IconTile tone={active ? 'accent' : 'plain'}><Icon size={24} weight={c.id === 'google' ? 'bold' : 'light'} aria-hidden="true" /></IconTile>
+      <IconTile tone={active ? 'accent' : 'plain'}><ConnectorIcon icon={c.icon} /></IconTile>
       <div className="min-w-0 flex-1">
         <div className="row-title flex flex-wrap items-center gap-2">
           {c.name}
@@ -184,9 +184,9 @@ function ConnectorRow({ c }: { c: Connector }) {
         </div>
         <div className="row-sub">{c.description}</div>
         {c.account && <div className="row-sub mt-0.5">{c.account}{c.connected_at ? `, since ${fmtDate(c.connected_at)}` : ''}</div>}
-        {c.id === 'google' && (active || c.status === 'failed') && (
-          <ul className="m-0 mt-4 flex list-none flex-wrap gap-2 p-0" aria-label="Google services">
-            {SERVICES.map((s) => {
+        {c.services.length > 0 && (active || c.status === 'failed') && (
+          <ul className="m-0 mt-4 flex list-none flex-wrap gap-2 p-0" aria-label={`${c.name} services`}>
+            {c.services.map((s) => {
               const granted = c.scopes_granted.includes(s)
               return (
                 <li key={s} className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-[13px] capitalize ${granted ? 'border-ok/30 bg-ok-soft text-ink' : 'border-line-strong text-muted'}`}>

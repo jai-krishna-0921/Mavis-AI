@@ -15,13 +15,15 @@ export type Me = {
   invites_left: number | null
 }
 
-export type ConnectorId = 'google' | 'slack'
+export type ConnectorId = string
 export type ConnectorStatus = 'active' | 'failed' | 'none'
 
 export type Connector = {
   id: ConnectorId
   name: string
   description: string
+  icon: string
+  services: string[]
   status: ConnectorStatus
   account: string | null
   scopes_granted: string[]

@@ -16,8 +16,6 @@ const ICONS: Record<string, Icon> = {
   contacts: AddressBook,
 }
 
-export const SERVICES = ['mail', 'calendar', 'drive', 'docs', 'sheets', 'tasks', 'meet', 'contacts'] as const
-
 export function ServiceIcon({ name, size = 20 }: { name: string; size?: number }) {
   const I = ICONS[name] ?? Square
   return <I size={size} weight="light" aria-hidden="true" />

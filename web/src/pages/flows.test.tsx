@@ -104,6 +104,21 @@ describe('login polling', () => {
 })
 
 describe('workspace connectors', () => {
+  it('renders a connector the page has never heard of from the API alone', async () => {
+    db().connectors.push({
+      id: 'testco', name: 'Testco Suite', description: 'Notes and boxes.', icon: 'testco',
+      services: ['notes', 'boxes'], status: 'active', account: 'me@corp.test',
+      scopes_granted: ['notes'], missing_scopes: ['boxes'], connected_at: null,
+    })
+    renderApp('/workspace')
+    const card = (await screen.findByText('Notes and boxes.')).closest('li')!
+    expect(within(card).getByText('Testco Suite')).toBeInTheDocument()
+    expect(within(card).getByText('me@corp.test')).toBeInTheDocument()
+    const chips = within(card).getByLabelText('Testco Suite services')
+    expect(within(chips).getByText('notes')).toBeInTheDocument()
+    expect(within(chips).getByText('boxes')).toBeInTheDocument()
+  })
+
   it('shows contact rows with copy, and connects Slack via redirect', async () => {
     const redirect = vi.spyOn(nav, 'redirectTo').mockImplementation(() => {})
     const user = userEvent.setup()
@@ -119,7 +134,7 @@ describe('workspace connectors', () => {
   it('disconnects Google with the forget choice', async () => {
     const user = userEvent.setup()
     renderApp('/workspace')
-    expect(await screen.findByLabelText('Google services')).toBeInTheDocument()
+    expect(await screen.findByLabelText('Google Workspace services')).toBeInTheDocument()
     const before = db().items.filter((i) => i.source === 'gmail').length
     expect(before).toBeGreaterThan(0)
     await user.click(await screen.findByRole('button', { name: 'Disconnect' }))
