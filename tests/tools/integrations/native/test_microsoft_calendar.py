@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -304,3 +304,92 @@ async def test_calendars_and_secondary_calendar_ids_are_validated():
     assert cals[1]["accessRole"] == "reader" and cals[1]["summary"] == "Team"
     bad = await ex.execute(U, "calendar.list", {**WIN, "calendar_id": "x/../y"})
     assert bad.error_kind is K.INVALID_ARGUMENT
+
+
+def _many(n: int, *, day: str = "2026-10-15", modified: str = "2026-10-01T00:00:00Z") -> list[dict]:
+    """n half-hour busy events, one every 30 minutes from midnight (they fit in a day only for n <= 48)."""
+    out = []
+    for i in range(n):
+        start = datetime(2026, 10, 15, tzinfo=UTC) + timedelta(minutes=30 * i)
+        end = start + timedelta(minutes=30)
+        out.append(graph_event(f"x{i}", start=start.strftime("%Y-%m-%dT%H:%M:%S"),
+                               end=end.strftime("%Y-%m-%dT%H:%M:%S"), modified=modified))
+    return out
+
+
+async def test_find_says_when_it_searched_only_the_first_events(monkeypatch):
+    from mavis.tools.integrations.native import graph_calendar as gc
+    monkeypatch.setattr(gc, "SCAN_LIMIT", 3)
+    g = FakeGraph().on("GET", "calendarView", httpx.Response(200, json=page(
+        _many(3), next_link="https://graph.microsoft.com/v1.0/me/calendar/calendarView?$skiptoken=z")))
+    ex, _ = g.executor()
+    r = await ex.execute(U, "calendar.find", {"query": "zzz"})
+    assert r.data["items"] == [] and any("first 3 events" in n for n in r.data["notes"])
+    whole = FakeGraph().on("GET", "calendarView", httpx.Response(200, json=page(_many(3))))
+    ex2, _ = whole.executor()
+    assert len((await ex2.execute(U, "calendar.find", {"query": "zzz"})).data["notes"]) == 1
+
+
+async def test_free_slots_does_not_call_the_unread_tail_free(monkeypatch):
+    from mavis.tools.integrations.native import graph_calendar as gc
+    monkeypatch.setattr(gc, "SCAN_LIMIT", 4)
+    # 4 events 00:00-02:00 were read and Graph has more: nothing after the last read start (01:30) is known
+    g = FakeGraph().on("GET", "calendarView", httpx.Response(200, json=page(
+        _many(4), next_link="https://graph.microsoft.com/v1.0/me/calendar/calendarView?$skiptoken=z")))
+    ex, _ = g.executor()
+    r = await ex.execute(U, "calendar.free_slots", {
+        "time_min": "2026-10-15T00:00:00Z", "time_max": "2026-10-15T23:00:00Z"})
+    assert r.data["partial"] is True and r.data["time_max"] == "2026-10-15T01:30:00+00:00"
+    assert r.data["free_slots"] == [] and "more than 4 events" in r.data["notes"][0]
+    full = FakeGraph().on("GET", "calendarView", httpx.Response(200, json=page(_many(2))))
+    ex2, _ = full.executor()
+    done = await ex2.execute(U, "calendar.free_slots", {
+        "time_min": "2026-10-15T00:00:00Z", "time_max": "2026-10-15T23:00:00Z"})
+    assert "partial" not in done.data and done.data["free_slots"][0]["start"] == "2026-10-15T01:00:00+00:00"
+
+
+async def test_updated_min_notes_when_matches_are_cut_or_the_scan_is_capped(monkeypatch):
+    from mavis.tools.integrations.native import graph_calendar as gc
+    monkeypatch.setattr(gc, "SCAN_LIMIT", 3)
+    g = FakeGraph().on("GET", "calendarView", httpx.Response(200, json=page(
+        _many(3, modified="2026-10-14T00:00:00Z"),
+        next_link="https://graph.microsoft.com/v1.0/me/calendar/calendarView?$skiptoken=z")))
+    ex, _ = g.executor()
+    r = await ex.execute(U, "calendar.list", {**WIN, "updated_min": "2026-10-10T00:00:00Z", "max_results": 2})
+    assert len(r.data["items"]) == 2
+    flat = " ".join(r.data["notes"])
+    assert "3 changed events matched; only the first 2" in flat and "first 3 events of the window" in flat
+
+
+async def test_updating_an_outlook_event_with_guests_is_outward_for_the_approval_card(
+    provider, cache, monkeypatch, user,
+):
+    """workspace_tools.prepare_event_update reads calendar.get and escalates when others are guests. It must
+    see the mapped Outlook shape (attendees[].self), so an event with guests is OUTWARD, a solo one is not."""
+    from mavis.domain.integrations import ConnectionState, ToolResult
+    from mavis.domain.policy import RiskClass
+    from mavis.tools.integrations import actions as a
+    from mavis.tools.integrations import tools as tools_mod
+    from mavis.tools.integrations.actions import GOOGLE_CAPABILITIES
+    from mavis.tools.integrations.workspace_tools import PREPARES
+    from mavis.tools.registry import ToolContext
+
+    for c in GOOGLE_CAPABILITIES:
+        provider.set_state(user.id, c, ConnectionState.ACTIVE)
+    monkeypatch.setattr(tools_mod, "_deps", lambda p, c: (provider, cache))
+    spec = a.ACTIONS["calendar.update_event"]
+    args = a.CalendarUpdateArgs(event_id="ms:e1", summary="Renamed")
+    assert spec.risk_fn(args) is RiskClass.WRITE_SELF  # decided by the pre-step, not the arguments
+
+    async def prepared(event: dict):
+        g = FakeGraph().on("GET", r"/v1.0/me/events/e1$", httpx.Response(200, json=event))
+        ex, _ = g.executor()
+        got = await ex.execute(U, "calendar.get", {"event_id": "ms:e1"})
+        provider.results["calendar.get"] = ToolResult(ok=True, data=got.data)
+        return await PREPARES["calendar.update_event"](ToolContext(user_id=user.id), args)
+
+    guests = await prepared(graph_event("e1", organizer_is_me=True, attendees=(
+        ("Bob", "bob@acme.com", "accepted"),)))
+    assert guests.risk is RiskClass.OUTWARD and "1 guest" in guests.note
+    solo = await prepared(graph_event("e1", organizer_is_me=True))
+    assert solo.risk is None

@@ -119,7 +119,8 @@ def map_event(raw: dict, me: str = "") -> dict:
         state = str((entry.get("status") or {}).get("response") or "") if isinstance(entry, dict) else ""
         attendees.append({
             "email": email, "displayName": name, "responseStatus": RESPONSES.get(state, "needsAction"),
-            "self": bool(me and email.lower() == me), "organizer": bool(email) and email == org_email,
+            "self": bool(me and email.lower() == me),
+            "organizer": bool(email) and email.lower() == org_email.lower(),
         })
     online = raw.get("onlineMeeting") if isinstance(raw.get("onlineMeeting"), dict) else {}
     place = raw.get("location") if isinstance(raw.get("location"), dict) else {}
@@ -141,6 +142,13 @@ def map_event(raw: dict, me: str = "") -> dict:
     if raw.get("seriesMasterId"):
         out["recurringEventId"] = with_ms(str(raw["seriesMasterId"]))
     return out
+
+
+def _start_of(raw: dict) -> datetime | None:
+    if raw.get("isAllDay"):
+        day = _day(raw.get("start"))
+        return datetime.combine(date.fromisoformat(day), time.min, UTC) if day else None
+    return _moment(raw.get("start"))
 
 
 def busy_spans(events: Iterable[dict]) -> list[tuple[datetime, datetime]]:
@@ -189,7 +197,12 @@ class CalendarActions:
             since = _utc(a.updated_min)
             items = [e for e in items if (to_datetime(e.get("lastModifiedDateTime")) or since) >= since]
             notes.append("changes since the given time were picked out locally from the events in the window")
-        if more:
+            if more:
+                notes.append(f"only the first {SCAN_LIMIT} events of the window were checked for changes; "
+                             "narrow the window")
+            if len(items) > a.max_results:
+                notes.append(f"{len(items)} changed events matched; only the first {a.max_results} are shown")
+        elif more:
             notes.append("there are more events in this window than were returned; narrow the window")
         me = await self._me(uid)
         out: dict[str, Any] = {"items": [map_event(e, me) for e in items[: a.max_results]], "timeZone": "UTC"}
@@ -199,7 +212,7 @@ class CalendarActions:
 
     async def find(self, uid: int, a: Any) -> dict:
         now = datetime.now(UTC)
-        items, _ = await self._view(
+        items, more = await self._view(
             uid, a.calendar_id, now - FIND_WINDOW_BACK, now + FIND_WINDOW_AHEAD, SCAN_LIMIT)
         needle = a.query.strip().lower()
 
@@ -210,14 +223,24 @@ class CalendarActions:
             return any(needle in h.lower() for h in hay)
 
         me = await self._me(uid)
+        notes = ["matched by title, place and guests"]
+        if more:
+            notes.append(f"searched only the first {len(items)} events (by start time) of the window; "
+                         "events after that were not checked, so ask about a narrower period")
         return {"items": [map_event(e, me) for e in items if hit(e)][:FIND_RESULTS], "timeZone": "UTC",
-                "notes": ["matched by title, place and guests"]}
+                "notes": notes}
 
     async def free_slots(self, uid: int, a: Any) -> dict:
         lo, hi = a.time_min, a.time_max
         lo = lo if lo.tzinfo else lo.replace(tzinfo=UTC)
         hi = hi if hi.tzinfo else hi.replace(tzinfo=UTC)
-        items, _ = await self._view(uid, PRIMARY, lo, hi, SCAN_LIMIT)
+        items, more = await self._view(uid, PRIMARY, lo, hi, SCAN_LIMIT)
+        notes: list[str] = []
+        if more:  # ordered by start: time before the last event read is complete, nothing after it is known
+            seen = _start_of(items[-1]) if items else None
+            hi = max(lo, min(hi, seen)) if seen else lo
+            notes.append(f"the window holds more than {SCAN_LIMIT} events; free time is reported only up to "
+                         f"{hi.isoformat(timespec='seconds')} and nothing after that was checked")
         spans = [(max(s, lo), min(e, hi)) for s, e in busy_spans(items)]
         spans = sorted((s, e) for s, e in spans if e > s)
         free, cursor = [], _utc(lo)
@@ -232,7 +255,7 @@ class CalendarActions:
         def show(d: datetime) -> str:
             return d.astimezone(zone).isoformat(timespec="seconds")
 
-        return {
+        out: dict[str, Any] = {
             "time_min": show(lo), "time_max": show(hi),
             "busy": [{"start": show(s), "end": show(e)} for s, e in spans],
             "free_slots": [
@@ -240,6 +263,9 @@ class CalendarActions:
                 for s, e in free if (e - s) >= timedelta(minutes=MIN_FREE_MINUTES)
             ],
         }
+        if notes:
+            out.update(partial=True, notes=notes)
+        return out
 
     async def create(self, uid: int, a: Any) -> dict:
         start = _utc(a.start)  # a length is elapsed time: add it in UTC, not on a zone's wall clock
