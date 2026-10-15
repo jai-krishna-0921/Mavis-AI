@@ -29,18 +29,15 @@ from mavis.store.repo import connections
 from mavis.tools.integrations.actions import (
     BRANDS,
     CAPABILITY_PURPOSE,
-    GOOGLE_ABILITIES,
-    GOOGLE_ANCHOR,
-    GOOGLE_CAPABILITIES,
-    WORKSPACE_ROW,
+    DISPLAY_NAMES,
     active_capabilities,
     consent_notice,
     display_name,
-    is_google,
-    workspace_enabled,
 )
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connections import ConnectionCache
+from mavis.tools.integrations.native import providers
+from mavis.tools.integrations.native.base import NativeProvider
 from mavis.worker.locks import claim, release
 
 log = structlog.get_logger()
@@ -73,10 +70,14 @@ HasChecks = Callable[[int, int], Awaitable[bool]]  # (user_id, pending_id) -> a 
 CancelChecks = Callable[[int, int], Awaitable[object]]  # (user_id, pending_id): drop its scheduled checks
 FIRST_SYNC_CLAIM_TTL_S = 600
 MORE_ACCESS_KEY = "more_access_offered"  # user state: {service: day a missing-permission link was sent}
-GOOGLE_KEY = "google"  # one reconnect prompt per day for all eight Google capabilities
 NUDGE_KEY = "workspace_nudged"
 UPGRADE_TEXT = ("I can now work with your Drive, Docs, Sheets and Tasks too. "
                 "Tap to upgrade your Google connection.")
+
+
+def _family(capability: Capability) -> providers.ProviderSpec | None:
+    """The provider whose one consent covers `capability` with others (None while its family gate is off)."""
+    return providers.family_of(capability)
 
 
 def _join(items: list[str]) -> str:
@@ -334,11 +335,12 @@ class ConnectFlow:
 
     @staticmethod
     def _state_of(capability: Capability, states: dict[str, ConnectionState]) -> ConnectionState:
-        """The state a pending for `capability` waits on. One Google consent covers every Google service, and
-        a person may leave some boxes unticked, so for Google it is ACTIVE as soon as any service is."""
-        if not is_google(capability):
+        """The state a pending for `capability` waits on. One consent covers every service of a family, and
+        a person may leave some boxes unticked, so for a family it is ACTIVE as soon as any service is."""
+        spec = _family(capability)
+        if spec is None:
             return states.get(capability.value, ConnectionState.NONE)
-        mine = [states.get(c.value, ConnectionState.NONE) for c in GOOGLE_CAPABILITIES]
+        mine = [states.get(c.value, ConnectionState.NONE) for c in spec.capabilities]
         for wanted in (ConnectionState.ACTIVE, ConnectionState.FAILED, ConnectionState.INITIATED):
             if wanted in mine:
                 return wanted
@@ -384,8 +386,9 @@ class ConnectFlow:
             await self._announce(user_id, capability)
 
     async def _announce(self, user_id: int, capability: Capability) -> None:
-        if is_google(capability):
-            await self.send(user_id, await self._google_announcement(user_id))
+        spec = _family(capability)
+        if spec is not None:
+            await self.send(user_id, await self._family_announcement(user_id, spec))
             return
         text = (f"Connected ✓ I can see your {display_name(capability)} now. "
                 "Give me a minute to get familiar with it.")
@@ -403,43 +406,45 @@ class ConnectFlow:
             log.warning("connect.slack_chat_check_failed", error=type(exc).__name__)
             return False
 
-    async def _google_announcement(self, user_id: int) -> str:
-        full = f"Connected ✓ I can now work with your {GOOGLE_ABILITIES}."
-        access = getattr(self.provider, "google_access", None)
+    async def _family_announcement(self, user_id: int, spec: providers.ProviderSpec) -> str:
+        full = f"Connected ✓ I can now work with your {spec.abilities or spec.display_name}."
+        access = getattr(self.provider, "provider_access", None)
         if access is None:
             return full
         try:
-            found = await access(user_id)
+            found = await access(user_id, NativeProvider(spec.id))
         except Exception as exc:  # noqa: BLE001 - the announcement must not fail the activation
-            log.warning("connect.google_access_failed", error=type(exc).__name__)
+            log.warning("connect.family_access_failed", error=type(exc).__name__)
             return full
         if found is None or not found[1]:
             return full
         can, cannot = found
-        return (f"Connected ✓ I can {_join(can)}. Not allowed on Google's screen: {', '.join(cannot)}. "
-                "To add them, send /connect google and leave every box ticked.")
+        return (f"Connected ✓ I can {_join(can)}. Not allowed on {spec.display_name}'s screen: "
+                f"{', '.join(cannot)}. To add them, {spec.reconnect_hint}.")
 
-    async def _google_fan_out(self, user_id: int, capability: Capability) -> list[Capability]:
-        """The Google account is googlesuper (the anchor is ACTIVE): every Google capability activates.
-        A legacy Gmail/Calendar activation stays on its own capability."""
-        if not is_google(capability):
+    async def _fan_out(self, user_id: int, capability: Capability) -> list[Capability]:
+        """The account covers a whole family (one of its capabilities is ACTIVE): every live member activates.
+        A lone legacy activation stays on its own capability."""
+        spec = _family(capability)
+        if spec is None:
             return [capability]
         states = await self.cache.status(user_id, fresh=True)
-        live = [c for c in GOOGLE_CAPABILITIES if states.get(c.value) is ConnectionState.ACTIVE]
+        live = [c for c in spec.capabilities if states.get(c.value) is ConnectionState.ACTIVE]
         if not live or (len(live) == 1 and live[0] is capability):
-            return [capability]  # a lone legacy Gmail or Calendar activation stays on its own capability
-        if self.on_google_begin is not None:
+            return [capability]  # a lone legacy activation stays on its own capability
+        if spec.legacy_capabilities and self.on_google_begin is not None:
             self.on_google_begin(user_id)
         return live  # only what the consent actually allowed
 
     async def _activate(self, user_id: int, capability: Capability) -> bool:
-        """Activate `capability`, or all eight Google capabilities when the Google account is googlesuper.
-        True if a first sync ran for any of them."""
-        targets = await self._google_fan_out(user_id, capability)
+        """Activate `capability`, or every live member of its family. True if a first sync ran for any."""
+        targets = await self._fan_out(user_id, capability)
         ran = False
         for target in targets:
             ran = await self._activate_one(user_id, target) or ran
-        if len(targets) > 1 and ran and self.on_google_active is not None:
+        family = _family(capability)
+        if (len(targets) > 1 and ran and family is not None and family.legacy_capabilities
+                and self.on_google_active is not None):
             try:
                 await self.on_google_active(user_id)
             except Exception as exc:  # noqa: BLE001 - leftover legacy triggers only duplicate events
@@ -462,8 +467,9 @@ class ConnectFlow:
                 await self.state.update(user_id, {"synced": synced})
         prompted = dict(st.get("reconnect_prompted", {}))
         cleared = prompted.pop(capability.value, None) is not None
-        if is_google(capability):
-            cleared = prompted.pop(GOOGLE_KEY, None) is not None or cleared
+        family = _family(capability)
+        if family is not None:
+            cleared = prompted.pop(family.id, None) is not None or cleared
         if cleared:
             await self.state.update(user_id, {"reconnect_prompted": prompted})
         if self.on_active is not None:
@@ -492,7 +498,8 @@ class ConnectFlow:
         st = await self.state.get(user_id)
         today = self.clock().date().isoformat()
         prompted = dict(st.get("reconnect_prompted", {}))
-        key = GOOGLE_KEY if is_google(capability) else capability.value
+        family = _family(capability)
+        key = family.id if family else capability.value
         if prompted.get(key) == today:
             return False
         if await self.start(user_id, capability, "", revoked=True) is None:
@@ -508,7 +515,8 @@ class ConnectFlow:
         st = await self.state.get(user_id)
         today = self.clock().date().isoformat()
         offered = dict(st.get(MORE_ACCESS_KEY, {}))
-        key = GOOGLE_KEY if is_google(capability) else capability.value
+        family = _family(capability)
+        key = family.id if family else capability.value
         if offered.get(key) == today:
             return False
         name = display_name(capability)
@@ -580,11 +588,17 @@ class ConnectFlow:
         return tuple(c for c in active_capabilities() if can is None or can(c))
 
     def _menu(self) -> list[tuple[Capability, str]]:
-        """(capability, label) per menu row: with Workspace on, one Google row instead of Gmail + Calendar."""
-        if not workspace_enabled():
-            return [(c, display_name(c)) for c in self._offered()]
-        others = [c for c in self._offered() if c not in GOOGLE_CAPABILITIES]
-        return [(GOOGLE_ANCHOR, WORKSPACE_ROW), *((c, display_name(c)) for c in others)]
+        """(capability, label) per menu row: an enabled family collapses into one row at its first member."""
+        rows: list[tuple[Capability, str]] = []
+        seen: set[str] = set()
+        for c in self._offered():
+            spec = _family(c)
+            if spec is None:
+                rows.append((c, display_name(c)))
+            elif spec.id not in seen:
+                seen.add(spec.id)
+                rows.append((spec.anchor_capability(), spec.family_label or spec.display_name))
+        return rows
 
     async def offer_menu(self, user_id: int) -> None:
         states = await self.cache.status(user_id, fresh=True)
@@ -611,40 +625,53 @@ class ConnectFlow:
                 mark, word = "✅", "connected"
             elif state is ConnectionState.FAILED:
                 mark, word = "⚠️", "needs reconnecting"
-            elif c is GOOGLE_ANCHOR and workspace_enabled() and any(
-                states.get(g.value) is ConnectionState.ACTIVE for g in (Capability.GMAIL, Capability.CALENDAR)
-            ):
-                mark, word = "⚪", "Gmail and Calendar only (send /connect google to add the rest)"
+            elif (legacy := self._legacy_only(c, states)) is not None:
+                mark, word = "⚪", legacy
             else:
                 mark, word = "⚪", "not connected"
             lines.append(f"{mark} {label}: {word}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _legacy_only(capability: Capability, states: dict[str, ConnectionState]) -> str | None:
+        """The status word for a family anchor whose only live services are the legacy ones."""
+        spec = _family(capability)
+        if spec is None or not spec.legacy_capabilities or capability is not spec.anchor:
+            return None
+        live = [g for g in spec.legacy_capabilities if states.get(g.value) is ConnectionState.ACTIVE]
+        if not live:
+            return None
+        names = " and ".join(DISPLAY_NAMES.get(g, g.value).replace("Google Calendar", "Calendar")
+                             for g in spec.legacy_capabilities)
+        return f"{names} only (send /connect {spec.id} to add the rest)"
+
     async def maybe_nudge_upgrade(self, user_id: int) -> bool:
         """Workspace on, Gmail/Calendar on the legacy connection only: one upgrade nudge, ever."""
-        if not workspace_enabled():
+        spec = next((s for s in providers.user_providers()
+                     if s.legacy_capabilities and s.anchor is not None and s.family_enabled()), None)
+        if spec is None:
             return False
         st = await self.state.get(user_id)
         if st.get(NUDGE_KEY):
             return False
         states = await self.cache.status(user_id)
-        if states.get(GOOGLE_ANCHOR.value) is ConnectionState.ACTIVE:
+        if states.get(spec.anchor.value) is ConnectionState.ACTIVE:
             return False
-        legacy = (Capability.GMAIL, Capability.CALENDAR)
-        if not any(states.get(c.value) is ConnectionState.ACTIVE for c in legacy):
+        if not any(states.get(c.value) is ConnectionState.ACTIVE for c in spec.legacy_capabilities):
             return False
         await self.state.update(user_id, {NUDGE_KEY: self.clock().isoformat()})
         await self.send(user_id, UPGRADE_TEXT,
-                        [[Button(label="Upgrade Google", data=f"{START_PREFIX}{GOOGLE_ANCHOR.value}")]])
+                        [[Button(label="Upgrade Google", data=f"{START_PREFIX}{spec.anchor.value}")]])
         return True
 
     async def disconnect(self, user_id: int, capability: Capability, *, forget: bool = True) -> bool:
         """True when the connection is gone. `forget=False` keeps what was learned from it."""
         name = display_name(capability)
+        family = _family(capability)
         try:
             await self.provider.disconnect(UserRef(user_id=user_id), capability.value)
         except NoSuchConnection:
-            if not (workspace_enabled() and is_google(capability)):
+            if family is None or not family.legacy_capabilities:
                 await self.send(user_id, f"There's no {name} connection to remove.")
                 return False
             try:
@@ -662,7 +689,7 @@ class ConnectFlow:
             await self.send(user_id, f"I couldn't disconnect {name} just now. Mind trying again in a bit?")
             return False
         self.cache.invalidate(user_id)
-        dropped = [c.value for c in (GOOGLE_CAPABILITIES if is_google(capability) else (capability,))]
+        dropped = [c.value for c in (family.capabilities if family else (capability,))]
         st = await self.state.get(user_id)
         synced = {k: v for k, v in st.get("synced", {}).items() if k not in dropped}
         polling = {k: v for k, v in st.get("polling", {}).items() if k not in dropped}
@@ -679,18 +706,18 @@ class ConnectFlow:
 
     async def _forget_learned(self, user_id: int, capability: Capability) -> int:
         """Forget is the default: what was learned from mail or Slack records goes with the connection."""
-        prefix = ""
-        if capability is Capability.GMAIL or is_google(capability):
-            prefix = "gmail:"
-        elif capability is Capability.SLACK:
-            prefix = "slack:"
-        if not prefix or self.forget_source is None:
+        spec = providers.provider_of_capability(capability)
+        if spec is None or not (_family(capability) is not None or capability is spec.capabilities[0]):
             return 0
-        try:
-            return int(await self.forget_source(user_id, prefix))
-        except Exception as exc:  # noqa: BLE001 - the disconnect itself already succeeded
-            log.warning("connect.forget_source_failed", prefix=prefix, error=type(exc).__name__)
+        if not spec.forget_prefixes or self.forget_source is None:
             return 0
+        total = 0
+        for prefix in spec.forget_prefixes:
+            try:
+                total += int(await self.forget_source(user_id, prefix))
+            except Exception as exc:  # noqa: BLE001 - the disconnect itself already succeeded
+                log.warning("connect.forget_source_failed", prefix=prefix, error=type(exc).__name__)
+        return total
 
     async def _disconnect_legacy_accounts(self, user_id: int) -> int:
         """No googlesuper account: remove the old Gmail and Calendar accounts instead. Returns how many."""

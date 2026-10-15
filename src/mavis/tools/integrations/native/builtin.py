@@ -200,6 +200,7 @@ register(ProviderSpec(
     external_label=lambda a: clean_text(a.get("email")) or "a Google account",
     remember_identity=_google_identity,
     capabilities=GOOGLE_CAPABILITIES, anchor=GOOGLE_ANCHOR, family_enabled=workspace_enabled,
+    legacy_capabilities=(Capability.GMAIL, Capability.CALENDAR), family_label="Google Workspace",
     action_scopes=gs.ACTION_SCOPES,
     toolkits=frozenset({"google", "googlesuper", *(c.value for c in GOOGLE_CAPABILITIES)}),
     executor=("google", "GoogleExecutor"), features=gs.GOOGLE_FEATURES,

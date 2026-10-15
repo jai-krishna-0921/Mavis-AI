@@ -136,6 +136,8 @@ class ProviderSpec:
     capabilities: tuple[Capability, ...] = ()  # fan-out of one consent; see anchor
     anchor: Capability | None = None  # capability used for connect prompts, status and pending requests
     family_enabled: Callable[[], bool] = _always  # False: capabilities are not a family (Google workspace)
+    legacy_capabilities: tuple[Capability, ...] = ()  # served by an older Composio connection (Google)
+    family_label: str = ""  # menu row label for the family; empty: display_name
     capabilities_for: Callable[[Grant], tuple[Capability, ...]] | None = None  # call via spec.caps_for(grant)
     action_scopes: Mapping[str, tuple[frozenset[str], ...]] = field(default_factory=dict)
     #   action -> tuple of any-of scope groups, all groups must be met. Empty: any ACTIVE grant covers all.
