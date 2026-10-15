@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Jai Krishna. All rights reserved.
 # Proprietary. Use is governed by LICENSE in the repository root.
-"""Where Google and Slack send the browser back after consent (native connectors).
+"""Where each native vendor (Google, Slack, ...) sends the browser back after consent (native connectors).
 
 The state is signed, single use and bound to the user (and, when the dashboard started it, to that
 session), so this public endpoint needs no other auth. After a
@@ -22,13 +22,12 @@ from mavis.bus.base import EventBus
 from mavis.domain import timeutil
 from mavis.domain.events import Job, JobKind
 from mavis.domain.messages import Outbound
-from mavis.domain.policy import Capability
 from mavis.store import db as dbm
 from mavis.store.models import User
 from mavis.store.repo import connections
 from mavis.tools.integrations import get_connection_cache, get_provider
-from mavis.tools.integrations.actions import GOOGLE_ANCHOR, workspace_enabled
 from mavis.tools.integrations.base import IntegrationProvider
+from mavis.tools.integrations.native import providers
 from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.oauth import OAuthError
 from mavis.web import sessions
@@ -37,7 +36,6 @@ router = APIRouter()
 log = structlog.get_logger()
 
 THROTTLE_S = 10
-_NAMES = {NativeProvider.GOOGLE: "Google", NativeProvider.SLACK: "Slack"}
 
 _PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title>
@@ -57,22 +55,31 @@ _USER_TEXT = {
 
 
 WEB_ORIGIN = "web"
-_NOTHING_ALLOWED = (
-    "You signed in with {account} but did not allow any Google service, so nothing is connected. "
-    "Send /connect google to try again and leave every box ticked.")
 
 
-def _capability(provider: NativeProvider) -> Capability:
-    """The capability a finished consent for this vendor is checked as (the Google anchor when Workspace is
-    on, since one consent covers every Google service)."""
-    if provider is NativeProvider.SLACK:
-        return Capability.SLACK
-    return GOOGLE_ANCHOR if workspace_enabled() else Capability.GMAIL
+def _resolve(provider: str) -> tuple[NativeProvider, providers.ProviderSpec] | None:
+    """The registered, user-facing vendor behind a URL segment, or None (unknown, or an internal grant)."""
+    spec = providers.spec_of(provider)
+    if spec is None or spec.internal:
+        return None
+    try:
+        return NativeProvider(spec.id), spec
+    except ValueError:
+        return None
 
 
-async def _nothing_allowed(integrations: IntegrationProvider, user_id: int) -> bool:
-    access = getattr(integrations, "google_access", None)
-    found = await access(user_id) if access is not None else None
+def _text(spec: providers.ProviderSpec, kind: str, **extra: str) -> str | None:
+    """The user-facing line for an outcome kind: the vendor's own wording, else the shared default."""
+    template = spec.user_text.get(kind) or _USER_TEXT.get(kind)
+    if template is None:
+        return None
+    link = (spec.admin_link() if spec.admin_link else None) or ""
+    return template.format(name=spec.display_name, admin_link=link, **extra)
+
+
+async def _nothing_allowed(integrations: IntegrationProvider, provider: NativeProvider, user_id: int) -> bool:
+    access = getattr(integrations, "provider_access", None)
+    found = await access(user_id, provider) if access is not None else None
     return found is not None and not found[0]
 
 
@@ -92,14 +99,6 @@ def _clean(value: object, limit: int = 60) -> str:
     return " ".join(text.split())[:limit]
 
 
-def _external(provider: NativeProvider, account: dict) -> str:
-    """Which outside account was just linked, in words the person consenting will recognise."""
-    if provider is NativeProvider.GOOGLE:
-        return _clean(account.get("email")) or "a Google account"
-    team = _clean(account.get("team_name"))
-    return f"the {team} workspace" if team else "a Slack workspace"
-
-
 async def _mavis_name(user_id: int) -> str:
     """The Telegram display name of the Mavis account being linked (never an id, token or secret)."""
     async with dbm.Session() as s:
@@ -116,19 +115,15 @@ async def _tell(user_id: int, text: str) -> None:
         log.warning("oauth.notify_failed", error=type(exc).__name__)
 
 
-async def _remember_identity(user_id: int, provider: NativeProvider, account: dict) -> None:
+async def _remember_identity(user_id: int, spec: providers.ProviderSpec, account: dict) -> None:
     """The linked account is the user's own: its address / Slack id map to the user node in the graph.
     Best effort: a failure here must not undo the connection."""
-    from mavis.attention.connector_ingest import remember_identity
-
+    if spec.remember_identity is None:
+        return
     try:
-        if provider is NativeProvider.GOOGLE:
-            await remember_identity(user_id, emails=(str(account.get("email") or ""),))
-        else:
-            await remember_identity(user_id, slack_ids=(str(account.get("user_id") or ""),),
-                                    team=str(account.get("team_id") or ""))
+        await spec.remember_identity(user_id, account)
     except Exception as exc:  # noqa: BLE001
-        log.warning("oauth.identity_failed", provider=provider.value, error=type(exc).__name__)
+        log.warning("oauth.identity_failed", provider=spec.id, error=type(exc).__name__)
 
 
 _CONFIRM = """<!doctype html><html><head><meta charset="utf-8">
@@ -151,11 +146,11 @@ async def oauth_go(provider: str, t: str = "", ok: str = "") -> HTMLResponse | R
     """The confirmation page in front of a consent link sent in chat (native.oauth.handoff_link)."""
     from mavis.tools.integrations.native import oauth as oauth_mod
 
-    try:
-        native = NativeProvider(provider)
-    except ValueError:
+    resolved = _resolve(provider)
+    if resolved is None:
         return _page("Not found", "This sign-in link is not valid.", 404)
-    name = _NAMES[native]
+    native, spec = resolved
+    name = spec.display_name
     parked = await oauth_mod.handoff(t, native, consume=ok == "1")
     if parked is None:
         return _page("Link expired", f"This {name} link expired or was already used. Ask Mavis to connect "
@@ -172,17 +167,15 @@ async def oauth_go(provider: str, t: str = "", ok: str = "") -> HTMLResponse | R
 @router.get("/oauth/{provider}/callback", response_class=HTMLResponse)
 async def oauth_callback(
     provider: str, request: Request, code: str | None = None, state: str | None = None,
-    error: str | None = None,
+    error: str | None = None, error_description: str | None = None,
     bus: EventBus = Depends(get_bus), integrations: IntegrationProvider = Depends(get_provider),
 ) -> HTMLResponse:
     oauth = getattr(integrations, "oauth", None)
-    try:
-        native = NativeProvider(provider)
-    except ValueError:
-        native = None
-    if native is None or oauth is None:
+    resolved = _resolve(provider)
+    if resolved is None or oauth is None:
         return _page("Not found", "This sign-in link is not valid.", 404)
-    name = _NAMES[native]
+    native, spec = resolved
+    name = spec.display_name
     # A consent started from the dashboard is bound to that browser session. The cookie is optional here: a
     # link started from Telegram has no session to match.
     active = await sessions.lookup(request.cookies.get(sessions.COOKIE))
@@ -191,16 +184,18 @@ async def oauth_callback(
     if error or not code or not state:
         # Denied, or a malformed return. We learn whose it was only from a valid state; never echo `error`.
         origin = None
+        kind = spec.denial_kind(error, error_description) if spec.denial_kind else "denied"
         if state:
             try:
                 user_id, _, origin = await oauth.deny_with_origin(state, native, session_hash)
             except OAuthError:
                 user_id = None
             if user_id is not None:
-                await _tell(user_id, _USER_TEXT["denied"].format(name=name))
+                await _tell(user_id, _text(spec, kind) or _text(spec, "denied") or "")
         if origin == WEB_ORIGIN:
-            return _back_to_dashboard(f"{native.value}_denied")
-        return _page("Not connected", f"{name} was not connected. You can close this tab.", 400)
+            return _back_to_dashboard(f"{native.value}_{kind}")
+        return _page("Not connected", (_text(spec, kind) if kind != "denied" else None)
+                     or f"{name} was not connected. You can close this tab.", 400)
 
     try:
         done = await oauth.complete(state, code, native, session_hash)
@@ -211,8 +206,8 @@ async def oauth_callback(
                 f"This {name} sign-in was started in a different browser session, so nothing was connected. "
                 "Open the Mavis dashboard in the browser where you are signed in, and connect again "
                 "from there."), 400)
-        if exc.user_id is not None and exc.kind in _USER_TEXT:
-            await _tell(exc.user_id, _USER_TEXT[exc.kind].format(name=name))
+        if exc.user_id is not None and (exc.kind in _USER_TEXT or exc.kind in spec.user_text):
+            await _tell(exc.user_id, _text(spec, exc.kind) or "")
         log.info("oauth.callback_failed", provider=provider, kind=exc.kind)
         if exc.origin == WEB_ORIGIN:
             return _back_to_dashboard(f"{native.value}_{exc.kind}")
@@ -220,23 +215,24 @@ async def oauth_callback(
                                       "and try again from Telegram.", 400)
 
     get_connection_cache().invalidate(done.user_id)
-    if native is NativeProvider.GOOGLE and await _nothing_allowed(integrations, done.user_id):
+    if (spec.features and spec.nothing_allowed
+            and await _nothing_allowed(integrations, native, done.user_id)):
         # Every service box was unticked: there is nothing to connect, so do not call it connected.
         await oauth.revoke(done.user_id, native)
-        await _tell(done.user_id, _NOTHING_ALLOWED.format(account=_external(native, done.account)))
+        await _tell(done.user_id, spec.nothing_allowed.format(account=spec.external_label(done.account)))
         if done.origin == WEB_ORIGIN:
             return _back_to_dashboard(f"{native.value}_nothing_allowed")
         return _page("Nothing was allowed", (
-            "You did not allow any Google service, so nothing was connected. Go back to Telegram, ask me "
-            "to connect Google again, and leave the boxes ticked."), 400)
-    await _remember_identity(done.user_id, native, done.account)
+            f"You did not allow any {name} service, so nothing was connected. Go back to Telegram, ask me "
+            f"to connect {name} again, and leave the boxes ticked."), 400)
+    await _remember_identity(done.user_id, spec, done.account)
     # A granted Google address is not a sign-in identity: anyone can be handed a consent link. An address
     # becomes one only through a Google sign-in by the signed-in user, or the approved Telegram link.
     # Every finished consent is checked and activated (announcement, first sync, polling). A consent that
     # did not start from a /connect link (the dashboard's button) has no pending request yet: make one.
     pending_id = done.pending_id
     if pending_id is None:
-        pending_id = await connections.create_pending(done.user_id, _capability(native), "", None)
+        pending_id = await connections.create_pending(done.user_id, spec.anchor_capability(), "", None)
     now = timeutil.now()
     await bus.enqueue(Job(
         id=f"conncheck:{pending_id}:{int(now.timestamp()) // THROTTLE_S}",
@@ -244,7 +240,7 @@ async def oauth_callback(
     ))
     # Login CSRF: a consent link forwarded to someone else links THEIR account to the sender's Mavis user.
     # Both ends are told exactly what was linked to whom, so a surprised person can undo it.
-    outside = _external(native, done.account)
+    outside = spec.external_label(done.account)
     await _tell(done.user_id, f"{name} is connected: {outside}. If that is not yours, tell me to "
                               f"disconnect {name} and I will remove it.")
     if done.origin == WEB_ORIGIN:
