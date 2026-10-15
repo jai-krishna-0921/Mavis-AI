@@ -69,7 +69,7 @@ class AfterSave:
     exchange: Exchange
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class CatalogEntry:
     description: str
     services: Mapping[str, frozenset[str]]  # chip name -> any-of scopes that count as having it
@@ -93,7 +93,7 @@ def _always() -> bool:
     return True
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class ProviderSpec:
     """Everything the platform needs to know about one native vendor. Registered once in PROVIDERS."""
 
@@ -170,6 +170,10 @@ def register(spec: ProviderSpec) -> ProviderSpec:
         raise ValueError(f"provider {spec.id} is already registered")
     if not spec.id or len(spec.id) > _MAX_ID:
         raise ValueError(f"provider id {spec.id!r} must be 1 to {_MAX_ID} characters")
+    if not spec.capabilities and not spec.internal:
+        raise ValueError(f"provider {spec.id} must declare at least one capability")
+    if spec.anchor is not None and spec.anchor not in spec.capabilities:
+        raise ValueError(f"provider {spec.id} anchor {spec.anchor.value} is not one of its capabilities")
     for other in PROVIDERS.values():
         clash = set(other.capabilities) & set(spec.capabilities)
         if clash:
