@@ -84,3 +84,14 @@ async def tokens(native_env, db, client):
 @pytest.fixture
 def oauth(tokens, client):
     return NativeOAuth(tokens, client)
+
+
+@pytest.fixture
+def isolated_registry():
+    """Snapshot PROVIDERS so a test may register fakes without leaking."""
+    from mavis.tools.integrations.native import providers
+
+    saved = dict(providers.PROVIDERS)
+    yield providers
+    providers.PROVIDERS.clear()
+    providers.PROVIDERS.update(saved)
