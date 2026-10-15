@@ -20,7 +20,6 @@ import httpx
 from mavis.domain.errors import FailureKind
 from mavis.tools.integrations.native.base import NativeProvider, TokenSource
 from mavis.tools.integrations.native.google import NEVER_SENT, SAFE_METHODS, _retry_after
-from mavis.tools.integrations.native.http import ResponseTooLarge, send_capped
 
 GRAPH_HOST = "graph.microsoft.com"
 GRAPH = f"https://{GRAPH_HOST}/v1.0"
@@ -59,13 +58,33 @@ def bad_segment(value: str) -> bool:
     """Would this value, used as one URL path segment, address something else? Dot segments, anything outside
     the characters real Graph ids use (so no slash, backslash, query, fragment, percent or control char)."""
     v = strip_ms(value)
-    return v in ("", ".", "..") or v != v.strip() or not _ID_OK.fullmatch(v)
+    return (v in ("", ".", "..") or v.startswith("$") or v != v.strip()
+            or not _ID_OK.fullmatch(v))
 
 
 def seg(value: str) -> str:
     if bad_segment(value):
         raise GraphError(FailureKind.INVALID_ARGUMENT, "invalid id")
     return quote(strip_ms(value), safe=":@=!")
+
+
+def _bad_graph_url(url: str) -> bool:
+    """Is this anything but a plain https URL on the Graph host (default port, no userinfo)? A link that
+    does not even parse counts as bad."""
+    try:
+        target = httpx.URL(url)
+    except (httpx.InvalidURL, ValueError):
+        return True
+    return (target.scheme != "https" or target.host != GRAPH_HOST or target.port not in (None, 443)
+            or bool(target.userinfo))
+
+
+def _prefer(extra: str | None) -> str:
+    """Prefer values are comma-joined; IdType="ImmutableId" is always kept so stored ids stay stable."""
+    values = [v.strip() for v in (extra or "").split(",") if v.strip()]
+    if not any(v.lower().startswith("idtype") for v in values):
+        values.insert(0, 'IdType="ImmutableId"')
+    return ", ".join(values)
 
 
 def _error_code(data: bytes) -> str:
@@ -105,15 +124,23 @@ class GraphClient:
 
     async def _send(self, token: str, method: str, url: str, params: dict | None, body: Any,
                     headers: dict | None, cap: int) -> tuple[int, httpx.Headers, bytes, bool]:
-        hdrs = {"Authorization": f"Bearer {token}", "Prefer": 'IdType="ImmutableId"', **(headers or {})}
+        extra = {k: v for k, v in (headers or {}).items()}
+        prefer = ", ".join(v for k, v in extra.items() if k.lower() == "prefer")
+        hdrs = {k: v for k, v in extra.items() if k.lower() not in ("authorization", "host", "prefer")}
+        hdrs["Authorization"] = f"Bearer {token}"
+        hdrs["Prefer"] = _prefer(prefer)
         kw: dict[str, Any] = {"headers": hdrs, "params": params}
         if body is not None:
             kw["json"] = body
-        try:
-            resp = await send_capped(self._client, method, url, max_bytes=cap, **kw)
-        except ResponseTooLarge:
-            return 200, httpx.Headers(), b"", True
-        return resp.status_code, resp.headers, resp.content, False
+        async with self._client.stream(method, url, **kw) as resp:
+            chunks, size, cut = [], 0, False
+            async for chunk in resp.aiter_bytes():
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > cap:
+                    cut = True
+                    break
+            return resp.status_code, resp.headers, b"".join(chunks)[:cap], cut
 
     async def raw(
         self, uid: int, method: str, url: str, *, params: dict | None = None, body: Any = None,
@@ -122,8 +149,7 @@ class GraphClient:
         """One authorised call with the retry rules (see GoogleExecutor._raw). A 429 or a 503 with Retry-After
         was rejected before it ran, so any call may repeat after waiting once. A 504 or other 5xx or a read
         error may come after Graph acted: only an idempotent call repeats, otherwise UNCONFIRMED."""
-        target = httpx.URL(url)
-        if target.host != GRAPH_HOST or target.scheme != "https":
+        if _bad_graph_url(url):
             raise GraphError(FailureKind.INVALID_ARGUMENT, "refusing a non-Graph url")
         if idempotent is None:
             idempotent = method.upper() in SAFE_METHODS
@@ -193,14 +219,25 @@ class GraphClient:
         next_link: str | None = None
         delta_link: str | None = None
         target, query = url, params
+        total = 0
         for _ in range(max_pages):
-            data = await self.json(uid, "GET", target, params=query)
+            _, raw, cut = await self.raw(uid, "GET", target, params=query)
+            total += len(raw)
+            if cut:
+                raise GraphError(FailureKind.UNKNOWN, "microsoft response larger than the size limit")
+            try:
+                data = json.loads(raw) if raw.strip() else {}
+            except ValueError:
+                raise GraphError(FailureKind.UNKNOWN, "microsoft returned a body that is not JSON") from None
             if not isinstance(data, dict):
                 break
             items += [x for x in data.get("value") or [] if isinstance(x, dict)]
             next_link = data.get("@odata.nextLink") or None
             delta_link = data.get("@odata.deltaLink") or delta_link
-            if len(items) >= limit or not next_link:
-                break
+            for link in (next_link, delta_link):
+                if link is not None and (not isinstance(link, str) or _bad_graph_url(link)):
+                    raise GraphError(FailureKind.UNKNOWN, "microsoft returned a link outside Graph")
+            if len(items) >= limit or not next_link or total >= self.max_json:
+                break  # the aggregate byte budget ends paging early; next_link lets the caller continue
             target, query = next_link, None
         return items[:limit], next_link, delta_link

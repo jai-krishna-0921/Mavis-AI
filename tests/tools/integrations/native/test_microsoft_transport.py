@@ -181,3 +181,113 @@ async def test_next_link_to_another_host_is_not_followed():
     g.assert_all_routed()
 
 
+
+
+def _prefer_of(request):
+    return request.headers["prefer"]
+
+
+async def test_caller_prefer_is_merged_and_immutable_ids_kept():
+    g = FakeGraph().on("GET", PROFILE, ok_me())
+    ex, _ = g.executor()
+    url = "https://graph.microsoft.com/v1.0/me"
+    await ex.graph.json(1, "GET", url, headers={"prefer": "odata.maxpagesize=50"})
+    await ex.graph.json(1, "GET", url)
+    await ex.graph.json(1, "GET", url, headers={"Prefer": 'IdType="ImmutableId"'})
+    first, second, third = (_prefer_of(r) for r in g.requests)
+    assert 'IdType="ImmutableId"' in first and "odata.maxpagesize=50" in first
+    assert second == 'IdType="ImmutableId"' and third == 'IdType="ImmutableId"'
+    g.assert_all_routed()
+
+
+async def test_caller_headers_cannot_override_authorization_or_host():
+    g = FakeGraph().on("GET", PROFILE, ok_me())
+    ex, _ = g.executor()
+    await ex.graph.json(1, "GET", "https://graph.microsoft.com/v1.0/me",
+                        headers={"authorization": "Bearer evil", "Host": "evil.test"})
+    req = g.requests[0]
+    assert req.headers["authorization"] == "Bearer tok" and req.headers["host"] == "graph.microsoft.com"
+    g.assert_all_routed()
+
+
+@pytest.mark.parametrize("url", [
+    "http://graph.microsoft.com/v1.0/me", "https://evil.test/v1.0/me",
+    "https://graph.microsoft.com:8443/v1.0/me", "https://user:pw@graph.microsoft.com/v1.0/me",
+    "https://graph.microsoft.com:80/v1.0/me", "https://[bad/v1.0/me", "not a url"])
+async def test_non_graph_urls_are_refused_before_any_request(url):
+    g = FakeGraph()
+    ex, _ = g.executor()
+    with pytest.raises(GraphError) as e:
+        await ex.graph.raw(1, "GET", url)
+    assert e.value.kind is K.INVALID_ARGUMENT and g.requests == []
+
+
+@pytest.mark.parametrize("link", [
+    "http://graph.microsoft.com/v1.0/me/messages?x=1", "https://graph.microsoft.com:444/x",
+    "https://u:p@graph.microsoft.com/x", "https://[bad/x"])
+@pytest.mark.parametrize("key", ["@odata.nextLink", "@odata.deltaLink"])
+async def test_bad_links_in_a_page_are_a_protocol_failure(key, link):
+    body = {"value": [{"id": "1"}], key: link}
+    g = FakeGraph().on("GET", r"/v1.0/me/messages$", httpx.Response(200, json=body))
+    ex, _ = g.executor()
+    with pytest.raises(GraphError) as e:
+        await ex.graph.pages(1, "https://graph.microsoft.com/v1.0/me/messages", {}, 10)
+    assert e.value.kind is K.UNKNOWN
+    assert len(g.requests) == 1
+
+
+@pytest.mark.parametrize("bad", ["$batch", "ms:$value", "$metadata"])
+def test_ids_starting_with_dollar_are_refused(bad):
+    with pytest.raises(GraphError):
+        seg(bad)
+
+
+async def test_oversized_error_response_keeps_its_status_and_retry_after():
+    g = FakeGraph().on("GET", PROFILE, [
+        httpx.Response(429, content=b"x" * 5000, headers={"Retry-After": "2"}), ok_me()])
+    ex, sleeps = g.executor()
+    ex.graph.max_json = 1000
+    r = await ex.execute(U, "mail.profile", {})
+    assert r.ok and sleeps == [2.0]
+    g2 = FakeGraph().on("GET", PROFILE, httpx.Response(404, content=b"x" * 5000))
+    ex2, _ = g2.executor()
+    ex2.graph.max_json = 1000
+    assert (await ex2.execute(U, "mail.profile", {})).error_kind is K.NOT_FOUND
+
+
+async def test_504_with_retry_after_waits_once_for_a_read_and_is_unconfirmed_for_a_write():
+    slow = graph_error(504, "gatewayTimeout", headers={"Retry-After": "2"})
+    g = FakeGraph().on("GET", PROFILE, [slow, ok_me()])
+    ex, sleeps = g.executor()
+    assert (await ex.execute(U, "mail.profile", {})).ok and sleeps == [2.0]
+    g2 = FakeGraph().on("POST", r"/v1.0/me/sendMail$", slow)
+    ex2, sleeps2 = g2.executor()
+    with pytest.raises(GraphError) as e:
+        await ex2.graph.json(1, "POST", SEND, body={})
+    assert e.value.kind is K.UNCONFIRMED and sleeps2 == [] and len(g2.requests) == 1
+
+
+@pytest.mark.parametrize("status,code,url,kind", [
+    (403, "Forbidden", "https://graph.microsoft.com/v1.0/me/chats/19:x@unq.gbl.spaces/messages",
+     K.PERMISSION_MISSING),
+    (403, "accessDenied", "https://graph.microsoft.com/v1.0/me/drive/items/01A", K.PERMISSION_MISSING),
+    (403, "ErrorAccessDenied", "https://graph.microsoft.com/v1.0/me/messages/AAA", K.NOT_FOUND),
+    (403, "Forbidden", "", K.NOT_FOUND),
+    (423, "resourceLocked", "", K.UNAVAILABLE), (413, "x", "", K.INVALID_ARGUMENT),
+    (401, "x", "", K.AUTH)])
+def test_classify_url_cases(status, code, url, kind):
+    from mavis.tools.integrations.native.graph import classify
+    assert classify(status, code, f"microsoft {status} {code}", url).kind is kind
+
+
+async def test_pages_stop_at_the_aggregate_byte_budget_and_return_the_next_link():
+    base = "https://graph.microsoft.com/v1.0/me/messages"
+    pad = "p" * 400
+    g = FakeGraph().on("GET", r"/v1.0/me/messages$", [
+        httpx.Response(200, json=page([{"id": str(i), "pad": pad}], next_link=f"{base}?$skiptoken={i}"))
+        for i in range(5)])
+    ex, _ = g.executor()
+    ex.graph.max_json = 1000
+    items, more, _ = await ex.graph.pages(1, base, {}, 50)
+    assert len(items) < 5 and more and len(g.requests) < 5
+    g.assert_all_routed()
