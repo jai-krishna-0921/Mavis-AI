@@ -33,18 +33,16 @@ from mavis.store import db as dbm
 from mavis.store.models import NativeGrant, User
 from mavis.tools.integrations.native import crypto
 from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired
+from mavis.tools.integrations.native.builtin import (  # noqa: F401  (re-exported: moved to builtin)
+    GOOGLE_GONE,
+    GOOGLE_TOKEN_URL,
+    SLACK_GONE,
+    SLACK_TOKEN_URL,
+)
 from mavis.tools.integrations.native.http import TOKEN_BYTES, ResponseTooLarge, send_capped
 
 ACTIVE, REVOKED, FAILED = "ACTIVE", "REVOKED", "FAILED"
 REFRESH_AHEAD = timedelta(minutes=5)
-
-GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
-
-# Vendor error codes that mean the grant itself is gone (the user must reconnect).
-_GOOGLE_GONE = frozenset({"invalid_grant"})
-_SLACK_GONE = frozenset({"invalid_refresh_token", "token_revoked", "account_inactive", "invalid_auth",
-                         "token_expired", "not_authed", "invalid_grant"})
 
 
 @dataclass(frozen=True)
@@ -308,11 +306,11 @@ class NativeTokenStore:
     async def _refresh(self, provider: NativeProvider, refresh_token: str) -> dict:
         st = get_settings()
         if provider is NativeProvider.GOOGLE:
-            url, gone = GOOGLE_TOKEN_URL, _GOOGLE_GONE
+            url, gone = GOOGLE_TOKEN_URL, GOOGLE_GONE
             data = {"grant_type": "refresh_token", "refresh_token": refresh_token,
                     "client_id": st.google_oauth_client_id, "client_secret": st.google_oauth_client_secret}
         else:
-            url, gone = SLACK_TOKEN_URL, _SLACK_GONE
+            url, gone = SLACK_TOKEN_URL, SLACK_GONE
             data = {"grant_type": "refresh_token", "refresh_token": refresh_token,
                     "client_id": st.slack_client_id, "client_secret": st.slack_client_secret}
         try:

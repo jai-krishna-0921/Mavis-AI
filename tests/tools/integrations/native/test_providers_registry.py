@@ -27,12 +27,12 @@ def test_rejects_duplicates_long_ids_and_stolen_capabilities():
             providers.register(spec())
     with pytest.raises(ValueError):
         providers.register(spec(id="x" * 17))
-    owner = spec(id="owner", capabilities=(Capability.GMAIL,), anchor=Capability.GMAIL)
+    owner = spec(id="owner", capabilities=(Capability.NOTION,), anchor=Capability.NOTION)
     with providers.registered(owner):
         try:
             with pytest.raises(ValueError, match="already belong to owner"):
                 providers.register(
-                    spec(id="other", capabilities=(Capability.GMAIL,), anchor=Capability.GMAIL))
+                    spec(id="other", capabilities=(Capability.NOTION,), anchor=Capability.NOTION))
         finally:
             providers.unregister("other")
 

@@ -35,6 +35,17 @@ from mavis.domain import timeutil
 from mavis.store import db as dbm
 from mavis.store.models import NativeOAuthState
 from mavis.tools.integrations.native.base import NativeProvider
+from mavis.tools.integrations.native.builtin import (  # noqa: F401  (re-exported: moved to builtin)
+    GOOGLE_AUTH_URL,
+    GOOGLE_REVOKE_URL,
+    GOOGLE_SCOPES,
+    GOOGLE_USERINFO_URL,
+    SLACK_AUTH_URL,
+    SLACK_BOT_SCOPES,
+    SLACK_OPEN_DM_URL,
+    SLACK_REVOKE_URL,
+    SLACK_USER_SCOPES,
+)
 from mavis.tools.integrations.native.http import TOKEN_BYTES, ResponseTooLarge, send_capped
 from mavis.tools.integrations.native.tokens import (
     GOOGLE_TOKEN_URL,
@@ -45,38 +56,6 @@ from mavis.tools.integrations.native.tokens import (
 )
 
 STATE_TTL_S = 600
-
-GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
-GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
-SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
-SLACK_REVOKE_URL = "https://slack.com/api/auth.revoke"
-SLACK_OPEN_DM_URL = "https://slack.com/api/conversations.open"
-
-_AUTH = "https://www.googleapis.com/auth/"
-# Full Workspace read and write. A broader scope covers the narrower ones (gmail.modify reads, calendar
-# covers events, drive covers every Drive read, contacts covers contacts.readonly), so none of the
-# narrower variants is asked for. router.ACTION_SCOPES still honours older grants made with them.
-GOOGLE_SCOPES = ("openid", "email", "profile") + tuple(
-    _AUTH + name for name in (
-        "gmail.modify", "gmail.send", "gmail.compose",
-        "calendar", "drive", "documents", "spreadsheets", "presentations",
-        "forms.body.readonly", "forms.responses.readonly",
-        "tasks", "contacts", "contacts.other.readonly", "directory.readonly",
-        "meetings.space.created", "meetings.space.readonly",
-    )
-)
-SLACK_USER_SCOPES = (
-    "channels:history", "groups:history", "im:history", "mpim:history",
-    "channels:read", "groups:read", "im:read", "mpim:read",
-    "users:read", "users:read.email", "chat:write", "search:read",
-)
-
-# Bot scopes: Mavis as a bot user in the workspace (DM and @mention chat, cards, reactions, files).
-SLACK_BOT_SCOPES = (
-    "chat:write", "im:history", "im:read", "im:write", "app_mentions:read", "reactions:write",
-    "users:read", "files:write", "commands",
-)
 
 _ERRORS = {"bad_state", "expired_state", "replayed_state", "denied", "exchange_failed", "not_configured",
            "wrong_provider", "account_taken", "not_allowed", "session_mismatch"}

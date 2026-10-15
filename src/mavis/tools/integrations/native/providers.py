@@ -77,6 +77,12 @@ class CatalogEntry:
     always_listed: bool = False  # True: shown on the dashboard even when not configured (Google, Slack)
 
 
+def clean_text(value: object, limit: int = 60) -> str:
+    """Third-party or user-chosen text for a page or a message: one line, no control characters, bounded."""
+    text = "".join(ch if ch.isprintable() else " " for ch in str(value or ""))
+    return " ".join(text.split())[:limit]
+
+
 def _no_key(account: dict) -> str | None:
     return None
 
@@ -226,3 +232,6 @@ def configured(spec: ProviderSpec) -> bool:
         return False
     cid, secret = client_credentials(spec)
     return bool(cid and secret)
+
+
+from mavis.tools.integrations.native import builtin  # noqa: E402,F401  (registers google and slack)
