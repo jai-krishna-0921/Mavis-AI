@@ -53,7 +53,8 @@ def test_tool_sets_per_specialist():
                                          "calendar.create_event", "calendar.update_event",
                                          "calendar.calendars", "calendar.delete_event",
                                          "calendar.respond"}
-    assert agent_actions("knowledge") == {"notion.search", "notion.read", "notion.create_page"}
+    assert agent_actions("knowledge") == {"notion.search", "notion.read", "notion.create_page",
+                                          "onedrive.search", "onedrive.read"}
     assert agent_actions("conversation") == {
         "mail.search", "mail.read", "mail.draft", "mail.send", "mail.reply",
         "calendar.list", "calendar.find", "calendar.free_slots", "calendar.create_event",
@@ -74,6 +75,8 @@ def test_tool_sets_per_specialist():
         "slack.channels", "slack.history", "slack.send", "notion.search", "notion.read", "notion.create_page",
         # Teams follows the Slack precedent: same agent tags, sends wait for approval
         "teams.chats", "teams.history", "teams.send",
+        # OneDrive search and read
+        "onedrive.search", "onedrive.read",
     }
 
 

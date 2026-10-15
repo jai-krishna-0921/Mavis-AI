@@ -287,6 +287,20 @@ class TeamsChatArgs(ToolArgs):
     chat_id: str
 
 
+class OnedriveSearchArgs(ToolArgs):
+    query: str = Field(default="", description="Words in the file name or text; empty lists recent files")
+    max_results: int = Field(default=10, ge=1, le=25)
+
+
+class OnedriveReadArgs(ToolArgs):
+    item_id: str = Field(min_length=1, description="Item id from onedrive_search")
+
+
+class OnedriveRecentArgs(ToolArgs):
+    shared_with_me: bool = False
+    max_results: int = Field(default=25, ge=1, le=50)
+
+
 class NotionSearchArgs(ToolArgs):
     query: str = ""
 
@@ -1018,6 +1032,15 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("drive.read", Capability.DRIVE,
                "Read the text of a Drive file by file id: Google Docs, Sheets (as CSV), Slides, text files.",
                FileArgs, RiskClass.READ, _CHAT),
+    ActionSpec("onedrive.search", Capability.ONEDRIVE,
+               "Search the user's OneDrive files (including files shared with them) by name or text. Returns "
+               "item ids, names, types and dates.",
+               OnedriveSearchArgs, RiskClass.READ, _a("knowledge", "conversation", "spawn")),
+    ActionSpec("onedrive.read", Capability.ONEDRIVE,
+               "Read the text of a OneDrive file by item id: text files, Word, Excel, PowerPoint and PDF.",
+               OnedriveReadArgs, RiskClass.READ, _a("knowledge", "conversation", "spawn")),
+    ActionSpec("onedrive.list_recent", Capability.ONEDRIVE, "Recent or shared OneDrive files.",
+               OnedriveRecentArgs, RiskClass.READ, _INTERNAL),
     ActionSpec("docs.read", Capability.DOCS, "Read a Google Doc by document id: title and text.",
                DocArgs, RiskClass.READ, _CHAT),
     ActionSpec("sheets.find", Capability.SHEETS, "Find Google Sheets spreadsheets by name or content.",

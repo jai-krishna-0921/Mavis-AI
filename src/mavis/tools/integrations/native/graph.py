@@ -29,6 +29,7 @@ DEFAULT_RETRY_WAIT_S = 1.0
 SERVER_BACKOFF_S = 1.0
 MAX_PAGES = 10
 MS_ID_PREFIX = "ms:"
+REDIRECTS = (301, 302, 303, 307, 308)
 # Graph ids: base64url (- _ =), Teams chat ids (: @ .), no / ? # % \
 _ID_OK = re.compile(r"[A-Za-z0-9_\-=.:@!$+~]+")
 _CODE_OK = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
@@ -146,11 +147,20 @@ class GraphClient:
                     break
             return resp.status_code, resp.headers, b"".join(chunks)[:cap], cut
 
-    async def raw(
+    @property
+    def http(self) -> httpx.AsyncClient:
+        """The shared HTTP client, for the one caller that fetches a pre-authenticated download URL."""
+        return self._client
+
+    async def raw(self, uid: int, method: str, url: str, **kw: Any) -> tuple[httpx.Headers, bytes, bool]:
+        _, headers, data, cut = await self.raw_status(uid, method, url, **kw)
+        return headers, data, cut
+
+    async def raw_status(
         self, uid: int, method: str, url: str, *, params: dict | None = None, body: Any = None,
         headers: dict | None = None, cap: int | None = None, idempotent: bool | None = None,
-        on_forbidden: FailureKind | None = None,
-    ) -> tuple[httpx.Headers, bytes, bool]:
+        on_forbidden: FailureKind | None = None, accept_redirect: bool = False,
+    ) -> tuple[int, httpx.Headers, bytes, bool]:
         """One authorised call with the retry rules (see GoogleExecutor._raw). A 429 or a 503 with Retry-After
         was rejected before it ran, so any call may repeat after waiting once. A 504 or other 5xx or a read
         error may come after Graph acted: only an idempotent call repeats, otherwise UNCONFIRMED."""
@@ -176,8 +186,8 @@ class GraphClient:
                 backed_off = True
                 await self._sleep(SERVER_BACKOFF_S)
                 continue
-            if status < 300:
-                return resp_headers, data, cut
+            if status < 300 or (accept_redirect and status in REDIRECTS):
+                return status, resp_headers, data, cut  # a redirect is handed back for the caller to judge
             code = _error_code(data)
             detail = f"microsoft {status} {code}".strip()
             if status == 401:

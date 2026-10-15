@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Jai Krishna. All rights reserved.
 # Proprietary. Use is governed by LICENSE in the repository root.
-"""Compact, model-facing text for Microsoft 365 results (Teams today; OneDrive joins here).
+"""Compact, model-facing text for Microsoft 365 results (Teams chats and OneDrive files).
 
 Names and message text come from other people: each is flattened to one line or clipped, and the registry
 wraps the whole result as untrusted.
@@ -57,6 +57,42 @@ def render_history(data: Any) -> str:
     return "\n".join(lines)
 
 
+def _when(value: Any) -> str:
+    return str(value or "")[:10]
+
+
+def render_files(data: Any) -> str:
+    files = [f for f in (data or {}).get("files") or [] if isinstance(f, dict)]
+    if not files:
+        return "No OneDrive files matched."
+    lines = []
+    for f in files:
+        who = one_line(f.get("modifiedBy") or "unknown", NAME_CHARS)
+        line = (f"- id={f.get('id', '')} | {one_line(f.get('name') or '(untitled)')} | "
+                f"{f.get('mimeType', '')} | {f.get('size', '')} | modified {_when(f.get('modifiedTime'))} "
+                f"by {who}")
+        if f.get("shared") and f.get("sharedBy"):
+            line += f" | shared by {one_line(f['sharedBy'], NAME_CHARS)}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def render_read(data: Any) -> str:
+    data = data if isinstance(data, dict) else {}
+    name = one_line(data.get("name") or "(untitled)")
+    head = f"{name} | {data.get('mimeType', '')} | {data.get('size', '')}"
+    parts = [head]
+    if data.get("note"):
+        parts.append(f"({one_line(data['note'], LAST_CHARS)})")
+    text = clip_body(str(data.get("text") or ""))
+    if text:
+        parts.append(text)
+    if data.get("truncated"):
+        parts.append("(the file is longer; only the start is shown)")
+    return "\n".join(parts)
+
+
 MICROSOFT_RENDERERS: dict[str, Callable[..., Any]] = {
     "teams.chats": render_chats, "teams.history": render_history,
+    "onedrive.search": render_files, "onedrive.list_recent": render_files, "onedrive.read": render_read,
 }

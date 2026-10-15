@@ -23,6 +23,7 @@ from mavis.tools.integrations.actions import ACTIONS
 from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired, TokenSource
 from mavis.tools.integrations.native.graph import GRAPH, GraphClient, GraphError, bad_segment
 from mavis.tools.integrations.native.graph_calendar import calendar_handlers
+from mavis.tools.integrations.native.graph_files import files_handlers
 from mavis.tools.integrations.native.graph_mail import mail_handlers
 from mavis.tools.integrations.native.graph_teams import teams_handlers
 
@@ -42,6 +43,7 @@ class MicrosoftExecutor:
         self._handlers.update(mail_handlers(self))
         self._handlers.update(calendar_handlers(self))
         self._handlers.update(teams_handlers(self))
+        self._handlers.update(files_handlers(self))
 
     def handles(self, action: str) -> bool:
         return action in self._handlers
