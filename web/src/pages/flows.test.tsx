@@ -198,9 +198,17 @@ describe('vault', () => {
     renderApp('/vault')
     await screen.findByText('Priya Raman')
     expect(screen.getAllByText('You told Mavis').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('From your mail').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('From Gmail').length).toBeGreaterThan(0)
     expect(screen.getAllByText('Not confirmed').length).toBeGreaterThan(0)
     expect(screen.queryByText(/trust/i)).not.toBeInTheDocument()
+  })
+
+  it('labels a connector the page has never heard of from the API and marks it not confirmed', async () => {
+    db().items = [{ id: 'oc1', kind: 'person', title: 'Rhea Kapoor', detail: 'Met via Outlook', source: 'outlook_calendar', trust: 'low', updated_at: null }]
+    renderApp('/vault')
+    await screen.findByText('Rhea Kapoor')
+    expect(await screen.findByText('From Outlook Calendar')).toBeInTheDocument()
+    expect(screen.getAllByText('Not confirmed').length).toBe(1)
   })
 
   it('opens the profile editor from a separate Edit button', async () => {

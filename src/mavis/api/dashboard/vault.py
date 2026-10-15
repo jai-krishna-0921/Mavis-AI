@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from mavis.access import preferences
 from mavis.api.dashboard import common
 from mavis.api.dashboard.common import DashError
-from mavis.memory.vault import VaultError, VaultItem, get_vault
+from mavis.memory.vault import VaultError, VaultItem, connector_prefixes, get_vault
 from mavis.store.repo import personal as personal_repo
 from mavis.web import emails
 from mavis.web.sessions import Active
@@ -26,7 +26,6 @@ log = structlog.get_logger(__name__)
 PAGE = 25
 MAX_ITEMS = 500
 UI_KINDS = ("person", "organisation", "project", "fact", "preference")
-SOURCES = ("gmail", "slack", "calendar")  # connectors whose learning can be forgotten as a whole
 _ORG_RELS = frozenset({"WORKS_AT", "STUDIES_AT"})
 _PREF_RELS = frozenset({"PREFERS", "DISLIKES", "STRUGGLES_WITH"})
 _PREF_PROFILE = frozenset({"tone", "brevity", "dislikes", "other"})
@@ -51,6 +50,15 @@ def ui_kind(item: VaultItem) -> str | None:
     if item.kind == "routine":
         return "fact"
     return None
+
+
+def _label(name: str) -> str:
+    return name.replace("_", " ").title()
+
+
+def connectors() -> list[dict[str, str]]:
+    """The memory connectors whose learning can be forgotten as a whole, from the provider table."""
+    return [{"name": n, "label": _label(n)} for n in sorted(connector_prefixes())]
 
 
 def source_of(item: VaultItem) -> str:
@@ -83,13 +91,15 @@ async def summary(active: Active = Depends(common.authed)) -> dict:
     user = active.user
     items = await all_items(user.id)
     n = lambda k: sum(1 for kind, _ in items if kind == k)  # noqa: E731
-    sources = {source_of(i) for _, i in items if source_of(i) in SOURCES}
+    known = set(connector_prefixes())
+    sources = {source_of(i) for _, i in items if source_of(i) in known}
     profile = {"name": user.name or "", "timezone": user.timezone, "currency": user.currency or ""}
     if email := await emails.primary(user.id):
         profile["email"] = email
     return {"profile": profile, "counts": {
         "people": n("person"), "organisations": n("organisation"), "projects": n("project"),
-        "facts": n("fact") + n("preference"), "sources": len(sources)}}
+        "facts": n("fact") + n("preference"), "sources": len(sources)},
+            "connectors": connectors()}
 
 
 @router.get("/items")
@@ -184,7 +194,7 @@ async def sources(active: Active = Depends(common.authed)) -> list[dict]:
 
 @router.post("/sources/{source}/forget", status_code=204)
 async def forget_source(source: str, active: Active = Depends(common.authed)) -> Response:
-    if source not in SOURCES:
+    if source not in connector_prefixes():
         raise common.not_found("That source")
     await get_vault().forget_source(active.user.id, source)
     return Response(status_code=204)

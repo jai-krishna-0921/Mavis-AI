@@ -120,6 +120,7 @@ export const handlers = [
     return HttpResponse.json({
       profile: { name: db().me.name, timezone: db().me.timezone, currency: db().me.currency },
       counts: { people: n('person'), organisations: n('organisation'), projects: n('project'), facts: n('fact') + n('preference'), sources: db().sources().length },
+      connectors: [{ name: 'gmail', label: 'Gmail' }, { name: 'slack', label: 'Slack' }, { name: 'calendar', label: 'Calendar' }, { name: 'outlook_calendar', label: 'Outlook Calendar' }],
     })
   }),
   http.get(`${B}/vault/items`, ({ request }) => {

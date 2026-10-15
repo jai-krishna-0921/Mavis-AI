@@ -58,12 +58,6 @@ def connector_prefixes() -> dict[str, tuple[str, ...]]:
     return merged
 
 
-def __getattr__(name: str):
-    if name == "CONNECTOR_PREFIXES":
-        return connector_prefixes()
-    raise AttributeError(name)
-
-
 MAX_CORRECTION = 300
 MIN_SUBSTRING_FORGET = 4  # vectors are forgotten by text; shorter needles would take unrelated memories
 
@@ -110,11 +104,15 @@ def _trust(tier: str) -> str:
     return "third_party" if tier == TIER_THIRD else tier
 
 
-def _connector(sources: list[str]) -> str:
+def _connector(sources: list[str], prefixes: dict[str, tuple[str, ...]] | None = None) -> str:
+    """The connector a memory came from: the one whose registered origin prefix its source starts with
+    (longest prefix wins), whatever the connector is called."""
+    prefixes = connector_prefixes() if prefixes is None else prefixes
+    flat = sorted(((p, name) for name, ps in prefixes.items() for p in ps), key=lambda x: -len(x[0]))
     for s in sources:
-        head = s.split(":", 1)[0]
-        if head in connector_prefixes():
-            return head
+        for prefix, name in flat:
+            if s.startswith(prefix):
+                return name
     return ""
 
 
@@ -122,11 +120,11 @@ def _section_of(g: GraphItem) -> str:
     return personal.correction_section(g.source_ref)
 
 
-def _fact_item(g: GraphItem) -> VaultItem:
+def _fact_item(g: GraphItem, prefixes: dict[str, tuple[str, ...]] | None = None) -> VaultItem:
     src = personal.source_label(g.source_ref)
     sources = [src] if src else []
     return VaultItem(id=g.id, kind="signal" if g.tier == TIER_THIRD else "fact", text=g.statement,
-                     trust=_trust(g.tier), sources=sources, connector=_connector(sources),
+                     trust=_trust(g.tier), sources=sources, connector=_connector(sources, prefixes),
                      section=_section_of(g), meta={"subject": g.subject, "relation": g.rel, "object": g.obj})
 
 
@@ -153,8 +151,9 @@ class Vault:
         """The user's items of one kind, newest knowledge last for graph kinds, most important first for the rest."""
         if kind not in KINDS:
             raise VaultError(f"Unknown kind: {kind}")
+        prefixes = connector_prefixes()
         if kind in ("fact", "signal"):
-            items = [_fact_item(g) for g in await personal.graph_items(self.memory, user_id)]
+            items = [_fact_item(g, prefixes) for g in await personal.graph_items(self.memory, user_id)]
             return [i for i in items if i.kind == kind][-limit:]
         if kind == "person":
             suppressed = await personal_repo.suppressed_keys(user_id)
@@ -164,7 +163,7 @@ class Vault:
                     continue
                 ev = personal.person_evidence(a, False)
                 out.append(VaultItem(id=ev.id, kind="person", text=ev.text, trust=_trust(ev.tier),
-                                     sources=ev.sources, connector=_connector(ev.sources),
+                                     sources=ev.sources, connector=_connector(ev.sources, prefixes),
                                      section="people", meta=ev.meta))
             return out
         if kind == "routine":
@@ -177,7 +176,7 @@ class Vault:
         if kind == "layer":
             layer = await personal_layer.current(user_id)
             return [VaultItem(id=ln["id"], kind="layer", text=ln["text"], trust=_trust(ln["tier"]),
-                              sources=ln["sources"], connector=_connector(ln["sources"]), section=ln["section"],
+                              sources=ln["sources"], connector=_connector(ln["sources"], prefixes), section=ln["section"],
                               meta={"evidence": ln["evidence"], "confirmed": ln["confirmed"],
                                     "pinned": ln["pinned"]}) for ln in layer["lines"]][:limit]
         return [VaultItem(id=k, kind="suppression", text=label or k, trust="user")

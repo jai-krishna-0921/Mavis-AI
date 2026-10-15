@@ -57,7 +57,8 @@ export type McpCreated = { server: McpServer; authorize_url?: string }
 export type McpCreateBody = { catalog_id: string } | { name: string; url: string; bearer_token?: string }
 
 export type VaultKind = 'person' | 'organisation' | 'project' | 'fact' | 'preference'
-export type VaultSource = 'you' | 'gmail' | 'slack' | 'calendar' | 'dashboard'
+// 'you' | 'dashboard' | a connector name from VaultSummary.connectors
+export type VaultSource = string
 
 export type VaultItem = {
   id: string
@@ -74,6 +75,7 @@ export type VaultPage = { items: VaultItem[]; next_cursor: string | null }
 export type VaultSummary = {
   profile: Record<string, string>
   counts: { people: number; organisations: number; projects: number; facts: number; sources: number }
+  connectors: { name: string; label: string }[]
 }
 
 export type SourceInfo = { source: VaultSource; count: number; last_sync: string | null }

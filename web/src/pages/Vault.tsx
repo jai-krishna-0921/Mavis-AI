@@ -20,20 +20,26 @@ const TABS: { kind: VaultKind; label: string; count: 'people' | 'organisations' 
   { kind: 'preference', label: 'Preferences', count: null },
 ]
 
-const SOURCE_LABEL: Record<string, string> = { you: 'You', gmail: 'Gmail', slack: 'Slack', calendar: 'Calendar', dashboard: 'Dashboard' }
-const srcLabel = (s: string) => SOURCE_LABEL[s] ?? s
+const SOURCE_LABEL: Record<string, string> = { you: 'You', dashboard: 'Dashboard' }
+const generic = (s: string) => s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+
+// Connector names and labels come from the API (the provider table); the page knows only "you" and "dashboard".
+function useSources() {
+  const connectors = useVaultSummary().data?.connectors
+  const labels = new Map((connectors ?? []).map((c) => [c.name, c.label]))
+  return {
+    label: (s: string) => SOURCE_LABEL[s] ?? labels.get(s) ?? generic(s),
+    provenance: (s: string) => PROVENANCE[s] ?? `From ${labels.get(s) ?? generic(s)}`,
+    thirdParty: (s: string) => labels.has(s),
+  }
+}
 
 // Plain provenance for an item: where Mavis learned it, in the user's terms.
 const PROVENANCE: Record<string, string> = {
   you: 'You told Mavis',
-  gmail: 'From your mail',
-  slack: 'From Slack',
-  calendar: 'From your calendar',
   dashboard: 'You corrected this',
 }
-const provenance = (s: string) => PROVENANCE[s] ?? srcLabel(s)
 // Only third-party sources are unconfirmed until the user says otherwise.
-const THIRD_PARTY = new Set(['gmail', 'slack', 'calendar'])
 
 function useDebounced<T>(v: T, ms = 250) {
   const [d, setD] = useState(v)
@@ -84,6 +90,7 @@ function ProfileCard() {
 }
 
 function ItemRow({ item }: { item: VaultItem }) {
+  const src = useSources()
   const [mode, setMode] = useState<'view' | 'edit' | 'forget'>('view')
   const [title, setTitle] = useState(item.title)
   const [detail, setDetail] = useState(item.detail ?? '')
@@ -125,8 +132,8 @@ function ItemRow({ item }: { item: VaultItem }) {
           <div className="row-title">{item.title}</div>
           {item.detail && <div className="row-sub mt-0.5">{item.detail}</div>}
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted">
-            <span className="tag">{provenance(item.source)}</span>
-            {THIRD_PARTY.has(item.source) && <span className="rounded-full border border-dashed border-ink/30 px-2.5 py-0.5 italic">Not confirmed</span>}
+            <span className="tag">{src.provenance(item.source)}</span>
+            {src.thirdParty(item.source) && <span className="rounded-full border border-dashed border-ink/30 px-2.5 py-0.5 italic">Not confirmed</span>}
             {item.updated_at && <span className="tnum">updated {fmtDate(item.updated_at)}</span>}
           </div>
         </div>
@@ -159,6 +166,7 @@ function ItemRow({ item }: { item: VaultItem }) {
 }
 
 function Sources() {
+  const src = useSources()
   const sources = useVaultSources()
   const forget = useForgetSource()
   const qc = useQueryClient()
@@ -175,18 +183,18 @@ function Sources() {
         {sources.data.map((s) => (
           <li key={s.source} className="row flex-wrap">
             <div className="min-w-0 flex-1">
-              <div className="row-title">{srcLabel(s.source)}</div>
+              <div className="row-title">{src.label(s.source)}</div>
               <div className="row-sub tnum">{s.count} items{s.last_sync ? `, last sync ${fmtDate(s.last_sync)}` : ''}</div>
             </div>
             <button type="button" className="btn btn-sm btn-danger" onClick={() => setTarget(s.source)}>
-              Forget everything from {srcLabel(s.source)}
+              Forget everything from {src.label(s.source)}
             </button>
           </li>
         ))}
       </ul>
       {target && (
-        <Modal title={`Forget everything from ${srcLabel(target)}`} onClose={() => setTarget(null)}>
-          <p className="text-muted">This deletes every item Mavis learned from {srcLabel(target)}. It cannot be undone.</p>
+        <Modal title={`Forget everything from ${src.label(target)}`} onClose={() => setTarget(null)}>
+          <p className="text-muted">This deletes every item Mavis learned from {src.label(target)}. It cannot be undone.</p>
           {forget.error && <p className="error" role="alert">{forget.error.message}</p>}
           <div className="mt-6 flex flex-wrap justify-end gap-2">
             <button type="button" className="btn" onClick={() => setTarget(null)}>Cancel</button>
@@ -204,6 +212,7 @@ function Sources() {
 const TAB_ICON = { person: UserCircle, organisation: Buildings, project: Stack, fact: Brain, preference: Funnel } as const
 
 export function Vault() {
+  const src = useSources()
   const [kind, setKind] = useState<VaultKind>('person')
   const [search, setSearch] = useState('')
   const [source, setSource] = useState<string | null>(null)
@@ -255,7 +264,7 @@ export function Vault() {
           <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by source">
             {present.map((s) => (
               <button key={s} type="button" className="chip" aria-pressed={source === s} onClick={() => setSource(source === s ? null : s)}>
-                {srcLabel(s)}
+                {src.label(s)}
               </button>
             ))}
           </div>
