@@ -25,17 +25,17 @@ _VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "
 _SKIP = frozenset({"script", "style", "head", "title", "template", "noscript", "iframe", "object", "svg"})
 _BLOCK = gmail_mime._BLOCK_TAGS
 
-_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 _CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})\s?|\\(.)", re.S)
-_STYLE_BLOCK = re.compile(r"<style[^>]*>(.*?)</style>", re.S | re.I)
-_AT_BLOCK = re.compile(r"@[^{};]+\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}")
-_RULE = re.compile(r"([^{}]+)\{([^{}]*)\}")
+_BRACES = re.compile(r"[{}]")
+_ANGLE = re.compile(r"[<>]")
 _NUMBER = re.compile(r"^\s*(-?(?:\d+\.?\d*|\.\d+))\s*([a-z%]*)\s*$")
 _COLOR_TOKEN = re.compile(r"#[0-9a-f]{3,8}\b|(?:rgb|hsl)a?\([^)]*\)|\b[a-z]+\b", re.I)
 _NAMED = {"white": (255, 255, 255), "ivory": (255, 255, 240), "snow": (255, 250, 250),
           "whitesmoke": (245, 245, 245), "black": (0, 0, 0), "transparent": "t"}
 _UNITS_PX = {"": 1.0, "px": 1.0, "pt": 4 / 3, "em": 16.0, "rem": 16.0, "%": 0.16}
 OFFSCREEN_PX = -500
+MAX_STYLE_TEXT = 50_000  # characters of <style> blocks read in all; later rules are ignored
+MAX_DECLARATIONS = 8_000  # one style attribute or rule body longer than this is treated as hiding
 Bg = tuple[int, int, int] | str | None  # a background: rgb, "image", or unknown
 
 
@@ -46,9 +46,26 @@ def _unescape(m: re.Match[str]) -> str:
     return m[2] or ""
 
 
+def strip_comments(text: str) -> str:
+    """Remove /* ... */ comments in one pass (an unclosed one runs to the end)."""
+    out: list[str] = []
+    pos = 0
+    while (i := text.find("/*", pos)) != -1:
+        out.append(text[pos:i])
+        j = text.find("*/", i + 2)
+        if j == -1:
+            return "".join(out)
+        pos = j + 2
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def declarations(css: str) -> dict[str, str]:
-    """name -> lowercase value of an inline style, with comments removed and CSS escapes decoded."""
-    css = _CSS_ESCAPE.sub(_unescape, _CSS_COMMENT.sub("", css))
+    """name -> lowercase value of an inline style, with comments removed and CSS escapes decoded. A style
+    too long to inspect cheaply is treated as hiding."""
+    if len(css) > MAX_DECLARATIONS:
+        return {"display": "none"}
+    css = _CSS_ESCAPE.sub(_unescape, strip_comments(css))
     out: dict[str, str] = {}
     for item in css.split(";"):
         name, sep, value = item.partition(":")
@@ -66,7 +83,7 @@ def _px(value: str) -> float | None:
 
 def _color(value: str) -> tuple[int, int, int] | str | None:
     """(r, g, b), "t" for transparent, or None when unknown."""
-    for tok in _COLOR_TOKEN.findall(value):
+    for tok in _COLOR_TOKEN.findall(value[:100]):  # bounded: a pathological value must not cost much
         t = tok.lower()
         if t.startswith("#"):
             h = t[1:]
@@ -136,23 +153,57 @@ def style_hides(d: dict[str, str], bg: Bg) -> bool:
     return False
 
 
+def _style_texts(markup: str) -> list[str]:
+    """The text of each closed <style> block, found with str.find (linear), at most MAX_STYLE_TEXT in all."""
+    low = markup.lower()
+    out: list[str] = []
+    total = pos = 0
+    while total < MAX_STYLE_TEXT and (i := low.find("<style", pos)) != -1:
+        start = low.find(">", i)
+        if start == -1:
+            break
+        end = low.find("</style", start)
+        if end == -1:
+            break
+        out.append(markup[start + 1:end][:MAX_STYLE_TEXT - total])
+        total += end - start
+        pos = end + 7
+    return out
+
+
 def hiding_rules(markup: str) -> tuple[set[str], set[str], set[str]]:
-    """Classes, ids and bare tag names that a `<style>` block hides (colour-only rules do not count)."""
+    """Classes, ids and bare tag names that a `<style>` block hides (colour-only rules do not count).
+    One linear scan over the braces; at-rules (`@media ...`) are skipped whole."""
     classes: set[str] = set()
     ids: set[str] = set()
     tags: set[str] = set()
-    for block in _STYLE_BLOCK.findall(markup):
-        css = _AT_BLOCK.sub("", _CSS_COMMENT.sub("", block))
-        for m in _RULE.finditer(css):
-            if not style_hides(declarations(m[2]), "image"):
-                continue
-            for one in m[1].split(","):
-                one = one.strip().lower()
-                compound = re.split(r"[\s>+~]+", one)[-1]
-                classes.update(re.findall(r"\.([\w-]+)", compound))
-                ids.update(re.findall(r"#([\w-]+)", compound))
-                if compound == one and re.fullmatch(r"[a-z][\w-]*", compound):
-                    tags.add(compound)
+    for block in _style_texts(markup):
+        css = strip_comments(block)
+        depth = last = body_start = 0
+        prelude = ""
+        for m in _BRACES.finditer(css):
+            if m[0] == "{":
+                if depth == 0:
+                    prelude, body_start = css[last:m.start()].strip().lower(), m.end()
+                depth += 1
+            elif depth == 0:
+                last = m.end()
+            else:
+                depth -= 1
+                if depth:
+                    continue
+                last = m.end()
+                if prelude.startswith("@"):
+                    continue
+                if not style_hides(declarations(css[body_start:m.start()]), "image"):
+                    continue
+                for one in prelude.split(","):
+                    one = one.strip()
+                    compound = re.split(r"[\s>+~]+", one)[-1]
+                    classes.update(re.findall(r"\.([\w-]+)", compound))
+                    ids.update(re.findall(r"#([\w-]+)", compound))
+                    if compound == one and re.fullmatch(r"[a-z][\w-]*", compound):
+                        tags.add(compound)
     return classes, ids, tags
 
 
@@ -232,10 +283,36 @@ class _Extractor(HTMLParser):
         self._emit(data)
 
 
+def defang(markup: str) -> str:
+    """Make the markup safe for HTMLParser, which rescans the rest of its input for every unclosed construct
+    (`<a <a <a ...`, `<!--` repeated) and so goes quadratic. One linear pass: comments are removed (an
+    unclosed one ends the markup), `<![` sections and any `<` with no `>` before the next `<` become literal
+    text. Complete tags are left exactly as they were."""
+    out: list[str] = []
+    pos = 0
+    while (i := markup.find("<", pos)) != -1:
+        out.append(markup[pos:i])
+        if markup.startswith("<!--", i):
+            j = markup.find("-->", i + 4)
+            if j == -1:
+                return "".join(out)
+            pos = j + 3
+            continue
+        m = None if markup.startswith("<![", i) else _ANGLE.search(markup, i + 1)
+        if m is None or m[0] == "<":
+            out.append("&lt;")
+            pos = i + 1
+        else:
+            out.append(markup[i:m.end()])
+            pos = m.end()
+    out.append(markup[pos:])
+    return "".join(out)
+
+
 def html_to_text_limited(markup: str, limit: int) -> tuple[str, bool]:
     """(text, cut): `cut` is True when the markup, its nesting or the text exceeded a bound."""
     cut = len(markup) > MAX_HTML
-    markup = markup[:MAX_HTML]
+    markup = defang(markup[:MAX_HTML])
     parser = _Extractor(limit, hiding_rules(markup))
     try:
         parser.feed(markup)

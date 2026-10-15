@@ -51,6 +51,24 @@ _MS_CLAUSE = re.compile(r"\s*(dmarc|dkim)\s*=\s*pass\b", re.I)
 MS_AUTH_AS = "x-ms-exchange-organization-authas"
 
 
+def _strip_comments(value: str) -> str:
+    """Remove "(...)" comments (RFC 8601), nesting-aware, in one pass; an unclosed one runs to the end. Text
+    inside a comment is never a result property."""
+    out: list[str] = []
+    depth = 0
+    for ch in value:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth:
+                depth -= 1
+            else:
+                out.append(ch)
+        elif not depth:
+            out.append(ch)
+    return "".join(out)
+
+
 def ms_sender_authenticated(headers: dict[str, str], from_address: str, labels: Iterable[str] = ()) -> bool:
     """Outlook / Exchange Online mail (ids prefixed `ms:`). True only for the topmost Authentication-Results
     header of a message Exchange itself stamped as received from outside (X-MS-Exchange-Organization-AuthAs:
@@ -62,7 +80,7 @@ def ms_sender_authenticated(headers: dict[str, str], from_address: str, labels: 
         return False
     if str(headers.get(MS_AUTH_AS, "")).strip().lower() != "anonymous":
         return False
-    value = str(headers.get("authentication-results", "") or "")
+    value = _strip_comments(str(headers.get("authentication-results", "") or ""))
     domain = from_address.rpartition("@")[2].strip().lower().strip(".")
     if not value or not domain:
         return False

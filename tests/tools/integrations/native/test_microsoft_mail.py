@@ -348,6 +348,11 @@ async def test_header_that_starts_with_a_method_is_accepted():
                         EXO[1]]),
     ("unaligned dmarc", [("Authentication-Results",
                           "x.protection.outlook.com; dmarc=pass header.from=evil.test"), EXO[1]]),
+    ("value only inside a comment", [("Authentication-Results",
+                                      "x.protection.outlook.com; dmarc=pass (header.from=acme.com) "
+                                      "header.from=evil.test"), EXO[1]]),
+    ("whole clause inside a comment", [("Authentication-Results",
+                                        "x.protection.outlook.com; (dkim=pass header.d=acme.com)"), EXO[1]]),
     ("dmarc fail", [("Authentication-Results", "x.protection.outlook.com; dmarc=fail header.from=acme.com"),
                     EXO[1]]),
     ("foreign authserv", [("Authentication-Results", "mail.evil.test; dmarc=pass header.from=acme.com"),
