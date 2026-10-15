@@ -66,3 +66,19 @@ async def test_calendar_delta_first_request_carries_the_window_and_removed_becom
     assert "startDateTime" not in g.requests[1].url.params
     by = {e["id"]: e for e in inc.data["items"]}
     assert by["ms:e9"]["status"] == "cancelled" and by["ms:e1"]["summary"]
+
+
+async def test_sixty_id_only_changes_over_four_pages_are_all_returned_and_fetched():
+    ids = [f"m{i}" for i in range(60)]
+    pages = [httpx.Response(200, json=page([{"id": i} for i in ids[n * 15:(n + 1) * 15]],
+                                           next_link=BASE + f"?$skiptoken={n + 1}" if n < 3 else None,
+                                           delta_link=BASE + "?$deltatoken=D9" if n == 3 else None))
+             for n in range(4)]
+    g = FakeGraph().on("GET", r"/inbox/messages/delta$", pages)
+    g.on("GET", r"/me/messages/m\d+$", lambda req: httpx.Response(
+        200, json=graph_message(req.url.path.rsplit("/", 1)[1], folder="F-inbox")))
+    ex, _ = g.executor()
+    r = await ex.execute(U, "mail.inbox_delta", {"cursor": BASE + "?$deltatoken=D1"})
+    got = [m["messageId"] for m in r.data["messages"]]
+    assert sorted(got) == sorted(f"ms:{i}" for i in ids) and len(set(got)) == 60
+    assert r.data["cursor"].endswith("D9") and r.data["more"] is False

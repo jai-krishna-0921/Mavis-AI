@@ -10,11 +10,8 @@ from mavis.worker import runner
 
 
 class FakeWorkspace:
-    def __init__(self, baselined: bool) -> None:
-        self.baselined, self.handled = baselined, []
-
-    async def is_baselined(self, user_id: int) -> bool:
-        return self.baselined
+    def __init__(self) -> None:
+        self.handled = []
 
     async def handle(self, user, signal, *, quiet=False, backlog=False):
         self.handled.append((signal, quiet))
@@ -28,33 +25,36 @@ def share(user_id: int, kind="onedrive_share"):
                  payload={"kind": kind, "raw": raw}, trust=Trust.UNTRUSTED)
 
 
-@pytest.mark.parametrize("baselined", [True, False])
-async def test_share_becomes_a_file_shared_signal(user, monkeypatch, baselined):
-    ws = FakeWorkspace(baselined)
+async def test_share_becomes_a_file_shared_signal_and_is_never_quiet(user, monkeypatch):
+    # a Microsoft-only user never has the Google workspace baseline marker: the share must still speak
+    ws = FakeWorkspace()
     monkeypatch.setattr(onedrive_shares, "_workspace", lambda: ws)
     await onedrive_shares.on_event(share(user.id))
     [(signal, quiet)] = ws.handled
     assert signal.kind is SignalKind.FILE_SHARED and signal.actor == "priya@corp.test"
-    assert signal.object_title == "Plan.docx" and quiet is (not baselined)
+    assert signal.object_title == "Plan.docx" and quiet is False
 
 
 @pytest.mark.parametrize("kind", ["share", "comment", "task"])
 async def test_other_kinds_are_ignored(user, monkeypatch, kind):
-    ws = FakeWorkspace(True)
+    ws = FakeWorkspace()
     monkeypatch.setattr(onedrive_shares, "_workspace", lambda: ws)
     await onedrive_shares.on_event(share(user.id, kind))
     assert ws.handled == []
 
 
-def test_registered_next_to_the_workspace_handler(monkeypatch):
+def test_registered_next_to_an_existing_workspace_handler():
     from mavis.attention import wiring
+
+    async def google_handler(event):
+        return None
+
     saved = {k: list(v) for k, v in runner._event_handlers.items()}
     try:
-        monkeypatch.setattr(wiring, "workspace_enabled", lambda: True)
-        wiring.register_workspace()
+        runner.register_event_handler(EventType.WORKSPACE_SIGNAL, google_handler, replace=True)
         wiring.register_onedrive_shares()
-        handlers = runner._event_handlers[EventType.WORKSPACE_SIGNAL]
-        assert onedrive_shares.on_event in handlers and len(handlers) == 2
+        wiring.register_onedrive_shares()  # idempotent
+        assert runner._event_handlers[EventType.WORKSPACE_SIGNAL] == [google_handler, onedrive_shares.on_event]
     finally:
         runner._event_handlers.clear()
         runner._event_handlers.update(saved)

@@ -52,6 +52,22 @@ async def native_call(provider: Any, user_id: int, action: str, args: dict) -> T
     return await provider.execute(user, action, args)
 
 
+async def own_tenant(provider: Any, user_id: int) -> str:
+    """The signed-in account's tenant id ("" when unknown: then nobody counts as internal)."""
+    tokens = getattr(provider, "tokens", None)
+    try:
+        acct = await tokens.account(user_id, NativeProvider.MICROSOFT) if tokens is not None else None
+    except Exception:  # noqa: BLE001 - an unknown tenant only makes records lower trust
+        return ""
+    return str((acct or {}).get("tid") or "").lower()
+
+
+def is_external(sender_tenant: object, own_tid: str, from_me: bool) -> bool:
+    """A sender outside the account's tenant, or whose tenant is unknown, is external (low trust); the
+    user's own messages never are."""
+    return not from_me and not (own_tid and str(sender_tenant or "").lower() == own_tid)
+
+
 class MicrosoftSync:
     def __init__(self, first_sync: FirstSync) -> None:
         self.fs = first_sync
@@ -143,12 +159,7 @@ class MicrosoftSync:
 
     async def _own_tenant(self, user_id: int) -> str:
         """The signed-in account's tenant id ("" when unknown: then nobody counts as internal)."""
-        tokens = getattr(self.fs.provider, "tokens", None)
-        try:
-            acct = await tokens.account(user_id, NativeProvider.MICROSOFT) if tokens is not None else None
-        except Exception:  # noqa: BLE001 - an unknown tenant only makes records lower trust
-            return ""
-        return str((acct or {}).get("tid") or "").lower()
+        return await own_tenant(self.fs.provider, user_id)
 
     async def _chat(self, user_id: int, chat: dict, cutoff: Any, room: int, own_tid: str = "",
                     started: Any = None) -> int:
@@ -185,8 +196,7 @@ class MicrosoftSync:
                     continue
                 sender = by_id.get(from_id, {})
                 # a sender outside the account's tenant, or whose tenant is unknown, is external (low trust)
-                tid = str(sender.get("tenantId") or "").lower()
-                external = not m.get("fromMe") and not (own_tid and tid == own_tid)
+                external = is_external(sender.get("tenantId"), own_tid, bool(m.get("fromMe")))
                 await self.fs.connectors.teams(user_id, {
                     "chat_id": cid, "message_id": mid, "kind": "message",
                     "from": str(m.get("from") or ""), "from_id": from_id,

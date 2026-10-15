@@ -441,7 +441,7 @@ async def test_intake_hands_every_mail_to_the_connector_ingest_and_survives_its_
     seen = []
 
     class Spy:
-        async def email(self, user_id, payload):
+        async def email(self, user_id, payload, *, source="gmail"):
             seen.append(payload["message_id"])
 
     intake = Intake(pipeline=None, loops=None, wakeups=None, thresholds=None, forward=None, connectors=Spy())

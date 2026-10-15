@@ -37,5 +37,6 @@ async def on_event(event: Event) -> None:
         user = await users.get(event.user_id)
     except NoResultFound:
         return
-    workspace = _workspace()
-    await workspace.handle(user, signal, quiet=not await workspace.is_baselined(user.id))
+    # never quiet: the OneDrive poll baselines itself (its first run records the shares already there and
+    # publishes nothing), and the Google-only workspace marker is never set for a Microsoft-only user
+    await _workspace().handle(user, signal, quiet=False)

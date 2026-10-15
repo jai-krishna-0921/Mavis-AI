@@ -145,3 +145,85 @@ async def test_onedrive_polls_every_thirty_minutes_baselines_then_signals_new_sh
     assert await poll_od(poller, 1, st) == 1
     [ev] = poller.bus.events
     assert ev.type is EventType.WORKSPACE_SIGNAL and ev.payload["kind"] == "onedrive_share" and ev.payload["raw"]["name"] == "Plan.docx"
+
+
+async def test_changes_spread_over_ticks_are_neither_lost_nor_repeated():
+    n, st = Native(), {"cursors": {"outlook_delta": "L0"}}
+    poller, poll_mail = P(n), hook_for(C.OUTLOOK)
+    first = [mail(str(i)) for i in range(30)]
+    n.results["mail.inbox_delta"] = lambda a: ToolResult(ok=True, data=(
+        {"messages": first, "cursor": "NEXT", "more": True} if a["cursor"] == "L0"
+        else {"messages": [mail(str(i)) for i in range(30, 60)], "cursor": "L2"}))
+    assert await poll_mail(poller, 1, st) == 30 and st["cursors"]["outlook_delta"] == "NEXT"
+    assert await poll_mail(poller, 1, st) == 30 and st["cursors"]["outlook_delta"] == "L2"
+    assert len({e.id for e in poller.bus.events}) == 60
+
+
+def chat(cid, last, members=()):
+    return {"id": f"ms:{cid}", "type": "group", "topic": "T", "members": list(members), "lastMessageAt": last}
+
+
+def tmsg(mid, at, cid, me=False, from_id="u1"):
+    return {"id": mid, "chatId": f"ms:{cid}", "from": "P", "fromId": from_id, "fromMe": me, "text": "x", "at": at}
+
+
+async def test_teams_failed_chat_keeps_the_floor_below_its_messages_and_is_retried():
+    n, st = Native(), {"cursors": {"teams_at": "2026-10-15T09:00:00+00:00"}}
+    poller, poll_teams = P(n), hook_for(C.TEAMS)
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [
+        chat("a", "2026-10-15T10:00:00Z"), chat("b", "2026-10-15T11:00:00Z")]})
+    n.results["teams.history"] = lambda args: (
+        ToolResult(ok=False, error_kind=K.UNKNOWN, error="x") if args["chat_id"] == "ms:a" else
+        ToolResult(ok=True, data={"messages": [tmsg("b1", "2026-10-15T11:00:00Z", "b")]}))
+    assert await poll_teams(poller, 1, st) == 1
+    assert st["cursors"]["teams_at"].startswith("2026-10-15T09:00")      # chat a is still owed
+    n.results["teams.history"] = lambda args: ToolResult(ok=True, data={"messages": [
+        tmsg("a1", "2026-10-15T10:00:00Z", "a")] if args["chat_id"] == "ms:a" else [tmsg("b1", "2026-10-15T11:00:00Z", "b")]})
+    assert await poll_teams(poller, 1, st) == 1                           # b1 is deduped, a1 arrives
+    assert {e.id for e in poller.bus.events} == {"teams:1:b:b1", "teams:1:a:a1"}
+    assert st["cursors"]["teams_at"].startswith("2026-10-15T11:00")
+
+
+async def test_teams_throttled_history_sets_the_backoff_and_stops_reading():
+    n, st = Native(), {"cursors": {"teams_at": "2026-10-15T09:00:00+00:00"}}
+    poller = P(n)
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [
+        chat("a", "2026-10-15T10:00:00Z"), chat("b", "2026-10-15T11:00:00Z")]})
+    n.results["teams.history"] = ToolResult(ok=False, error_kind=K.RATE_LIMITED, error="x")
+    assert await hook_for(C.TEAMS)(poller, 1, st) == 0
+    assert st["cursors"]["ms_backoff_n"] == 1 and [c[1] for c in n.native].count("teams.history") == 1
+    assert st["cursors"]["teams_at"].startswith("2026-10-15T09:00")
+
+
+async def test_teams_external_follows_the_sender_tenant():
+    class Tokens:
+        async def account(self, uid, provider):
+            return {"tid": "TENANT-A"}
+
+    n, st = Native(), {"cursors": {"teams_at": "2026-10-15T09:00:00+00:00"}}
+    n.tokens = Tokens()
+    poller = P(n)
+    members = [{"id": "u1", "name": "P", "email": "p@x.com", "tenantId": "tenant-a"},
+               {"id": "u2", "name": "Q", "email": "q@y.com", "tenantId": "tenant-b"},
+               {"id": "u3", "name": "R", "email": "r@y.com", "tenantId": ""}]
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [chat("a", "2026-10-15T11:00:00Z", members)]})
+    n.results["teams.history"] = ToolResult(ok=True, data={"messages": [
+        tmsg("1", "2026-10-15T10:00:00Z", "a", from_id="u1"), tmsg("2", "2026-10-15T10:01:00Z", "a", from_id="u2"),
+        tmsg("3", "2026-10-15T10:02:00Z", "a", from_id="u3"), tmsg("4", "2026-10-15T10:03:00Z", "a", me=True, from_id="u2")]})
+    await hook_for(C.TEAMS)(poller, 1, st)
+    by = {e.payload["message_id"]: e.payload["external"] for e in poller.bus.events}
+    assert by == {"1": False, "2": True, "3": True, "4": False}
+    assert poller.bus.events[0].payload["members"][0]["tenantId"] == "tenant-a"
+
+
+async def test_two_chains_writing_cursors_concurrently_keep_both(user):
+    from mavis.tools.integrations.connect_flow import RepoUserState
+    from mavis.tools.integrations.poller import Poller
+
+    poller = Poller(provider=None, cache=None, bus=None, state=RepoUserState(), schedule=None)
+    stale_a, stale_b = {"cursors": {}}, {"cursors": {}}              # both ticks read before either wrote
+    await poller.set_cursor(user.id, stale_a, "outlook_delta", "L1")
+    await poller.set_cursor(user.id, stale_b, "teams_at", "T1")      # old code rewrote the whole dict: L1 lost
+    await poller.set_cursor(user.id, stale_a, "gmail_after", 5)
+    cursors = (await RepoUserState().get(user.id))["cursors"]
+    assert cursors == {"outlook_delta": "L1", "teams_at": "T1", "gmail_after": 5}

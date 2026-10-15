@@ -175,10 +175,18 @@ class Poller:
             log.warning("poller.status_failed", user_id=user_id, error=type(exc).__name__)
         return False
 
+    async def merge_cursors(self, user_id: int, patch: dict) -> None:
+        """Change only these cursor keys, merged in the database under the row lock: chains that poll at the
+        same time (four Microsoft ones, Gmail, Slack, Calendar) never erase each other's cursors."""
+        nested = getattr(self.state, "update_nested", None)
+        if nested is not None:
+            await nested(user_id, "cursors", patch)
+            return
+        cursors = dict((await self.state.get(user_id)).get("cursors", {}))
+        await self.state.update(user_id, {"cursors": {**cursors, **patch}})
+
     async def set_cursor(self, user_id: int, st: dict, key: str, value: object) -> None:
-        cursors = dict(st.get("cursors", {}))
-        cursors[key] = value
-        await self.state.update(user_id, {"cursors": cursors})
+        await self.merge_cursors(user_id, {key: value})
 
 
 async def poll_gmail(poller: Poller, user_id: int, st: dict) -> int:
@@ -215,8 +223,7 @@ async def poll_slack(poller: Poller, user_id: int, st: dict) -> int:
         poller.provider, poller.bus, user_id, dict(cursors.get("slack_ts") or {}),
         int(cursors.get("slack_offset") or 0), now=poller.clock(),
     )
-    merged = {**cursors, "slack_ts": ts_by_channel, "slack_offset": offset}
-    await poller.state.update(user_id, {"cursors": merged})
+    await poller.merge_cursors(user_id, {"slack_ts": ts_by_channel, "slack_offset": offset})
     return published
 
 

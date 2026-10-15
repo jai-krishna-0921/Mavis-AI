@@ -43,7 +43,7 @@ SELECT = (
 # reduced by html_to_text, which drops hidden content.
 PREFER_PAGE = {"Prefer": "odata.maxpagesize=25"}
 BASELINE_PAGES = 40
-DELTA_FETCH_CAP = 25
+DELTA_FETCH_BATCH = 5
 WELL_KNOWN = {"inbox": "INBOX", "sentitems": "SENT", "drafts": "DRAFT", "deleteditems": "TRASH",
               "junkemail": "SPAM", "archive": "ARCHIVE"}
 _RESERVED_LABELS = frozenset({"INBOX", "SENT", "DRAFT", "TRASH", "SPAM"})
@@ -440,18 +440,21 @@ class MailActions:
         if baseline:
             return out
         live = [m for m in items if "@removed" not in m and not m.get("isDraft")]
-        if len(live) > DELTA_FETCH_CAP:
-            live = live[:DELTA_FETCH_CAP]
-            out["more"] = True
         # a delta link keeps the $select it was made with (id only): fetch what the page left out
-        full = []
-        for m in live:
-            got = m if "receivedDateTime" in m else await self._fetch(uid, str(m.get("id") or ""))
-            if got:
-                full.append(got)
+        full = []  # every change is returned: the cursor moves past them, so none may be dropped
+        for i in range(0, len(live), DELTA_FETCH_BATCH):
+            batch = live[i:i + DELTA_FETCH_BATCH]
+            got = await asyncio.gather(*(
+                self._have(m) if "receivedDateTime" in m else self._fetch(uid, str(m.get("id") or ""))
+                for m in batch))
+            full += [g for g in got if g]
         folders = {str(m.get("parentFolderId") or ""): "INBOX" for m in full}
         out["messages"] = await self._mapped(full, folders, SEARCH_BODY_CAP)
         return out
+
+    @staticmethod
+    async def _have(message: dict) -> dict:
+        return message
 
     async def _fetch(self, uid: int, mid: str) -> dict | None:
         try:

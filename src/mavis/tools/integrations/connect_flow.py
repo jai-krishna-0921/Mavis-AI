@@ -90,6 +90,7 @@ ForgetSource = Callable[[int, str], Awaitable[int]]
 class UserState(Protocol):
     async def get(self, user_id: int) -> dict: ...
     async def update(self, user_id: int, patch: dict) -> dict: ...
+    async def update_nested(self, user_id: int, key: str, patch: dict) -> dict: ...
 
 
 class RepoUserState:
@@ -102,6 +103,11 @@ class RepoUserState:
         from mavis.store.repo import users
 
         return await users.update_state(user_id, patch)
+
+    async def update_nested(self, user_id: int, key: str, patch: dict) -> dict:
+        from mavis.store.repo import users
+
+        return await users.update_nested(user_id, key, patch)
 
 
 class ReplyScope:

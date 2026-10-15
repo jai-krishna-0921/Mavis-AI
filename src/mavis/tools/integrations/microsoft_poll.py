@@ -18,8 +18,10 @@ import structlog
 
 from mavis.domain import timeutil
 from mavis.domain.errors import FailureKind
+from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.integrations import ToolResult
-from mavis.tools.integrations.microsoft_sync import native_call
+from mavis.tools.integrations.microsoft_sync import is_external, native_call, own_tenant
+from mavis.tools.integrations.native.graph_files import SHARED_UNAVAILABLE
 from mavis.tools.integrations.native.providers import PollAuthError
 from mavis.tools.integrations.normalize import (
     calendar_event,
@@ -182,6 +184,9 @@ async def _calendar_by_list(poller: Any, user_id: int, st: dict) -> int:
 
 
 async def poll_teams(poller: Any, user_id: int, st: dict) -> int:
+    """New Teams messages. `teams_at` is the floor under every chat; `teams_chats` holds a per-chat watermark
+    for chats read ahead of it. A chat that fails or is left for the next tick keeps the floor below its
+    unread messages, so nothing is skipped (replays dedupe by event id)."""
     if _backed_off(poller, st):
         return 0
     now = poller.clock()
@@ -195,40 +200,62 @@ async def poll_teams(poller: Any, user_id: int, st: dict) -> int:
         await _put(poller, user_id, st, "teams_at", now.isoformat())
         await _success(poller, user_id, st)
         return 0
+    per_chat = {str(k): v for k, v in (_cursors(st).get("teams_chats") or {}).items()}
+
+    def since(chat: dict) -> datetime:
+        return to_datetime(per_chat.get(str(chat["id"]))) or mark
+
     chats = [c for c in res.data.get("chats") or [] if isinstance(c, dict) and c.get("id")]
-    changed = [c for c in chats if (to_datetime(c.get("lastMessageAt")) or mark) > mark]
+    changed = [c for c in chats if (to_datetime(c.get("lastMessageAt")) or mark) > since(c)]
     changed.sort(key=lambda c: str(c.get("lastMessageAt") or ""))
-    published, newest = 0, mark
-    for chat in changed[:TEAMS_PER_TICK]:
+    own_tid = await own_tenant(poller.provider, user_id)
+    published, unresolved, throttled = 0, [], False
+    for i, chat in enumerate(changed):
+        if i >= TEAMS_PER_TICK or throttled:
+            unresolved.append(chat)
+            continue
+        floor = since(chat)
         hist = await native_call(poller.provider, user_id, "teams.history",
                                  {"chat_id": str(chat["id"]), "limit": TEAMS_HISTORY})
         if not hist.ok:
             if hist.error_kind is FailureKind.AUTH:
                 raise PollAuthError
-            continue  # that chat is retried next tick (the watermark has not passed it)
+            throttled = hist.error_kind in (FailureKind.RATE_LIMITED, FailureKind.UNAVAILABLE)
+            if throttled:
+                await _failed(poller, user_id, st, hist, "teams_history")
+            unresolved.append(chat)  # retried next tick: its floor does not move
+            continue
         members = [m for m in chat.get("members") or [] if isinstance(m, dict)]
-        by_id = {str(m.get("id") or ""): str(m.get("email") or "") for m in members}
+        by_id = {str(m.get("id") or ""): m for m in members}
+        roster = [{"name": str(m.get("name") or ""), "email": str(m.get("email") or ""),
+                   "tenantId": str(m.get("tenantId") or ""), "me": bool(m.get("me"))} for m in members]
         for m in hist.data.get("messages") or []:
             at = to_datetime(m.get("at")) if isinstance(m, dict) else None
-            if at is None or at <= mark:
+            if at is None or at <= floor:
                 continue
-            from_id = str(m.get("fromId") or "")
+            from_id, from_me = str(m.get("fromId") or ""), bool(m.get("fromMe"))
+            sender = by_id.get(from_id, {})
             event = teams_event(user_id, {
                 "chat_id": str(chat["id"]), "message_id": str(m.get("id") or ""),
-                "from": str(m.get("from") or ""), "from_id": from_id, "from_address": by_id.get(from_id, ""),
-                "from_me": bool(m.get("fromMe")), "text": str(m.get("text") or ""), "at": str(m.get("at") or ""),
+                "from": str(m.get("from") or ""), "from_id": from_id,
+                "from_address": str(sender.get("email") or ""), "from_me": from_me,
+                "text": str(m.get("text") or ""), "at": str(m.get("at") or ""),
                 "chat_type": str(chat.get("type") or ""), "topic": str(chat.get("topic") or ""),
-                "members": [{"name": str(x.get("name") or ""), "email": str(x.get("email") or "")} for x in members],
-                "external": any(x.get("external") for x in members),
+                "members": roster, "external": is_external(sender.get("tenantId"), own_tid, from_me),
             }, source="poller")
             if event is not None and await poller.bus.publish(event):
                 published += 1
-            newest = max(newest, at)
-    if len(changed) > TEAMS_PER_TICK:
-        # chats beyond this tick's share are older than the ones read; keep the watermark at the last chat read
-        newest = min(newest, to_datetime(changed[TEAMS_PER_TICK - 1].get("lastMessageAt")) or newest)
-    await _put(poller, user_id, st, "teams_at", newest.isoformat())
-    await _success(poller, user_id, st)
+        per_chat[str(chat["id"])] = (to_datetime(chat.get("lastMessageAt")) or floor).isoformat()
+    if unresolved:
+        new_floor = min(since(c) for c in unresolved)
+    else:
+        new_floor = max([mark, *(to_datetime(c.get("lastMessageAt")) or mark for c in chats)])
+    kept = sorted(((k, v) for k, v in per_chat.items() if (to_datetime(v) or mark) > new_floor),
+                  key=lambda kv: kv[1], reverse=True)[:SEEN_CAP]
+    await _put(poller, user_id, st, "teams_chats", dict(kept))
+    await _put(poller, user_id, st, "teams_at", new_floor.isoformat())
+    if not throttled:
+        await _success(poller, user_id, st)
     return published
 
 
@@ -242,10 +269,11 @@ async def poll_onedrive(poller: Any, user_id: int, st: dict) -> int:
     res = await native_call(poller.provider, user_id, "onedrive.list_recent",
                             {"shared_with_me": True, "max_results": 25})
     if not res.ok:
-        if res.error_kind is FailureKind.UNAVAILABLE and "not available" in (res.error or ""):
+        if res.error_kind is FailureKind.UNAVAILABLE and (res.error or "") == SHARED_UNAVAILABLE:
             # the shares endpoint is going away (uncertainty 7): off for a day, no message to the user
             await _put(poller, user_id, st, "onedrive_at", (now + SHARES_OFF - SHARES_EVERY).isoformat())
             return 0
+        await _put(poller, user_id, st, "onedrive_at", now.isoformat())  # retry in 30 minutes, not 2
         return await _failed(poller, user_id, st, res, "onedrive")
     files = [f for f in res.data.get("files") or [] if isinstance(f, dict) and f.get("id")]
     seen_before = _cursors(st).get("onedrive_seen")
@@ -270,8 +298,6 @@ async def poll_onedrive(poller: Any, user_id: int, st: dict) -> int:
 
 
 def _share_event(user_id: int, raw: dict) -> Any:
-    from mavis.domain.events import Event, EventType, Trust
-
     return Event(id=f"ods:{user_id}:{raw['id']}"[:200], user_id=user_id, type=EventType.WORKSPACE_SIGNAL,
                  occurred_at=to_datetime(raw["sharedWithMeTime"]) or timeutil.now(),
                  source="poller", payload={"kind": "onedrive_share", "raw": raw}, trust=Trust.UNTRUSTED)
