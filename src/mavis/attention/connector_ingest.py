@@ -79,14 +79,14 @@ class ConnectorIngest:
             if own:
                 if not labels & (guard.EXCLUDED_LABELS | {"DRAFT"}):
                     job = records.email_record(user_id, n, self_ids=ident, self_names=await self._names(user_id),
-                                              source=source)
+                                           source=source)
                     if job is not None and job.authored:
                         await self._authored(job, mute)
                 return IngestDecision("drop", "own_mail")
             decision = guard.should_ingest_email(n, mute)
             if decision:
                 job = records.email_record(user_id, n, self_ids=ident, self_names=await self._names(user_id),
-                                              source=source)
+                                           source=source)
                 if job is not None:
                     await self._offer(job, mute)
             return decision

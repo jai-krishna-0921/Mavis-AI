@@ -27,6 +27,14 @@ def test_teams_record():
     assert own.authored and own.label == "Teams message you wrote"
 
 
+def test_teams_roster_flag_marks_the_user_even_without_known_addresses():
+    n = {"chat_id": "c", "message_id": "1", "from": "P", "from_id": "u", "from_address": "p@x.com", "from_me": False,
+         "text": "hi there", "at": "2026-10-14T10:00:00Z", "chat_type": "group",
+         "members": [{"name": "Me", "email": "mine@elsewhere.test", "me": True}]}
+    job = records.teams_record(1, n, self_ids={"emails": [], "slack_ids": []})
+    assert [p.is_user for p in job.people if p.email == "mine@elsewhere.test"] == [True]
+
+
 def test_teams_record_redacts_secrets():
     n = {"chat_id": "c", "message_id": "1", "from": "P", "from_id": "u", "from_address": "p@x.com", "from_me": False,
          "text": "my password is hunter2hunter2", "at": "2026-10-14T10:00:00Z", "chat_type": "group", "members": []}

@@ -69,6 +69,7 @@ def message_view(raw: dict, chat_id: str, me_oid: str, me_mail: str) -> dict | N
 def _member(raw: dict, me_oid: str) -> dict:
     uid = str(raw.get("userId") or "")
     return {"id": uid, "name": str(raw.get("displayName") or ""), "email": str(raw.get("email") or ""),
+            "tenantId": str(raw.get("tenantId") or ""),
             "me": bool(me_oid) and uid == me_oid}
 
 

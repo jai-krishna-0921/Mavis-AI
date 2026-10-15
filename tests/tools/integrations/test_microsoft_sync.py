@@ -14,6 +14,10 @@ class Native:
 
     def __init__(self):
         self.results, self.native, self.plain = {}, [], []
+        self.tokens = self
+
+    async def account(self, user_id, provider):
+        return {"tid": "tenant-1", "oid": "o0"}
 
     async def execute(self, user, action, args):
         self.plain.append(action)
@@ -87,8 +91,8 @@ async def test_calendar_sync_uses_the_ocal_prefix_and_native_calls(fake_bus):
 def teams_world(p, history):
     p.results["teams.chats"] = ToolResult(ok=True, data={"chats": [
         {"id": "ms:c1", "type": "oneOnOne", "topic": "", "members": [
-            {"id": "u1", "name": "Priya", "email": "priya@corp.test", "me": False},
-            {"id": "u0", "name": "Me", "email": "me@corp.test", "me": True}], "lastMessageAt": "2026-10-04T10:00:00Z"},
+            {"id": "u1", "name": "Priya", "email": "priya@corp.test", "me": False, "tenantId": "tenant-1"},
+            {"id": "u0", "name": "Me", "email": "me@corp.test", "me": True, "tenantId": "tenant-1"}], "lastMessageAt": "2026-10-04T10:00:00Z"},
         {"id": "ms:c2", "type": "group", "topic": "Old", "members": [], "lastMessageAt": "2026-08-01T10:00:00Z"}]})
     p.results["teams.history"] = history
 
@@ -110,6 +114,50 @@ async def test_teams_sync_respects_window_and_caps_and_skips_other_messages(fake
     n = sink.teams_[0][3]
     assert n["from_address"] == "priya@corp.test" and n["chat_type"] == "oneOnOne" and n["kind"] == "message"
     assert n["from_me"] is False and n["external"] is False and n["members"][0]["email"] == "priya@corp.test"
+    assert n["members"][1]["me"] is True
+
+
+async def _external_for(fake_bus, tenant, **member):
+    p, sink = Native(), Sink()
+    p.results["teams.chats"] = ToolResult(ok=True, data={"chats": [
+        {"id": "ms:c1", "type": "group", "topic": "", "lastMessageAt": "2026-10-04T10:00:00Z",
+         "members": [{"id": "u1", "name": "G", "email": "g@other.test", "me": False, **member}]}]})
+    p.results["teams.history"] = ToolResult(ok=True, data={"messages": [tmsg(4, 1)]})
+    fs, _ = make(p, fake_bus, sink)
+    await fs.run(1, C.TEAMS)
+    return sink.teams_[0][3]["external"]
+
+
+async def test_teams_sender_tenant_decides_external(fake_bus):
+    assert await _external_for(fake_bus, "t", tenantId="tenant-1") is False        # colleague
+    assert await _external_for(fake_bus, "t", tenantId="other-tenant") is True     # guest or federated
+    assert await _external_for(fake_bus, "t") is True                              # unknown: fail safe
+
+
+async def test_teams_empty_message_id_is_not_kept(fake_bus):
+    p, sink = Native(), Sink()
+    teams_world(p, ToolResult(ok=True, data={"messages": [{**tmsg(4, 1), "id": ""}, tmsg(4, 2)]}))
+    fs, _ = make(p, fake_bus, sink)
+    await fs.run(1, C.TEAMS)
+    assert [m[2] for m in sink.teams_] == ["m42"]
+
+
+async def test_teams_budget_is_checked_inside_a_chat(fake_bus):
+    from datetime import timedelta
+
+    from mavis.tools.integrations import microsoft_sync as ms
+
+    t = [NOW]
+
+    def clock():
+        return t[0]
+
+    p, sink = Native(), Sink()
+    teams_world(p, lambda a: (t.__setitem__(0, t[0] + timedelta(seconds=ms.BACKFILL_BUDGET_S + 1)) or
+                              ToolResult(ok=True, data={"messages": [tmsg(4, 1)], "next": "2026-10-04T10:00:00Z"})))
+    fs, _ = make(p, fake_bus, sink, clock=clock)
+    await fs.run(1, C.TEAMS)
+    assert len(sink.teams_) == 1 and len([c for c in p.native if c[1] == "teams.history"]) == 1
 
 
 async def test_teams_total_and_per_chat_caps(fake_bus, monkeypatch):

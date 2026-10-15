@@ -121,6 +121,9 @@ class MicrosoftSync:
         if not res.ok:  # no Teams licence, a personal account or a transient error: nothing to say
             return []
         sink, clock = self.fs.connectors, self.fs.clock
+        if sink is None:
+            log.warning("first_sync.teams_no_connectors", user_id=user_id)
+        own_tid = await self._own_tenant(user_id)
         started = clock()
         cutoff = started - timedelta(days=sync_window("sync_teams_days", 7))
         chats = [c for c in extract_list(res.data, "chats", "data.chats") if isinstance(c, dict)]
@@ -132,21 +135,33 @@ class MicrosoftSync:
             last = to_datetime(chat.get("lastMessageAt"))
             if not chat.get("id") or (last is not None and last < cutoff):
                 continue
-            got = await self._chat(user_id, chat, cutoff, TOTAL_CAP - kept)
+            got = await self._chat(user_id, chat, cutoff, TOTAL_CAP - kept, own_tid, started)
             kept += got
             read_chats += 1 if got else 0
         await self._catch_up(user_id)
         return [f"Caught up on {kept} recent Teams messages in {read_chats} chats"] if kept else []
 
-    async def _chat(self, user_id: int, chat: dict, cutoff: Any, room: int) -> int:
+    async def _own_tenant(self, user_id: int) -> str:
+        """The signed-in account's tenant id ("" when unknown: then nobody counts as internal)."""
+        tokens = getattr(self.fs.provider, "tokens", None)
+        try:
+            acct = await tokens.account(user_id, NativeProvider.MICROSOFT) if tokens is not None else None
+        except Exception:  # noqa: BLE001 - an unknown tenant only makes records lower trust
+            return ""
+        return str((acct or {}).get("tid") or "").lower()
+
+    async def _chat(self, user_id: int, chat: dict, cutoff: Any, room: int, own_tid: str = "",
+                    started: Any = None) -> int:
         """Page one chat newest first until the window, the per-chat cap or the total cap. A failed page
         (rate limited, unavailable, anything) ends this chat only: a partial chat is fine."""
         cid, members = str(chat["id"]), [m for m in chat.get("members") or [] if isinstance(m, dict)]
-        roster = [{"name": str(m.get("name") or ""), "email": str(m.get("email") or "")} for m in members]
-        external = any(m.get("external") for m in members)
-        by_id = {str(m.get("id") or ""): str(m.get("email") or "") for m in members}
+        roster = [{"name": str(m.get("name") or ""), "email": str(m.get("email") or ""),
+                   "me": bool(m.get("me"))} for m in members]
+        by_id = {str(m.get("id") or ""): m for m in members}
+        clock = self.fs.clock
+        started = started or clock()
         kept, before = 0, ""
-        while kept < min(PER_CHAT_CAP, room):
+        while kept < min(PER_CHAT_CAP, room) and (clock() - started).total_seconds() <= BACKFILL_BUDGET_S:
             args: dict[str, Any] = {"chat_id": cid, "limit": HISTORY_PAGE}
             if before:
                 args["before"] = before
@@ -165,11 +180,17 @@ class MicrosoftSync:
                     break
                 if kept >= min(PER_CHAT_CAP, room):
                     break
-                from_id = str(m.get("fromId") or "")
+                from_id, mid = str(m.get("fromId") or ""), str(m.get("id") or "")
+                if not mid:
+                    continue
+                sender = by_id.get(from_id, {})
+                # a sender outside the account's tenant, or whose tenant is unknown, is external (low trust)
+                tid = str(sender.get("tenantId") or "").lower()
+                external = not m.get("fromMe") and not (own_tid and tid == own_tid)
                 await self.fs.connectors.teams(user_id, {
-                    "chat_id": cid, "message_id": str(m.get("id") or ""), "kind": "message",
+                    "chat_id": cid, "message_id": mid, "kind": "message",
                     "from": str(m.get("from") or ""), "from_id": from_id,
-                    "from_address": by_id.get(from_id, ""), "from_me": bool(m.get("fromMe")),
+                    "from_address": str(sender.get("email") or ""), "from_me": bool(m.get("fromMe")),
                     "text": str(m.get("text") or ""), "at": str(m.get("at") or ""),
                     "chat_type": str(chat.get("type") or ""), "topic": str(chat.get("topic") or ""),
                     "members": roster, "external": external,

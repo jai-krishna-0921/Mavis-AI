@@ -264,8 +264,9 @@ def teams_record(user_id: int, n: dict, *, self_ids: Mapping[str, Iterable[str]]
     person(str(n.get("from") or ""), from_addr, "sender", me=bool(n.get("from_me")))
     for m in n.get("members") or []:
         if isinstance(m, dict):
-            person(str(m.get("name") or ""), str(m.get("email") or ""), "recipient")
-    sender = people.get(from_addr.lower() or str(n.get("from") or "").lower()) or Person(name=str(n.get("from") or ""))
+            person(str(m.get("name") or ""), str(m.get("email") or ""), "recipient", me=bool(m.get("me")))
+    sender = (people.get(from_addr.lower() or str(n.get("from") or "").lower())
+              or Person(name=str(n.get("from") or "")))
     body = redact(str(n.get("text") or ""))[:BODY_CAP]
     when = timeutil.ensure_utc(_dt(n.get("at"))) or timeutil.now()
     direct = str(n.get("chat_type") or "") == "oneOnOne"
