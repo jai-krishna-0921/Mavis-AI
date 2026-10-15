@@ -203,6 +203,10 @@ class WorkspaceIntake:
     async def _baselined(self, user_id: int) -> bool:
         return bool((await self.state(user_id)).get(BASELINE_KEY))
 
+    async def is_baselined(self, user_id: int) -> bool:
+        """Has first sync put its quiet baseline in (polls and shares may speak from then on)?"""
+        return await self._baselined(user_id)
+
     async def poll_shared(self, user_id: int) -> int:
         st = await self.state(user_id)
         after = to_datetime(st.get("shared_after")) or (self.clock() - SHARED_LOOKBACK)

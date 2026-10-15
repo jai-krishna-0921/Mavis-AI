@@ -244,6 +244,26 @@ def normalize_slack(d: dict) -> dict[str, Any]:
     return out
 
 
+def normalize_teams(d: dict) -> dict[str, Any]:
+    """A Teams chat message as the teams_message payload (ids lose the `ms:` marker)."""
+    members = [m for m in d.get("members") or [] if isinstance(m, dict)]
+    return {
+        "chat_id": str(pick(d, "chat_id", default="")).removeprefix("ms:"),
+        "message_id": str(pick(d, "message_id", default="")).removeprefix("ms:"),
+        "kind": "message",
+        "from": str(pick(d, "from", default="")),
+        "from_id": str(pick(d, "from_id", default="")),
+        "from_address": str(pick(d, "from_address", default="")).lower(),
+        "from_me": bool(pick(d, "from_me", default=False)),
+        "text": str(pick(d, "text", default=""))[:SNIPPET_LIMIT],
+        "at": str(pick(d, "at", default="")),
+        "chat_type": str(pick(d, "chat_type", default="")),
+        "topic": str(pick(d, "topic", default="")),
+        "members": members,
+        "external": bool(pick(d, "external", default=False)),
+    }
+
+
 def normalize_notion(d: dict) -> dict[str, Any]:
     return {
         "page_id": str(pick(d, "id", "page_id", default="")),
@@ -267,12 +287,13 @@ def _event(
     )
 
 
-def email_event(user_id: int, raw: dict, source: str) -> Event | None:
+def email_event(user_id: int, raw: dict, source: str, *, prefix: str = "gmail") -> Event | None:
     m = normalize_email(raw)
     if not m["message_id"]:
         return None
+    mid = m["message_id"].removeprefix("ms:") if prefix == "outlook" else m["message_id"]
     return _event(
-        f"gmail:{user_id}:msg:{m['message_id']}",
+        f"{prefix}:{user_id}:msg:{mid}",
         user_id,
         EventType.EMAIL_RECEIVED,
         to_datetime(m["received_at"]),
@@ -281,13 +302,13 @@ def email_event(user_id: int, raw: dict, source: str) -> Event | None:
     )
 
 
-def calendar_event(user_id: int, raw: dict, source: str) -> Event | None:
+def calendar_event(user_id: int, raw: dict, source: str, *, prefix: str = "gcal") -> Event | None:
     c = normalize_calendar_event(raw)
     if not c["event_id"]:
         return None
     version = c["updated"] or c["start"] or ""
     return _event(
-        f"gcal:{user_id}:{c['event_id']}:{version}",
+        f"{prefix}:{user_id}:{c['event_id']}:{version}",
         user_id,
         EventType.CALENDAR_CHANGED,
         to_datetime(c["updated"]),
@@ -302,6 +323,14 @@ def slack_event(user_id: int, raw: dict, source: str) -> Event | None:
         return None
     event_id = f"slack:{user_id}:{s['channel']}:{s['ts']}"
     return _event(event_id, user_id, EventType.SLACK_MESSAGE, None, source, s)
+
+
+def teams_event(user_id: int, raw: dict, source: str) -> Event | None:
+    t = normalize_teams(raw)
+    if not (t["chat_id"] and t["message_id"]):
+        return None
+    return _event(f"teams:{user_id}:{t['chat_id']}:{t['message_id']}", user_id, EventType.TEAMS_MESSAGE,
+                  to_datetime(t["at"]), source, t)
 
 
 def notion_event(user_id: int, raw: dict, source: str) -> Event | None:

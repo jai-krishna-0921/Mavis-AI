@@ -556,7 +556,10 @@ async def test_register_attention_wires_workspace_when_enabled(
 
     initiative_wiring.set_current(build_initiative(recording_bus, fake_memory, embed=no_embed))
     register_attention()
-    assert runner._event_handlers[EventType.WORKSPACE_SIGNAL] == [get_workspace().on_event]
+    from mavis.attention import onedrive_shares
+
+    assert runner._event_handlers[EventType.WORKSPACE_SIGNAL] == [
+        get_workspace().on_event, onedrive_shares.on_event]
     assert "ws:" in buttons.BUTTON_HANDLERS
     assert WORKSPACE_POLL_KIND in system.SYSTEM_WAKEUP_HANDLERS
 
@@ -576,7 +579,10 @@ async def test_register_attention_leaves_workspace_out_when_the_flag_is_off(
 
     initiative_wiring.set_current(build_initiative(recording_bus, fake_memory, embed=no_embed))
     register_attention()
-    assert EventType.WORKSPACE_SIGNAL not in runner._event_handlers
+    from mavis.attention import onedrive_shares
+
+    # the OneDrive share handler serves Microsoft-only users, so it is wired without the Google flag
+    assert runner._event_handlers[EventType.WORKSPACE_SIGNAL] == [onedrive_shares.on_event]
     assert "ws:" not in buttons.BUTTON_HANDLERS
     assert WORKSPACE_POLL_KIND not in system.SYSTEM_WAKEUP_HANDLERS
 

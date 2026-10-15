@@ -44,6 +44,8 @@ def test_catalog_covers_spec_actions():
         "teams.chats", "teams.history", "teams.send", "teams.chat",
         # Microsoft OneDrive (native only)
         "onedrive.search", "onedrive.read", "onedrive.list_recent",
+        # Outlook delta polls (native only, internal)
+        "mail.inbox_delta", "calendar.delta",
     }
     assert set(ACTIONS) == expected
 
@@ -88,7 +90,12 @@ def test_capabilities_match_action_prefix():
                    "slides": Capability.DOCS, "forms": Capability.DOCS, "teams": Capability.TEAMS,
                    "onedrive": Capability.ONEDRIVE}
     for name, spec in ACTIONS.items():
-        assert spec.capability is prefix_caps[name.split(".")[0]]
+        want = prefix_caps[name.split(".")[0]]
+        if name == "mail.inbox_delta":
+            want = Capability.OUTLOOK
+        elif name == "calendar.delta":
+            want = Capability.OUTLOOK_CALENDAR
+        assert spec.capability is want
 
 
 def test_localize_naive_datetimes_to_user_tz():

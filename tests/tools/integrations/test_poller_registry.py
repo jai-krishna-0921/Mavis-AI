@@ -15,6 +15,9 @@ from mavis.tools.integrations.poller import POLL_INTERVAL, POLL_KIND, Poller, ho
 from tests.tools.integrations.fakes import NOW
 
 SB = Capability.SANDBOX
+BUILTIN_POLLED = frozenset({
+    Capability.GMAIL, Capability.CALENDAR, Capability.SLACK,
+    Capability.OUTLOOK, Capability.OUTLOOK_CALENDAR, Capability.TEAMS, Capability.ONEDRIVE})
 
 
 @pytest.fixture
@@ -50,7 +53,7 @@ def make(provider, cache, fake_bus, state, rec, **kw):
 
 
 def test_builtin_pollable_set_is_unchanged():
-    assert pollable() == frozenset({Capability.GMAIL, Capability.CALENDAR, Capability.SLACK})
+    assert pollable() == BUILTIN_POLLED
     assert not hasattr(poller_mod, "POLLABLE")
 
 
@@ -109,7 +112,7 @@ async def test_ensure_chains_arms_registered_capabilities(db, isolated_registry,
 
 def test_every_registered_poller_path_resolves_to_a_callable():
     paths = [(s.id, c, p) for s in providers.PROVIDERS.values() for c, p in s.pollers.items()]
-    assert {c for _, c, _ in paths} == {Capability.GMAIL, Capability.CALENDAR, Capability.SLACK}
+    assert {c for _, c, _ in paths} == BUILTIN_POLLED
     for _, capability, path in paths:
         module, attr = path.split(":", 1)
         resolved = getattr(importlib.import_module(module), attr)

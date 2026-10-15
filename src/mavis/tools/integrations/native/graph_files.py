@@ -88,6 +88,11 @@ def _person(node: Any) -> str:
     return str(user.get("displayName") or "") if isinstance(user, dict) else ""
 
 
+def _person_email(node: Any) -> str:
+    user = node.get("user") if isinstance(node, dict) else None
+    return str(user.get("email") or "") if isinstance(user, dict) else ""
+
+
 def item_view(raw: dict) -> dict:
     """One drive item. A shared item (`remoteItem`) is addressed by its own drive: `ms:<driveId>~<itemId>`.
     No download URL is ever copied out of the raw item."""
@@ -108,6 +113,9 @@ def item_view(raw: dict) -> dict:
         "webViewLink": str(src.get("webUrl") or raw.get("webUrl") or ""),
         "shared": shared,
         "sharedBy": (_person(marker.get("sharedBy")) or _person(marker.get("owner"))) if shared else "",
+        "sharedByEmail": ((_person_email(marker.get("sharedBy")) or _person_email(marker.get("owner")))
+                          if shared else ""),
+        "sharedAt": str(marker.get("sharedDateTime") or "") if shared else "",
     }
 
 

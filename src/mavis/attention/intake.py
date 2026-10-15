@@ -106,7 +106,10 @@ class Intake:
     async def on_email(self, event: Event) -> None:
         p = event.payload
         if self._connectors is not None:
-            await self._connectors.email(event.user_id, p)  # never raises; bulk and own mail stay out
+            # Outlook ids carry an ms: prefix: that mail is the outlook mailbox (its own record prefix and
+            # pause switch), never gmail
+            source = "outlook" if str(p.get("message_id") or "").startswith("ms:") else "gmail"
+            await self._connectors.email(event.user_id, p, source=source)  # never raises
         labels = set(p.get("labels") or [])
         # the user's own mail (sent, or a draft they are still writing) is never news to them
         if p.get("from_me") or labels & OWN_LABELS or not p.get("message_id"):

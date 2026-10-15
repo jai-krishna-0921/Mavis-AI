@@ -21,7 +21,7 @@ from typing import Any
 from mavis.domain import timeutil
 from mavis.domain.errors import FailureKind
 from mavis.tools.integrations.native import gmail_mime
-from mavis.tools.integrations.native.graph import GRAPH, GraphError, seg, strip_ms, with_ms
+from mavis.tools.integrations.native.graph import GRAPH, MAX_PAGES, GraphError, seg, strip_ms, with_ms
 from mavis.tools.integrations.native.graph_html import html_to_text, html_to_text_limited  # noqa: F401
 from mavis.tools.integrations.normalize import to_datetime
 
@@ -41,6 +41,9 @@ SELECT = (
 # GraphClient already sends `Prefer: IdType="ImmutableId"`. `outlook.body-content-type="text"` is NOT sent:
 # Exchange's own HTML to text conversion keeps text hidden with CSS, so the body is requested as sent and
 # reduced by html_to_text, which drops hidden content.
+PREFER_PAGE = {"Prefer": "odata.maxpagesize=25"}
+BASELINE_PAGES = 40
+DELTA_FETCH_CAP = 25
 WELL_KNOWN = {"inbox": "INBOX", "sentitems": "SENT", "drafts": "DRAFT", "deleteditems": "TRASH",
               "junkemail": "SPAM", "archive": "ARCHIVE"}
 _RESERVED_LABELS = frozenset({"INBOX", "SENT", "DRAFT", "TRASH", "SPAM"})
@@ -417,6 +420,48 @@ class MailActions:
     async def _pages(self, uid: int, url: str, params: dict, limit: int) -> tuple[list[dict], Any, Any]:
         return await self.graph.pages(uid, url, params, limit)
 
+    async def inbox_delta(self, uid: int, a: Any) -> dict:
+        """Inbox changes. Empty cursor: a silent baseline (walk the last hour, keep only the delta link).
+        A cursor the service no longer knows (410) answers `reset`. Linked cursors are Graph URLs only."""
+        base = f"{GRAPH}/me/mailFolders/inbox/messages/delta"
+        baseline = not a.cursor
+        since = _stamp(timeutil.now() - timedelta(hours=1))
+        params = {"$select": "id", "$filter": f"receivedDateTime ge {since}"} if baseline else None
+        try:
+            items, more, delta = await self.graph.pages(
+                uid, a.cursor or base, params, 100_000, max_pages=BASELINE_PAGES if baseline else MAX_PAGES,
+                headers=PREFER_PAGE)
+        except GraphError as exc:
+            if a.cursor and exc.kind is FailureKind.NOT_FOUND:
+                return {"messages": [], "cursor": "", "baseline": False, "reset": True, "more": False}
+            raise
+        out: dict[str, Any] = {"messages": [], "cursor": delta or more or "", "baseline": baseline,
+                               "reset": False, "more": bool(more and not delta)}
+        if baseline:
+            return out
+        live = [m for m in items if "@removed" not in m and not m.get("isDraft")]
+        if len(live) > DELTA_FETCH_CAP:
+            live = live[:DELTA_FETCH_CAP]
+            out["more"] = True
+        # a delta link keeps the $select it was made with (id only): fetch what the page left out
+        full = []
+        for m in live:
+            got = m if "receivedDateTime" in m else await self._fetch(uid, str(m.get("id") or ""))
+            if got:
+                full.append(got)
+        folders = {str(m.get("parentFolderId") or ""): "INBOX" for m in full}
+        out["messages"] = await self._mapped(full, folders, SEARCH_BODY_CAP)
+        return out
+
+    async def _fetch(self, uid: int, mid: str) -> dict | None:
+        try:
+            got = await self._call(uid, "GET", f"{GRAPH}/me/messages/{seg(mid)}", params={"$select": SELECT})
+        except GraphError as exc:
+            if exc.kind in (FailureKind.NOT_FOUND, FailureKind.INVALID_ARGUMENT):
+                return None  # moved or deleted since the page
+            raise
+        return got if isinstance(got, dict) else None
+
     async def read(self, uid: int, a: Any) -> dict:
         raw = await self._call(uid, "GET", f"{GRAPH}/me/messages/{seg(a.message_id)}", params={
             "$select": SELECT, "$expand": "attachments($select=name,contentType,size)"})
@@ -588,7 +633,8 @@ class MailActions:
 
 def mail_handlers(ex: Any) -> dict[str, Callable[[int, Any], Awaitable[Any]]]:
     m = MailActions(ex)
-    return {"mail.search": m.search, "mail.read": m.read, "mail.thread": m.thread, "mail.draft": m.draft,
+    return {"mail.inbox_delta": m.inbox_delta,
+            "mail.search": m.search, "mail.read": m.read, "mail.thread": m.thread, "mail.draft": m.draft,
             "mail.send": m.send, "mail.reply": m.reply, "mail.archive": m.archive,
             "mail.mark_read": m.mark_read, "mail.mark_unread": m.mark_unread, "mail.label": m.label,
             "mail.trash": m.trash, "mail.untrash": m.untrash}

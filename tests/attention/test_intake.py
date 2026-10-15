@@ -1014,3 +1014,16 @@ async def test_strict_mode_surfaces_test_double_failures(user, stack, fake_llm, 
     fake_llm.push_structured(ACCOUNT)
     with pytest.raises(AssertionError):
         await stack.intake.on_email(email(user.id, "strict", subject="Hi"))
+
+
+async def test_outlook_mail_is_offered_to_the_graph_as_outlook(user, stack, fake_llm):
+    calls = []
+
+    class Rec:
+        async def email(self, uid, n, *, source="gmail"):
+            calls.append((n["message_id"], source))
+
+    stack.intake._connectors = Rec()
+    await stack.intake.on_email(email(user.id, "ms:AAA", labels=("SENT",)))
+    await stack.intake.on_email(email(user.id, "g1", labels=("SENT",)))
+    assert calls == [("ms:AAA", "outlook"), ("g1", "gmail")]

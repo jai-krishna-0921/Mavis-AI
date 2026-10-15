@@ -330,3 +330,13 @@ def test_renderers_flatten_names_and_clip_text():
         }
     )
     assert len(read) < 6200 and "truncated" in read
+
+
+def test_item_view_exposes_the_sharer_address_and_share_time():
+    from mavis.tools.integrations.native.graph_files import item_view
+
+    remote = {"id": "r", "name": "Plan.docx", "parentReference": {"driveId": "d"},
+              "shared": {"sharedBy": {"user": {"displayName": "Priya", "email": "priya@corp.test"}},
+                         "sharedDateTime": "2026-10-15T12:00:00Z"}}
+    v = item_view({"id": "x", "remoteItem": remote})
+    assert v["sharedByEmail"] == "priya@corp.test" and v["sharedAt"] == "2026-10-15T12:00:00Z"

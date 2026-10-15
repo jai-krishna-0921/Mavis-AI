@@ -265,6 +265,13 @@ def register_workspace() -> None:
     register_first_sync_handler(Capability.CONTACTS, workspace.first_sync_contacts)
 
 
+def register_onedrive_shares() -> None:
+    """OneDrive shares-with-me signals (any Microsoft user), next to the Google workspace handler."""
+    from mavis.attention import onedrive_shares
+
+    register_event_handler(EventType.WORKSPACE_SIGNAL, onedrive_shares.on_event)
+
+
 async def close_attention() -> None:
     """Shutdown: close a Qdrant client this module opened itself (the shared one belongs to memory)."""
     while _private_clients:
@@ -309,3 +316,4 @@ def register_attention() -> None:
     context_hooks.register_context_provider(get_digest().context)
     if workspace_enabled():
         register_workspace()
+    register_onedrive_shares()

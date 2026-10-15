@@ -280,6 +280,10 @@ class SlackSendArgs(ToolArgs):
     thread_ts: str = Field(default="", description="Reply inside the thread that starts at this ts")
 
 
+class DeltaArgs(ToolArgs):
+    cursor: str = Field(default="", max_length=4000, description="Opaque delta link; empty starts a baseline")
+
+
 class TeamsChatsArgs(ToolArgs):
     limit: int = Field(default=20, ge=1, le=50)
 
@@ -1171,6 +1175,10 @@ _WORKSPACE_SPECS: tuple[ActionSpec, ...] = (
                _INTERNAL),
     ActionSpec("contacts.list", Capability.CONTACTS, "The user's contacts (emails only).", NoArgs,
                RiskClass.READ, _INTERNAL),
+    ActionSpec("mail.inbox_delta", Capability.OUTLOOK, "Inbox changes since a delta link.", DeltaArgs,
+               RiskClass.READ, _INTERNAL),
+    ActionSpec("calendar.delta", Capability.OUTLOOK_CALENDAR, "Calendar changes since a delta link.",
+               DeltaArgs, RiskClass.READ, _INTERNAL),
     ActionSpec("teams.chat", Capability.TEAMS, "One Teams chat with its members (approval pre-step).",
                TeamsChatArgs, RiskClass.READ, _INTERNAL),
 )

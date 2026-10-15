@@ -32,6 +32,7 @@ MS_SCOPES = (
     "openid", "profile", "email", "offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send",
     "Calendars.ReadWrite", "Chat.ReadWrite", "ChatMessage.Send", "Files.Read.All",
 )
+_POLL = "mavis.tools.integrations.microsoft_poll"
 MS_CAPABILITIES = (C.OUTLOOK, C.OUTLOOK_CALENDAR, C.TEAMS, C.ONEDRIVE)
 NEEDS = {  # capability -> any-of scopes (lowercase) the grant must hold to serve it
     C.OUTLOOK: {"mail.readwrite"}, C.OUTLOOK_CALENDAR: {"calendars.readwrite"},
@@ -144,6 +145,8 @@ MS_SPEC = providers.register(ProviderSpec(
     toolkits=frozenset({"microsoft", "microsoft365", "m365", "outlook", "teams", "onedrive",
                         *(c.value for c in MS_CAPABILITIES)}),
     executor=("microsoft", "MicrosoftExecutor"),
+    pollers={C.OUTLOOK: f"{_POLL}:poll_mail", C.OUTLOOK_CALENDAR: f"{_POLL}:poll_calendar",
+             C.TEAMS: f"{_POLL}:poll_teams", C.ONEDRIVE: f"{_POLL}:poll_onedrive"},
     abilities="Outlook mail, Outlook Calendar, Teams chats and OneDrive",
     reconnect_hint="send /connect microsoft and accept every permission",
     forget_prefixes=("outlook:", "ocal:", "teams:", "onedrive:"),

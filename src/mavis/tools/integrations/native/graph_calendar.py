@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from mavis.domain.errors import FailureKind
 from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.google import FIND_WINDOW_BACK, MIN_FREE_MINUTES
-from mavis.tools.integrations.native.graph import GRAPH, GraphError, seg, with_ms
+from mavis.tools.integrations.native.graph import GRAPH, MAX_PAGES, GraphError, seg, with_ms
 from mavis.tools.integrations.normalize import to_datetime
 
 PRIMARY = "primary"
@@ -28,6 +28,8 @@ VIEW_TOP = 100  # calendarView page size
 FIND_WINDOW_AHEAD = timedelta(days=180)
 FIND_RESULTS = 25
 SCAN_LIMIT = 500  # events read for a local filter (find, updated_min)
+DELTA_AHEAD_DAYS = 14
+BASELINE_PAGES = 40
 BUSY = frozenset({"busy", "oof", "tentative", "workingElsewhere"})
 SELECT = (
     "id,subject,bodyPreview,start,end,isAllDay,isCancelled,showAs,location,organizer,isOrganizer,attendees,"
@@ -210,6 +212,32 @@ class CalendarActions:
             out["notes"] = notes
         return out
 
+    async def delta(self, uid: int, a: Any) -> dict:
+        """Changes over the brief window. The window goes on the FIRST request only; a stored delta link
+        carries it. An unknown link (gone) answers `reset`; a removed event reads as cancelled."""
+        baseline = not a.cursor
+        base = f"{GRAPH}/me/calendarView/delta"
+        now = datetime.now(UTC)
+        params = ({"startDateTime": _stamp(now - timedelta(days=1)),
+                   "endDateTime": _stamp(now + timedelta(days=DELTA_AHEAD_DAYS))} if baseline else None)
+        try:
+            items, more, link = await self.graph.pages(
+                uid, a.cursor or base, params, 100_000, max_pages=BASELINE_PAGES if baseline else MAX_PAGES,
+                headers={"Prefer": 'odata.maxpagesize=50, outlook.timezone="UTC"'})
+        except GraphError as exc:
+            if a.cursor and exc.kind is FailureKind.NOT_FOUND:
+                return {"items": [], "cursor": "", "baseline": False, "reset": True, "more": False}
+            raise
+        out: dict[str, Any] = {"items": [], "cursor": link or more or "", "baseline": baseline,
+                               "reset": False, "more": bool(more and not link)}
+        if baseline:
+            return out
+        me = await self._me(uid)
+        out["items"] = [
+            {"id": with_ms(str(e.get("id") or "")), "status": "cancelled", "summary": ""}
+            if "@removed" in e else map_event(e, me) for e in items]
+        return out
+
     async def find(self, uid: int, a: Any) -> dict:
         now = datetime.now(UTC)
         items, more = await self._view(
@@ -357,7 +385,8 @@ class CalendarActions:
 
 def calendar_handlers(ex: Any) -> dict[str, Callable[[int, Any], Awaitable[Any]]]:
     c = CalendarActions(ex)
-    return {"calendar.list": c.list, "calendar.find": c.find, "calendar.free_slots": c.free_slots,
+    return {"calendar.delta": c.delta,
+            "calendar.list": c.list, "calendar.find": c.find, "calendar.free_slots": c.free_slots,
             "calendar.create_event": c.create, "calendar.update_event": c.update,
             "calendar.calendars": c.calendars, "calendar.get": c.get, "calendar.delete_event": c.delete,
             "calendar.respond": c.respond}
