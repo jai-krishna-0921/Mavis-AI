@@ -43,16 +43,34 @@ class FakeGraph:
     """Routes (method, path regex) to a response or a callable. Requests are recorded.
 
     A list is a script: one answer per call, the last one repeats. Patterns match the URL path
-    (`/v1.0/me/messages`), not the query string."""
+    (`/v1.0/me/messages`); an optional `query={"$filter": "..."}` also requires those decoded query
+    parameters (exact values, subset match).
+
+    Like real Graph, a 200 JSON answer only carries on-request fields: `internetMessageHeaders` needs
+    `$select` naming it, chat `members` / `lastMessagePreview` need `$expand` naming them, and
+    `Prefer: outlook.body-content-type="text"` turns html message bodies into text. Builders always
+    build the full object; the fake strips what the request did not ask for. Other `Prefer` values
+    (timezone, maxpagesize) are not honoured: assert them with `query_of` and `request.headers`.
+
+    A request no route answers is recorded in `unrouted` and answered 404 `UnroutedInFakeGraph`
+    (distinct from a real `itemNotFound`); call `assert_all_routed()` at the end of a test."""
 
     def __init__(self) -> None:
-        self.routes: list[tuple[str, re.Pattern[str], Any]] = []
+        self.routes: list[tuple[str, re.Pattern[str], Any, dict[str, str] | None]] = []
+        self.unrouted: list[httpx.Request] = []
         self.requests: list[httpx.Request] = []
         self.active = self.peak = 0
 
-    def on(self, method: str, pattern: str, response: Any) -> FakeGraph:
-        self.routes.append((method, re.compile(pattern), response))
+    def on(
+        self, method: str, pattern: str, response: Any, *, query: dict[str, str] | None = None
+    ) -> FakeGraph:
+        self.routes.append((method, re.compile(pattern), response, query))
         return self
+
+    def assert_all_routed(self) -> None:
+        assert not self.unrouted, "unrouted requests: " + ", ".join(
+            f"{r.method} {r.url.path}" for r in self.unrouted
+        )
 
     async def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -60,14 +78,17 @@ class FakeGraph:
         self.peak = max(self.peak, self.active)
         try:
             await asyncio.sleep(0)
-            for method, pattern, response in self.routes:
-                if request.method == method and pattern.search(request.url.path):
+            for method, pattern, response, query in self.routes:
+                if request.method == method and pattern.search(request.url.path) and _has(request, query):
                     if isinstance(response, list):
                         answer = response.pop(0) if len(response) > 1 else response[0]
                     else:
                         answer = response
-                    return answer(request) if callable(answer) else answer
-            return graph_error(404, "itemNotFound", f"no fake route for {request.method} {request.url.path}")
+                    return _shape(request, answer(request) if callable(answer) else answer)
+            self.unrouted.append(request)
+            return graph_error(
+                404, "UnroutedInFakeGraph", f"no fake route for {request.method} {request.url.path}"
+            )
         finally:
             self.active -= 1
 
@@ -85,12 +106,64 @@ class FakeGraph:
 
         return MicrosoftExecutor(tokens or GraphTokens(), self.client(), sleep=sleep), sleeps
 
-    def calls(self, method: str, pattern: str) -> list[httpx.Request]:
-        return [r for r in self.requests if r.method == method and re.search(pattern, r.url.path)]
+    def calls(self, method: str, pattern: str, *, query: dict[str, str] | None = None) -> list[httpx.Request]:
+        return [
+            r for r in self.requests
+            if r.method == method and re.search(pattern, r.url.path) and _has(r, query)
+        ]
 
 
 def body_of(request: httpx.Request) -> dict:
     return json.loads(request.content)
+
+
+def query_of(request: httpx.Request) -> dict[str, str]:
+    """The decoded query (`$filter`, `$search`, `$select`, ...). A repeated key keeps its last value."""
+    return dict(request.url.params.multi_items())
+
+
+def _has(request: httpx.Request, query: dict[str, str] | None) -> bool:
+    if not query:
+        return True
+    got = query_of(request)
+    return all(got.get(k) == v for k, v in query.items())
+
+
+def _names(request: httpx.Request, key: str) -> set[str]:
+    return {part.split("(")[0].strip() for part in query_of(request).get(key, "").split(",") if part.strip()}
+
+
+def _strip(node: Any, select: set[str], expand: set[str], text_body: bool) -> None:
+    if isinstance(node, list):
+        for child in node:
+            _strip(child, select, expand, text_body)
+    elif isinstance(node, dict):
+        if "internetMessageHeaders" in node and "internetMessageHeaders" not in select:
+            del node["internetMessageHeaders"]
+        if "chatType" in node:
+            for field in ("members", "lastMessagePreview"):
+                if field in node and field not in expand:
+                    del node[field]
+        body = node.get("body")
+        is_html = isinstance(body, dict) and body.get("contentType") == "html"
+        if text_body and "conversationId" in node and is_html:
+            node["body"] = {"contentType": "text", "content": re.sub(r"<[^>]+>", "", body["content"])}
+        for child in node.values():
+            _strip(child, select, expand, text_body)
+
+
+def _shape(request: httpx.Request, answer: httpx.Response) -> httpx.Response:
+    """Drop on-request fields the caller did not ask for from a 200 JSON answer, as Graph does."""
+    if answer.status_code != 200 or "json" not in answer.headers.get("content-type", ""):
+        return answer
+    try:
+        data = json.loads(answer.content)
+    except ValueError:
+        return answer
+    text_body = 'outlook.body-content-type="text"' in request.headers.get("Prefer", "")
+    _strip(data, _names(request, "$select"), _names(request, "$expand"), text_body)
+    return httpx.Response(200, json=data, headers={k: v for k, v in answer.headers.items()
+                                                   if k.lower() not in ("content-length", "content-type")})
 
 
 def page(items: list, next_link: str | None = None, delta_link: str | None = None) -> dict:
@@ -100,6 +173,11 @@ def page(items: list, next_link: str | None = None, delta_link: str | None = Non
     if delta_link:
         out["@odata.deltaLink"] = delta_link
     return out
+
+
+def graph_removed(item_id: str, reason: str = "deleted") -> dict:
+    """A delta tombstone."""
+    return {"id": item_id, "@removed": {"reason": reason}}
 
 
 def _address(spec: str) -> dict:
@@ -136,7 +214,7 @@ def graph_message(
         "body": {"contentType": "html" if html else "text", "content": html or text},
         "from": who,
         "sender": who,
-        "toRecipients": [{"emailAddress": {"address": to}}],
+        "toRecipients": [{"emailAddress": {"name": to, "address": to}}],
         "ccRecipients": [],
         "receivedDateTime": sent_at,
         "sentDateTime": sent_at,
@@ -170,6 +248,8 @@ def graph_event(
     all_day: bool = False,
 ) -> dict:
     def stamp(value: str) -> dict:
+        if "T" not in value:
+            value += "T00:00:00"
         # Graph pads to seven fractional digits and states the zone separately
         return {"dateTime": value if "." in value else f"{value}.0000000", "timeZone": tz}
 
@@ -206,7 +286,10 @@ def graph_chat(
     last_text: str = "hi",
     last_from: str = "u-alice",
     last_at: str = "2026-10-05T10:00:00Z",
+    me: tuple[str, str, str] = ("Me", "me@orbit.test", "u-me"),
 ) -> dict:
+    """`me` is the signed-in user (name, email, user id); Graph lists them among the members too."""
+    members = (*members, *(() if any(m[2] == me[2] for m in members) else (me,)))
     names = {uid: name for name, _, uid in members}
     return {
         "id": cid,
@@ -268,20 +351,34 @@ def graph_item(
     modified: str = "2026-10-05T10:00:00Z",
     shared_by: str | None = None,
     web_url: str | None = None,
+    folder: bool = False,
+    child_count: int = 3,
+    drive_id: str = "d-me",
+    remote_drive_id: str = "d-remote",
 ) -> dict:
+    facet: dict[str, Any] = (
+        {"folder": {"childCount": child_count}} if folder else {"file": {"mimeType": mime}}
+    )
     item: dict[str, Any] = {
         "id": iid,
         "name": name,
         "size": size,
-        "file": {"mimeType": mime},
+        **facet,
+        "parentReference": {"driveId": drive_id, "id": "root-id", "path": "/drive/root:"},
         "createdDateTime": modified,
         "lastModifiedDateTime": modified,
         "lastModifiedBy": {"user": {"displayName": "Alice", "email": "alice@acme.com"}},
         "webUrl": web_url or f"https://acme-my.sharepoint.com/personal/x/{iid}",
     }
     if shared_by:
+        # a shared item is read from the OWNER's drive: /drives/{remote driveId}/items/{remote id}
         item["remoteItem"] = {
             "id": f"remote-{iid}",
+            "name": name,
+            "size": size,
+            **facet,
+            "parentReference": {"driveId": remote_drive_id, "id": "remote-root"},
+            "webUrl": item["webUrl"],
             "shared": {"owner": {"user": {"displayName": shared_by}}, "sharedDateTime": modified},
         }
     return item
@@ -289,5 +386,5 @@ def graph_item(
 
 __all__ = [
     "FakeGraph", "GraphTokens", "body_of", "graph_chat", "graph_chat_message", "graph_error",
-    "graph_event", "graph_item", "graph_message", "page",
+    "graph_event", "graph_item", "graph_message", "graph_removed", "page", "query_of",
 ]
