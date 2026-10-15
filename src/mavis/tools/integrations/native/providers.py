@@ -6,6 +6,7 @@ poller or connect_flow (they import this module)."""
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -172,6 +173,7 @@ class ProviderSpec:
 
 
 PROVIDERS: dict[str, ProviderSpec] = {}
+_HOOK_PATH = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*:[A-Za-z_]\w*")
 _MAX_ID = 16
 
 
@@ -190,6 +192,14 @@ def register(spec: ProviderSpec) -> ProviderSpec:
             raise ValueError(f"{sorted(c.value for c in clash)} already belong to {other.id}")
     if spec.toolkits and not {c.value for c in spec.capabilities} <= spec.toolkits:
         raise ValueError("toolkits must include every capability value (ConnectFlow passes capability.value)")
+    stray = set(spec.pollers) - set(spec.capabilities)
+    if stray:
+        raise ValueError(f"provider {spec.id} has pollers for capabilities it does not own: "
+                         f"{sorted(c.value for c in stray)}")
+    for capability, path in spec.pollers.items():
+        if not isinstance(path, str) or not _HOOK_PATH.fullmatch(path):
+            raise ValueError(f"provider {spec.id} poller for {capability.value} must be a 'module:function' "
+                             "string")
     PROVIDERS[spec.id] = spec
     return spec
 

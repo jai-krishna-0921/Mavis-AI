@@ -99,3 +99,22 @@ def test_anchor_capability_falls_back_to_first_when_family_off():
     off = spec(capabilities=(Capability.SANDBOX, Capability.NOTION), family_enabled=lambda: False)
     assert off.anchor_capability() is Capability.SANDBOX
     assert spec(anchor=None).anchor_capability() is Capability.NOTION
+
+
+def test_a_poller_for_a_capability_the_spec_does_not_own_is_refused():
+    bad = spec(pollers={Capability.CALENDAR: "pkg.mod:fn"})
+    with pytest.raises(ValueError, match="poller"):
+        providers.register(bad)
+    assert providers.spec_of("testing") is None
+
+
+@pytest.mark.parametrize("path", ["nocolon", "pkg.mod:", ":fn", "pkg mod:fn", "a:b:c", "pkg..mod:fn", ""])
+def test_a_malformed_poller_path_is_refused(path):
+    with pytest.raises(ValueError, match="module:function"):
+        providers.register(spec(pollers={Capability.SANDBOX: path}))
+    assert providers.spec_of("testing") is None
+
+
+def test_a_well_formed_poller_path_is_accepted():
+    with providers.registered(spec(pollers={Capability.SANDBOX: "pkg.mod:fn_2"})):
+        assert providers.spec_of("testing") is not None
