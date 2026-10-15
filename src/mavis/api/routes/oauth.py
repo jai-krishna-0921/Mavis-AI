@@ -70,11 +70,33 @@ def _resolve(provider: str) -> tuple[NativeProvider, providers.ProviderSpec] | N
 
 def _text(spec: providers.ProviderSpec, kind: str, **extra: str) -> str | None:
     """The user-facing line for an outcome kind: the vendor's own wording, else the shared default."""
-    template = spec.user_text.get(kind) or _USER_TEXT.get(kind)
-    if template is None:
-        return None
-    link = (spec.admin_link() if spec.admin_link else None) or ""
-    return template.format(name=spec.display_name, admin_link=link, **extra)
+    link = ""
+    if spec.admin_link:
+        try:
+            link = str(spec.admin_link() or "")
+        except Exception as exc:  # a vendor hook must never fail the public callback
+            log.warning("oauth.admin_link_failed", provider=spec.id, error=type(exc).__name__)
+    own, shared = spec.user_text.get(kind), _USER_TEXT.get(kind)
+    for template in (own, shared):
+        if template is None:
+            continue
+        try:
+            return template.format(name=spec.display_name, admin_link=link, **extra)
+        except (KeyError, IndexError, ValueError):  # an unknown placeholder or stray brace in a spec's copy
+            log.warning("oauth.user_text_invalid", provider=spec.id, kind=kind)
+    return None
+
+
+def _denial_kind(spec: providers.ProviderSpec, error: str | None, description: str | None) -> str:
+    """The outcome key for a denied return; "denied" whenever the vendor hook fails or answers oddly."""
+    if spec.denial_kind is None:
+        return "denied"
+    try:
+        kind = spec.denial_kind(error, description)
+    except Exception as exc:
+        log.warning("oauth.denial_kind_failed", provider=spec.id, error=type(exc).__name__)
+        return "denied"
+    return kind if isinstance(kind, str) and kind.isidentifier() else "denied"
 
 
 async def _nothing_allowed(integrations: IntegrationProvider, provider: NativeProvider, user_id: int) -> bool:
@@ -93,17 +115,11 @@ def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
     return HTMLResponse(_PAGE.format(title=html.escape(title), body=html.escape(body)), status_code=status)
 
 
-def _clean(value: object, limit: int = 60) -> str:
-    """Third-party or user-chosen text for a page or a message: one line, no control characters, bounded."""
-    text = "".join(ch if ch.isprintable() else " " for ch in str(value or ""))
-    return " ".join(text.split())[:limit]
-
-
 async def _mavis_name(user_id: int) -> str:
     """The Telegram display name of the Mavis account being linked (never an id, token or secret)."""
     async with dbm.Session() as s:
         user = await s.get(User, user_id)
-    return _clean(user.name) if user is not None and user.name else "a Mavis account"
+    return providers.clean_text(user.name) if user is not None and user.name else "a Mavis account"
 
 
 async def _tell(user_id: int, text: str) -> None:
@@ -184,7 +200,7 @@ async def oauth_callback(
     if error or not code or not state:
         # Denied, or a malformed return. We learn whose it was only from a valid state; never echo `error`.
         origin = None
-        kind = spec.denial_kind(error, error_description) if spec.denial_kind else "denied"
+        kind = _denial_kind(spec, error, error_description)
         if state:
             try:
                 user_id, _, origin = await oauth.deny_with_origin(state, native, session_hash)

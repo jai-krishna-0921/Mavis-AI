@@ -4,6 +4,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
+import structlog.testing
 
 from mavis.domain.policy import Capability
 from mavis.tools.integrations.native.base import NativeProvider
@@ -89,6 +90,22 @@ async def test_exchange_failure_is_a_fixed_error(oauth, vendor, isolated_registr
     with pytest.raises(OAuthError) as e:
         await oauth.complete(state, "c", T)
     assert e.value.kind == "exchange_failed"
+
+
+async def test_a_crashing_exchange_hook_becomes_a_fixed_error_without_vendor_text(
+        oauth, vendor, isolated_registry):
+    async def boom(req):
+        raise KeyError("AADSTS-secret-vendor-claim")
+
+    isolated_registry.register(fake(exchange=boom))
+    state = q(await oauth.authorize_url(1, T))["state"]
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(OAuthError) as e:
+            await oauth.complete(state, "c", T)
+    assert e.value.kind == "exchange_failed" and e.value.user_id == 1
+    assert "secret" not in str(e.value) and e.value.__cause__ is None and e.value.__suppress_context__
+    [warn] = [x for x in logs if x["event"] == "oauth.exchange_hook_failed"]
+    assert warn["error"] == "KeyError" and "secret" not in str(logs)
 
 
 async def test_account_taken_uses_the_spec_key(oauth, vendor, isolated_registry):

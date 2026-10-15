@@ -154,3 +154,45 @@ async def test_internal_and_unknown_providers_are_404(web, isolated_registry):
     for name in ("slack_bot", "github"):
         assert (await c.get(f"/oauth/{name}/callback", params={"code": "c", "state": "s"})).status_code == 404
         assert (await c.get(f"/oauth/{name}/go", params={"t": "x"})).status_code == 404
+
+
+async def test_a_raising_denial_hook_falls_back_to_plain_denied(web, oauth, isolated_registry):
+    def boom(error, description):
+        raise KeyError("vendor-claim")
+
+    isolated_registry.register(fake(denial_kind=boom))
+    c, _ = web
+    state = query(await oauth.authorize_url(5, T))["state"]
+    with structlog.testing.capture_logs() as logs:
+        r = await c.get("/oauth/testing/callback", params={"error": "access_denied", "state": state})
+    assert r.status_code == 400 and "Testco was not connected" in r.text
+    [text] = await outbox()
+    assert text.startswith("Testco sign-in was cancelled")
+    [warn] = [e for e in logs if e["event"] == "oauth.denial_kind_failed"]
+    assert warn["error"] == "KeyError" and "vendor-claim" not in str(logs)
+
+
+async def test_an_unknown_placeholder_in_spec_copy_falls_back_to_the_default_text(
+        web, oauth, isolated_registry):
+    isolated_registry.register(fake(user_text={"admin_consent": "{name} needs {nope} approval"},
+                                    denial_kind=lambda e, d: "admin_consent"))
+    c, _ = web
+    state = query(await oauth.authorize_url(5, T))["state"]
+    r = await c.get("/oauth/testing/callback", params={"error": "access_denied", "state": state})
+    assert r.status_code == 400 and "Testco was not connected" in r.text and "{nope}" not in r.text
+    [text] = await outbox()
+    assert "{nope}" not in text and text
+
+
+async def test_a_failing_admin_link_never_raises_on_the_callback(web, oauth, isolated_registry):
+    def boom():
+        raise RuntimeError("no tenant")
+
+    isolated_registry.register(fake(admin_link=boom))
+    c, _ = web
+    state = query(await oauth.authorize_url(5, T))["state"]
+    r = await c.get("/oauth/testing/callback", params={
+        "error": "access_denied", "error_description": "AADSTS65001", "state": state})
+    assert r.status_code == 400
+    [text] = await outbox()
+    assert "https://" not in text and "approve Mavis AI first" in text

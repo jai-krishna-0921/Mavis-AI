@@ -25,6 +25,7 @@ from datetime import timedelta
 from urllib.parse import urlencode
 
 import httpx
+import structlog
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import delete
@@ -61,6 +62,8 @@ from mavis.tools.integrations.native.tokens import (  # noqa: F401  (token URLs 
     NativeTokenStore,
     UserNotAdmitted,
 )
+
+log = structlog.get_logger(__name__)
 
 STATE_TTL_S = 600
 
@@ -302,6 +305,9 @@ class NativeOAuth:
         try:
             ex = await spec.exchange(req)
         except (OAuthError, ExchangeFailed):
+            raise OAuthError("exchange_failed", user_id=st.user_id, pending_id=pending) from None
+        except Exception as exc:  # a vendor hook (parsing a claim, say) must not 500 the public callback
+            log.warning("oauth.exchange_hook_failed", provider=spec.id, error=type(exc).__name__)
             raise OAuthError("exchange_failed", user_id=st.user_id, pending_id=pending) from None
         key = spec.account_key(ex.account)
         owner = await self.tokens.owner_of_key(provider, key[:255]) if key else None
