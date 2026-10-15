@@ -284,7 +284,7 @@ async def test_the_database_refuses_a_second_user_for_the_same_account_even_if_t
     async def blind(*a, **k):  # the race: both callbacks passed the owner check before either saved
         return None
 
-    monkeypatch.setattr(tokens, "owner_of", blind)
+    monkeypatch.setattr(tokens, "owner_of_key", blind)
     with pytest.raises(OAuthError) as exc:
         await oauth.complete(query(await oauth.authorize_url(6, G, 2))["state"], "c", G)
     assert exc.value.kind == "account_taken" and exc.value.user_id == 6 and exc.value.pending_id == 2

@@ -17,8 +17,8 @@ def test_google_spec_matches_the_old_constants():
     assert g.auth_url == oauth.GOOGLE_AUTH_URL and g.token_url == tokens.GOOGLE_TOKEN_URL
     assert g.revoke_url == oauth.GOOGLE_REVOKE_URL and g.pkce is True
     assert g.scope_params[0].scopes == oauth.GOOGLE_SCOPES
-    assert g.extra_auth_params == {"access_type": "offline", "prompt": "consent",
-                                   "include_granted_scopes": "true"}
+    assert g.extra_auth_params == {"response_type": "code", "access_type": "offline",
+                                   "prompt": "consent", "include_granted_scopes": "true"}
     assert g.gone_codes == frozenset({"invalid_grant"})
     assert g.capabilities == GOOGLE_CAPABILITIES and g.anchor is GOOGLE_ANCHOR
     assert g.account_key({"email": "A@B.com"}) == "a@b.com"

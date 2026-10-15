@@ -34,6 +34,7 @@ from mavis.config import get_settings
 from mavis.domain import timeutil
 from mavis.store import db as dbm
 from mavis.store.models import NativeOAuthState
+from mavis.tools.integrations.native import providers
 from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.builtin import (  # noqa: F401  (re-exported: moved to builtin)
     GOOGLE_AUTH_URL,
@@ -47,7 +48,13 @@ from mavis.tools.integrations.native.builtin import (  # noqa: F401  (re-exporte
     SLACK_USER_SCOPES,
 )
 from mavis.tools.integrations.native.http import TOKEN_BYTES, ResponseTooLarge, send_capped
-from mavis.tools.integrations.native.tokens import (
+from mavis.tools.integrations.native.providers import (
+    AfterSave,
+    ExchangeFailed,
+    ExchangeRequest,
+    RevokeRequest,
+)
+from mavis.tools.integrations.native.tokens import (  # noqa: F401  (token URLs re-exported)
     GOOGLE_TOKEN_URL,
     SLACK_TOKEN_URL,
     AccountTaken,
@@ -190,12 +197,8 @@ async def handoff(token: str, provider: NativeProvider, *, consume: bool) -> dic
 
 
 def configured(provider: NativeProvider) -> bool:
-    s = get_settings()
-    if not s.native_token_kek:
-        return False
-    if provider is NativeProvider.GOOGLE:
-        return bool(s.google_oauth_client_id and s.google_oauth_client_secret)
-    return bool(s.slack_client_id and s.slack_client_secret)
+    spec = providers.spec_of(provider)
+    return spec is not None and not spec.internal and providers.configured(spec)
 
 
 class NativeOAuth:
@@ -223,19 +226,20 @@ class NativeOAuth:
                                    expires_at=now + timedelta(seconds=STATE_TTL_S)))
             await s.commit()
         state = sign_state(user_id, provider.value, verifier, nonce=nonce)
-        st = get_settings()
-        if provider is NativeProvider.GOOGLE:
-            q = {"response_type": "code", "client_id": st.google_oauth_client_id,
-                 "redirect_uri": redirect_uri(provider), "scope": " ".join(GOOGLE_SCOPES),
-                 "state": state, "access_type": "offline", "prompt": "consent",
-                 "include_granted_scopes": "true",
-                 "code_challenge": _b64(hashlib.sha256(verifier.encode()).digest()),
-                 "code_challenge_method": "S256"}
-            return f"{GOOGLE_AUTH_URL}?{urlencode(q)}"
-        q = {"client_id": st.slack_client_id, "redirect_uri": redirect_uri(provider),
-             "scope": ",".join(SLACK_BOT_SCOPES), "user_scope": ",".join(SLACK_USER_SCOPES),
-             "state": state}
-        return f"{SLACK_AUTH_URL}?{urlencode(q)}"
+        spec = providers.spec_of(provider)
+        client_id, _ = providers.client_credentials(spec)
+        extra = dict(spec.extra_auth_params)
+        # response_type leads the query (Google's URL has always been built that way)
+        q: dict[str, str] = {"response_type": extra.pop("response_type")} if "response_type" in extra else {}
+        q["client_id"], q["redirect_uri"] = client_id, redirect_uri(provider)
+        for p in spec.scope_params:
+            q[p.name] = p.sep.join(p.scopes)
+        q["state"] = state
+        q.update(extra)
+        if spec.pkce:
+            q["code_challenge"] = _b64(hashlib.sha256(verifier.encode()).digest())
+            q["code_challenge_method"] = "S256"
+        return f"{spec.auth_url}?{urlencode(q)}"
 
     # --- finishing -----------------------------------------------------------------------------------
 
@@ -288,35 +292,35 @@ class NativeOAuth:
 
     async def _complete(self, st: StatePayload, pending: int | None, code: str, provider: NativeProvider,
                         origin: str | None) -> Completed:
-        bot = None
+        spec = providers.spec_of(provider)
+        if spec is None or spec.exchange is None:
+            raise OAuthError("not_configured")
+        client_id, client_secret = providers.client_credentials(spec)
+        req = ExchangeRequest(post=self._post, code=code, verifier=st.verifier if spec.pkce else "",
+                              redirect_uri=redirect_uri(provider), client_id=client_id,
+                              client_secret=client_secret)
         try:
-            if provider is NativeProvider.GOOGLE:
-                account, access, refresh, expires = await self._google(code, st.verifier)
-            else:
-                account, access, refresh, expires = await self._slack(code)
-                bot = account.pop("_bot", None)  # the workspace bot token travels beside the user's
-        except OAuthError as exc:
-            raise OAuthError(exc.kind, user_id=st.user_id, pending_id=pending) from None
-        key, value = (("email", account.get("email")) if provider is NativeProvider.GOOGLE
-                      else ("user_id", account.get("user_id")))
-        team = None if provider is NativeProvider.GOOGLE else str(account.get("team_id") or "")
-        owner = await self.tokens.owner_of(provider, key, value, team) if value else None
+            ex = await spec.exchange(req)
+        except (OAuthError, ExchangeFailed):
+            raise OAuthError("exchange_failed", user_id=st.user_id, pending_id=pending) from None
+        key = spec.account_key(ex.account)
+        owner = await self.tokens.owner_of_key(provider, key[:255]) if key else None
         if owner is not None and owner != st.user_id:
             raise OAuthError("account_taken", user_id=st.user_id, pending_id=pending)
         try:
-            await self.tokens.save(st.user_id, provider, account=account, access_token=access,
-                                   refresh_token=refresh, expires_at=expires)
+            await self.tokens.save(st.user_id, provider, account=ex.account, access_token=ex.access_token,
+                                   refresh_token=ex.refresh_token, expires_at=ex.expires_at)
         except AccountTaken:  # the check above can lose a race; the database constraint cannot
             raise OAuthError("account_taken", user_id=st.user_id, pending_id=pending) from None
         except UserNotAdmitted:  # banned or deleted while the consent screen was open
             raise OAuthError("not_allowed") from None
-        if bot is not None:
+        if spec.after_save is not None:
             try:
-                await self._save_bot(st.user_id, bot)
+                await spec.after_save(AfterSave(self._post, self.tokens, st.user_id, ex))
             except UserNotAdmitted:
                 await self.tokens.delete(st.user_id, provider)
                 raise OAuthError("not_allowed") from None
-        return Completed(st.user_id, provider, pending, account, origin)
+        return Completed(st.user_id, provider, pending, ex.account, origin)
 
     async def _post(self, url: str, **kw) -> dict:
         try:
@@ -331,103 +335,23 @@ class NativeOAuth:
             raise OAuthError("exchange_failed")
         return body
 
-    async def _google(self, code: str, verifier: str):
-        st = get_settings()
-        body = await self._post(GOOGLE_TOKEN_URL, data={
-            "grant_type": "authorization_code", "code": code,
-            "redirect_uri": redirect_uri(NativeProvider.GOOGLE),
-            "client_id": st.google_oauth_client_id, "client_secret": st.google_oauth_client_secret,
-            "code_verifier": verifier})
-        access = body.get("access_token")
-        if not isinstance(access, str) or not access:
-            raise OAuthError("exchange_failed")
-        info = await self._post(GOOGLE_USERINFO_URL, method="GET",
-                                headers={"Authorization": f"Bearer {access}"})
-        email = info.get("email")
-        if not isinstance(email, str) or not email:
-            raise OAuthError("exchange_failed")
-        scope = body.get("scope")
-        account = {"email": email.lower(), "sub": str(info.get("sub") or ""),
-                   "scopes": sorted(scope.split()) if isinstance(scope, str) else []}
-        refresh = body.get("refresh_token") if isinstance(body.get("refresh_token"), str) else None
-        return account, access, refresh, _expiry(body)
-
-    async def _slack(self, code: str):
-        st = get_settings()
-        body = await self._post(SLACK_TOKEN_URL, data={
-            "code": code, "redirect_uri": redirect_uri(NativeProvider.SLACK),
-            "client_id": st.slack_client_id, "client_secret": st.slack_client_secret})
-        authed = body.get("authed_user")
-        team = body.get("team")
-        if body.get("ok") is not True or not isinstance(authed, dict):
-            raise OAuthError("exchange_failed")
-        access = authed.get("access_token")
-        if not isinstance(access, str) or not access or not authed.get("id"):
-            raise OAuthError("exchange_failed")
-        scope = authed.get("scope")
-        team = team if isinstance(team, dict) else {}
-        account = {"team_id": str(team.get("id") or ""), "team_name": str(team.get("name") or ""),
-                   "user_id": str(authed["id"]),
-                   "scopes": sorted(scope.replace(",", " ").split()) if isinstance(scope, str) else []}
-        refresh = authed.get("refresh_token") if isinstance(authed.get("refresh_token"), str) else None
-        bot_token = body.get("access_token")
-        if isinstance(bot_token, str) and bot_token and body.get("bot_user_id"):
-            bot_scope = body.get("scope")
-            account["_bot"] = {
-                "token": bot_token,
-                "account": {"team_id": account["team_id"], "team_name": account["team_name"],
-                            "user_id": account["user_id"], "bot_user_id": str(body["bot_user_id"]),
-                            "scopes": sorted(bot_scope.replace(",", " ").split())
-                            if isinstance(bot_scope, str) else []},
-            }
-        return account, access, refresh, _expiry(authed)
-
-    async def _save_bot(self, user_id: int, bot: dict) -> None:
-        """Keep the bot token sealed beside the user grant, keyed by team and the authorizing user, and note
-        the user's DM with the bot (so events in it are never read as third-party records). Best effort: a
-        failure leaves Slack reading working without the bot."""
-        account = dict(bot["account"])
-        try:
-            r = await send_capped(self._http, "POST", SLACK_OPEN_DM_URL, max_bytes=TOKEN_BYTES,
-                                  headers={"Authorization": f"Bearer {bot['token']}"},
-                                  json={"users": account["user_id"]})
-            data = r.json()
-            channel = (data.get("channel") or {}).get("id") if isinstance(data, dict) else None
-            if isinstance(channel, str) and channel:
-                account["dm"] = channel
-        except (ResponseTooLarge, httpx.HTTPError, ValueError):
-            pass
-        try:
-            await self.tokens.save(user_id, NativeProvider.SLACK_BOT, account=account,
-                                   access_token=bot["token"], refresh_token=None, expires_at=None)
-        except AccountTaken:
-            pass
-
     # --- revoke --------------------------------------------------------------------------------------
 
     async def revoke(self, user_id: int, provider: NativeProvider) -> None:
         """Tell the vendor to drop the grant, then forget it locally. A vendor failure never blocks the
         local delete (the token would expire or stay revoked on its own)."""
+        spec = providers.spec_of(provider)
         secrets_ = await self.tokens.reveal(user_id, provider)
-        if secrets_ is not None:
+        if secrets_ is not None and spec is not None and spec.revoke is not None:
             access, refresh = secrets_
+
+            async def raw(url: str, *, method: str = "POST", **kw):
+                return await send_capped(self._http, method, url, max_bytes=TOKEN_BYTES, **kw)
+
             try:
-                if provider is NativeProvider.GOOGLE:
-                    await send_capped(self._http, "POST", GOOGLE_REVOKE_URL, max_bytes=TOKEN_BYTES,
-                                      data={"token": refresh or access})
-                else:
-                    await send_capped(self._http, "POST", SLACK_REVOKE_URL, max_bytes=TOKEN_BYTES,
-                                      headers={"Authorization": f"Bearer {access}"})
+                await spec.revoke(RevokeRequest(post=raw, access_token=access, refresh_token=refresh))
             except (ResponseTooLarge, httpx.HTTPError):
                 pass
         await self.tokens.delete(user_id, provider)
-        if provider is NativeProvider.SLACK:
-            await self.tokens.delete(user_id, NativeProvider.SLACK_BOT)
-
-
-def _expiry(body: dict):
-    try:
-        ttl = int(body["expires_in"]) if body.get("expires_in") else None
-    except (TypeError, ValueError):
-        ttl = None
-    return timeutil.now() + timedelta(seconds=ttl) if ttl else None
+        for companion in (spec.companions if spec is not None else ()):
+            await self.tokens.delete(user_id, NativeProvider(companion))
