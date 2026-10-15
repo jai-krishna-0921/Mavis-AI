@@ -24,6 +24,7 @@ from mavis.domain.errors import (
 )
 from mavis.domain.integrations import ToolResult, UserRef
 from mavis.domain.localtime import provider_args
+from mavis.domain.policy import Capability
 from mavis.tools.integrations.actions import (
     ACTIONS,
     CAPABILITY_PURPOSE,
@@ -65,7 +66,11 @@ async def call_action(
     aliases = serving(spec.capability)
     await cache.ensure_any(ctx.user_id, aliases, CAPABILITY_PURPOSE[spec.capability])
     result = await provider.execute(UserRef(user_id=ctx.user_id), action, provider_args(args))
-    if not result.ok and not await cache.is_active_any(ctx.user_id, aliases, fresh=True):
+    if not result.ok and result.source:  # failed on the Microsoft side of a merged call
+        source = Capability(result.source)
+        if not await cache.is_active_any(ctx.user_id, (source,), fresh=True):
+            raise ConnectionRequired(source, REVOKED_REASON, revoked=True)
+    elif not result.ok and not await cache.is_active_any(ctx.user_id, aliases, fresh=True):
         states = await cache.status(ctx.user_id)  # just fetched fresh above
         needs = failed_alias(states, aliases) or spec.capability
         raise ConnectionRequired(needs, REVOKED_REASON, revoked=True)
@@ -112,10 +117,12 @@ def failed_action(action: str, result: ToolResult) -> ActionFailed:
     # only one of OUR argument names is ever named to the user, never provider text
     leaf = (field or "").split(".")[-1].split("[")[0]
     field = leaf if leaf in spec.args_model.model_fields else None
-    name = display_name(spec.capability)
+    source = Capability(result.source) if result.source else None
+    name = display_name(source or spec.capability)
     reason = failure_text(kind, name, field)
     detail = (result.error or "no detail").strip()
-    return ActionFailed(f"{action} failed ({kind.value}): {detail}", reason=reason, kind=kind, field=field)
+    return ActionFailed(f"{action} failed ({kind.value}): {detail}", reason=reason, kind=kind, field=field,
+                        capability=source)
 
 
 async def action_data(

@@ -24,6 +24,7 @@ from mavis.initiative.untrusted import wrap_untrusted
 from mavis.store.repo import attention as repo
 from mavis.store.repo import users
 from mavis.timers.service import WakeupService
+from mavis.tools.integrations.actions import serving
 
 log = structlog.get_logger()
 
@@ -73,7 +74,8 @@ class AttentionBrief:
         rows = await repo.recent(user_id, timeutil.now() - BRIEF_LOOKBACK, origin=repo.ORIGIN_LIVE, limit=100)
         if not rows:  # a quiet night: say so, but only to users whose Gmail is actually watched
             polling = (await users.get_state(user_id)).get("polling") or {}
-            return [BriefItem(NOTHING, True)] if polling.get(Capability.GMAIL.value) else []
+            watched = any(polling.get(c.value) for c in serving(Capability.GMAIL))  # Gmail or Outlook
+            return [BriefItem(NOTHING, True)] if watched else []
         waiting = _waiting(rows)
         items = [BriefItem(f"Email: {_line(r)}", False) for r in waiting[:MAX_BRIEF]]
         if not waiting:

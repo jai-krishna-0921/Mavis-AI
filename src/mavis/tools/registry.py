@@ -622,10 +622,11 @@ class ToolRegistry:
             raise
         except ActionFailed as exc:
             log.warning("tool.action_failed", tool=tool.name, kind=getattr(exc.kind, "value", None))
-            if (exc.kind is FailureKind.PERMISSION_MISSING and tool.requires is not None
+            offered = exc.capability or tool.requires
+            if (exc.kind is FailureKind.PERMISSION_MISSING and offered is not None
                     and self.permission_missing is not None):
                 try:
-                    await self.permission_missing(user_id, tool.requires)
+                    await self.permission_missing(user_id, offered)
                 except Exception as offer_exc:  # noqa: BLE001 - the offer is a courtesy
                     log.warning("tool.permission_offer_failed", tool=tool.name,
                                 error=type(offer_exc).__name__)

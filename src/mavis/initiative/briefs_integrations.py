@@ -14,6 +14,7 @@ from mavis.domain.integrations import ConnectionState, UserRef
 from mavis.domain.policy import Capability
 from mavis.initiative.email_triage import AUTOMATED, classify
 from mavis.initiative.routines import BriefItem
+from mavis.tools.integrations.actions import serving
 from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.connections import ConnectionCache, is_auth_error
 from mavis.tools.integrations.normalize import (
@@ -36,11 +37,14 @@ async def usable(
     cache: ConnectionCache, user_id: int, capability: Capability, on_failed: OnFailed | None,
     *, fresh: bool = False,
 ) -> bool:
-    """Is the connection active? A FAILED one (expired or revoked token) triggers the reconnect prompt."""
-    state = (await cache.status(user_id, fresh=fresh)).get(capability.value)
-    if state is ConnectionState.FAILED:
-        await _prompt(on_failed, user_id, capability)
-    return state is ConnectionState.ACTIVE
+    """Is any account serving this capability active (Gmail or Outlook for mail)? A FAILED one (expired or
+    revoked token) triggers the reconnect prompt for that account."""
+    states = await cache.status(user_id, fresh=fresh)
+    aliases = serving(capability)
+    for alias in aliases:
+        if states.get(alias.value) is ConnectionState.FAILED:
+            await _prompt(on_failed, user_id, alias)
+    return any(states.get(a.value) is ConnectionState.ACTIVE for a in aliases)
 
 
 async def _prompt(on_failed: OnFailed | None, user_id: int, capability: Capability) -> None:
@@ -63,6 +67,17 @@ async def auth_failed(
         await usable(cache, user_id, capability, on_failed, fresh=True)
     except Exception as exc:  # noqa: BLE001
         log.warning("brief.status_failed", user_id=user_id, error=type(exc).__name__)
+
+
+def _account(raw: dict) -> str:
+    """With several accounts connected each item says which one it came from."""
+    return f" [{raw['account']}]" if raw.get("account") else ""
+
+
+def _notes(data: object) -> list[str]:
+    """Which account could not be reached (a merged read answers with the others)."""
+    notes = data.get("notes") if isinstance(data, dict) else None
+    return [n for n in notes if isinstance(n, str)] if isinstance(notes, list) else []
 
 
 class CalendarBrief:
@@ -91,16 +106,18 @@ class CalendarBrief:
         if not res.ok:
             await auth_failed(self.cache, user_id, Capability.CALENDAR, res.error, self.on_failed)
             return None
-        events = [normalize_calendar_event(e) for e in extract_calendar_items(res.data)]
-        if not events:
-            return CALENDAR_EMPTY
+        raw = extract_calendar_items(res.data)
+        notes = _notes(res.data)
+        if not raw:
+            return "\n".join([CALENDAR_EMPTY, *notes])
         lines = []
-        for e in events:
+        for r in raw:
+            e = normalize_calendar_event(r)
             begins = to_datetime(e["start"])
             when = f"{begins.astimezone(tz):%H:%M}" if begins else "all day"
             who = f" (with {', '.join(e['attendees'])})" if e["attendees"] else ""
-            lines.append(f"- {when} {e['summary']}{who}")
-        return "Calendar today:\n" + "\n".join(lines)
+            lines.append(f"- {when} {e['summary']}{who}{_account(r)}")
+        return "Calendar today:\n" + "\n".join([*lines, *notes])
 
     async def items(self, user_id: int, start: datetime, end: datetime) -> list[BriefItem]:
         """Phase 3 BriefSource protocol (routines.register_brief_source)."""
@@ -133,15 +150,17 @@ class InboxBrief:
             await auth_failed(self.cache, user_id, Capability.GMAIL, res.error, self.on_failed)
             return None
         worth = []
-        for m in (normalize_email(x) for x in extract_messages(res.data)):
+        notes = _notes(res.data)
+        for x in extract_messages(res.data):
+            m = normalize_email(x)
             security = "security" in classify(m)
             noise = m["list_unsubscribe"] or any(w in m["from_address"] for w in AUTOMATED)
             if security or not noise:
-                worth.append(m)
+                worth.append((m, x))
         if not worth:
-            return INBOX_EMPTY
-        lines = [f"- {m['from_name']}: {m['subject']}" for m in worth[:5]]
-        return f"Inbox: {len(worth)} unread worth a look\n" + "\n".join(lines)
+            return "\n".join([INBOX_EMPTY, *notes])
+        lines = [f"- {m['from_name']}: {m['subject']}{_account(x)}" for m, x in worth[:5]]
+        return "\n".join([f"Inbox: {len(worth)} unread worth a look", *lines, *notes])
 
     async def items(self, user_id: int, start: datetime, end: datetime) -> list[BriefItem]:
         """Phase 3 BriefSource protocol (routines.register_brief_source)."""

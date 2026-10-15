@@ -155,3 +155,36 @@ async def test_brief_auth_error_confirmed_failed_prompts():
     p.set_state(1, Capability.GMAIL, ConnectionState.FAILED)
     assert await brief.gather(1, NOW) is None  # cache is warm with ACTIVE: auth error then confirms
     assert prompts == [Capability.GMAIL]
+
+
+async def test_microsoft_only_user_gets_both_briefs_with_account_tags():
+    p = FakeProvider()
+    p.set_state(1, Capability.OUTLOOK, ConnectionState.ACTIVE)
+    p.set_state(1, Capability.OUTLOOK_CALENDAR, ConnectionState.ACTIVE)
+    when = {"dateTime": "2026-10-05T04:30:00Z"}
+    p.results["calendar.list"] = ToolResult(ok=True, data={"items": [
+        {"id": "e1", "summary": "Standup", "start": when, "account": "work: me@corp.test"}]})
+    p.results["mail.search"] = ToolResult(ok=True, data={"messages": [
+        {"messageId": "ms:1", "sender": "Bo <bo@corp.test>", "subject": "Budget", "labelIds": ["UNREAD"],
+         "messageTimestamp": "2026-10-05T01:00:00Z", "account": "work: me@corp.test"}]})
+    cal = await CalendarBrief(p, ConnectionCache(p), tz_of).gather(1, NOW)
+    inbox = await InboxBrief(p, ConnectionCache(p)).gather(1, NOW)
+    assert cal == "Calendar today:\n- 10:00 Standup [work: me@corp.test]"
+    assert "Budget [work: me@corp.test]" in inbox
+
+
+async def test_dual_user_brief_names_the_unreachable_account_and_prompts_a_failed_one():
+    p = FakeProvider()
+    p.set_state(1, Capability.GMAIL, ConnectionState.ACTIVE)
+    p.set_state(1, Capability.OUTLOOK, ConnectionState.FAILED)
+    p.results["mail.search"] = ToolResult(ok=True, data={"messages": [], "notes": [
+        "Could not reach work: me@corp.test (needs reconnecting)"]})
+    prompted = []
+
+    async def on_failed(user_id, capability):
+        prompted.append(capability)
+
+    text = await InboxBrief(p, ConnectionCache(p), on_failed=on_failed).gather(1, NOW)
+    assert text == (
+        "Inbox: nothing unread that needs you.\nCould not reach work: me@corp.test (needs reconnecting)")
+    assert prompted == [Capability.OUTLOOK]

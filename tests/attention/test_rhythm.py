@@ -251,3 +251,11 @@ async def test_quiet_night_says_nothing_needs_you_only_when_gmail_is_watched(use
     await users.update_state(user.id, {"polling": {"gmail": True}})
     assert await AttentionBrief().items(user.id, MORNING, MORNING) == [BriefItem(NOTHING, True)]
     assert NOTHING == "Inbox: nothing new that needs you."
+
+
+async def test_quiet_night_line_for_a_user_whose_outlook_is_watched(user, clock):
+    from mavis.store.repo import users
+
+    clock.set(MORNING)
+    await users.update_state(user.id, {"polling": {"outlook": True}})
+    assert await AttentionBrief().items(user.id, MORNING, MORNING) == [BriefItem(NOTHING, True)]

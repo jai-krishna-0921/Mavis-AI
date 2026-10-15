@@ -24,7 +24,7 @@ from typing import Any
 import structlog
 
 from mavis import bus
-from mavis.domain.errors import ActionFailed
+from mavis.domain.errors import ActionFailed, ConnectionRequired
 from mavis.domain.policy import RiskClass
 from mavis.domain.tasks import TaskOrigin
 from mavis.store.repo import tasks as tasks_repo
@@ -38,7 +38,7 @@ from mavis.tools.integrations.actions import (
     SheetUpdateArgs,
     TaskRefArgs,
 )
-from mavis.tools.integrations.base import IntegrationProvider
+from mavis.tools.integrations.base import IntegrationProvider, single
 from mavis.tools.integrations.connections import ConnectionCache
 from mavis.tools.integrations.normalize import extract_list, pick
 from mavis.tools.integrations.tools import action_data
@@ -119,6 +119,19 @@ async def modify_workspace_state(user_id: int, change: Callable[[dict], dict]) -
     return await users.modify_nested(user_id, STATE_KEY, change)
 
 
+class _GoogleOnly:
+    """The provider seen without the Google + Microsoft merge (mail.profile must name Google's address)."""
+
+    def __init__(self, provider: IntegrationProvider) -> None:
+        self._provider = provider
+
+    async def execute(self, user, action, args):
+        return await single(self._provider)(user, action, args)
+
+    def __getattr__(self, name: str):
+        return getattr(self._provider, name)
+
+
 async def my_email(
     ctx: ToolContext, *, provider: IntegrationProvider | None = None, cache: ConnectionCache | None = None
 ) -> str:
@@ -126,9 +139,13 @@ async def my_email(
     state = (await users.get_state(ctx.user_id)).get(STATE_KEY) or {}
     if isinstance(state, dict) and state.get("email"):
         return str(state["email"])
-    try:
-        data = await action_data(ctx, "mail.profile", NoArgs(), provider=provider, cache=cache)
-    except ActionFailed:
+    if provider is None:
+        from mavis.tools import integrations  # module lookup at call time (tests swap the singletons)
+
+        provider = integrations.get_provider()
+    try:  # Google's own profile: the merged one may answer with the user's Outlook address
+        data = await action_data(ctx, "mail.profile", NoArgs(), provider=_GoogleOnly(provider), cache=cache)
+    except (ActionFailed, ConnectionRequired):
         return ""
     email = str(pick(data, "emailAddress", "response_data.emailAddress", "data.response_data.emailAddress",
                      default="") or "").strip().lower()

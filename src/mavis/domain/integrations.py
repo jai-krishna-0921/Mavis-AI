@@ -38,6 +38,9 @@ class ToolResult(BaseModel):
     error: str | None = None  # provider detail: for the model (wrapped as untrusted) and logs, never the user
     error_kind: FailureKind | None = None  # set by the adapter; None means classify `error` as given
     error_field: str | None = None  # our argument name the failure was about, when the provider said so
+    # The capability value of the account a failure came from, when it is not the action's own (a merged
+    # mail or calendar call that failed on Microsoft's side): prompts and copy then name that account.
+    source: str | None = None
 
 
 _PROVIDER_ID = re.compile(r"mavis-(\d+)")

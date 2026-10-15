@@ -23,7 +23,7 @@ import httpx
 from pydantic import BaseModel
 
 from mavis.config import get_settings
-from mavis.domain.errors import ActionFailed, IntegrationError
+from mavis.domain.errors import ActionFailed, ConnectionRequired, IntegrationError
 from mavis.domain.messages import Outbound
 from mavis.domain.policy import RiskClass
 from mavis.domain.results import ToolOutput
@@ -32,6 +32,7 @@ from mavis.store.repo import outbox, users
 from mavis.store.repo import tasks as tasks_repo
 from mavis.tools import web
 from mavis.tools.integrations.actions import (
+    CAPABILITY_PURPOSE,
     CalendarCreateArgs,
     CalendarGetArgs,
     DocAppendArgs,
@@ -460,6 +461,8 @@ async def prepare_sender(ctx: ToolContext, args: BaseModel) -> Prepared:
         picked = await merge.resolve_sender(ctx.user_id, kind, getattr(args, "account", ""))
         if isinstance(picked, merging.AskWhich):
             return Prepared(refusal=picked.text)
+    if picked is not None and not picked.active:  # reconnect before a card is queued, never send from Gmail
+        raise ConnectionRequired(picked.capability, CAPABILITY_PURPOSE[picked.capability], revoked=True)
     return Prepared(note=f"From: {picked.address}") if picked is not None and picked.address else Prepared()
 
 

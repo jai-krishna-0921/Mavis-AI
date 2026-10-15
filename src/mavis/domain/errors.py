@@ -85,11 +85,14 @@ class ActionFailed(MavisError):
     """
 
     def __init__(self, message: str, reason: str = "", kind: FailureKind = FailureKind.UNKNOWN,
-                 field: str | None = None) -> None:
+                 field: str | None = None, capability: Capability | None = None) -> None:
         super().__init__(message)
         self.reason = reason or message
         self.kind = kind
         self.field = field
+        # The account the failure came from, when it is not the tool's own capability (Outlook behind a
+        # Gmail-declared tool): a permission offer then goes to that service.
+        self.capability = capability
 
 
 class NeedsUserDetail(ValueError):

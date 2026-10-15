@@ -24,6 +24,7 @@ from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.google import MIN_FREE_MINUTES
 from mavis.tools.integrations.native.graph import MS_ID_PREFIX
 from mavis.tools.integrations.native.microsoft_spec import PERSONAL_TENANT
+from mavis.tools.integrations.native.tokens import ACTIVE
 from mavis.tools.integrations.normalize import extract_calendar_items, extract_messages, to_datetime
 
 if TYPE_CHECKING:
@@ -58,6 +59,7 @@ class Account:
     capability: Capability
     address: str
     tag: str
+    active: bool = True  # False: a Microsoft grant that was revoked or stopped working
 
 
 @dataclass(frozen=True)
@@ -115,19 +117,21 @@ class MailCalendarMerge:
 
     # --- who is connected -------------------------------------------------------------------------
 
-    async def _microsoft(self, user_id: int, kind: str) -> tuple[Capability, str, bool] | None:
-        """(capability, address, personal) when the user has an ACTIVE Microsoft grant serving this kind."""
+    async def _microsoft(self, user_id: int, kind: str) -> tuple[Capability, str, bool, bool] | None:
+        """(capability, address, personal, active) when the user has a Microsoft grant serving this kind,
+        whatever its status: a revoked one still counts, so nothing silently falls back to Google."""
         spec = providers.spec_of("microsoft")
         if spec is None or not self.router._ready(MICROSOFT):
             return None
-        grant = await self.router._active_grant(user_id, MICROSOFT)
+        grant = await self.router.tokens.grant(user_id, MICROSOFT)
         cap = MERGED[kind][1]
         if grant is None or cap not in spec.caps_for(grant):
             return None
-        return cap, str(grant.account.get("mail") or ""), grant.account.get("tid") == PERSONAL_TENANT
+        return (cap, str(grant.account.get("mail") or ""), grant.account.get("tid") == PERSONAL_TENANT,
+                grant.status == ACTIVE)
 
     async def engaged(self, user_id: int, kind: str) -> bool:
-        """Does the user have an ACTIVE Microsoft account serving this kind (so the merge applies)?"""
+        """Does the user have a Microsoft account serving this kind (so the merge applies)?"""
         return await self._microsoft(user_id, kind) is not None
 
     async def _google(self, user_id: int, kind: str) -> tuple[Capability, str] | None:
@@ -152,7 +156,7 @@ class MailCalendarMerge:
         if g:
             out.append(Account(GOOGLE, g[0], g[1], f"{gword}: {g[1] or 'Google account'}"))
         if ms:
-            out.append(Account(MICROSOFT, ms[0], ms[1], f"{mword}: {ms[1] or 'Microsoft account'}"))
+            out.append(Account(MICROSOFT, ms[0], ms[1], f"{mword}: {ms[1] or 'Microsoft account'}", ms[3]))
         return out
 
     # --- defaults and sender choice ---------------------------------------------------------------
@@ -187,7 +191,9 @@ class MailCalendarMerge:
         accounts = await self.accounts(user_id, kind)
         tags = tuple(a.tag for a in accounts)
         listing = ", ".join(tags) or "none"
-        ask = ("Ask the user which to use (for example: Send from your work or personal email?), then call "
+        example = "Send from your work or personal email?" if kind == "mail" else \
+            "Put it on your work or personal calendar?"
+        ask = (f"Ask the user which to use (for example: {example}), then call "
                "again with account set to that address")
         if account_arg and account_arg.strip():
             hit = self._match(accounts, account_arg)
@@ -221,9 +227,18 @@ class MailCalendarMerge:
         return await self._read(user, kind, action, args)
 
     async def _run(self, user: UserRef, account: Account, action: str, args: dict) -> ToolResult:
-        if account.provider is MICROSOFT:
-            return await self.router.executors[MICROSOFT].execute(user, action, args)
-        return await self.router._execute_single(user, action, args)
+        if account.provider is not MICROSOFT:
+            return await self.router._execute_single(user, action, args)
+        executor = self.router.executors[MICROSOFT]
+        if not account.active:
+            result = ToolResult(ok=False, error_kind=FailureKind.AUTH, error=_MS_NOT_CONNECTED)
+        elif not executor.handles(action):
+            result = ToolResult(ok=False, error_kind=FailureKind.UNKNOWN,
+                                error=f"microsoft does not implement {action!r}")
+        else:
+            result = await executor.execute(user, action, args)
+        # which account a failure came from, so the tool layer names Microsoft, not Google
+        return result if result.ok else result.model_copy(update={"source": account.capability.value})
 
     # --- new items --------------------------------------------------------------------------------
 
@@ -232,6 +247,8 @@ class MailCalendarMerge:
         picked = await self.resolve_sender(user.user_id, kind, wanted if isinstance(wanted, str) else None)
         if isinstance(picked, AskWhich):
             return picked.result()
+        if not picked.active:  # chosen (or the default) but not usable: reconnect it, never send from Gmail
+            raise ConnectionRequired(picked.capability, _purpose(picked.capability), revoked=True)
         stored = await self._stored_default(user.user_id, kind) if wanted else None
         result = await self._run(user, picked, action, {k: v for k, v in args.items() if k != "account"})
         if result.ok and wanted and not stored:
@@ -246,8 +263,10 @@ class MailCalendarMerge:
         if not any(is_ms(i) for i in every):
             return None  # nothing Microsoft's: the single-provider path, untouched
         ms = await self._microsoft(user.user_id, kind)
-        if ms is None:  # never let a Microsoft id reach Google
-            return ToolResult(ok=False, error_kind=FailureKind.AUTH, error=_MS_NOT_CONNECTED)
+        if ms is None or not ms[3]:  # never let a Microsoft id reach Google
+            cap = MERGED[kind][1]
+            return ToolResult(ok=False, error_kind=FailureKind.AUTH, error=_MS_NOT_CONNECTED,
+                              source=cap.value)
         ms_args, g_args = dict(args), dict(args)
         for name in names:
             value = args.get(name)
@@ -255,7 +274,7 @@ class MailCalendarMerge:
                 ms_args[name] = [v for v in value if is_ms(v)]
                 g_args[name] = [v for v in value if not is_ms(v)]
         halves: list[tuple[Account | None, dict]] = []
-        ms_account = Account(MICROSOFT, ms[0], ms[1], "")
+        ms_account = Account(MICROSOFT, ms[0], ms[1], "", ms[3])
         if any(is_ms(i) for i in every):
             halves.append((ms_account, ms_args))
         if any(not is_ms(i) for i in every):
@@ -274,9 +293,12 @@ class MailCalendarMerge:
         accounts = await self.accounts(user.user_id, kind)
         if action == "mail.profile":
             default = await self._stored_default(user.user_id, kind)
-            first = next((a for a in accounts if a.provider.value == default), accounts[0])
+            usable = [a for a in accounts if a.active] or accounts
+            first = next((a for a in usable if a.provider.value == default), usable[0])
             return ToolResult(ok=True, data={"emailAddress": first.address,
                                              "accounts": [a.tag for a in accounts]})
+        if action in ("calendar.list", "calendar.find"):  # a calendar id belongs to one provider
+            accounts = _owner_of_calendar(accounts, args.get("calendar_id"))
         outs = await asyncio.gather(*(self._run(user, a, action, args) for a in accounts),
                                     return_exceptions=True)
         sides = list(zip(accounts, outs, strict=True))
@@ -290,29 +312,50 @@ class MailCalendarMerge:
         return ToolResult(ok=True, data=_combine(action, args, good, notes))
 
 
+def _owner_of_calendar(accounts: list[Account], calendar_id: Any) -> list[Account]:
+    """"primary" (or none) means every account's own calendar; any other id is Microsoft's when it carries
+    the ms: prefix and Google's otherwise. No owner connected: keep all, so the failure is reported."""
+    if not isinstance(calendar_id, str) or calendar_id in ("", "primary"):
+        return accounts
+    owner = MICROSOFT if is_ms(calendar_id) else GOOGLE
+    mine = [a for a in accounts if a.provider is owner]
+    return mine or accounts
+
+
+def _purpose(capability: Capability) -> str:
+    from mavis.tools.integrations.actions import CAPABILITY_PURPOSE  # actions has no dependency back here
+
+    return CAPABILITY_PURPOSE[capability]
+
+
 def _unreachable(account: Account, result: ToolResult) -> str:
     gone = result.error_kind in (FailureKind.AUTH, FailureKind.PERMISSION_MISSING)
     return f"Could not reach {account.tag} ({'needs reconnecting' if gone else 'temporarily unavailable'})"
 
 
 def _join_halves(results: list[ToolResult]) -> ToolResult:
-    ok = [r for r in results if r.ok]
-    bad = [r for r in results if not r.ok]
-    if not bad:
-        data: dict[str, Any] = {}
-        for r in ok:
-            for key, value in (r.data if isinstance(r.data, dict) else {}).items():
-                if key in _COUNTED and isinstance(value, int) and isinstance(data.get(key), int):
-                    data[key] += value
-                elif isinstance(value, list) and isinstance(data.get(key), list):
-                    data[key] = [*data[key], *value]
-                else:
-                    data.setdefault(key, value)
-        return ToolResult(ok=True, data=data)
-    first = bad[0]
-    if ok:
-        return first.model_copy(update={"error": f"first part done, second failed: {first.error or ''}"})
-    return first
+    """The two halves of one id list: Microsoft's ids first, then Google's."""
+    names = ("the Microsoft part", "the Google part")
+    bad = [i for i, r in enumerate(results) if not r.ok]
+    if bad:
+        first = results[bad[0]]
+        if len(bad) == len(results):
+            return first
+        done = next(names[i] for i, r in enumerate(results) if r.ok)
+        said = f"{done} was done, {names[bad[0]]} failed: {first.error or ''}"
+        return first.model_copy(update={"error": said})
+    data: dict[str, Any] = {}
+    for r in results:
+        for key, value in (r.data if isinstance(r.data, dict) else {}).items():
+            if key in _COUNTED and isinstance(value, int) and isinstance(data.get(key), int):
+                data[key] += value
+            elif isinstance(value, list) and isinstance(data.get(key), list):
+                data[key] = [*data[key], *value]
+            elif key == "partial":
+                data[key] = bool(data.get(key)) or bool(value)
+            else:
+                data.setdefault(key, value)
+    return ToolResult(ok=True, data=data)
 
 
 def _limit(args: dict, items: list) -> list:
