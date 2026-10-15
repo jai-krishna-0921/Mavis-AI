@@ -197,13 +197,6 @@ async def test_reconnect_revives_a_revoked_grant(tokens, vendor):
     assert len(await tokens.grants(1)) == 1
 
 
-async def test_owner_of_finds_the_holder_of_a_vendor_account(tokens):
-    await save(tokens)
-    assert await tokens.owner_of(G, "email", "a@x.com") == 1
-    assert await tokens.owner_of(G, "email", "other@x.com") is None
-    assert await tokens.owner_of(S, "email", "a@x.com") is None
-
-
 @pytest.mark.parametrize("exc", [httpx.ReadTimeout("slow"), httpx.RemoteProtocolError("cut")],
                          ids=lambda e: type(e).__name__)
 @pytest.mark.parametrize(("provider", "url"), [(G, GOOGLE_TOKEN_URL), (S, SLACK_TOKEN_URL)],

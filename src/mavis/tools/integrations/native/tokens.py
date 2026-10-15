@@ -131,16 +131,6 @@ class NativeTokenStore:
                 NativeGrant.provider == provider.value, NativeGrant.account_key == key,
                 NativeGrant.status == ACTIVE))
 
-    async def owner_of(self, provider: NativeProvider, account_key: str, value: str,
-                       team: str | None = None) -> int | None:
-        """The user whose ACTIVE grant already holds this vendor account (one vendor account, one user).
-        A Slack user id is only unique inside its workspace, so Slack callers pass the `team`."""
-        async with dbm.Session() as s:
-            rows = await s.scalars(select(NativeGrant).where(
-                NativeGrant.provider == provider.value, NativeGrant.status == ACTIVE))
-            return next((r.user_id for r in rows if (r.account or {}).get(account_key) == value
-                         and (team is None or (r.account or {}).get("team_id") == team)), None)
-
     async def user_for_slack(self, team_id: str, slack_user_id: str) -> int | None:
         """The Mavis user whose ACTIVE Slack grant belongs to this Slack user in this team. Uses the unique
         (provider, account_key) index, so it is one indexed row lookup per webhook delivery."""

@@ -12,7 +12,6 @@ from mavis.tools.integrations.native.router import (
     allows,
     covers,
     feature_access,
-    google_features,
     provider_of,
 )
 from tests.tools.integrations.fakes import FakeProvider
@@ -128,7 +127,6 @@ async def test_feature_wording_comes_from_the_spec(tokens, oauth, client, isolat
     g = await grant(tokens)
     assert feature_access(g) == (["search pages"], ["edit pages"])
     assert await router.provider_access(1, T) == (["search pages"], ["edit pages"])
-    assert google_features is not None
 
 
 def test_google_and_slack_behaviour_is_unchanged():

@@ -30,6 +30,7 @@ from mavis.domain.errors import FailureKind, IntegrationError, WebhookVerificati
 from mavis.domain.events import Event
 from mavis.domain.integrations import UserRef
 from mavis.tools.integrations.base import IntegrationProvider
+from mavis.tools.integrations.native.providers import PollAuthError
 from mavis.tools.integrations.normalize import extract_list, slack_event
 
 log = structlog.get_logger()
@@ -365,10 +366,6 @@ async def backfill(
 
 
 # --- poll safety net -----------------------------------------------------------------------------------
-
-
-class PollAuthError(Exception):
-    """A Slack read failed as unauthorised (so the poller can follow its reconnect path)."""
 
 
 async def poll_messages(

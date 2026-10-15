@@ -24,12 +24,6 @@ def connectors() -> tuple[str, ...]:
     return tuple(sorted({name for spec in providers.user_providers() for name in spec.memory_sources}))
 
 
-def __getattr__(name: str):
-    if name == "CONNECTORS":
-        return connectors()
-    raise AttributeError(name)
-
-
 async def paused(user_id: int) -> set[str]:
     raw = (await users.get_state(user_id)).get(KEY) or {}
     return {str(c) for c in raw.get("paused", [])} & set(connectors())

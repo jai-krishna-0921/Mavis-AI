@@ -26,35 +26,7 @@ from mavis.tools.integrations.base import IntegrationProvider
 from mavis.tools.integrations.native import oauth as oauth_mod
 from mavis.tools.integrations.native import providers
 from mavis.tools.integrations.native.base import NativeExecutor, NativeProvider
-from mavis.tools.integrations.native.google_scopes import (  # noqa: F401 - re-exported for tests and the dashboard
-    _CAL_FREEBUSY,
-    _CAL_LIST,
-    _CAL_READ,
-    _CAL_WRITE,
-    _CONTACTS_READ,
-    _CONTACTS_WRITE,
-    _DOCS_READ,
-    _DOCS_WRITE,
-    _DRIVE_META,
-    _DRIVE_READ,
-    _DRIVE_WRITE,
-    _FORMS_BODY,
-    _FORMS_RESPONSES,
-    _MAIL_DRAFT,
-    _MAIL_MODIFY,
-    _MAIL_READ,
-    _MAIL_SEND,
-    _MEET_CREATE,
-    _MEET_READ,
-    _SHEETS_READ,
-    _SHEETS_WRITE,
-    _SLIDES_READ,
-    _SLIDES_WRITE,
-    _TASKS_READ,
-    _TASKS_WRITE,
-    ACTION_SCOPES,
-    GOOGLE_FEATURES,
-)
+from mavis.tools.integrations.native.google_scopes import ACTION_SCOPES  # noqa: F401  (re-exported)
 from mavis.tools.integrations.native.http import make_client
 from mavis.tools.integrations.native.oauth import NativeOAuth
 from mavis.tools.integrations.native.tokens import ACTIVE, REVOKED, Grant, NativeTokenStore
@@ -70,9 +42,6 @@ def feature_access(grant: Grant) -> tuple[list[str], list[str]]:
     feats = spec.features if spec is not None else ()
     can = [label for label, action in feats if allows(grant, action)]
     return can, [label for label, _ in feats if label not in can]
-
-
-google_features = feature_access  # name kept for callers and tests
 
 
 def provider_of(capability: Capability) -> NativeProvider | None:
@@ -176,9 +145,6 @@ class NativeRouter:
         if grant is None or spec is None or not spec.features:
             return None
         return feature_access(grant)
-
-    async def google_access(self, user_id: int) -> tuple[list[str], list[str]] | None:
-        return await self.provider_access(user_id, NativeProvider.GOOGLE)
 
     async def slack_chat_ready(self, user_id: int) -> bool:
         """Can this user talk to Mavis in a Slack DM? True when the workspace bot is installed for them."""

@@ -76,7 +76,8 @@ async def test_account_deletion_revokes_every_registered_provider(
 def test_vault_connector_matches_by_registered_prefix_not_by_name(isolated_registry):
     isolated_registry.register(ProviderSpec(
         id="testing", display_name="Testco", brand="Testco", capabilities=(Capability.NOTION,),
-        anchor=Capability.NOTION, memory_sources={"outlook_calendar": ("ocal:",), "outlook": ("ocal:mail:",)}))
+        anchor=Capability.NOTION,
+        memory_sources={"outlook_calendar": ("ocal:",), "outlook": ("ocal:mail:",)}))
     assert vault._connector(["ocal:abc"]) == "outlook_calendar"
     assert vault._connector(["ocal:mail:abc"]) == "outlook"  # longest prefix wins
     assert vault._connector(["you", "gmail:thread"]) == "gmail"

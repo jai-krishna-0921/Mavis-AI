@@ -58,12 +58,6 @@ def hook_for(capability: Capability) -> PollHook | None:
     return _hooks[path]
 
 
-def __getattr__(name: str):
-    if name == "POLLABLE":  # old callers
-        return pollable()
-    raise AttributeError(name)
-
-
 OnFailed = Callable[[int, Capability], Awaitable[object]]
 UserIds = Callable[[], Awaitable[list[int]]]
 
@@ -214,17 +208,13 @@ async def poll_gmail(poller: Poller, user_id: int, st: dict) -> int:
 
 async def poll_slack(poller: Poller, user_id: int, st: dict) -> int:
     """Safety net for missed Events API deliveries: per-channel latest-ts cursors, a batch a tick."""
-    from mavis.tools.integrations.native.slack_events import PollAuthError as SlackPollAuthError
     from mavis.tools.integrations.native.slack_events import poll_messages
 
     cursors = st.get("cursors", {})
-    try:
-        published, ts_by_channel, offset = await poll_messages(
-            poller.provider, poller.bus, user_id, dict(cursors.get("slack_ts") or {}),
-            int(cursors.get("slack_offset") or 0), now=poller.clock(),
-        )
-    except SlackPollAuthError:
-        raise PollAuthError from None
+    published, ts_by_channel, offset = await poll_messages(  # raises PollAuthError when Slack refuses us
+        poller.provider, poller.bus, user_id, dict(cursors.get("slack_ts") or {}),
+        int(cursors.get("slack_offset") or 0), now=poller.clock(),
+    )
     merged = {**cursors, "slack_ts": ts_by_channel, "slack_offset": offset}
     await poller.state.update(user_id, {"cursors": merged})
     return published

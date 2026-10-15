@@ -51,7 +51,7 @@ def make(provider, cache, fake_bus, state, rec, **kw):
 
 def test_builtin_pollable_set_is_unchanged():
     assert pollable() == frozenset({Capability.GMAIL, Capability.CALENDAR, Capability.SLACK})
-    assert poller_mod.POLLABLE == pollable()
+    assert not hasattr(poller_mod, "POLLABLE")
 
 
 def test_registered_hook_is_pollable_and_resolved(isolated_registry):
