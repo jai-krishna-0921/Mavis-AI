@@ -46,6 +46,31 @@ async def _close(user_id: int, channel: str) -> None:
     await users.modify_nested(user_id, OWED_KEY, lambda cur: {k: v for k, v in cur.items() if k != channel})
 
 
+REPLIED_KEY = "teams_replied"  # users.state cursors: {owed key: newest time the user wrote in that chat}
+MAX_REPLIED = 100
+
+
+def _ts_iso(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+async def _note_reply(user_id: int, key: str, sent: datetime) -> None:
+    """Remember the newest time the user wrote in a chat (cleared with the Microsoft cursors on disconnect)."""
+    def change(cur: dict) -> dict:
+        known = dict(cur.get(REPLIED_KEY) or {})
+        old = _ts_iso(known.get(key))
+        if old is None or sent > old:
+            known[key] = sent.isoformat()
+        newest = sorted(known.items(), key=lambda kv: str(kv[1]), reverse=True)[:MAX_REPLIED]
+        return {**cur, REPLIED_KEY: dict(newest)}
+
+    await users.modify_nested(user_id, "cursors", change)
+
+
 def sender_name(payload: dict[str, Any]) -> str:
     """A display name safe to put in Mavis's own words: letters and spaces, short (it is third-party text)."""
     raw = str(payload.get("user_name") or payload.get("from") or "someone")
@@ -139,15 +164,22 @@ async def on_teams_event(event: Event) -> None:
     if not chat or p.get("chat_type") != "oneOnOne":
         return
     key = teams_key(chat)
-    if p.get("from_me"):
-        await _close(event.user_id, key)
-        return
     try:
         sent = datetime.fromisoformat(str(p.get("at") or ""))
     except ValueError:
-        return
-    if sent.tzinfo is None:
+        sent = None
+    if sent is not None and sent.tzinfo is None:
         sent = sent.replace(tzinfo=UTC)
+    if p.get("from_me"):
+        await _close(event.user_id, key)
+        if sent is not None:
+            await _note_reply(event.user_id, key, sent)
+        return
+    if sent is None:
+        return
+    replied = _ts_iso(((await users.get_state(event.user_id)).get("cursors") or {}).get(REPLIED_KEY, {}).get(key))
+    if replied is not None and sent <= replied:
+        return  # backlog read newest first: the user already answered after this message
     if not p.get("from_id") or timeutil.now() - sent > FORGET_AFTER:
         return
     name, ts = sender_name(p), f"{sent.timestamp():.6f}"
