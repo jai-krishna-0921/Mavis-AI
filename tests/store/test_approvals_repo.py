@@ -131,3 +131,16 @@ async def test_mark_started_only_for_claimed_unstarted_rows(user):
     assert await approvals.mark_started(aid) is True
     assert await approvals.mark_started(aid) is False
     assert (await approvals.get(aid)).started_at is not None
+
+
+def test_a_per_approval_transaction_id_is_not_part_of_an_actions_identity():
+    from mavis.store.repo.approvals import args_hash, equivalence_key, target_key
+
+    one = {"summary": "Sync", "start": "2026-10-20T10:00:00+00:00", "sender_pin": "microsoft:me@corp.test",
+           "transaction_id": "aaa"}
+    two = {**one, "transaction_id": "bbb"}
+    assert equivalence_key(one) == equivalence_key(two)                       # all-argument fallback (no guests)
+    assert equivalence_key(one, ("start", "attendees")) == equivalence_key(two, ("start", "attendees"))
+    assert target_key(one, ("summary",)) == target_key(two, ("summary",))
+    assert args_hash(one) == args_hash(two)
+    assert equivalence_key(one) != equivalence_key({**one, "summary": "Other"})

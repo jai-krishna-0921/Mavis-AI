@@ -38,8 +38,15 @@ async def create(
         return a.id
 
 
+NOT_IDENTITY = frozenset({"transaction_id"})  # minted per approval: two cards for one action still match
+
+
+def _identity_args(arguments: dict | None) -> dict:
+    return {k: v for k, v in (arguments or {}).items() if k not in NOT_IDENTITY}
+
+
 def args_hash(arguments: dict) -> str:
-    canon = json.dumps(arguments, sort_keys=True, default=str, ensure_ascii=False)
+    canon = json.dumps(_identity_args(arguments), sort_keys=True, default=str, ensure_ascii=False)
     return hashlib.sha256(canon.encode()).hexdigest()
 
 
@@ -68,7 +75,7 @@ def equivalence_key(arguments: dict, identity: Sequence[str] = ()) -> str:
     empty, or any of those arguments is empty in this call (an invite with no guests), the action is
     identified by all of its canonical arguments. A field written "?name" is optional: part of the identity
     when set, compared as empty when not (a location), and never a reason to fall back to all arguments."""
-    canon = _canon(arguments or {})
+    canon = _canon(_identity_args(arguments))
     required = [f for f in identity if not f.startswith("?")]
     optional = [f[1:] for f in identity if f.startswith("?")]
     if required and all(field in canon for field in required):
@@ -79,7 +86,7 @@ def equivalence_key(arguments: dict, identity: Sequence[str] = ()) -> str:
 def target_key(arguments: dict, target: Sequence[str]) -> str | None:
     """The coarser "same target" key (canonical, like equivalence_key), or None when the tool declares
     no target or a target field is empty in this call (then nothing is matched by target)."""
-    canon = _canon(arguments or {})
+    canon = _canon(_identity_args(arguments))
     if not target or not all(field in canon for field in target):
         return None
     return json.dumps({f: canon[f] for f in target}, sort_keys=True, default=str, ensure_ascii=False)
