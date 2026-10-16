@@ -318,7 +318,7 @@ async def block_teams_nudge(router, world, user, bus, booked):
     st = {"cursors": {"teams_at": ago(1).replace("Z", "+00:00")}}
     assert await hook_for(C.TEAMS)(poller, user.id, st) == 1
     [event] = [e for e in bus.events if e.type is EventType.TEAMS_MESSAGE]
-    assert event.id == f"teams:{user.id}:{CHAT}:tm1" or event.id.startswith(f"teams:{user.id}:")
+    assert event.id == f"teams:{user.id}:{CHAT}:tm1"
     await sr.on_teams_event(event)
     owed = (await users.get_state(user.id)).get(sr.OWED_KEY) or {}
     # first sync's catch-up already opened the entry for this chat; the live message keeps it: ONE nudge only
@@ -389,7 +389,7 @@ async def block_reply_through_the_gate(router, world, user, rec_bus, monkeypatch
     await graph.ainvoke(go, cfg)
     await graph.ainvoke(go, cfg)  # a redelivered tap does not send again
     [sent] = world.graph.calls("POST", r"/v1.0/me/messages/m-priya/reply$")
-    assert json.loads(sent.content)["comment"] == "Confirmed." or "Confirmed." in sent.content.decode()
+    assert json.loads(sent.content)["comment"] == "Confirmed."
     assert world.graph.calls("POST", r"/sendMail$") == [] and world.google.calls("POST", r"/messages/send$") == []
     assert (await approvals.get(card.id)).status == ApprovalStatus.EXECUTED
 
@@ -454,7 +454,12 @@ async def block_forget(router, world, user, bus, rec, state):
                        base_url="https://mavis.test", forget_source=forget)
     await state.update(user.id, {"polling": {"outlook": True, "outlookcalendar": True, "teams": True, "onedrive": True,
                                              "gmail": True},
-                                 "synced": {"outlook": True, "teams": True}})
+                                 "synced": {"outlook": True, "teams": True},
+                                 "cursors": {"outlook_delta": "L", "teams_at": "t", "onedrive_seen": ["f"],
+                                             "ms_backoff_n": 1, "gmail_after": 7},
+                                 "slack_owed": {"teams:abc": {"source": "teams", "chat": "ms:c", "from": "Alex"},
+                                                "D1": {"team": "T", "from": "Sam"}},
+                                 "defaults": {"mail": "microsoft", "calendar": "google"}})
     google_before = len(world.google.requests)
     assert await flow.disconnect(user.id, C.OUTLOOK, forget=True) is True
     assert sorted(p for _, p in forgotten) == ["ocal:", "onedrive:", "outlook:", "teams:"]  # and never gmail:
@@ -463,6 +468,9 @@ async def block_forget(router, world, user, bus, rec, state):
     polling = (await state.get(user.id))["polling"]
     assert polling == {"gmail": True} and "teams" not in (await state.get(user.id)).get("synced", {})
     assert len(world.google.requests) == google_before  # no Google data touched
+    after = await state.get(user.id)  # nothing of Microsoft's is left to nudge about or to replay on reconnect
+    assert after["cursors"] == {"gmail_after": 7}
+    assert list(after["slack_owed"]) == ["D1"] and after["defaults"] == {"calendar": "google"}
 
 
 async def block_deletion(router, sam, monkeypatch):
