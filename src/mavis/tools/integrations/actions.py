@@ -319,7 +319,8 @@ class TeamsChatArgs(ToolArgs):
 
 
 class OnedriveSearchArgs(ToolArgs):
-    query: str = Field(default="", description="Words in the file name or text; empty lists recent files")
+    query: str = Field(default="", max_length=200,
+                       description="Words in the file name or text; empty lists recent files")
     max_results: int = Field(default=10, ge=1, le=25)
 
 

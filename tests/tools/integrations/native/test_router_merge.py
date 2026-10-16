@@ -168,3 +168,16 @@ async def test_free_slots_are_intersected(both, tokens):
     await ms_grant(tokens)
     r = await router.execute(U, "calendar.free_slots", {"time_min": "2026-10-15T08:00:00Z", "time_max": "2026-10-15T18:00:00Z"})
     assert r.data["free_slots"] == [{"start": "2026-10-15T10:00:00+00:00", "end": "2026-10-15T12:00:00+00:00", "minutes": 120}]
+
+
+async def test_provider_grant_never_returns_another_users_grant(both, tokens):
+    fb, g, m, router = both
+    await ms_grant(tokens, user=2, mail="other@corp.test")
+    assert await router.provider_grant(1, M) is None             # user 1 has none, user 2's is not theirs
+    mine = await router.provider_grant(2, M)
+    assert mine is not None and mine.user_id == 2 and mine.account["mail"] == "other@corp.test"
+    await ms_grant(tokens, user=1)
+    assert (await router.provider_grant(1, M)).account["mail"] == "me@corp.test"
+    assert (await router.provider_grant(2, M)).account["mail"] == "other@corp.test"
+    await tokens.mark(2, M, "REVOKED")
+    assert await router.provider_grant(2, M) is None and await router.provider_grant(1, M) is not None

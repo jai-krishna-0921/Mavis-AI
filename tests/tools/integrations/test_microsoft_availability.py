@@ -54,3 +54,18 @@ async def test_work_account_is_offered_everything(ms_env, user):
     from mavis.tools.integrations.wiring import microsoft_unserved
     await _grant(user.id, "11111111-2222-3333-4444-555555555555")
     assert await microsoft_unserved(user.id) == frozenset()
+
+
+def test_onedrive_search_query_is_length_bounded_in_the_tool_schema():
+    from pydantic import ValidationError
+
+    from mavis.tools.integrations.actions import OnedriveSearchArgs
+
+    schema = OnedriveSearchArgs.model_json_schema()
+    assert schema["properties"]["query"]["maxLength"] == 200
+    assert OnedriveSearchArgs(query="x" * 200).query
+    try:
+        OnedriveSearchArgs(query="x" * 201)
+    except ValidationError:
+        return
+    raise AssertionError("an over-long query must be refused")
