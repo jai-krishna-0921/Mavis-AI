@@ -26,30 +26,52 @@ _VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "
                    "source", "track", "wbr"})
 _SKIP = frozenset({"script", "style", "head", "title", "template", "noscript", "iframe", "object", "svg",
                    "noembed", "noframes", "math"})
-# Elements a browser closes on its own when an enclosing block closes: crossing them is not a doubt.
-_IMPLIED = frozenset({"p", "li", "dd", "dt", "td", "th", "tr", "tbody", "thead", "tfoot", "option",
-                      "optgroup", "colgroup", "caption"})
 # Formatting elements a browser re-opens after a block end tag (the adoption agency): only a hidden one of
 # these, crossed by a block closer, leaves the extent of the hidden part in doubt.
 _FORMATTING = frozenset({"a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong",
                          "tt", "u"})
-# Elements whose start tag a browser answers by closing an open sibling of these names (top of the stack).
-_CLOSES = {"li": frozenset({"li"}), "dd": frozenset({"dd", "dt"}), "dt": frozenset({"dd", "dt"}),
-           "td": frozenset({"td", "th"}), "th": frozenset({"td", "th"}),
-           "tr": frozenset({"td", "th", "tr"}),
-           "tbody": frozenset({"td", "th", "tr", "tbody", "thead", "tfoot"}),
-           "thead": frozenset({"td", "th", "tr", "tbody", "thead", "tfoot"}),
-           "tfoot": frozenset({"td", "th", "tr", "tbody", "thead", "tfoot"}),
-           "option": frozenset({"option"})}
+_LIST_ITEMS = {"li": frozenset({"li"}), "dd": frozenset({"dd", "dt"}), "dt": frozenset({"dd", "dt"})}
+_CELLS = frozenset({"td", "th"})
+_ROWS = frozenset({"tr"})
+_SECTIONS = frozenset({"tbody", "thead", "tfoot"})
+_ROW_CONTEXT = frozenset({"tr", "tbody", "thead", "tfoot", "table"})
+_SELECT = frozenset({"select"})
+_OPTION = frozenset({"option"})
+_BUTTON = frozenset({"button"})
+_PARA = frozenset({"p"})
+_TABLE = frozenset({"table"})
+_STRUCTURE = frozenset({"table", "tbody", "thead", "tfoot", "tr", "td", "th", "caption"})
+_CAPTION = frozenset({"caption"})
+_CAPTION_OR_TABLE = frozenset({"caption", "table"})
+_TABLE_OR_CELL = frozenset({"table", "td", "th"})
+_CLOSES_P = frozenset({
+    "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl",
+    "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "main", "menu", "nav", "ol", "p",
+    "section", "summary", "ul", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "listing", "form", "li", "dd",
+    "dt", "plaintext", "table", "hr", "xmp"})
+_INTEGRATION = frozenset({"mi", "mo", "mn", "ms", "mtext", "annotation-xml", "foreignobject", "desc"})
+_IN_SELECT = frozenset({"option", "optgroup", "select", "script", "template", "hr"})
 # End tags a browser treats as block closers when deciding what they close (table parts, list items ...).
 _CLOSERS = gmail_mime._BLOCK_TAGS | frozenset({
     "td", "th", "dd", "dt", "dl", "tbody", "thead", "tfoot", "caption", "form", "nav", "aside", "main",
-    "figure", "fieldset", "address", "center"})
+    "figure", "fieldset", "address", "center", "button", "object", "applet", "marquee", "select"})
 # Elements that stop a browser's search for the element an end tag closes: crossing one means it is ignored.
-_SCOPE = frozenset({"table", "td", "th", "caption", "object", "template", "applet", "marquee", "select"})
+_SCOPE = frozenset({"table", "td", "th", "caption", "object", "template", "applet", "marquee", "select",
+                    "mi", "mo", "mn", "ms", "mtext", "annotation-xml", "foreignobject", "desc"})
+_TABLE_SCOPE = frozenset({"table", "template"})  # end tags of table parts look no further than the table
 _SCOPE_EXTRA = {"li": frozenset({"ul", "ol"}), "p": frozenset({"button"})}
+# HTML tags that leave svg/math: their "/" is ignored there, so they stay open (hidden or not).
+_BREAKOUT = frozenset({"b", "big", "blockquote", "body", "center", "code", "dd", "div", "dl", "dt", "em",
+                       "h1", "h2", "h3", "h4", "h5", "h6", "head", "i", "li", "listing", "menu", "nobr", "ol",
+                       "p", "pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup", "table",
+                       "tt", "u", "ul", "var", "font"})
 _FOREIGN = frozenset({"svg", "math"})  # self-closing children there really are empty elements
-_DOUBT = "#doubt"  # stack marker: an end tag crossed a hidden element, so the rest of the parent is hidden
+# Elements a browser will not close implicitly: an end tag that would cross one is ignored (or, for
+# formatting elements, handled by the adoption agency) rather than closing it.
+_SPECIAL = _CLOSERS | _SKIP | frozenset({"button", "select", "applet", "marquee", "object", "body", "html",
+                                         "form", "iframe", "option", "optgroup", "colgroup", "col"})
+_P_STOPS = frozenset({"button", "table", "td", "th", "caption", "object", "marquee", "applet", "template"})
+_TABLE_PARTS = frozenset({"tr", "td", "th", "tbody", "thead", "tfoot", "caption", "colgroup", "col"})
 _BLOCK = gmail_mime._BLOCK_TAGS
 
 _CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})\s?|\\(.)", re.S)
@@ -286,11 +308,38 @@ class _Extractor(HTMLParser):
             if tag in ("br", "hr"):
                 self._emit("\n")
             return
-        self._close_siblings(tag)
+        foreign = self._foreign()
+        if tag in _BREAKOUT and foreign:
+            self._close_from(self._outermost_foreign())  # leaves svg/math; the hidden stays as ghosts
+            foreign = False
+        if foreign:  # an svg or math element: none of the HTML rules below apply to it
+            hide, bg = self._hides(tag, attrs, self._stack[-1][2] if self._stack else None)
+            self._stack.append((tag, hide, bg))
+            self._open[tag] = self._open.get(tag, 0) + 1
+            if hide:
+                self._hidden += 1
+            return
+        if tag == "select" and self._open.get("select"):  # acts as </select> and is itself dropped
+            self._close_from(self._find(_SELECT, frozenset()))
+            return
+        if tag in ("select", "template"):
+            self._doubt()  # their parsing rules (and what they swallow) are not followed: hide the rest
+        in_select = self._open.get("select") and tag not in _IN_SELECT
+        if not in_select:
+            self._close_implied(tag)
         if len(self._stack) >= MAX_DEPTH:
             self.cut = True  # absurd nesting: drop the rest rather than walk it
             return
         hide, bg = self._hides(tag, attrs, self._stack[-1][2] if self._stack else None)
+        no_table = tag in _TABLE_PARTS and not self._open.get("table")
+        if in_select or no_table:  # a browser ignores these start tags here; a hidden one stays as a ghost
+            if hide:
+                self._ghost((tag, True, bg))
+                self._hidden += 1
+            return
+        if tag in ("td", "th") and self._nearest(_ROW_CONTEXT) != "tr":
+            self._stack.append(("tr", False, bg))  # the row a browser implies
+            self._open["tr"] = self._open.get("tr", 0) + 1
         self._stack.append((tag, hide, bg))
         self._open[tag] = self._open.get(tag, 0) + 1
         if hide:
@@ -298,50 +347,150 @@ class _Extractor(HTMLParser):
         elif tag in _BLOCK:
             self._emit("\n- " if tag == "li" else "\n")
 
-    def _close_siblings(self, tag: str) -> None:
-        """Pop the open siblings a browser closes by itself (`<li>a<li>b`, `<td>a<td>b`, `<p>a<p>b`), so
-        unclosed rows and items do not stack up as depth."""
-        closes = _CLOSES.get(tag)
-        if closes is None and (tag in _BLOCK or tag == "p"):
-            closes = frozenset({"p"})
-        while closes and self._stack and self._stack[-1][0] in closes and not self._stack[-1][1]:
-            name = self._stack.pop()[0]  # a hidden sibling is left open: when in doubt, keep hiding
-            self._open[name] -= 1
+    def _foreign(self) -> bool:
+        """Is the insertion point inside svg or math content (and not in an HTML integration point)?"""
+        if not (self._open.get("svg") or self._open.get("math")):
+            return False
+        for frame in reversed(self._stack):
+            if frame[0] in _INTEGRATION:
+                return False
+            if frame[0] in _FOREIGN:
+                return True
+        return False
 
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _FOREIGN or self._open.get("svg") or self._open.get("math"):
-            return  # `<path/>` in svg is an empty element: it never stays open
-        self.handle_starttag(tag, attrs)  # HTML5 ignores the "/" on a non-void element: `<div/>` opens a div
+    def _outermost_foreign(self) -> int:
+        for idx, frame in enumerate(self._stack):
+            if frame[0] in _FOREIGN:
+                return idx
+        return len(self._stack)
 
-    def handle_endtag(self, tag: str) -> None:
-        if not self._open.get(tag):
-            return
-        crossed: list[tuple[str, bool, Bg]] = []
-        target_hidden = False
-        while self._stack:  # every element is pushed and popped once: linear overall
-            frame = self._stack.pop()
-            name, hid, _ = frame
-            if name != _DOUBT:
+    def _nearest(self, names: frozenset[str]) -> str:
+        """Name of the nearest open element in `names` (the stack is walked from the top)."""
+        for frame in reversed(self._stack):
+            if frame[0] in names:
+                return frame[0]
+        return ""
+
+    def _ghost(self, frame: tuple[str, bool, Bg]) -> None:
+        """A hidden element a browser has already closed. It stays on the stack, unmatchable, so what follows
+        keeps being hidden (when in doubt hide) and a later end tag for it finds nothing, as in a browser."""
+        self._stack.append(("#" + frame[0], True, frame[2]))
+
+    def _close_from(self, idx: int) -> None:
+        """Close the elements from stack index `idx` up, as a browser does implicitly. Visible ones
+        are dropped, so unclosed rows, items and paragraphs do not stack up as depth; hidden ones become
+        ghosts."""
+        popped = self._stack[idx:]
+        del self._stack[idx:]
+        for name, hid, _ in popped:
+            if name[0] != "#":
                 self._open[name] -= 1
             if hid:
                 self._hidden -= 1
-            if name == tag:
-                target_hidden = hid
-                break
-            if name != _DOUBT:
-                crossed.append(frame)
-        # A browser ignores a non-block end tag that crosses open block elements, and re-opens formatting
-        # elements a block end tag crossed. Around a hidden element either means we cannot tell where the
-        # hidden part ends, so the rest of the parent is hidden. Other block closers just close what is open.
-        if tag in _CLOSERS:  # a block closer only re-opens hidden formatting elements it crossed
+                if name in _FORMATTING:  # still in the browser's list of formatting elements: re-opened later
+                    self._doubt()
+        for name, hid, bg in popped:
+            if hid:
+                self._stack.append((name if name[0] == "#" else "#" + name, True, bg))
+                self._hidden += 1
+
+    def _find(self, targets: frozenset[str], stops: frozenset[str]) -> int:
+        """Stack index of the nearest element in `targets` reached before one in `stops`, else -1."""
+        for idx in range(len(self._stack) - 1, -1, -1):
+            name = self._stack[idx][0]
+            if name in targets:
+                return idx
+            if name in stops:
+                return -1
+        return -1
+
+    def _close_implied(self, tag: str) -> None:
+        """What a browser closes by itself when `tag` starts: an open li, dd, dt, cell, row, option or button,
+        then an open p (for a block start). A select start inside a select only closes it (see
+        handle_starttag)."""
+        idx = -1
+        if tag in _TABLE_PARTS:  # "clear the stack back to a table context": foster-parented junk is closed
+            for pos in range(len(self._stack) - 1, -1, -1):
+                if self._stack[pos][0] in _STRUCTURE:
+                    if self._stack[pos][0] not in _CELLS and pos < len(self._stack) - 1:
+                        self._close_from(pos + 1)
+                    break
+        if tag in _TABLE_PARTS and self._nearest(_CAPTION_OR_TABLE) == "caption":
+            self._close_from(self._find(_CAPTION, frozenset()))  # acts as </caption>, then goes on below
+        if tag in _LIST_ITEMS:
+            idx = self._find(_LIST_ITEMS[tag], _SPECIAL - frozenset({"div", "p", "address"}))
+        elif tag in ("td", "th"):
+            idx = self._find(_CELLS, _ROW_CONTEXT)
+        elif tag == "tr":
+            idx = self._find(_ROWS, _SECTIONS | frozenset({"table"}))
+        elif tag in _SECTIONS or tag in ("caption", "colgroup"):
+            idx = self._find(_TABLE, frozenset()) + 1 if self._open.get("table") else -1
+            idx = idx if idx > 0 else -1
+        elif tag == "table" and self._nearest(_TABLE_OR_CELL) == "table":
+            idx = self._find(_TABLE, frozenset())
+        elif tag in ("option", "optgroup"):
+            idx = self._find(_OPTION, _SELECT)
+        elif tag == "button" and self._open.get("button"):
+            idx = self._find(_BUTTON, _SCOPE)
+        if idx >= 0:
+            self._close_from(idx)
+        if tag in _CLOSES_P and self._open.get("p"):
+            idx = self._find(_PARA, _P_STOPS)
+            if idx >= 0:
+                self._close_from(idx)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if (tag in _FOREIGN or self._foreign()) and tag not in _BREAKOUT:
+            return  # `<path/>` in svg is an empty element: it never stays open
+        self.handle_starttag(tag, attrs)  # HTML5 ignores the "/" on a non-void element: `<div/>` opens a div
+
+    def _doubt(self) -> None:
+        """The extent of a hidden element can no longer be told: everything after is hidden."""
+        self._hidden += 1
+
+    def _drop(self, idx: int) -> None:
+        name, hid, _ = self._stack.pop(idx)
+        if name[0] != "#":
+            self._open[name] -= 1
+        if hid:
+            self._hidden -= 1
+
+    def handle_endtag(self, tag: str) -> None:
+        """Follow what a browser does with this end tag, failing toward hiding. A browser ignores an end tag
+        that would cross a scope boundary or (for "any other end tag") a special element, so the hidden
+        element stays open; it removes a crossed formatting element without closing the blocks around it
+        and re-opens a hidden one on the next text. Where that cannot be followed, the rest is hidden."""
+        if not self._open.get(tag):
+            return
+        stack = self._stack
+        idx = len(stack) - 1
+        while stack[idx][0] != tag:  # at most MAX_DEPTH frames
+            idx -= 1
+        crossed = stack[idx + 1:]
+        special = any(f[0] in _SPECIAL for f in crossed)
+        reopened = any(f[1] and f[0] in _FORMATTING for f in crossed)  # reconstructed on the next text
+        if tag in _FORMATTING or tag == "form":
+            if special or (tag == "form" and crossed):
+                # adoption agency / form pointer: only this element leaves the stack
+                hid = stack[idx][1]
+                self._drop(idx)
+                if reopened or hid:
+                    self._doubt()
+                return
+        elif tag in _CLOSERS:
             stops = _SCOPE | _SCOPE_EXTRA.get(tag, frozenset())
-            doubt = (any(f[1] and (f[0] in _FORMATTING or f[0] in _SKIP) for f in crossed)
-                     or ((target_hidden or any(f[1] for f in crossed)) and any(f[0] in stops for f in crossed)))
-        else:
-            doubt = bool(crossed) and (target_hidden or any(f[1] for f in crossed))
-        if doubt:
-            self._stack.append((_DOUBT, True, self._stack[-1][2] if self._stack else None))
-            self._hidden += 1
+            if tag in _TABLE_PARTS or tag == "table":
+                stops = _TABLE_SCOPE
+            if not (self._open.get("math") or self._open.get("svg")):
+                stops = stops - _INTEGRATION  # mtext, desc ... are ordinary elements outside svg and math
+            if any(f[0] in stops for f in crossed):
+                return  # out of scope: ignored, whatever is hidden stays open
+        elif special:
+            return  # "any other end tag" stops at a special element and is ignored
+        while len(stack) > idx:  # every element is pushed and popped once: linear overall
+            self._drop(len(stack) - 1)
+        if reopened:
+            self._doubt()
         if tag in _BLOCK:
             self._emit("\n")
 

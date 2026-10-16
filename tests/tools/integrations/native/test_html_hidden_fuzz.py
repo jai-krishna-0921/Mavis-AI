@@ -103,9 +103,10 @@ def test_unclosed_skipped_element_hides_everything_after_gmail(opener):
         assert "seen" in text
 
 
-def test_hidden_block_closed_by_a_crossing_tag_hides_the_rest_of_the_parent_only():
-    text = graph_html.html_to_text("<div><span><b hidden>A</span>SECRET</div>visible")
-    assert "SECRET" not in text and "visible" in text
+def test_hidden_formatting_element_crossed_by_an_end_tag_is_reopened_so_the_rest_stays_hidden():
+    # a browser re-opens the hidden <b> for every later text, so even what follows </div> is hidden
+    text = graph_html.html_to_text("<div><span><b hidden>A</span>SECRET</div>later")
+    assert "SECRET" not in text and "later" not in text
 
 
 # --- linear time and size bounds, both modules ---
@@ -191,11 +192,9 @@ IGNORED_CLOSER = [
     "<p hidden><table><tr><td>x</p>SECRET",
     '<li style="display:none"><ul></li>SECRET',
     "<p hidden><button>x</p>SECRET",
-    "<div hidden><caption></div>SECRET",
     "<div hidden><select></div>SECRET",
     "<div hidden><marquee></div>SECRET",
     "<div hidden><object></div>SECRET",
-    "<div hidden><th>x</div>SECRET",
 ]
 
 
@@ -221,8 +220,10 @@ def test_math_breakout_tags_stay_hidden(html):
     assert "SECRET" not in graph_html.html_to_text(html)
 
 
-def test_math_does_not_blank_the_tail():
-    assert graph_html.html_to_text('<math><span style="display:none"/>SECRET</math> tail') == "tail"
+def test_math_breakout_keeps_what_follows_hidden_like_a_browser():
+    # html5lib: the <span> leaves math and stays open, so " tail" is inside it; hiding it fails safe
+    assert graph_html.html_to_text('<math><span style="display:none"/>SECRET</math> tail') == ""
+    assert graph_html.html_to_text("<svg><path d='M0'/><g/></svg>tail") == "tail"
 
 
 async def _post_fail(first, second, **kw):
@@ -256,7 +257,38 @@ async def test_never_sent_writes_keep_unavailable_or_rate_limited():
     req = h.Request("POST", "https://graph.microsoft.com/v1.0/me/sendMail")
     err, graph_error, _ = await _post_fail(h.ConnectError("x", request=req), h.ConnectError("x", request=req))
     assert err.kind is K.UNAVAILABLE
-    err, *_ = await _post_fail(h.ConnectError("x", request=req), graph_error(429, "x", headers={"Retry-After": "99"}))
+    slow = graph_error(429, "x", headers={"Retry-After": "99"})
+    err, *_ = await _post_fail(h.ConnectError("x", request=req), slow)
     assert err.kind is K.RATE_LIMITED
     err, *_ = await _post_fail(h.PoolTimeout("x", request=req), h.ConnectTimeout("x", request=req))
     assert err.kind is K.UNAVAILABLE
+
+
+# --- shapes found by the html5lib differential fuzz (test_html_browser_oracle.py) ---
+ORACLE_SHAPES = [
+    "<i><path><noscript></path></i>SECRET",
+    '<li style="visibility:hidden"><a><ul></a></li>SECRET',
+    '<form><th style="display:none"><a hidden></th></form>SECRET',
+    "<caption><ol hidden></caption>SECRET",
+    '<td><path style="visibility:hidden"></td>SECRET',
+    '<form><blockquote style="visibility:hidden"></form>SECRET',
+    '<th><li style="visibility:hidden"></th>SECRET',
+    '<th><ul style="visibility:hidden"></th>SECRET',
+    "<b><i hidden></b>SECRET",
+    "<span><b hidden></span>SECRET",
+    "<div><b hidden><p></b>SECRET",
+    '<p hidden><div style="visibility:hidden"></p>SECRET',
+    '<table><td></tr><blockquote style="visibility:hidden"></td>SECRET',
+    '<li><div><li style="display:none"></div>SECRET',
+    "<svg><p hidden /></svg>SECRET",
+    '<table><ol><tr><section style="display:none"></ol>SECRET',
+    "<form hidden><a></form>SECRET",
+    '<select><select><object style="display:none"></select>SECRET',
+    '<button><li style="visibility:hidden"></button><noscript></li>SECRET',
+    '<math><mtext><div style="display:none"/>SECRET',
+]
+
+
+@pytest.mark.parametrize("html", ORACLE_SHAPES)
+def test_oracle_shapes_never_leak_on_the_outlook_path(html):
+    assert "SECRET" not in graph_html.html_to_text(html)
