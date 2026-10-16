@@ -379,3 +379,27 @@ async def test_an_unlisted_backlog_expires_after_a_day_and_releases_the_floor():
     n.results["teams.history"] = lambda args: ToolResult(ok=True, data={"messages": [tmsg("b1", "2026-10-16T12:00:00Z", "b")]})
     await poll_teams(poller, 1, st)
     assert "ms:a" not in st["cursors"]["teams_resume"] and st["cursors"]["teams_at"].startswith("2026-10-16T12:00")
+
+
+async def test_a_mailbox_less_account_skips_mail_quietly_without_slowing_the_other_services():
+    from datetime import timedelta
+
+    from mavis.tools.integrations.native.graph import NO_MAILBOX
+    n, st = Native(), {}
+    poller, poll_mail = P(n), hook_for(C.OUTLOOK)
+    n.results["mail.inbox_delta"] = ToolResult(ok=False, error_kind=K.UNAVAILABLE, error=f"microsoft 404 MailboxNotEnabledForRESTAPI: {NO_MAILBOX}")
+    assert await poll_mail(poller, 1, st) == 0
+    assert not st["cursors"].get("ms_backoff_n") and "ms_backoff_until" not in st["cursors"]   # Teams etc. run on
+    calls = len(n.native)
+    assert await poll_mail(poller, 1, st) == 0 and len(n.native) == calls                      # mail itself rests
+    poller.now = poller.now + timedelta(hours=7)
+    await poll_mail(poller, 1, st)
+    assert len(n.native) == calls + 1                                                          # and looks again later
+
+
+async def test_a_real_outage_still_backs_off_for_everyone():
+    n, st = Native(), {}
+    poller, poll_mail = P(n), hook_for(C.OUTLOOK)
+    n.results["mail.inbox_delta"] = ToolResult(ok=False, error_kind=K.UNAVAILABLE, error="microsoft 503")
+    await poll_mail(poller, 1, st)
+    assert st["cursors"]["ms_backoff_n"] == 1

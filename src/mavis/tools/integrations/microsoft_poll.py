@@ -22,6 +22,7 @@ from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.integrations import ToolResult
 from mavis.tools.integrations.microsoft_sync import is_external, native_call, own_tenant
 from mavis.tools.integrations.native.base import NativeProvider
+from mavis.tools.integrations.native.graph import NO_MAILBOX
 from mavis.tools.integrations.native.graph_files import SHARED_UNAVAILABLE
 from mavis.tools.integrations.native.providers import PollAuthError
 from mavis.tools.integrations.normalize import (
@@ -102,8 +103,23 @@ async def _publish_mail(poller: Any, user_id: int, messages: list[dict]) -> int:
     return published
 
 
+MAILBOX_REST = timedelta(hours=6)
+
+
+async def _no_mailbox(poller: Any, user_id: int, st: dict, res: ToolResult) -> bool:
+    """A work account with no Exchange mailbox: mail rests for hours on its own clock. It is not an outage,
+    so the shared back-off that Teams, OneDrive and the calendar obey stays untouched."""
+    if res.error_kind is not FailureKind.UNAVAILABLE or NO_MAILBOX not in (res.error or ""):
+        return False
+    await _put(poller, user_id, st, "outlook_off_until", (poller.clock() + MAILBOX_REST).isoformat())
+    return True
+
+
 async def poll_mail(poller: Any, user_id: int, st: dict) -> int:
     if _backed_off(poller, st):
+        return 0
+    off = to_datetime(_cursors(st).get("outlook_off_until"))
+    if off is not None and poller.clock() < off:
         return 0
     cursor = str(_cursors(st).get("outlook_delta") or "")
     res = await native_call(poller.provider, user_id, "mail.inbox_delta", {"cursor": cursor})
@@ -114,6 +130,8 @@ async def poll_mail(poller: Any, user_id: int, st: dict) -> int:
                 await _put(poller, user_id, st, "outlook_baselining", False)
                 return 0
             return await _mail_by_search(poller, user_id, st)
+        if await _no_mailbox(poller, user_id, st, res):
+            return 0
         return await _failed(poller, user_id, st, res, "mail")
     data = res.data if isinstance(res.data, dict) else {}
     published = 0
@@ -140,6 +158,8 @@ async def _mail_by_search(poller: Any, user_id: int, st: dict) -> int:
     res = await native_call(poller.provider, user_id, "mail.search",
                             {"query": "in:inbox newer_than:1d", "max_results": 25})
     if not res.ok:
+        if await _no_mailbox(poller, user_id, st, res):
+            return 0
         return await _failed(poller, user_id, st, res, "mail_search")
     await _success(poller, user_id, st)
     return await _publish_mail(poller, user_id, extract_messages(res.data))
