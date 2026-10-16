@@ -46,6 +46,7 @@ dependencies = [
     "tzdata>=2026.4",
     "tzfpy>=0.16",
     "uvicorn[standard]>=0.54.0",
+    "selectolax==1.0.0",
 ]
 
 [build-system]
