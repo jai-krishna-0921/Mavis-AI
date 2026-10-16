@@ -491,7 +491,7 @@ async def _pick_sender(ctx: ToolContext, args: BaseModel) -> Prepared:
     if hasattr(args, "sender_pin"):  # the card and the send are for this account, whatever changes meanwhile
         args.sender_pin = f"{picked.provider.value}:{picked.address}"
     if hasattr(args, "transaction_id") and picked.provider.value == "microsoft":
-        args.transaction_id = uuid.uuid4().hex  # one id per approval: Graph answers a repeat with the same event
+        args.transaction_id = uuid.uuid4().hex  # one per approval: Graph answers a repeat with that event
     return Prepared(note=f"From: {picked.address}")
 
 

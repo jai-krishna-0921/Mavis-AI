@@ -54,8 +54,8 @@ async def test_edited_event_keeps_its_transaction_id(user, fake_llm, rec_bus, se
     register_integration_tools(fresh_registry)
     was = {"summary": "Sync", "start": "2026-10-20T10:00:00+00:00", "duration_minutes": 30, "attendees": [],
            "account": "", "sender_pin": "microsoft:me@corp.test", "transaction_id": "tx-1"}
-    aid = await approvals.create(user.id, None, "calendar_create_event", was, "Create event\nFrom: me@corp.test",
-                                 utcnow() + timedelta(hours=48))
+    aid = await approvals.create(user.id, None, "calendar_create_event", was,
+                                 "Create event\nFrom: me@corp.test", utcnow() + timedelta(hours=48))
     tool = fresh_registry.get("calendar_create_event")
     fake_llm.push_structured(tool.args_model.model_validate(
         {"summary": "Sync 2", "start": "2026-10-20T10:00:00+00:00", "transaction_id": "other"}))
