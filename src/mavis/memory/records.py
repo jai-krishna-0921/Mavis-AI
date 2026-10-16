@@ -248,7 +248,7 @@ def teams_record(user_id: int, n: dict, *, self_ids: Mapping[str, Iterable[str]]
                  self_names: Iterable[str] = ()) -> RecordJob | None:
     """A RecordJob for one normalized Teams chat message (the teams_message payload). People are the author
     and the other chat members; the message is the user's own when `from_me` says so (set by our intake from
-    the signed-in account) or the author's address is one of theirs."""
+    the signed-in account); an author's address alone never makes a message the user's."""
     chat, mid = str(n.get("chat_id") or "").removeprefix("ms:"), str(n.get("message_id") or "")
     if not (chat and mid):
         return None
@@ -257,8 +257,10 @@ def teams_record(user_id: int, n: dict, *, self_ids: Mapping[str, Iterable[str]]
     def person(name: str, email: str, role: str, *, me: bool = False) -> None:
         key = email.lower() or name.lower()
         if key and key not in people and len(people) < MAX_PEOPLE:
+            # an author is the user only when our intake says so (from_me): the directory email of a person
+            # in another tenant is theirs to set, so it never marks them as the user
             people[key] = Person(name=name if name.lower() != email.lower() else "", email=email.lower(),
-                                 role=role, is_user=me or _is_self(email, "", self_ids))
+                                 role=role, is_user=me or (role != "sender" and _is_self(email, "", self_ids)))
 
     from_addr = str(n.get("from_address") or "")
     person(str(n.get("from") or ""), from_addr, "sender", me=bool(n.get("from_me")))
