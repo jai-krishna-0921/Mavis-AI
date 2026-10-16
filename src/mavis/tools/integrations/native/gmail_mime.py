@@ -2,7 +2,7 @@
 # Proprietary. Use is governed by LICENSE in the repository root.
 """Gmail message payloads to text and back: a MIME walk for reading, EmailMessage for sending.
 
-Reading: text/plain is preferred, html is reduced to text with the stdlib parser, defanged and bounded
+Reading: text/plain is preferred, html is reduced to text from a spec-compliant tree (Lexbor), bounded
 (scripts, styles and hidden head content dropped), charsets are decoded without ever raising, attachments
 are listed by name and size and never fetched. The body is capped at BODY_CAP characters. Gmail has
 already undone the content-transfer-encoding (quoted-printable, base64) of every part, so only the charset
@@ -47,8 +47,8 @@ def tidy(text: str) -> str:
 
 
 def html_to_text(markup: str) -> str:
-    """HTML to text: one linear pass over bounded, defanged markup; script, style, noscript, noembed,
-    noframes and similar content is dropped, failing toward hiding (see graph_html)."""
+    """HTML to text: a tree walk over bounded markup; script, style, noscript, noembed, noframes, select
+    and similar content is dropped, failing toward hiding (see graph_html)."""
     from mavis.tools.integrations.native import graph_html  # late: graph_html imports this module
 
     return graph_html.html_to_text_limited(markup, graph_html.MAX_HTML, styles=False)[0]

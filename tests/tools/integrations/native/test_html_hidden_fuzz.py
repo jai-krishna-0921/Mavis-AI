@@ -31,7 +31,6 @@ GRAPH_ONLY = {
 GMAIL_NESTED = {
     "noscript crossed": "<b><noscript>A</b>SECRET",
     "noembed crossed": "<b><noembed>A</b>SECRET</noembed>",
-    "svg crossed": "<i><svg>A</i>SECRET",
 }
 
 
@@ -276,7 +275,6 @@ ORACLE_SHAPES = [
     '<th><ul style="visibility:hidden"></th>SECRET',
     "<b><i hidden></b>SECRET",
     "<span><b hidden></span>SECRET",
-    "<div><b hidden><p></b>SECRET",
     '<p hidden><div style="visibility:hidden"></p>SECRET',
     '<table><td></tr><blockquote style="visibility:hidden"></td>SECRET',
     '<li><div><li style="display:none"></div>SECRET',
@@ -292,3 +290,11 @@ ORACLE_SHAPES = [
 @pytest.mark.parametrize("html", ORACLE_SHAPES)
 def test_oracle_shapes_never_leak_on_the_outlook_path(html):
     assert "SECRET" not in graph_html.html_to_text(html)
+
+
+def test_adoption_agency_leaves_the_text_after_it_outside_the_closed_hidden_element():
+    # Changed in the Lexbor round: the hand model hid this text. html5lib 1.1 and Lexbor agree that
+    # `<div><b hidden><p></b>SECRET` closes the hidden <b> and puts SECRET in the <p>, outside any hidden
+    # element, so a browser shows it; likewise `<i><svg>A</i>SECRET` ends the svg at </i>.
+    assert graph_html.html_to_text("<div><b hidden><p></b>SECRET") == "SECRET"
+    assert gmail_mime.html_to_text("<i><svg>A</i>SECRET") == "SECRET"

@@ -296,7 +296,7 @@ async def test_large_bodies_are_converted_off_the_event_loop(monkeypatch):
 
 
 async def test_oversize_and_deeply_nested_html_is_cut_and_flagged():
-    nested = "<div>" * 500 + "deep text" + "</div>" * 500
+    nested = "<div>" * 20_000 + "deep text" + "</div>" * 20_000
     g = with_folders(FakeGraph()).on("GET", r"/v1.0/me/messages/m1$", httpx.Response(
         200, json=graph_message("m1", html="<p>top</p>" + nested)))
     ex, _ = g.executor()

@@ -1,91 +1,47 @@
 # Copyright (c) 2026 Jai Krishna. All rights reserved.
 # Proprietary. Use is governed by LICENSE in the repository root.
-"""HTML mail body to text for Outlook: one linear pass, bounded input and depth, hidden content dropped.
+"""HTML mail body to text for Outlook and Gmail: a spec-compliant tree (Lexbor) walked iteratively, hidden
+content dropped.
 
-Text a reader cannot see but a model can read is the injection channel this guards. An element is dropped
-(with everything inside it) when its inline style, its class or id as named by a `<style>` block, or its
-attributes hide it: display none, visibility hidden, opacity near 0, tiny font, zero width or height,
-off-screen offsets, clipping, transparent text, or text colour that matches (or, with no background set,
-is) white. Rules inside `@media` blocks are not evaluated (they would hide the real desktop body).
-When unsure the content is dropped: noembed and noframes are hidden, attribute text on end tags is
-discarded, and an end tag that crosses open elements around a hidden one (which a browser would ignore or
-repair by re-opening the hidden element) hides the rest of the enclosing element.
+Text a reader cannot see but a model can read is the injection channel this guards. The markup is parsed by
+a real HTML5 tree builder, so what a browser would nest, close, re-open or ignore is decided by the parser
+and not by rules of ours. An element is then dropped (with everything inside it) when its inline style, its
+class or id as named by a `<style>` block, or its attributes hide it: display none, visibility hidden,
+opacity near 0, tiny font, zero width or height, off-screen offsets, clipping, transparent text, or text
+colour that matches (or, with no background set, is) white. Rules inside `@media` blocks are not evaluated
+(they would hide the real desktop body). Always dropped by tag: script, style, head, title, template,
+noscript, iframe, object, svg, math, noembed, noframes and select (a dropdown is a control, not text).
+Comments are never content.
 """
 
 from __future__ import annotations
 
 import re
-from html.parser import HTMLParser
+
+from selectolax.lexbor import LexborHTMLParser
 
 from mavis.tools.integrations.native import gmail_mime
 
 MAX_HTML = gmail_mime.BODY_CAP * 20  # characters of markup parsed
-MAX_DEPTH = 100  # deeper nesting ends the parse: what follows is dropped
+MAX_NESTING_WORK = 40_000_000  # bound on the tree builder's nesting cost (see _bounded)
 
-_VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
-                   "source", "track", "wbr"})
 _SKIP = frozenset({"script", "style", "head", "title", "template", "noscript", "iframe", "object", "svg",
-                   "noembed", "noframes", "math"})
-# Formatting elements a browser re-opens after a block end tag (the adoption agency): only a hidden one of
-# these, crossed by a block closer, leaves the extent of the hidden part in doubt.
+                   "noembed", "noframes", "math", "select"})
+_BLOCK = gmail_mime._BLOCK_TAGS
+# Elements a browser re-nests when an end tag crosses a block.
 _FORMATTING = frozenset({"a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong",
                          "tt", "u"})
-_LIST_ITEMS = {"li": frozenset({"li"}), "dd": frozenset({"dd", "dt"}), "dt": frozenset({"dd", "dt"})}
-_CELLS = frozenset({"td", "th"})
-_ROWS = frozenset({"tr"})
-_SECTIONS = frozenset({"tbody", "thead", "tfoot"})
-_ROW_CONTEXT = frozenset({"tr", "tbody", "thead", "tfoot", "table"})
-_SELECT = frozenset({"select"})
-_OPTION = frozenset({"option"})
-_BUTTON = frozenset({"button"})
-_PARA = frozenset({"p"})
-_TABLE = frozenset({"table"})
-_STRUCTURE = frozenset({"table", "tbody", "thead", "tfoot", "tr", "td", "th", "caption"})
-_CAPTION = frozenset({"caption"})
-_CAPTION_OR_TABLE = frozenset({"caption", "table"})
-_TABLE_OR_CELL = frozenset({"table", "td", "th"})
-_CLOSES_P = frozenset({
-    "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl",
-    "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "main", "menu", "nav", "ol", "p",
-    "section", "summary", "ul", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "listing", "form", "li", "dd",
-    "dt", "plaintext", "table", "hr", "xmp"})
-_INTEGRATION = frozenset({"mi", "mo", "mn", "ms", "mtext", "annotation-xml", "foreignobject", "desc"})
-_IN_SELECT = frozenset({"option", "optgroup", "select", "script", "template", "hr"})
-# End tags a browser treats as block closers when deciding what they close (table parts, list items ...).
-_CLOSERS = gmail_mime._BLOCK_TAGS | frozenset({
-    "td", "th", "dd", "dt", "dl", "tbody", "thead", "tfoot", "caption", "form", "nav", "aside", "main",
-    "figure", "fieldset", "address", "center", "button", "object", "applet", "marquee", "select"})
-# Elements that stop a browser's search for the element an end tag closes: crossing one means it is ignored.
-_SCOPE = frozenset({"table", "td", "th", "caption", "object", "template", "applet", "marquee", "select",
-                    "mi", "mo", "mn", "ms", "mtext", "annotation-xml", "foreignobject", "desc"})
-_TABLE_SCOPE = frozenset({"table", "template"})  # end tags of table parts look no further than the table
-_SCOPE_EXTRA = {"li": frozenset({"ul", "ol"}), "p": frozenset({"button"})}
-# HTML tags that leave svg/math: their "/" is ignored there, so they stay open (hidden or not).
-_BREAKOUT = frozenset({"b", "big", "blockquote", "body", "center", "code", "dd", "div", "dl", "dt", "em",
-                       "h1", "h2", "h3", "h4", "h5", "h6", "head", "i", "li", "listing", "menu", "nobr", "ol",
-                       "p", "pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup", "table",
-                       "tt", "u", "ul", "var", "font"})
-_FOREIGN = frozenset({"svg", "math"})  # self-closing children there really are empty elements
-# Elements a browser will not close implicitly: an end tag that would cross one is ignored (or, for
-# formatting elements, handled by the adoption agency) rather than closing it.
-_SPECIAL = _CLOSERS | _SKIP | frozenset({"button", "select", "applet", "marquee", "object", "body", "html",
-                                         "form", "iframe", "option", "optgroup", "colgroup", "col"})
-_P_STOPS = frozenset({"button", "table", "td", "th", "caption", "object", "marquee", "applet", "template"})
-_TABLE_PARTS = frozenset({"tr", "td", "th", "tbody", "thead", "tfoot", "caption", "colgroup", "col"})
-_BLOCK = gmail_mime._BLOCK_TAGS
+# Void elements and ones a browser closes by itself: they do not deepen the stack.
+_NOT_NESTING = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+                          "source", "track", "wbr", "p", "li", "td", "th", "tr", "dd", "dt", "option"})
+_TAG_TOKEN = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9]*)")
+# Lexbor leaves `<sup>` inside svg and math, where the specification (and so a browser) ends the foreign
+# content at it. `<var>` it gets right and parses the same (an ordinary inline element that leaves foreign
+# content), and nobody writes it, so sup is written as var.
+_SUP = re.compile(r"<(/?)sup(?=[\s/>])", re.I)
 
 _CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})\s?|\\(.)", re.S)
 _BRACES = re.compile(r"[{}]")
-_ASCII_LETTER = re.compile(r"[A-Za-z]")
-_TAG_NAME = re.compile(r"<([A-Za-z][^\s/>]*)")
-_END_NAME = re.compile(r"</([A-Za-z][^\s/>]*)")
-_RAW_TEXT = {"script": re.compile(r"</script", re.I), "style": re.compile(r"</style", re.I)}
-# Raw-text and RCDATA elements HTMLParser does not know: their content is text up to the closer, never markup.
-_ESCAPED_RAW = {name: re.compile(rf"</{name}(?=[\s/>])", re.I)
-                for name in ("textarea", "xmp", "noembed", "noframes", "title", "iframe")}
-_PLAINTEXT = "plaintext"  # swallows the rest of the document
-_STYLE_OPEN = re.compile(r"<style", re.I)
-_STYLE_CLOSE = re.compile(r"</style", re.I)
 _NUMBER = re.compile(r"^\s*(-?(?:\d+\.?\d*|\.\d+))\s*([a-z%]*)\s*$")
 _COLOR_TOKEN = re.compile(r"#[0-9a-f]{3,8}\b|(?:rgb|hsl)a?\([^)]*\)|\b[a-z]+\b", re.I)
 _NAMED = {"white": (255, 255, 255), "ivory": (255, 255, 240), "snow": (255, 250, 250),
@@ -95,6 +51,8 @@ OFFSCREEN_PX = -500
 MAX_STYLE_TEXT = 50_000  # characters of <style> blocks read in all; later rules are ignored
 MAX_DECLARATIONS = 8_000  # one style attribute or rule body longer than this is treated as hiding
 Bg = tuple[int, int, int] | str | None  # a background: rgb, "image", or unknown
+
+
 
 
 def _unescape(m: re.Match[str]) -> str:
@@ -211,27 +169,29 @@ def style_hides(d: dict[str, str], bg: Bg) -> bool:
     return False
 
 
-def _style_texts(markup: str) -> list[str]:
-    """The text of each closed <style> block, found with linear scans, at most MAX_STYLE_TEXT in all."""
+
+def _style_texts(tree: LexborHTMLParser) -> list[str]:
+    """The text of each `<style>` element in the tree (comments and inert markup never count), at most
+    MAX_STYLE_TEXT characters in all."""
     out: list[str] = []
-    total = pos = 0
-    while total < MAX_STYLE_TEXT and (m := _STYLE_OPEN.search(markup, pos)):
-        start = markup.find(">", m.end())
-        if start == -1 or not (end := _STYLE_CLOSE.search(markup, start)):
+    total = 0
+    for node in tree.css("style"):
+        if total >= MAX_STYLE_TEXT:
             break
-        out.append(markup[start + 1:end.start()][:MAX_STYLE_TEXT - total])
-        total += end.start() - start
-        pos = end.end()
+        text = node.text()[:MAX_STYLE_TEXT - total]
+        out.append(text)
+        total += len(text)
     return out
 
 
-def hiding_rules(markup: str) -> tuple[set[str], set[str], set[str]]:
+def hiding_rules(blocks: list[str]) -> tuple[set[str], set[str], set[str]]:
     """Classes, ids and bare tag names that a `<style>` block hides (colour-only rules do not count).
-    One linear scan over the braces; at-rules (`@media ...`) are skipped whole."""
+    `blocks` are the texts of the document's style elements. One linear scan over the braces; at-rules
+    (`@media ...`) are skipped whole."""
     classes: set[str] = set()
     ids: set[str] = set()
     tags: set[str] = set()
-    for block in _style_texts(markup):
+    for block in blocks:
         css = strip_comments(block)
         depth = last = body_start = 0
         prelude = ""
@@ -258,34 +218,85 @@ def hiding_rules(markup: str) -> tuple[set[str], set[str], set[str]]:
                     ids.update(re.findall(r"#([\w-]+)", compound))
                     if compound == one and re.fullmatch(r"[a-z][\w-]*", compound):
                         tags.add(compound)
+    if "sup" in tags:
+        tags.add("var")  # the parse writes sup as var (see _SUP)
     return classes, ids, tags
 
 
-class _Extractor(HTMLParser):
-    def __init__(self, limit: int, rules: tuple[set[str], set[str], set[str]], styles: bool = True) -> None:
-        super().__init__(convert_charrefs=True)
-        self._styles = styles
+def _bounded(markup: str) -> tuple[str, bool]:
+    """Cut the markup where a browser-style tree builder would start to cost quadratic time. Every start tag
+    closes an open p by walking the open elements, and a formatting end tag over a block re-nests them, so the
+    work is about the sum of the open-element depth over the tags. It is estimated in one linear scan that
+    only ever overestimates the depth (an end tag pops only when it matches the innermost open name); a
+    document past the bound is cut there (the rest is dropped and reported)."""
+    names: list[str] = []
+    work = 0
+    for m in _TAG_TOKEN.finditer(markup):
+        name = m[2].lower()
+        if name in _NOT_NESTING:
+            continue
+        if m[1]:
+            if names and names[-1] == name:
+                names.pop()
+            if name in _FORMATTING:
+                work += len(names)
+        else:
+            work += len(names)
+            names.append(name)
+        if work > MAX_NESTING_WORK:
+            return markup[:m.start()], True
+    return markup, False
+
+
+_IN_SELECT = frozenset({"option", "optgroup", "hr", "script", "template", "select"})
+
+
+def _select_doubt(markup: str) -> int:
+    """Index where the markup must be cut because a `<select>` is not a plain dropdown, else -1. A select
+    holds only options, and a browser's rules for anything else in one (a table part, input, keygen, textarea,
+    a nested select, ...) differ between specification versions and parsers: whether such a tag ends the
+    select decides if the text after it is visible. Nothing is guessed: the markup is cut at that select, so
+    the rest is dropped. A well-formed dropdown (options only, closed) costs nothing."""
+    opened = -1
+    for m in _TAG_TOKEN.finditer(markup):
+        name = m[2].lower()
+        if opened < 0:
+            if name == "select" and not m[1]:
+                opened = m.start()
+        elif name == "select":
+            if m[1]:
+                opened = -1
+            else:
+                return opened
+        elif name not in _IN_SELECT:
+            return opened
+    return -1
+
+
+class _Walk:
+    """Text of a parsed document: an iterative depth-first walk (no recursion, so deep trees are fine) that
+    skips a hidden element with its whole subtree and emits block and list breaks around the rest."""
+
+    def __init__(self, limit: int, rules: tuple[set[str], set[str], set[str]], styles: bool) -> None:
+        self._limit, self._styles = limit, styles
+        self._classes, self._ids, self._tags = rules
         self.parts: list[str] = []
         self.cut = False
-        self._size, self._limit = 0, limit
-        self._classes, self._ids, self._tags = rules
-        self._stack: list[tuple[str, bool, Bg]] = []
-        self._open: dict[str, int] = {}
-        self._hidden = 0
+        self._size = 0
 
     def _emit(self, text: str) -> None:
-        if self._hidden or self.cut:
-            return
         self.parts.append(text)
         self._size += len(text)
         if self._size > self._limit:
             self.cut = True
 
-    def _hides(self, tag: str, attrs: list[tuple[str, str | None]], parent_bg: Bg) -> tuple[bool, Bg]:
-        if not self._styles:  # tag-only mode (Gmail): script, style, noscript, noembed ... are hidden
-            return tag in _SKIP, None
-        a = {k: (v or "") for k, v in attrs}
-        if tag in _SKIP or "hidden" in a or tag in self._tags:
+    def _hides(self, tag: str, attrs: dict[str, str | None], parent_bg: Bg) -> tuple[bool, Bg]:
+        if tag in _SKIP:
+            return True, parent_bg
+        if not self._styles:  # tag-only mode (Gmail)
+            return False, None
+        a = {k: (v or "") for k, v in attrs.items()}  # the parser keeps the first of a duplicated attribute
+        if "hidden" in a or tag in self._tags:
             return True, parent_bg
         if self._ids and a.get("id", "").lower() in self._ids:
             return True, parent_bg
@@ -301,295 +312,68 @@ class _Extractor(HTMLParser):
             d["color"] = a["color"].lower()
         return style_hides(d, bg), bg
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if self.cut:
-            return
-        if tag in _VOID:
-            if tag in ("br", "hr"):
-                self._emit("\n")
-            return
-        foreign = self._foreign()
-        if tag in _BREAKOUT and foreign:
-            self._close_from(self._outermost_foreign())  # leaves svg/math; the hidden stays as ghosts
-            foreign = False
-        if foreign:  # an svg or math element: none of the HTML rules below apply to it
-            hide, bg = self._hides(tag, attrs, self._stack[-1][2] if self._stack else None)
-            self._stack.append((tag, hide, bg))
-            self._open[tag] = self._open.get(tag, 0) + 1
-            if hide:
-                self._hidden += 1
-            return
-        if tag == "select" and self._open.get("select"):  # acts as </select> and is itself dropped
-            self._close_from(self._find(_SELECT, frozenset()))
-            return
-        if tag in ("select", "template"):
-            self._doubt()  # their parsing rules (and what they swallow) are not followed: hide the rest
-        in_select = self._open.get("select") and tag not in _IN_SELECT
-        if not in_select:
-            self._close_implied(tag)
-        if len(self._stack) >= MAX_DEPTH:
-            self.cut = True  # absurd nesting: drop the rest rather than walk it
-            return
-        hide, bg = self._hides(tag, attrs, self._stack[-1][2] if self._stack else None)
-        no_table = tag in _TABLE_PARTS and not self._open.get("table")
-        if in_select or no_table:  # a browser ignores these start tags here; a hidden one stays as a ghost
-            if hide:
-                self._ghost((tag, True, bg))
-                self._hidden += 1
-            return
-        if tag in ("td", "th") and self._nearest(_ROW_CONTEXT) != "tr":
-            self._stack.append(("tr", False, bg))  # the row a browser implies
-            self._open["tr"] = self._open.get("tr", 0) + 1
-        self._stack.append((tag, hide, bg))
-        self._open[tag] = self._open.get(tag, 0) + 1
-        if hide:
-            self._hidden += 1
+    def _open(self, tag: str) -> None:
+        if tag == "br" or tag == "hr":
+            self._emit("\n")
         elif tag in _BLOCK:
             self._emit("\n- " if tag == "li" else "\n")
 
-    def _foreign(self) -> bool:
-        """Is the insertion point inside svg or math content (and not in an HTML integration point)?"""
-        if not (self._open.get("svg") or self._open.get("math")):
-            return False
-        for frame in reversed(self._stack):
-            if frame[0] in _INTEGRATION:
-                return False
-            if frame[0] in _FOREIGN:
-                return True
-        return False
-
-    def _outermost_foreign(self) -> int:
-        for idx, frame in enumerate(self._stack):
-            if frame[0] in _FOREIGN:
-                return idx
-        return len(self._stack)
-
-    def _nearest(self, names: frozenset[str]) -> str:
-        """Name of the nearest open element in `names` (the stack is walked from the top)."""
-        for frame in reversed(self._stack):
-            if frame[0] in names:
-                return frame[0]
-        return ""
-
-    def _ghost(self, frame: tuple[str, bool, Bg]) -> None:
-        """A hidden element a browser has already closed. It stays on the stack, unmatchable, so what follows
-        keeps being hidden (when in doubt hide) and a later end tag for it finds nothing, as in a browser."""
-        self._stack.append(("#" + frame[0], True, frame[2]))
-
-    def _close_from(self, idx: int) -> None:
-        """Close the elements from stack index `idx` up, as a browser does implicitly. Visible ones
-        are dropped, so unclosed rows, items and paragraphs do not stack up as depth; hidden ones become
-        ghosts."""
-        popped = self._stack[idx:]
-        del self._stack[idx:]
-        for name, hid, _ in popped:
-            if name[0] != "#":
-                self._open[name] -= 1
-            if hid:
-                self._hidden -= 1
-                if name in _FORMATTING:  # still in the browser's list of formatting elements: re-opened later
-                    self._doubt()
-        for name, hid, bg in popped:
-            if hid:
-                self._stack.append((name if name[0] == "#" else "#" + name, True, bg))
-                self._hidden += 1
-
-    def _find(self, targets: frozenset[str], stops: frozenset[str]) -> int:
-        """Stack index of the nearest element in `targets` reached before one in `stops`, else -1."""
-        for idx in range(len(self._stack) - 1, -1, -1):
-            name = self._stack[idx][0]
-            if name in targets:
-                return idx
-            if name in stops:
-                return -1
-        return -1
-
-    def _close_implied(self, tag: str) -> None:
-        """What a browser closes by itself when `tag` starts: an open li, dd, dt, cell, row, option or button,
-        then an open p (for a block start). A select start inside a select only closes it (see
-        handle_starttag)."""
-        idx = -1
-        if tag in _TABLE_PARTS:  # "clear the stack back to a table context": foster-parented junk is closed
-            for pos in range(len(self._stack) - 1, -1, -1):
-                if self._stack[pos][0] in _STRUCTURE:
-                    if self._stack[pos][0] not in _CELLS and pos < len(self._stack) - 1:
-                        self._close_from(pos + 1)
-                    break
-        if tag in _TABLE_PARTS and self._nearest(_CAPTION_OR_TABLE) == "caption":
-            self._close_from(self._find(_CAPTION, frozenset()))  # acts as </caption>, then goes on below
-        if tag in _LIST_ITEMS:
-            idx = self._find(_LIST_ITEMS[tag], _SPECIAL - frozenset({"div", "p", "address"}))
-        elif tag in ("td", "th"):
-            idx = self._find(_CELLS, _ROW_CONTEXT)
-        elif tag == "tr":
-            idx = self._find(_ROWS, _SECTIONS | frozenset({"table"}))
-        elif tag in _SECTIONS or tag in ("caption", "colgroup"):
-            idx = self._find(_TABLE, frozenset()) + 1 if self._open.get("table") else -1
-            idx = idx if idx > 0 else -1
-        elif tag == "table" and self._nearest(_TABLE_OR_CELL) == "table":
-            idx = self._find(_TABLE, frozenset())
-        elif tag in ("option", "optgroup"):
-            idx = self._find(_OPTION, _SELECT)
-        elif tag == "button" and self._open.get("button"):
-            idx = self._find(_BUTTON, _SCOPE)
-        if idx >= 0:
-            self._close_from(idx)
-        if tag in _CLOSES_P and self._open.get("p"):
-            idx = self._find(_PARA, _P_STOPS)
-            if idx >= 0:
-                self._close_from(idx)
-
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if (tag in _FOREIGN or self._foreign()) and tag not in _BREAKOUT:
-            return  # `<path/>` in svg is an empty element: it never stays open
-        self.handle_starttag(tag, attrs)  # HTML5 ignores the "/" on a non-void element: `<div/>` opens a div
-
-    def _doubt(self) -> None:
-        """The extent of a hidden element can no longer be told: everything after is hidden."""
-        self._hidden += 1
-
-    def _drop(self, idx: int) -> None:
-        name, hid, _ = self._stack.pop(idx)
-        if name[0] != "#":
-            self._open[name] -= 1
-        if hid:
-            self._hidden -= 1
-
-    def handle_endtag(self, tag: str) -> None:
-        """Follow what a browser does with this end tag, failing toward hiding. A browser ignores an end tag
-        that would cross a scope boundary or (for "any other end tag") a special element, so the hidden
-        element stays open; it removes a crossed formatting element without closing the blocks around it
-        and re-opens a hidden one on the next text. Where that cannot be followed, the rest is hidden."""
-        if not self._open.get(tag):
-            return
-        stack = self._stack
-        idx = len(stack) - 1
-        while stack[idx][0] != tag:  # at most MAX_DEPTH frames
-            idx -= 1
-        crossed = stack[idx + 1:]
-        special = any(f[0] in _SPECIAL for f in crossed)
-        reopened = any(f[1] and f[0] in _FORMATTING for f in crossed)  # reconstructed on the next text
-        if tag in _FORMATTING or tag == "form":
-            if special or (tag == "form" and crossed):
-                # adoption agency / form pointer: only this element leaves the stack
-                hid = stack[idx][1]
-                self._drop(idx)
-                if reopened or hid:
-                    self._doubt()
-                return
-        elif tag in _CLOSERS:
-            stops = _SCOPE | _SCOPE_EXTRA.get(tag, frozenset())
-            if tag in _TABLE_PARTS or tag == "table":
-                stops = _TABLE_SCOPE
-            if not (self._open.get("math") or self._open.get("svg")):
-                stops = stops - _INTEGRATION  # mtext, desc ... are ordinary elements outside svg and math
-            if any(f[0] in stops for f in crossed):
-                return  # out of scope: ignored, whatever is hidden stays open
-        elif special:
-            return  # "any other end tag" stops at a special element and is ignored
-        while len(stack) > idx:  # every element is pushed and popped once: linear overall
-            self._drop(len(stack) - 1)
-        if reopened:
-            self._doubt()
-        if tag in _BLOCK:
+    def _close(self, tag: str) -> None:
+        if tag in _BLOCK and tag not in ("br", "hr"):
             self._emit("\n")
 
-    def handle_data(self, data: str) -> None:
-        self._emit(data)
-
-
-def _tag_end(markup: str, i: int) -> int:
-    """Index of the `>` closing the tag that starts at `i`, honouring quoted attribute values (a quote opens
-    a value only right after `=`). A `<` is an ordinary character inside a tag, as in a browser. -1: the
-    input ended first."""
-    quote = ""
-    prev = ""
-    for j in range(i + 1, len(markup)):
-        ch = markup[j]
-        if quote:
-            if ch == quote:
-                quote = ""
-                prev = ch
-            continue
-        if ch == ">":
-            return j
-        if ch in "\"'" and prev == "=":
-            quote = ch
-        if not ch.isspace():
-            prev = ch
-    return -1
-
-
-def defang(markup: str) -> str:
-    """Make the markup safe for HTMLParser, which rescans the rest of its input for every unclosed construct
-    (`<a <a <a ...`, `<!--` repeated) and so goes quadratic. One linear pass, failing toward hiding:
-    comments, declarations, `<![if x]>` sections and processing instructions are dropped; a tag whose `>` is
-    missing drops the rest of the markup (at most once, so the pass stays linear); a `<` that cannot start a
-    tag becomes literal text. A `<` inside a tag belongs to it, and complete tags are passed through exactly
-    as they were. The text of textarea, xmp, noembed, noframes and title (up to their closer) and of
-    plaintext (to the end) is escaped so it can only be text."""
-    out: list[str] = []
-    pos = 0
-    while (i := markup.find("<", pos)) != -1:
-        out.append(markup[pos:i])
-        nxt = markup[i + 1:i + 2]
-        if markup.startswith("<!--", i):
-            j = markup.find("-->", i + 2)
-            if j == -1:
-                return "".join(out)
-            pos = j + 3
-        elif nxt in ("!", "?") or (nxt == "/" and not _ASCII_LETTER.match(markup, i + 2)):
-            j = markup.find(">", i + 1)  # a bogus comment, declaration or marked section: never content
-            if j == -1:
-                return "".join(out)
-            pos = j + 1
-        elif not (nxt == "/" or _ASCII_LETTER.match(markup, i + 1)):
-            out.append("&lt;")  # `1 < 2`: text
-            pos = i + 1
-        else:
-            end = _tag_end(markup, i)
-            if end == -1:
-                return "".join(out)
-            if nxt == "/":  # attribute text on an end tag is never content: keep only the name
-                closer = _END_NAME.match(markup, i)
-                out.append(f"</{closer[1]}>" if closer else "")
-            else:
-                out.append(markup[i:end + 1])
-            pos = end + 1
-            name = _TAG_NAME.match(markup, i)
-            tag = name[1].lower() if name and nxt != "/" else ""
-            raw = _RAW_TEXT.get(tag)
-            if raw is not None and markup[end - 1] != "/":  # script/style: its text is not markup
-                m = raw.search(markup, pos)
-                if m is None:
-                    out.append(markup[pos:])
-                    return "".join(out)
-                out.append(markup[pos:m.start()])
-                pos = m.start()
-            elif tag == _PLAINTEXT:
-                out.append(markup[pos:].replace("<", "&lt;"))
-                return "".join(out)
-            elif (raw := _ESCAPED_RAW.get(tag) or raw) is not None:
-                m = raw.search(markup, pos)
-                stop = m.start() if m else len(markup)
-                out.append(markup[pos:stop].replace("<", "&lt;"))
-                pos = stop
-    out.append(markup[pos:])
-    return "".join(out)
+    def run(self, root) -> None:  # noqa: ANN001 - a selectolax node
+        node = root
+        open_tags: list[str] = []
+        bgs: list[Bg] = [None]
+        while node is not None and not self.cut:
+            tag = node.tag or "-"
+            if tag == "-text":
+                self._emit(node.text_content or "")
+            elif tag[0] != "-":  # an element (not a comment, doctype or document node)
+                tag = tag.lower()
+                hide, bg = self._hides(tag, node.attributes, bgs[-1])
+                if hide:
+                    if tag in _BLOCK:
+                        self._emit("\n")  # a hidden block still separates what is around it
+                else:
+                    self._open(tag)
+                    if node.child is not None:
+                        open_tags.append(tag)
+                        bgs.append(bg)
+                        node = node.child
+                        continue
+                    self._close(tag)
+            while True:  # next sibling, or back up to the parent's next sibling
+                if node.next is not None:
+                    node = node.next
+                    break
+                if not open_tags:
+                    node = None
+                    break
+                self._close(open_tags.pop())
+                bgs.pop()
+                node = node.parent
 
 
 def html_to_text_limited(markup: str, limit: int, *, styles: bool = True) -> tuple[str, bool]:
-    """(text, cut): `cut` is True when the markup, its nesting or the text exceeded a bound. `styles=False`
-    hides by tag only (no style, class or attribute rules): the Gmail reader."""
+    """(text, cut): `cut` is True when the markup, its nesting cost or the text exceeded a bound.
+    `styles=False` hides by tag only (no style, class or attribute rules): the Gmail reader."""
     cut = len(markup) > MAX_HTML
-    markup = defang(markup[:MAX_HTML])
-    parser = _Extractor(limit, hiding_rules(markup) if styles else (set(), set(), set()), styles)
+    markup, bounded = _bounded(markup[:MAX_HTML])
+    doubt = _select_doubt(markup)
+    if doubt >= 0:
+        markup, bounded = markup[:doubt], True
+    cut = cut or bounded
     try:
-        parser.feed(markup)
-        parser.close()
-    except Exception:  # noqa: BLE001 - malformed markup degrades to whatever text was seen
-        pass
-    return gmail_mime.tidy("".join(parser.parts)), cut or parser.cut
+        tree = LexborHTMLParser(b"<body>" + _SUP.sub(r"<\1var", markup).encode("utf-8", "replace"))
+        rules = hiding_rules(_style_texts(tree)) if styles else (set(), set(), set())
+        walk = _Walk(limit, rules, styles)
+        if tree.root is not None:
+            walk.run(tree.root)
+    except Exception:  # noqa: BLE001 - a document the parser rejects yields nothing: fail toward hiding
+        return "", True
+    return gmail_mime.tidy("".join(walk.parts)), cut or walk.cut
 
 
 def html_to_text(markup: str, limit: int = MAX_HTML) -> str:

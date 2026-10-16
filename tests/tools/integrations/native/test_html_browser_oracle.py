@@ -12,10 +12,44 @@ html5lib = pytest.importorskip("html5lib")
 from mavis.tools.integrations.native import gmail_mime, graph_html  # noqa: E402
 
 SKIP = graph_html._SKIP
-TAGS = ["div", "span", "p", "b", "i", "a", "font", "table", "tr", "td", "th", "ul", "ol", "li", "button",
-        "math", "svg", "iframe", "section", "select", "object", "caption", "template", "noscript", "em",
-        "h1", "blockquote", "form", "mtext", "g", "path"]
-HIDERS = ["hidden", 'style="display:none"', 'style="visibility:hidden"']
+# Every HTML element name a tree builder knows (plus obsolete ones) and the svg and math names that matter.
+HTML_TAGS = [
+    "a", "abbr", "acronym", "address", "applet", "area", "article", "aside", "audio", "b", "base", "basefont",
+    "bdi", "bdo", "bgsound", "big", "blink", "blockquote", "body", "br", "button", "canvas", "caption",
+    "center", "cite", "code", "col", "colgroup", "data", "datalist", "dd", "del", "details", "dfn",
+    "dir", "div", "dl", "dt", "em", "embed", "fieldset", "figcaption", "figure", "font", "footer", "form",
+    "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html", "i",
+    "iframe", "image", "img", "input", "ins", "kbd", "keygen", "label", "legend", "li", "link", "listing",
+    "main", "map", "mark", "marquee", "menu", "menuitem", "meta", "meter", "nav", "nobr", "noembed",
+    "noframes", "noscript", "object", "ol", "optgroup", "option", "output", "p", "param", "picture",
+    "plaintext", "pre", "progress", "q", "rb", "rp", "rt", "rtc", "ruby", "s", "samp", "script", "search",
+    "section", "select", "slot", "small", "source", "span", "strike", "strong", "style", "sub", "summary",
+    "sup", "table", "tbody", "td", "textarea", "tfoot", "th", "thead", "time", "title", "tr",
+    "track", "tt", "u", "ul", "var", "video", "wbr", "xmp",
+]
+# Left out because html5lib 1.1 is stale on them and so cannot be the oracle: search (new element, not a
+# paragraph closer or block end tag for it), keygen (removed from the specification), summary and menu/dir end
+# tags (it ignores `</summary>` where the specification closes the summary), dialog (a paragraph closer),
+# rb/rtc (not in its implied-end-tag list), dd/dt/hgroup/figcaption (it foster-parents or misses the block
+# the specification has), and sup/var (Lexbor keeps sup inside svg, so graph_html parses sup as var).
+STALE_IN_HTML5LIB = {"search", "keygen", "summary", "dialog", "sup", "var", "rb", "rtc", "dd", "dt", "hgroup",
+                     "figcaption"}
+FOREIGN_TAGS = ["svg", "math", "g", "path", "circle", "foreignObject", "desc", "text", "mi", "mo", "mn", "ms",
+                "mtext", "mglyph", "malignmark"]  # annotation-xml: an integration point only with an encoding
+# Weighted toward the names that matter to nesting, so that tables, lists and formatting meet often.
+COMMON = ["div", "span", "p", "b", "i", "a", "font", "table", "tr", "td", "th", "ul", "ol", "li", "button",
+          "select", "object", "caption", "noscript", "em", "h1", "h2", "h3", "blockquote", "form",
+          "svg", "math", "mtext", "g", "path", "iframe", "section", "body", "html", "label", "details",
+          "menu", "listing", "frameset", "tbody", "textarea"]
+# template is left out: html5lib 1.1 has no template insertion mode (it treats it as a plain element and
+# lets a stray end tag leave it open), so it is no oracle for it; test_html_lexbor_regressions.py covers it.
+TAGS = [t for t in COMMON * 2 + HTML_TAGS + FOREIGN_TAGS
+        if t not in STALE_IN_HTML5LIB | {"template", "li"}]  # li: html5lib foster-parents it into the table
+HIDERS = ["hidden", 'style="display:none"', 'style="visibility:hidden"',
+          'style="display:none" style="display:block"', 'hidden hidden', 'class="a" hidden class="b"',
+          'style="display:block" style="display:none"']
+TABLE_PARTS = {"table", "tr", "td", "th", "col", "colgroup", "tbody", "thead", "tfoot", "caption"}
+SKIPPED_ASSERTIONS = [0]  # documents html5lib itself cannot build (an internal assertion)
 
 
 def _is_hidden(el, styles: bool) -> bool:
@@ -36,6 +70,7 @@ def _hidden_markers(html: str, styles: bool) -> tuple[set[str], set[str]]:
     try:
         root = html5lib.parse("<body>" + html, treebuilder="etree", namespaceHTMLElements=False)
     except AssertionError:  # html5lib 1.1 trips an internal assertion on a few table nestings
+        SKIPPED_ASSERTIONS[0] += 1
         return set(), set()
     hidden: set[str] = set()
     shown: set[str] = set()
@@ -56,19 +91,28 @@ def _doc(rng: random.Random, n: int, wild: bool) -> tuple[str, int]:
     parts: list[str] = []
     stack: list[str] = []
     marks = 0
+    foreign = False
     for _ in range(n):
         r = rng.random()
         if r < 0.38:
             tag = rng.choice(TAGS)
+            while foreign and tag in TABLE_PARTS:  # html5lib and Lexbor disagree on table parts in svg/math
+                tag = rng.choice(TAGS)
             attrs = ""
-            if rng.random() < 0.3:
+            # html5lib merges a later <body>/<html> start tag's attributes even inside a template, which the
+            # specification forbids (and Lexbor follows), so those two never carry attributes here.
+            if rng.random() < 0.3 and tag not in ("body", "html"):
                 attrs = " " + rng.choice(HIDERS)
             slash = " /" if wild and rng.random() < 0.1 else ""
             parts.append(f"<{tag}{attrs}{slash}>")
             stack.append(tag)
+            foreign = foreign or tag in ("svg", "math")
         elif r < 0.62:
             if wild:
-                parts.append(f"</{rng.choice(TAGS)}>")
+                # html5lib's end tags inside svg and math (</p>, </br> that leave them, "any other end tag"
+                # passing special elements) differ from the specification, so once one is open only
+                # foreign names close
+                parts.append(f"</{rng.choice(FOREIGN_TAGS if foreign else TAGS)}>")
             elif stack:
                 parts.append(f"</{stack.pop()}>")
         else:
@@ -85,26 +129,38 @@ SANITIZERS = {
 }
 
 
+DOCS = 6000
+TIME_BUDGET = 25.0  # seconds; exceeding it FAILS (a silently shortened run proves less than it claims)
+MAX_LOSS = {"graph": 0.025, "gmail": 0.025}  # visible markers allowed to go missing (measured ~0.013)
+
+
 @pytest.mark.parametrize("which", list(SANITIZERS))
 def test_nothing_a_browser_hides_reaches_the_text(which):
     fn, styles = SANITIZERS[which]
     rng = random.Random(f"oracle-{which}")
     start = time.perf_counter()
-    leaks, lost, total_visible = [], 0, 0
-    for _ in range(1500):
+    SKIPPED_ASSERTIONS[0] = 0
+    leaks, lost, total_visible, with_hidden = [], 0, 0, 0
+    for _ in range(DOCS):
         html, _n = _doc(rng, rng.randint(4, 40), wild=True)
         hidden, shown = _hidden_markers(html, styles)
         text = fn(html)
+        with_hidden += bool(hidden)
         bad = [m for m in hidden if m in text]
         if bad:
             leaks.append((bad, html))
         total_visible += len(shown)
         lost += sum(m not in text for m in shown)
-        if time.perf_counter() - start > 20:
-            break
+    elapsed = time.perf_counter() - start
     assert not leaks, f"{len(leaks)} leaks, first: {leaks[0]}"
-    print(f"{which}: lost {lost} of {total_visible} browser-visible markers in wild documents")
-    assert total_visible and lost / total_visible < 0.5, (lost, total_visible)
+    rate = lost / max(total_visible, 1)
+    print(f"{which}: lost {lost} of {total_visible} browser-visible markers ({rate:.4f}), "
+          f"{with_hidden}/{DOCS} documents with a hidden marker, {SKIPPED_ASSERTIONS[0]} html5lib skips, "
+          f"{elapsed:.1f}s")
+    assert elapsed < TIME_BUDGET, f"oracle run took {elapsed:.1f}s"
+    assert SKIPPED_ASSERTIONS[0] < DOCS * 0.01, SKIPPED_ASSERTIONS[0]
+    assert with_hidden > DOCS * 0.3, with_hidden
+    assert total_visible and lost / total_visible < MAX_LOSS[which], (lost, total_visible)
 
 
 _CHILD = {"ul": "li", "ol": "li", "table": "tr", "tr": "td"}

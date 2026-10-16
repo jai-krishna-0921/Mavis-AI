@@ -211,7 +211,11 @@ def test_html_to_text_is_bounded_and_fast():
     assert cut is True and len(text) <= 10_100
     flat = "<b>x</b>" * 60_000
     html_to_text(flat)
-    deep, cut = html_to_text_limited("<div>" * 5000 + "deep" + "</div>" * 5000, 10_000)
+    # nesting is no longer capped at 100 (the tree builder copes and the walk is iterative); html5lib shows
+    # the text of 5000 nested divs too. Only nesting so deep that building the tree turns quadratic is cut.
+    deep, cut = html_to_text_limited("<div>" * 5000 + "deep" + "</div>" * 5000, 100_000)
+    assert cut is False and "deep" in deep
+    deep, cut = html_to_text_limited("<div>" * 20_000 + "deep" + "</div>" * 20_000, 10_000)
     assert cut is True and "deep" not in deep
     _, cut = html_to_text_limited("a" * (MAX_HTML + 1), 10 * MAX_HTML)
     assert cut is True
@@ -386,7 +390,9 @@ def test_random_hidden_fragments_never_leak_their_markers():
     # `title=a>b` ends the tag early in a browser too, so only the safe ones go inside a tag
     noise = [n for n in noise if ">" not in n]
     wrappers = ["div", "span", "p", "td", "section", "DIV"]
-    fillers = ["x", "<b>y</b>", "<textarea>t</textarea>", "<!-- c -->", "<br>", "<p>z", "<xmp>q</xmp>"]
+    # fillers "<p>z" and "<xmp>" would close a hidden p, as a browser does (what follows is then visible)
+    fillers = ["x", "<b>y</b>", "<textarea>t</textarea>", "<!-- c -->", "<br>", "<span>z",
+               "<noembed>q</noembed>"]
     for n in range(400):
         tag = rng.choice(wrappers)
         attrs = " ".join(rng.sample([rng.choice(hiders)] + noise, k=rng.randint(1, 3)))
@@ -396,6 +402,8 @@ def test_random_hidden_fragments_never_leak_their_markers():
         inner = "".join(rng.choice(fillers) for _ in range(rng.randint(0, 3)))
         tail = rng.choice([f"</{tag}>", f"</{tag.lower()}>"])
         opener = f"<{tag} {attrs}{rng.choice(['', ' /'])}>"
+        if tag == "td":  # a td outside a table is ignored by a browser, attributes and all
+            opener, tail = "<table><tr>" + opener, tail + "</tr></table>"
         html = f"vis0{opener}{inner}{marker}{inner}{tail}vis1"
         text = html_to_text(html)
         assert marker not in text, html
