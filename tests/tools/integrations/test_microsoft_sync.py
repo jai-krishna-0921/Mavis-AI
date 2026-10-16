@@ -74,7 +74,7 @@ async def test_outlook_without_connectors_learns_in_batches(fake_bus):
     p.results["mail.search"] = ToolResult(ok=True, data={"messages": [msg("1")]})
     fs, mem = make(p, fake_bus)
     await fs.run(1, C.OUTLOOK)
-    assert mem.calls and mem.calls[0][2].startswith("first_sync:1:outlook:")
+    assert mem.calls and mem.calls[0][2].startswith("outlook:1:first_sync")
 
 
 async def test_calendar_sync_uses_the_ocal_prefix_and_native_calls(fake_bus):

@@ -111,7 +111,7 @@ class MicrosoftSync:
         if fs.connectors is None:
             await fs._learn_batches(
                 user_id, "Recent emails (untrusted content; extract people, organisations and events only):",
-                lines, f"first_sync:{user_id}:outlook", GMAIL_LEARN_JOBS)
+                lines, f"outlook:{user_id}:first_sync", GMAIL_LEARN_JOBS)
         return fs._mail_notices(mails, lines)
 
     @staticmethod
