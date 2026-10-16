@@ -201,7 +201,7 @@ class FirstSync:
         return noticed
 
     async def _calendar(self, user_id: int, *, execute: Callable[..., Awaitable[Any]] | None = None,
-                        ref: str | None = None) -> list[str]:
+                        ref: str | None = None, connector: str = "calendar") -> list[str]:
         """`execute(user_id, action, args)` and the LEARN `ref` default to Google's; Outlook passes its own so
         its events are read natively and learned under the forgettable `ocal:` prefix."""
         now = self.clock()
@@ -229,7 +229,10 @@ class FirstSync:
         await self._learn_batches(user_id, "Upcoming calendar:", lines,
                                  ref or f"first_sync:{user_id}:calendar", CALENDAR_LEARN_JOBS)
         if self.meetings is not None:
-            await self.meetings(user_id, events, str(tz))
+            if connector == "calendar":
+                await self.meetings(user_id, events, str(tz))
+            else:  # the memory switch of the account the events came from (Outlook has its own)
+                await self.meetings(user_id, events, str(tz), connector=connector)
         noticed: list[str] = []
         timed = sorted(((to_datetime(e["start"]), e) for e in events if e["start"]), key=lambda t: t[0])
         if timed:

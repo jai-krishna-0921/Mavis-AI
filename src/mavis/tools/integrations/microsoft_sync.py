@@ -128,7 +128,8 @@ class MicrosoftSync:
         async def execute(uid: int, action: str, args: dict) -> Any:
             return await self._data(uid, action, args)
 
-        return await self.fs._calendar(user_id, execute=execute, ref=f"ocal:{user_id}:first_sync")
+        return await self.fs._calendar(user_id, execute=execute, ref=f"ocal:{user_id}:first_sync",
+                                       connector="outlook_calendar")
 
     # --- Teams -----------------------------------------------------------------------------------------
 

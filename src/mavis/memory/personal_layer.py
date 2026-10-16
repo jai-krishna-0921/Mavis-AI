@@ -461,7 +461,7 @@ async def on_calendar_event(event: Event) -> None:
     start = to_datetime(p.get("start") or p.get("starts_at"))
     if start is None or str(p.get("status", "")).lower() == "cancelled":
         return
-    if "calendar" in await controls.paused(event.user_id):
+    if _calendar_connector(event) in await controls.paused(event.user_id):
         return
     await personal.note_meeting(event.user_id, title=str(p.get("title") or p.get("summary") or ""),
                                 start=start, attendees=list(p.get("attendees") or []),
@@ -469,12 +469,18 @@ async def on_calendar_event(event: Event) -> None:
                                 event_id=str(p.get("event_id") or ""))
 
 
-async def record_meetings(user_id: int, events: list[dict], tz: str) -> None:
-    """Calendar events from a sync (normalize_calendar_event's keys): occurrences for the routines evidence."""
+def _calendar_connector(event: Event) -> str:
+    """Which memory switch governs this event: Outlook events (ocal: ids) have their own."""
+    return "outlook_calendar" if event.id.startswith("ocal:") else "calendar"
+
+
+async def record_meetings(user_id: int, events: list[dict], tz: str, connector: str = "calendar") -> None:
+    """Calendar events from a sync (normalize_calendar_event's keys): occurrences for the routines evidence.
+    `connector` is the memory switch to honour ("outlook_calendar" for an Outlook sync)."""
     from mavis.memory import controls
     from mavis.tools.integrations.normalize import to_datetime
 
-    if "calendar" in await controls.paused(user_id):
+    if connector in await controls.paused(user_id):
         return
     for e in events:
         start = to_datetime(e.get("start"))

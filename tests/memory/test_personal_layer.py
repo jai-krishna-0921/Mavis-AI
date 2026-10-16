@@ -304,3 +304,39 @@ async def test_calendar_events_from_the_poller_become_occurrences(engineer, memo
     await personal_layer.on_calendar_event(Event(id="gcal:9", user_id=engineer.user_id, type=EventType.CALENDAR_CHANGED, occurred_at=datetime(2026, 9, 28, tzinfo=UTC), source="g",
                                                 payload={"event_id": "e9", "title": "Planning", "start": datetime(2026, 9, 28, 4, 0, tzinfo=UTC).isoformat()}, trust=Trust.UNTRUSTED))
     assert len(await personal_repo.signals(engineer.user_id, "meeting")) == 3
+
+
+def _cal_event(user_id, prefix, i, d):
+    from datetime import UTC, datetime
+
+    from mavis.domain.events import Event, EventType
+
+    return Event(id=f"{prefix}:{user_id}:e{i}:v", user_id=user_id, type=EventType.CALENDAR_CHANGED,
+                 occurred_at=datetime(2026, 9, d, tzinfo=UTC), source="p",
+                 payload={"event_id": f"e{i}", "title": "Standup", "attendees": [],
+                          "start": datetime(2026, 9, d, 4, 0, tzinfo=UTC).isoformat()}, trust=Trust.UNTRUSTED)
+
+
+async def test_outlook_calendar_pause_stops_only_outlook_meeting_notes(engineer, memory, ms_env):
+    await controls.set_paused(engineer.user_id, "outlook_calendar", True)
+    await personal_layer.on_calendar_event(_cal_event(engineer.user_id, "ocal", 1, 7))
+    assert len(await personal_repo.signals(engineer.user_id, "meeting")) == 0
+    await personal_layer.on_calendar_event(_cal_event(engineer.user_id, "gcal", 2, 8))  # Google is not paused
+    assert len(await personal_repo.signals(engineer.user_id, "meeting")) == 1
+
+
+async def test_google_calendar_pause_does_not_stop_outlook_meeting_notes(engineer, memory, ms_env):
+    await controls.set_paused(engineer.user_id, "calendar", True)
+    await personal_layer.on_calendar_event(_cal_event(engineer.user_id, "ocal", 1, 7))
+    assert len(await personal_repo.signals(engineer.user_id, "meeting")) == 1
+    await personal_layer.on_calendar_event(_cal_event(engineer.user_id, "gcal", 2, 8))
+    assert len(await personal_repo.signals(engineer.user_id, "meeting")) == 1
+
+
+async def test_a_sync_of_outlook_events_honours_the_outlook_calendar_pause(engineer, memory, ms_env):
+    events = [{"event_id": "e1", "summary": "Standup", "start": "2026-09-07T04:00:00+00:00", "attendees": []}]
+    await controls.set_paused(engineer.user_id, "outlook_calendar", True)
+    await personal_layer.record_meetings(engineer.user_id, events, "UTC", connector="outlook_calendar")
+    assert len(await personal_repo.signals(engineer.user_id, "meeting")) == 0
+    await personal_layer.record_meetings(engineer.user_id, events, "UTC")  # Google's sync: not paused
+    assert len(await personal_repo.signals(engineer.user_id, "meeting")) == 1
