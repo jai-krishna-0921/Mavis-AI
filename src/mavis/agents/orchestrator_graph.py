@@ -604,6 +604,8 @@ async def revise_approval(approval: Any, instructions: str) -> None:
         if asked != str(was.get("account") or "").strip().lower():
             raise SenderChange
         revised.sender_pin = was.get("sender_pin")
+        if hasattr(revised, "transaction_id"):  # one approval keeps one id, whatever the edit says
+            revised.transaction_id = was.get("transaction_id")
         if revised.sender_pin:
             preview += f"\nFrom: {str(revised.sender_pin).partition(':')[2]}"
     await approvals.update_args(approval.id, revised.model_dump(mode="json"), preview)

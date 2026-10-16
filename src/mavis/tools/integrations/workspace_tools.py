@@ -14,6 +14,7 @@ import base64
 import hashlib
 import re
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import date
 from pathlib import Path
@@ -467,6 +468,8 @@ async def _pick_sender(ctx: ToolContext, args: BaseModel) -> Prepared:
 
     if hasattr(args, "sender_pin"):
         args.sender_pin = None  # only this step may set it, whatever the model sent
+    if hasattr(args, "transaction_id"):
+        args.transaction_id = None
     try:
         merge = getattr(integrations.get_provider(), "merge", None)
     except IntegrationError:
@@ -487,6 +490,8 @@ async def _pick_sender(ctx: ToolContext, args: BaseModel) -> Prepared:
         return Prepared()
     if hasattr(args, "sender_pin"):  # the card and the send are for this account, whatever changes meanwhile
         args.sender_pin = f"{picked.provider.value}:{picked.address}"
+    if hasattr(args, "transaction_id") and picked.provider.value == "microsoft":
+        args.transaction_id = uuid.uuid4().hex  # one id per approval: Graph answers a repeat with the same event
     return Prepared(note=f"From: {picked.address}")
 
 

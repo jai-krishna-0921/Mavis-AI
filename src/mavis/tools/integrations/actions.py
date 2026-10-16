@@ -207,7 +207,21 @@ class CalendarSlotsArgs(LocalTimes):
     time_max: datetime = Field(description=wall_clock("Window end"))
 
 
-class CalendarCreateArgs(SenderPin, LocalTimes):
+class TransactionId(BaseModel):
+    """Graph's `transactionId` for one approved event: set by prepare_sender (never the model), stored with
+    the approval, so a retried create cannot make the event twice. Left out of the arguments while unset."""
+
+    transaction_id: SkipJsonSchema[str | None] = Field(default=None, max_length=64)
+
+    @model_serializer(mode="wrap")
+    def _leave_out_unset_transaction_id(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("transaction_id") is None:
+            data.pop("transaction_id", None)
+        return data
+
+
+class CalendarCreateArgs(TransactionId, SenderPin, LocalTimes):
     summary: str
     start: datetime = Field(description=wall_clock("Start time"))
     # Only a start given: the configured default length (hotfix4 H6), never a question about the length.

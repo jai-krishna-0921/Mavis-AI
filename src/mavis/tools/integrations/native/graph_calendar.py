@@ -307,8 +307,11 @@ class CalendarActions:
             body["location"] = {"displayName": a.location}
         if a.attendees:  # Graph sends the invites itself
             body["attendees"] = [{"emailAddress": {"address": e}, "type": "required"} for e in a.attendees]
+        txn = getattr(a, "transaction_id", None)
+        if txn:  # Graph returns the event it already made for this id, so a repeat is safe
+            body["transactionId"] = txn
         made = await self.graph.json(uid, "POST", f"{GRAPH}/me/events", body=body, headers=PREFER_UTC,
-                                     idempotent=False)
+                                     idempotent=bool(txn))
         return map_event(made, await self._me(uid))
 
     async def update(self, uid: int, a: Any) -> dict:

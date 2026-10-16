@@ -393,3 +393,29 @@ async def test_updating_an_outlook_event_with_guests_is_outward_for_the_approval
     assert guests.risk is RiskClass.OUTWARD and "1 guest" in guests.note
     solo = await prepared(graph_event("e1", organizer_is_me=True))
     assert solo.risk is None
+
+
+async def test_create_with_a_transaction_id_sends_it_and_can_be_repeated_safely():
+    bodies, state = [], {"n": 0}
+
+    def flaky(request):
+        bodies.append(json.loads(request.content))
+        state["n"] += 1
+        return httpx.Response(503) if state["n"] == 1 else httpx.Response(201, json=graph_event("new1"))
+    g = FakeGraph().on("POST", r"/v1.0/me/events$", flaky)
+    ex, _ = g.executor()
+    r = await ex.execute(U, "calendar.create_event", {
+        "summary": "Sync", "start": "2026-10-20T09:00:00Z", "transaction_id": "abc123"})
+    assert r.ok and len(bodies) == 2 and all(b["transactionId"] == "abc123" for b in bodies)
+
+
+async def test_create_without_a_transaction_id_sends_none():
+    seen = []
+
+    def ok(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(201, json=graph_event("n"))
+    g = FakeGraph().on("POST", r"/v1.0/me/events$", ok)
+    ex, _ = g.executor()
+    await ex.execute(U, "calendar.create_event", {"summary": "S", "start": "2026-10-20T09:00:00Z"})
+    assert "transactionId" not in seen[0]

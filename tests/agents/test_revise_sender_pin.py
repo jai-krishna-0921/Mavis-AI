@@ -48,3 +48,17 @@ async def test_google_only_edit_is_unchanged(user, fake_llm, rec_bus, sent, fres
     await revise_approval(await approvals.get(aid), "change the body")
     row = await approvals.get(aid)
     assert "sender_pin" not in row.arguments and "From:" not in row.preview
+
+
+async def test_edited_event_keeps_its_transaction_id(user, fake_llm, rec_bus, sent, fresh_registry):
+    register_integration_tools(fresh_registry)
+    was = {"summary": "Sync", "start": "2026-10-20T10:00:00+00:00", "duration_minutes": 30, "attendees": [],
+           "account": "", "sender_pin": "microsoft:me@corp.test", "transaction_id": "tx-1"}
+    aid = await approvals.create(user.id, None, "calendar_create_event", was, "Create event\nFrom: me@corp.test",
+                                 utcnow() + timedelta(hours=48))
+    tool = fresh_registry.get("calendar_create_event")
+    fake_llm.push_structured(tool.args_model.model_validate(
+        {"summary": "Sync 2", "start": "2026-10-20T10:00:00+00:00", "transaction_id": "other"}))
+    await revise_approval(await approvals.get(aid), "rename it")
+    row = await approvals.get(aid)
+    assert row.arguments["transaction_id"] == "tx-1" and row.arguments["summary"] == "Sync 2"

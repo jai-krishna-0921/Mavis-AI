@@ -113,3 +113,25 @@ async def test_a_needed_reconnect_still_surfaces_from_the_pre_step(router, token
     await ms_grant(tokens, status="REVOKED")
     with pytest.raises(ConnectionRequired):
         await prepare_sender(CTX, MailComposeArgs(to=["a@b.com"], subject="s", body="b", account="me@corp.test"))
+
+
+async def test_a_microsoft_event_gets_its_own_stable_transaction_id_the_model_cannot_choose(router, tokens):
+    await grant(tokens, G, ALL_GOOGLE)
+    await ms_grant(tokens)
+    args = CalendarCreateArgs(summary="x", start="2026-10-20T10:00:00", account="me@corp.test", transaction_id="evil")
+    await prepare_sender(CTX, args)
+    first = args.transaction_id
+    assert first and first != "evil" and len(first) <= 64
+    assert args.model_dump(mode="json")["transaction_id"] == first      # stored with the approval
+    again = CalendarCreateArgs(summary="x", start="2026-10-20T10:00:00", account="me@corp.test")
+    await prepare_sender(CTX, again)
+    assert again.transaction_id != first                                  # a new approval, a new id
+
+
+async def test_google_events_and_mail_carry_no_transaction_id(router, tokens):
+    await grant(tokens, G, ALL_GOOGLE)
+    await ms_grant(tokens)
+    event = CalendarCreateArgs(summary="x", start="2026-10-20T10:00:00", account="google")
+    await prepare_sender(CTX, event)
+    assert event.transaction_id is None and "transaction_id" not in event.model_dump(mode="json")
+    assert not hasattr(MAIL, "transaction_id")
