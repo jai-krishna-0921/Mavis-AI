@@ -330,3 +330,52 @@ async def test_a_tick_in_flight_at_disconnect_does_not_write_its_cursors_back():
     n.results["teams.history"] = ToolResult(ok=True, data={"messages": [tmsg("a1", "2026-10-15T10:00:00Z", "a")]})
     await poll_teams(poller, 1, st)
     assert wrote == []
+
+
+async def test_a_message_with_an_unreadable_time_does_not_end_paging_early():
+    n, st = Native(), {"cursors": {"teams_at": "2026-10-15T09:00:00+00:00"}}
+    poller, poll_teams = P(n), hook_for(C.TEAMS)
+    msgs, real = history_of(30)
+
+    def fn(args):
+        out = real(args)
+        if not args.get("before"):
+            out.data["messages"][3] = {**out.data["messages"][3], "at": "not a time"}
+        return out
+    n.results["teams.history"] = fn
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [chat("a", msgs[-1]["at"])]})
+    await poll_teams(poller, 1, st)
+    ids = {e.id for e in poller.bus.events}
+    assert {f"teams:1:a:a{i}" for i in range(0, 10)} <= ids          # the second page was read
+
+
+async def test_a_backlog_for_a_chat_missing_from_this_ticks_list_is_kept_and_holds_the_floor():
+    n, st = Native(), {"cursors": {"teams_at": "2026-10-15T09:00:00+00:00"}}
+    poller, poll_teams = P(n), hook_for(C.TEAMS)
+    msgs, n.results["teams.history"] = history_of(100)
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [chat("a", msgs[-1]["at"])]})
+    await poll_teams(poller, 1, st)
+    assert "ms:a" in st["cursors"]["teams_resume"]
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [chat("b", "2026-10-15T12:00:00Z")]})
+    n.results["teams.history"] = lambda args: ToolResult(ok=True, data={"messages": [tmsg("b1", "2026-10-15T12:00:00Z", "b")]})
+    await poll_teams(poller, 1, st)
+    assert "ms:a" in st["cursors"]["teams_resume"]                       # not dropped
+    assert st["cursors"]["teams_at"].startswith("2026-10-15T09:00")      # b moved on; a's older part is still owed
+    n.results["teams.history"] = history_of(100)[1]
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [chat("a", msgs[-1]["at"])]})
+    await poll_teams(poller, 1, st)                                      # a is listed again: the backlog finishes
+    assert {f"teams:1:a:a{i}" for i in range(100)} <= {e.id for e in poller.bus.events}
+
+
+async def test_an_unlisted_backlog_expires_after_a_day_and_releases_the_floor():
+    from datetime import timedelta
+    n, st = Native(), {"cursors": {"teams_at": "2026-10-15T09:00:00+00:00"}}
+    poller, poll_teams = P(n), hook_for(C.TEAMS)
+    msgs, n.results["teams.history"] = history_of(100)
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [chat("a", msgs[-1]["at"])]})
+    await poll_teams(poller, 1, st)
+    poller.now = poller.now + timedelta(hours=25)
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [chat("b", "2026-10-16T12:00:00Z")]})
+    n.results["teams.history"] = lambda args: ToolResult(ok=True, data={"messages": [tmsg("b1", "2026-10-16T12:00:00Z", "b")]})
+    await poll_teams(poller, 1, st)
+    assert "ms:a" not in st["cursors"]["teams_resume"] and st["cursors"]["teams_at"].startswith("2026-10-16T12:00")

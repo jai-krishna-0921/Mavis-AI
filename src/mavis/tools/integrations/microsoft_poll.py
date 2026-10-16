@@ -197,11 +197,23 @@ async def _calendar_by_list(poller: Any, user_id: int, st: dict) -> int:
     return published
 
 
+RESUME_TTL = timedelta(hours=24)
+
+
+def _expired(rec: dict, now: datetime) -> bool:
+    made = to_datetime(rec.get("at"))
+    return made is not None and now - made > RESUME_TTL
+
+
 def _before(page: list[dict], nxt: str, bound: datetime | None) -> bool:
     """True once a page reaches `bound` (a message at or before it, or the oldest message read is)."""
     oldest = to_datetime(nxt) if nxt else None
-    return not nxt or bound is None or (oldest is not None and oldest <= bound) or any(
-        (to_datetime(m.get("at")) or bound) <= bound for m in page)
+    if not nxt or bound is None:
+        return True
+    if oldest is not None and oldest <= bound:
+        return True
+    # a message whose time cannot be read says nothing about how far down the page got
+    return any((at := to_datetime(m.get("at"))) is not None and at <= bound for m in page)
 
 
 async def _read_chat(poller: Any, user_id: int, cid: str, floor: datetime, resume: dict | None
@@ -287,8 +299,9 @@ async def poll_teams(poller: Any, user_id: int, st: dict) -> int:
     changed = [c for c in chats if (to_datetime(c.get("lastMessageAt")) or mark) > since(c)]
     changed.sort(key=lambda c: str(c.get("lastMessageAt") or ""))
     own_tid = await own_tenant(poller.provider, user_id)
+    listed = {str(c.get("id")) for c in chats}
     resume = {str(k): v for k, v in (_cursors(st).get("teams_resume") or {}).items()
-              if isinstance(v, dict) and any(str(c.get("id")) == str(k) for c in chats)}
+              if isinstance(v, dict) and not _expired(v, now)}  # a chat missing from this list keeps its entry
     published, unresolved, throttled = 0, [], False
     for i, chat in enumerate(changed):
         if i >= TEAMS_PER_TICK or throttled:
@@ -323,7 +336,8 @@ async def poll_teams(poller: Any, user_id: int, st: dict) -> int:
             if event is not None and await poller.bus.publish(event):
                 published += 1
         if left is not None:  # older messages remain: the floor stays below this chat, the next tick continues
-            resume[cid] = left
+            old = resume.get(cid) or {}
+            resume[cid] = {**left, "at": old.get("at") or now.isoformat(), "floor": old.get("floor") or floor.isoformat()}
             unresolved.append(chat)
             continue
         resume.pop(cid, None)
@@ -332,6 +346,9 @@ async def poll_teams(poller: Any, user_id: int, st: dict) -> int:
         new_floor = min(since(c) for c in unresolved)
     else:
         new_floor = max([mark, *(to_datetime(c.get("lastMessageAt")) or mark for c in chats)])
+    for cid, rec in resume.items():
+        if cid not in listed:  # its older part is still owed: the floor stays below it until it expires
+            new_floor = min(new_floor, to_datetime(rec.get("floor")) or mark)
     if res.data.get("unordered") and chats:  # a plain page of chats: those outside it were never seen
         oldest_seen = min(to_datetime(c.get("lastMessageAt")) or mark for c in chats)
         new_floor = min(new_floor, max(oldest_seen, mark))
