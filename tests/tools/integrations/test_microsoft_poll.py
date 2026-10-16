@@ -227,3 +227,87 @@ async def test_two_chains_writing_cursors_concurrently_keep_both(user):
     await poller.set_cursor(user.id, stale_a, "gmail_after", 5)
     cursors = (await RepoUserState().get(user.id))["cursors"]
     assert cursors == {"outlook_delta": "L1", "teams_at": "T1", "gmail_after": 5}
+
+
+def history_of(count, *, start="2026-10-15T09:00:00", cid="a"):
+    """A chat with `count` messages one minute apart after `start`, paged newest first like Graph."""
+    from datetime import datetime, timedelta
+    t0 = datetime.fromisoformat(start + "+00:00")
+    msgs = [tmsg(f"{cid}{i}", (t0 + timedelta(minutes=i + 1)).isoformat(), cid) for i in range(count)]
+
+    def fn(args):
+        items = sorted(msgs, key=lambda m: m["at"], reverse=True)
+        if args.get("before"):
+            items = [m for m in items if m["at"] < args["before"]]
+        page = items[:args["limit"]]
+        return ToolResult(ok=True, data={"messages": page, "next": page[-1]["at"] if len(page) >= args["limit"] else None})
+    return msgs, fn
+
+
+async def test_teams_busy_chat_with_more_than_one_page_loses_nothing():
+    n, st = Native(), {"cursors": {"teams_at": "2026-10-15T09:00:00+00:00"}}
+    poller, poll_teams = P(n), hook_for(C.TEAMS)
+    msgs, n.results["teams.history"] = history_of(45)
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [chat("a", msgs[-1]["at"])]})
+    assert await poll_teams(poller, 1, st) == 45
+    assert {e.id for e in poller.bus.events} == {f"teams:1:a:a{i}" for i in range(45)}
+    assert st["cursors"]["teams_at"].startswith(msgs[-1]["at"][:16]) and not st["cursors"]["teams_resume"]
+
+
+async def test_teams_backlog_beyond_the_page_budget_continues_next_tick_and_only_then_moves_on():
+    n, st = Native(), {"cursors": {"teams_at": "2026-10-15T09:00:00+00:00"}}
+    poller, poll_teams = P(n), hook_for(C.TEAMS)
+    msgs, n.results["teams.history"] = history_of(100)
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [chat("a", msgs[-1]["at"])]})
+    assert await poll_teams(poller, 1, st) == 60            # three pages of 20, newest first
+    assert st["cursors"]["teams_at"].startswith("2026-10-15T09:00")   # the floor did not jump to the newest
+    assert "ms:a" in st["cursors"]["teams_resume"]
+    assert await poll_teams(poller, 1, st) == 40            # the older part
+    assert {e.id for e in poller.bus.events} == {f"teams:1:a:a{i}" for i in range(100)}
+    assert st["cursors"]["teams_at"].startswith(msgs[-1]["at"][:16]) and not st["cursors"]["teams_resume"]
+
+
+async def test_teams_messages_arriving_while_a_backlog_resumes_are_not_lost():
+    n, st = Native(), {"cursors": {"teams_at": "2026-10-15T09:00:00+00:00"}}
+    poller, poll_teams = P(n), hook_for(C.TEAMS)
+    msgs, n.results["teams.history"] = history_of(70)
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [chat("a", msgs[-1]["at"])]})
+    assert await poll_teams(poller, 1, st) == 60
+    more = msgs + [tmsg("late", "2026-10-15T11:30:00+00:00", "a")]
+
+    def fn(args):
+        items = sorted(more, key=lambda m: m["at"], reverse=True)
+        if args.get("before"):
+            items = [m for m in items if m["at"] < args["before"]]
+        page = items[:args["limit"]]
+        return ToolResult(ok=True, data={"messages": page, "next": page[-1]["at"] if len(page) >= args["limit"] else None})
+    n.results["teams.history"] = fn
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [chat("a", "2026-10-15T11:30:00+00:00")]})
+    await poll_teams(poller, 1, st)
+    assert {e.id for e in poller.bus.events} == {f"teams:1:a:a{i}" for i in range(70)} | {"teams:1:a:late"}
+    assert st["cursors"]["teams_at"].startswith("2026-10-15T11:30")
+
+
+async def test_teams_unordered_chat_page_does_not_move_the_floor_past_unseen_chats():
+    n, st = Native(), {"cursors": {"teams_at": "2026-10-15T09:00:00+00:00"}}
+    poller, poll_teams = P(n), hook_for(C.TEAMS)
+    n.results["teams.chats"] = ToolResult(ok=True, data={"unordered": True, "chats": [
+        chat("a", "2026-10-15T12:00:00Z"), chat("b", "2026-10-15T10:00:00Z")]})
+    n.results["teams.history"] = lambda args: ToolResult(ok=True, data={"messages": [
+        tmsg("x" + args["chat_id"], "2026-10-15T12:00:00Z" if args["chat_id"] == "ms:a" else "2026-10-15T10:00:00Z", args["chat_id"][3:])]})
+    assert await poll_teams(poller, 1, st) == 2
+    assert st["cursors"]["teams_at"].startswith("2026-10-15T10:00")      # not 12:00: other chats may hold older news
+
+
+async def test_a_long_baseline_is_finished_silently_before_changes_are_published():
+    n, st = Native(), {}
+    poller, poll_mail = P(n), hook_for(C.OUTLOOK)
+    n.results["mail.inbox_delta"] = ToolResult(ok=True, data={"messages": [], "cursor": "NEXT1", "baseline": True, "more": True})
+    assert await poll_mail(poller, 1, st) == 0 and st["cursors"]["outlook_delta"] == "NEXT1"
+    # the rest of the baseline arrives as a plain page: still the baseline, so nothing is announced
+    n.results["mail.inbox_delta"] = ToolResult(ok=True, data={"messages": [mail("1")], "cursor": "NEXT2", "baseline": False, "more": True})
+    assert await poll_mail(poller, 1, st) == 0 and not poller.bus.events
+    n.results["mail.inbox_delta"] = ToolResult(ok=True, data={"messages": [mail("2")], "cursor": "DELTA", "baseline": False, "more": False})
+    assert await poll_mail(poller, 1, st) == 0 and st["cursors"]["outlook_delta"] == "DELTA"
+    n.results["mail.inbox_delta"] = ToolResult(ok=True, data={"messages": [mail("3")], "cursor": "DELTA2", "baseline": False, "more": False})
+    assert await poll_mail(poller, 1, st) == 1                  # real changes only after the baseline ended

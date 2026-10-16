@@ -44,6 +44,7 @@ async def test_orderby_rejection_falls_back_in_three_steps():
     assert query_of(steps[1])["$expand"] == "lastMessagePreview" and "$orderby" in query_of(steps[1])
     assert "$orderby" not in query_of(steps[2])
     assert r.data["chats"][0]["members"][0]["email"] == "alice@acme.com"
+    assert r.data["unordered"] is True      # the poll must not trust its newest-first order for completeness
     g.assert_all_routed()
 
 
@@ -56,6 +57,7 @@ async def test_second_step_keeps_server_order_and_fetches_members():
     ex, _ = g.executor()
     r = await ex.execute(U, "teams.chats", {})
     assert r.ok and len(g.calls("GET", "/me/chats")) == 2 and len(g.calls("GET", "/members")) == 1
+    assert "unordered" not in r.data
     assert r.data["chats"][0]["members"][0]["name"] == "Alice"
 
 

@@ -133,7 +133,10 @@ class TeamsActions:
             if exc.kind is FailureKind.NOT_FOUND:  # a personal account answers 404 for chats
                 raise GraphError(FailureKind.PERMISSION_MISSING, NO_TEAMS) from None
             raise self._unavailable(exc) from None
-        return {"chats": chats}
+        out: dict[str, Any] = {"chats": chats}
+        if n == 2:
+            out["unordered"] = True  # a plain page: chats outside it were not seen (the poll keeps its floor)
+        return out
 
     async def _fill_members(self, uid: int, chats: list[dict], raw: list[dict], me_oid: str) -> None:
         gate = asyncio.Semaphore(MEMBER_CONCURRENCY)

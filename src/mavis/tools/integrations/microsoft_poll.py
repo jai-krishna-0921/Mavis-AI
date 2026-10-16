@@ -42,6 +42,8 @@ SHARES_OFF = timedelta(hours=24)
 SEEN_CAP = 200
 MAX_BACKOFF_MIN = 15
 TEAMS_CHATS, TEAMS_PER_TICK, TEAMS_HISTORY = 30, 10, 20
+TEAMS_PAGES = 3  # history pages read per chat per tick; a longer backlog continues next tick
+RESUME_CAP = 50
 
 
 def _cursors(st: dict) -> dict:
@@ -105,6 +107,7 @@ async def poll_mail(poller: Any, user_id: int, st: dict) -> int:
         if res.error_kind is FailureKind.INVALID_ARGUMENT:
             if cursor:  # a link we cannot use: start over from now
                 await _put(poller, user_id, st, "outlook_delta", "")
+                await _put(poller, user_id, st, "outlook_baselining", False)
                 return 0
             return await _mail_by_search(poller, user_id, st)
         return await _failed(poller, user_id, st, res, "mail")
@@ -112,11 +115,18 @@ async def poll_mail(poller: Any, user_id: int, st: dict) -> int:
     published = 0
     if data.get("reset"):
         await _put(poller, user_id, st, "outlook_delta", "")
+        await _put(poller, user_id, st, "outlook_baselining", False)
     else:
-        if not data.get("baseline"):  # the first sync owns history: a baseline publishes nothing
+        # the first sync owns history: a baseline publishes nothing, and neither does the rest of a long one
+        # (its next link is stored with `outlook_baselining` until the delta link arrives)
+        silent = bool(data.get("baseline")) or bool(_cursors(st).get("outlook_baselining"))
+        if not silent:
             published = await _publish_mail(poller, user_id, extract_messages(data))
         if data.get("cursor"):  # only after the events are out: a failure above re-delivers (ids dedupe)
             await _put(poller, user_id, st, "outlook_delta", str(data["cursor"]))
+            baselining = silent and bool(data.get("more"))
+            if baselining != bool(_cursors(st).get("outlook_baselining")):
+                await _put(poller, user_id, st, "outlook_baselining", baselining)
     await _success(poller, user_id, st)
     return published
 
@@ -183,10 +193,74 @@ async def _calendar_by_list(poller: Any, user_id: int, st: dict) -> int:
     return published
 
 
+def _before(page: list[dict], nxt: str, bound: datetime | None) -> bool:
+    """True once a page reaches `bound` (a message at or before it, or the oldest message read is)."""
+    oldest = to_datetime(nxt) if nxt else None
+    return not nxt or bound is None or (oldest is not None and oldest <= bound) or any(
+        (to_datetime(m.get("at")) or bound) <= bound for m in page)
+
+
+async def _read_chat(poller: Any, user_id: int, cid: str, floor: datetime, resume: dict | None
+                     ) -> tuple[list[dict], dict | None] | ToolResult:
+    """New messages of one chat, newest first by page, down to `floor` (at most TEAMS_PAGES pages).
+    Returns (messages newer than the floor, None) when it got all the way down, or (messages, resume) when
+    the backlog is longer: the resume record holds where the older part continues (`before`) and the newest
+    message already published (`top`), so the next tick reads what arrived since, then goes on downward.
+    A failed read returns its ToolResult."""
+    top = to_datetime((resume or {}).get("top"))
+    out: list[dict] = []
+    pages, newest = 0, top
+    # 1) from the newest message down to what was read before (everything on the first pass)
+    bound = top or floor
+    before, reached = "", False
+    while pages < TEAMS_PAGES:
+        args: dict[str, Any] = {"chat_id": cid, "limit": TEAMS_HISTORY}
+        if before:
+            args["before"] = before
+        hist = await native_call(poller.provider, user_id, "teams.history", args)
+        pages += 1
+        if not hist.ok or not isinstance(hist.data, dict):
+            return hist if not hist.ok else ToolResult(ok=False, error_kind=FailureKind.UNKNOWN, error="shape")
+        page = [m for m in hist.data.get("messages") or [] if isinstance(m, dict)]
+        nxt = str(hist.data.get("next") or "")
+        for m in page:
+            at = to_datetime(m.get("at"))
+            if at is not None and at > bound:
+                out.append(m)
+                newest = at if newest is None or at > newest else newest
+        if _before(page, nxt, bound) or nxt == before:
+            reached = True
+            break
+        before = nxt
+    if resume is None:
+        if reached:
+            return out, None
+        return out, {"before": before, "top": (newest or floor).isoformat()}
+    # 2) resuming: go on downward from where the last tick stopped, with the pages left
+    below, done = str(resume.get("before") or ""), False
+    while pages < TEAMS_PAGES + 1 and below:
+        hist = await native_call(poller.provider, user_id, "teams.history",
+                                 {"chat_id": cid, "limit": TEAMS_HISTORY, "before": below})
+        pages += 1
+        if not hist.ok or not isinstance(hist.data, dict):
+            return hist if not hist.ok else ToolResult(ok=False, error_kind=FailureKind.UNKNOWN, error="shape")
+        page = [m for m in hist.data.get("messages") or [] if isinstance(m, dict)]
+        nxt = str(hist.data.get("next") or "")
+        out += [m for m in page if (to_datetime(m.get("at")) or floor) > floor]
+        if _before(page, nxt, floor) or nxt == below:
+            done = True
+            break
+        below = nxt
+    if done and reached:
+        return out, None
+    return out, {"before": below, "top": (newest or floor).isoformat() if reached else str(resume.get("top") or "")}
+
+
 async def poll_teams(poller: Any, user_id: int, st: dict) -> int:
     """New Teams messages. `teams_at` is the floor under every chat; `teams_chats` holds a per-chat watermark
-    for chats read ahead of it. A chat that fails or is left for the next tick keeps the floor below its
-    unread messages, so nothing is skipped (replays dedupe by event id)."""
+    for chats read ahead of it. History is paged newest first down to the chat's floor. A chat that fails, or
+    whose backlog is longer than TEAMS_PAGES pages, keeps the floor below its unread messages (the backlog
+    continues from `teams_resume` next tick), so nothing is skipped (replays dedupe by event id)."""
     if _backed_off(poller, st):
         return 0
     now = poller.clock()
@@ -209,34 +283,33 @@ async def poll_teams(poller: Any, user_id: int, st: dict) -> int:
     changed = [c for c in chats if (to_datetime(c.get("lastMessageAt")) or mark) > since(c)]
     changed.sort(key=lambda c: str(c.get("lastMessageAt") or ""))
     own_tid = await own_tenant(poller.provider, user_id)
+    resume = {str(k): v for k, v in (_cursors(st).get("teams_resume") or {}).items()
+              if isinstance(v, dict) and any(str(c.get("id")) == str(k) for c in chats)}
     published, unresolved, throttled = 0, [], False
     for i, chat in enumerate(changed):
         if i >= TEAMS_PER_TICK or throttled:
             unresolved.append(chat)
             continue
-        floor = since(chat)
-        hist = await native_call(poller.provider, user_id, "teams.history",
-                                 {"chat_id": str(chat["id"]), "limit": TEAMS_HISTORY})
-        if not hist.ok:
-            if hist.error_kind is FailureKind.AUTH:
+        floor, cid = since(chat), str(chat["id"])
+        got = await _read_chat(poller, user_id, cid, floor, resume.get(cid))
+        if isinstance(got, ToolResult):
+            if got.error_kind is FailureKind.AUTH:
                 raise PollAuthError
-            throttled = hist.error_kind in (FailureKind.RATE_LIMITED, FailureKind.UNAVAILABLE)
+            throttled = got.error_kind in (FailureKind.RATE_LIMITED, FailureKind.UNAVAILABLE)
             if throttled:
-                await _failed(poller, user_id, st, hist, "teams_history")
+                await _failed(poller, user_id, st, got, "teams_history")
             unresolved.append(chat)  # retried next tick: its floor does not move
             continue
+        messages, left = got
         members = [m for m in chat.get("members") or [] if isinstance(m, dict)]
         by_id = {str(m.get("id") or ""): m for m in members}
         roster = [{"name": str(m.get("name") or ""), "email": str(m.get("email") or ""),
                    "tenantId": str(m.get("tenantId") or ""), "me": bool(m.get("me"))} for m in members]
-        for m in hist.data.get("messages") or []:
-            at = to_datetime(m.get("at")) if isinstance(m, dict) else None
-            if at is None or at <= floor:
-                continue
+        for m in sorted(messages, key=lambda x: to_datetime(x.get("at")) or floor):  # oldest first
             from_id, from_me = str(m.get("fromId") or ""), bool(m.get("fromMe"))
             sender = by_id.get(from_id, {})
             event = teams_event(user_id, {
-                "chat_id": str(chat["id"]), "message_id": str(m.get("id") or ""),
+                "chat_id": cid, "message_id": str(m.get("id") or ""),
                 "from": str(m.get("from") or ""), "from_id": from_id,
                 "from_address": str(sender.get("email") or ""), "from_me": from_me,
                 "text": str(m.get("text") or ""), "at": str(m.get("at") or ""),
@@ -245,14 +318,23 @@ async def poll_teams(poller: Any, user_id: int, st: dict) -> int:
             }, source="poller")
             if event is not None and await poller.bus.publish(event):
                 published += 1
-        per_chat[str(chat["id"])] = (to_datetime(chat.get("lastMessageAt")) or floor).isoformat()
+        if left is not None:  # older messages remain: the floor stays below this chat, the next tick continues
+            resume[cid] = left
+            unresolved.append(chat)
+            continue
+        resume.pop(cid, None)
+        per_chat[cid] = (to_datetime(chat.get("lastMessageAt")) or floor).isoformat()
     if unresolved:
         new_floor = min(since(c) for c in unresolved)
     else:
         new_floor = max([mark, *(to_datetime(c.get("lastMessageAt")) or mark for c in chats)])
+    if res.data.get("unordered") and chats:  # a plain page of chats: those outside it were never seen
+        oldest_seen = min(to_datetime(c.get("lastMessageAt")) or mark for c in chats)
+        new_floor = min(new_floor, max(oldest_seen, mark))
     kept = sorted(((k, v) for k, v in per_chat.items() if (to_datetime(v) or mark) > new_floor),
                   key=lambda kv: kv[1], reverse=True)[:SEEN_CAP]
     await _put(poller, user_id, st, "teams_chats", dict(kept))
+    await _put(poller, user_id, st, "teams_resume", dict(list(resume.items())[-RESUME_CAP:]))
     await _put(poller, user_id, st, "teams_at", new_floor.isoformat())
     if not throttled:
         await _success(poller, user_id, st)
