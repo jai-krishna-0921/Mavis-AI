@@ -3,6 +3,7 @@ places inside a hidden element (hidden attribute, display:none, or an element we
 appear in our text. Visible markers going missing is allowed (fail toward hiding) but bounded."""
 
 import random
+import re
 import time
 
 import pytest
@@ -31,11 +32,12 @@ HTML_TAGS = [
 # paragraph closer or block end tag for it), keygen (removed from the specification), summary and menu/dir end
 # tags (it ignores `</summary>` where the specification closes the summary), dialog (a paragraph closer),
 # rb/rtc (not in its implied-end-tag list), dd/dt/hgroup/figcaption (it foster-parents or misses the block
-# the specification has), and sup/var (Lexbor keeps sup inside svg, so graph_html parses sup as var).
-STALE_IN_HTML5LIB = {"search", "keygen", "summary", "dialog", "sup", "var", "rb", "rtc", "dd", "dt", "hgroup",
-                     "figcaption"}
-FOREIGN_TAGS = ["svg", "math", "g", "path", "circle", "foreignObject", "desc", "text", "mi", "mo", "mn", "ms",
-                "mtext", "mglyph", "malignmark"]  # annotation-xml: an integration point only with an encoding
+# the specification has). sup and var are in: graph_html cuts the markup at an svg or math that a sup follows.
+STALE_IN_HTML5LIB = {"search", "keygen", "summary", "dialog", "rb", "rtc", "dd", "dt", "hgroup",
+                     "figcaption", "main"}
+# No HTML integration points (desc, foreignObject, annotation-xml): html5lib differs from the specification.
+FOREIGN_TAGS = ["svg", "math", "g", "path", "circle", "text", "mi", "mo", "mn", "ms", "mtext", "mglyph",
+                "malignmark"]
 # Weighted toward the names that matter to nesting, so that tables, lists and formatting meet often.
 COMMON = ["div", "span", "p", "b", "i", "a", "font", "table", "tr", "td", "th", "ul", "ol", "li", "button",
           "select", "object", "caption", "noscript", "em", "h1", "h2", "h3", "blockquote", "form",
@@ -48,6 +50,8 @@ TAGS = [t for t in COMMON * 2 + HTML_TAGS + FOREIGN_TAGS
 HIDERS = ["hidden", 'style="display:none"', 'style="visibility:hidden"',
           'style="display:none" style="display:block"', 'hidden hidden', 'class="a" hidden class="b"',
           'style="display:block" style="display:none"']
+NOT_MARKUP = ["<select><col>", "</select>", "<svg><sup>", "</td></table>", "<style>.a{display:none}</style>",
+              "<script>", "<template>", "<table hidden>"]
 TABLE_PARTS = {"table", "tr", "td", "th", "col", "colgroup", "tbody", "thead", "tfoot", "caption"}
 SKIPPED_ASSERTIONS = [0]  # documents html5lib itself cannot build (an internal assertion)
 
@@ -78,7 +82,8 @@ def _hidden_markers(html: str, styles: bool) -> tuple[set[str], set[str]]:
 
     def visit(el, inherited: bool) -> None:
         here = inherited or _is_hidden(el, styles)
-        (hidden if here else shown).update(word.findall(el.text or ""))
+        if isinstance(el.tag, str):  # a comment's text is no text
+            (hidden if here else shown).update(word.findall(el.text or ""))
         for child in el:
             visit(child, here)
             (hidden if here else shown).update(word.findall(child.tail or ""))
@@ -99,10 +104,13 @@ def _doc(rng: random.Random, n: int, wild: bool) -> tuple[str, int]:
             while foreign and tag in TABLE_PARTS:  # html5lib and Lexbor disagree on table parts in svg/math
                 tag = rng.choice(TAGS)
             attrs = ""
+            if rng.random() < 0.08:  # markup-looking text inside an attribute value is not markup
+                attrs = f' title="{rng.choice(NOT_MARKUP)} mk{marks}z"'
+                marks += 1
             # html5lib merges a later <body>/<html> start tag's attributes even inside a template, which the
             # specification forbids (and Lexbor follows), so those two never carry attributes here.
             if rng.random() < 0.3 and tag not in ("body", "html"):
-                attrs = " " + rng.choice(HIDERS)
+                attrs += " " + rng.choice(HIDERS)
             slash = " /" if wild and rng.random() < 0.1 else ""
             parts.append(f"<{tag}{attrs}{slash}>")
             stack.append(tag)
@@ -115,6 +123,9 @@ def _doc(rng: random.Random, n: int, wild: bool) -> tuple[str, int]:
                 parts.append(f"</{rng.choice(FOREIGN_TAGS if foreign else TAGS)}>")
             elif stack:
                 parts.append(f"</{stack.pop()}>")
+        elif r < 0.7:  # a comment holding markup-looking text and a marker that must never appear
+            parts.append(f"<!-- {rng.choice(NOT_MARKUP)} mk{marks}z -->")
+            marks += 1
         else:
             parts.append(f" mk{marks}z ")
             marks += 1
@@ -143,8 +154,13 @@ def test_nothing_a_browser_hides_reaches_the_text(which):
     leaks, lost, total_visible, with_hidden = [], 0, 0, 0
     for _ in range(DOCS):
         html, _n = _doc(rng, rng.randint(4, 40), wild=True)
+        skipped = SKIPPED_ASSERTIONS[0]
         hidden, shown = _hidden_markers(html, styles)
         text = fn(html)
+        if SKIPPED_ASSERTIONS[0] == skipped:  # markers in comments and attribute values are never text
+            inert = set(re.findall(r"mk\d+z", html)) - hidden - shown
+            if any(m in text for m in inert):
+                leaks.append(([m for m in inert if m in text], html))
         with_hidden += bool(hidden)
         bad = [m for m in hidden if m in text]
         if bad:

@@ -46,12 +46,15 @@ def tidy(text: str) -> str:
     return _BLANK_LINES.sub("\n\n", "\n".join(lines)).strip()
 
 
-def html_to_text(markup: str) -> str:
+def html_to_text(markup: str, cuts: list[bool] | None = None) -> str:
     """HTML to text: a tree walk over bounded markup; script, style, noscript, noembed, noframes, select
     and similar content is dropped, failing toward hiding (see graph_html)."""
     from mavis.tools.integrations.native import graph_html  # late: graph_html imports this module
 
-    return graph_html.html_to_text_limited(markup, graph_html.MAX_HTML, styles=False)[0]
+    text, cut = graph_html.html_to_text_limited(markup, graph_html.MAX_HTML, styles=False)
+    if cuts is not None:
+        cuts.append(cut)  # the markup was cut (nesting, a select, size): the caller reports a truncated body
+    return text
 
 
 def b64url_decode(data: str) -> bytes:
@@ -113,20 +116,21 @@ def _is_attachment(part: dict) -> bool:
     return header(part, "content-disposition").strip().lower().startswith("attachment")
 
 
-def _render(part: dict, mode: str) -> str:
+def _render(part: dict, mode: str, cuts: list[bool] | None = None) -> str:
     """Text of a part: mode "plain" keeps text/plain, "html" keeps text/html only."""
     if _is_attachment(part):
         return ""
     mime = str(part.get("mimeType") or "").lower()
     children = [c for c in part.get("parts") or [] if isinstance(c, dict)]
     if mime == "multipart/alternative":
-        return _join(_render(c, "plain") for c in children) or _join(_render(c, "html") for c in children)
+        return (_join(_render(c, "plain", cuts) for c in children)
+                or _join(_render(c, "html", cuts) for c in children))
     if children:
-        return _join(_render(c, mode) for c in children)
+        return _join(_render(c, mode, cuts) for c in children)
     if mime == "text/plain" and mode == "plain":
         return tidy(_part_text(part))
     if mime == "text/html" and mode == "html":
-        return html_to_text(_part_text(part))
+        return html_to_text(_part_text(part), cuts)
     return ""
 
 
@@ -159,10 +163,11 @@ def body_text(payload: dict, cap: int = BODY_CAP) -> tuple[str, bool]:
     """(text, truncated): plain text preferred, html reduced to text when there is no plain part."""
     if not isinstance(payload, dict):
         return "", False
-    text = _render(payload, "plain") or _render(payload, "html")
+    cuts: list[bool] = []
+    text = _render(payload, "plain", cuts) or _render(payload, "html", cuts)
     if len(text) > cap:
         return text[:cap].rstrip(), True
-    return text, False
+    return text, any(cuts)
 
 
 def kept_headers(payload: dict) -> list[dict[str, str]]:

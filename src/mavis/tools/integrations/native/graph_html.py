@@ -24,24 +24,32 @@ from mavis.tools.integrations.native import gmail_mime
 
 MAX_HTML = gmail_mime.BODY_CAP * 20  # characters of markup parsed
 MAX_NESTING_WORK = 40_000_000  # bound on the tree builder's nesting cost (see _bounded)
+MAX_RECONSTRUCT_WORK = 100_000  # bound on its re-creation of unclosed formatting elements (see _bounded)
+FREE_FORMATTING = 8  # open formatting elements per tag that cost nothing (every real mail has a few)
 
 _SKIP = frozenset({"script", "style", "head", "title", "template", "noscript", "iframe", "object", "svg",
                    "noembed", "noframes", "math", "select"})
 _BLOCK = gmail_mime._BLOCK_TAGS
-# Elements a browser re-nests when an end tag crosses a block.
+# Elements a browser re-creates (reconstructs) after an end tag or a new block closed them.
 _FORMATTING = frozenset({"a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong",
                          "tt", "u"})
 # Void elements and ones a browser closes by itself: they do not deepen the stack.
-_NOT_NESTING = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
-                          "source", "track", "wbr", "p", "li", "td", "th", "tr", "dd", "dt", "option"})
-_TAG_TOKEN = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9]*)")
-# Lexbor leaves `<sup>` inside svg and math, where the specification (and so a browser) ends the foreign
-# content at it. `<var>` it gets right and parses the same (an ordinary inline element that leaves foreign
-# content), and nobody writes it, so sup is written as var.
-_SUP = re.compile(r"<(/?)sup(?=[\s/>])", re.I)
+_VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+                   "source", "track", "wbr"})
+_NOT_NESTING = _VOID | frozenset({"p", "li", "td", "th", "tr", "dd", "dt", "option"})
+_CELLS = frozenset({"td", "th"})
+_ROWS = frozenset({"tr", "tbody", "thead", "tfoot"})
+# Formatting scopes besides cells.
+_MARKERS = frozenset({"caption", "object", "applet", "marquee", "template"})
+# Raw-text and RCDATA elements: their content is text up to the matching end tag, never markup.
+_RAW = frozenset({"script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes"})
+_IN_SELECT = frozenset({"option", "optgroup", "hr"})
+_FOREIGN = frozenset({"svg", "math"})
+_TAG_NAME = re.compile(r"[^\s/>]*")
 
 _CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})\s?|\\(.)", re.S)
 _BRACES = re.compile(r"[{}]")
+_IMPORTANT = re.compile(r"\s*!\s*important\s*$", re.I)
 _NUMBER = re.compile(r"^\s*(-?(?:\d+\.?\d*|\.\d+))\s*([a-z%]*)\s*$")
 _COLOR_TOKEN = re.compile(r"#[0-9a-f]{3,8}\b|(?:rgb|hsl)a?\([^)]*\)|\b[a-z]+\b", re.I)
 _NAMED = {"white": (255, 255, 255), "ivory": (255, 255, 240), "snow": (255, 250, 250),
@@ -78,7 +86,9 @@ def strip_comments(text: str) -> str:
 
 def declarations(css: str) -> dict[str, str]:
     """name -> lowercase value of an inline style, with comments removed and CSS escapes decoded. A style
-    too long to inspect cheaply is treated as hiding."""
+    too long to inspect cheaply is treated as hiding. A property that any declaration hides stays hidden
+    whatever a later one says (a browser would drop an invalid later value, or honour `!important`, and
+    which one applies is not worth guessing): hiding wins."""
     if len(css) > MAX_DECLARATIONS:
         return {"display": "none"}
     css = _CSS_ESCAPE.sub(_unescape, strip_comments(css))
@@ -86,7 +96,11 @@ def declarations(css: str) -> dict[str, str]:
     for item in css.split(";"):
         name, sep, value = item.partition(":")
         if sep:
-            out[name.strip().lower()] = re.sub(r"\s*!important\s*$", "", value.strip(), flags=re.I).lower()
+            name = name.strip().lower()
+            value = _IMPORTANT.sub("", value.strip()).lower()
+            if name in out and name != "color" and style_hides({name: out[name]}, None):
+                continue
+            out[name] = value
     return out
 
 
@@ -170,17 +184,39 @@ def style_hides(d: dict[str, str], bg: Bg) -> bool:
 
 
 
-def _style_texts(tree: LexborHTMLParser) -> list[str]:
-    """The text of each `<style>` element in the tree (comments and inert markup never count), at most
-    MAX_STYLE_TEXT characters in all."""
+_STYLE_OPEN = re.compile(r"<style", re.I)
+_STYLE_CLOSE = re.compile(r"</style", re.I)
+
+
+def _tree_styles(tree: LexborHTMLParser) -> list[str]:
+    """The text of each `<style>` element in the tree (comments and inert markup never count)."""
+    return [node.text() for node in tree.css("style")]
+
+
+def _text_styles(markup: str) -> list[str]:
+    """The text of each `<style ...>...</style>` found by linear scans, wherever it sits (a comment, an
+    attribute, a part of the document that was cut): a superset of the real style elements, so it can only
+    hide more."""
+    out: list[str] = []
+    pos = 0
+    while m := _STYLE_OPEN.search(markup, pos):
+        start = markup.find(">", m.end())
+        if start == -1 or not (end := _STYLE_CLOSE.search(markup, start)):
+            break
+        out.append(markup[start + 1:end.start()])
+        pos = end.end()
+    return out
+
+
+def _capped(blocks: list[str]) -> list[str]:
+    """At most MAX_STYLE_TEXT characters of style text in all; later rules are ignored."""
     out: list[str] = []
     total = 0
-    for node in tree.css("style"):
+    for block in blocks:
         if total >= MAX_STYLE_TEXT:
             break
-        text = node.text()[:MAX_STYLE_TEXT - total]
-        out.append(text)
-        total += len(text)
+        out.append(block[:MAX_STYLE_TEXT - total])
+        total += len(out[-1])
     return out
 
 
@@ -218,58 +254,189 @@ def hiding_rules(blocks: list[str]) -> tuple[set[str], set[str], set[str]]:
                     ids.update(re.findall(r"#([\w-]+)", compound))
                     if compound == one and re.fullmatch(r"[a-z][\w-]*", compound):
                         tags.add(compound)
-    if "sup" in tags:
-        tags.add("var")  # the parse writes sup as var (see _SUP)
     return classes, ids, tags
 
 
-def _bounded(markup: str) -> tuple[str, bool]:
-    """Cut the markup where a browser-style tree builder would start to cost quadratic time. Every start tag
-    closes an open p by walking the open elements, and a formatting end tag over a block re-nests them, so the
-    work is about the sum of the open-element depth over the tags. It is estimated in one linear scan that
-    only ever overestimates the depth (an end tag pops only when it matches the innermost open name); a
-    document past the bound is cut there (the rest is dropped and reported)."""
-    names: list[str] = []
-    work = 0
-    for m in _TAG_TOKEN.finditer(markup):
-        name = m[2].lower()
-        if name in _NOT_NESTING:
+def _tag_end(markup: str, i: int) -> int:
+    """Index of the `>` closing the tag that starts at `i`, honouring quoted attribute values (a quote opens
+    a value only right after `=`). A `<` is an ordinary character inside a tag, as in a browser. -1: the
+    input ended first."""
+    quote = prev = ""
+    for j in range(i + 1, len(markup)):
+        ch = markup[j]
+        if quote:
+            if ch == quote:
+                quote = ""
+                prev = ch
             continue
-        if m[1]:
+        if ch == ">":
+            return j
+        if ch in "\"'" and prev == "=":
+            quote = ch
+        if not ch.isspace():
+            prev = ch
+    return -1
+
+
+def _comment_end(markup: str, i: int) -> int:
+    """Index just past the comment that starts at `i` (`<!--`), -1 when it never ends."""
+    if markup.startswith(">", i + 4):
+        return i + 5
+    if markup.startswith("->", i + 4):
+        return i + 6
+    ends = [(k, n) for k, n in ((markup.find("-->", i + 4), 3), (markup.find("--!>", i + 4), 4)) if k != -1]
+    if not ends:
+        return -1
+    k, n = min(ends)
+    return k + n
+
+
+def _tokens(markup: str) -> list[tuple[int, bool, str]]:
+    """(index, is_end_tag, lowercase name) of every tag a browser's tokenizer sees, in one linear pass.
+    Comments, bogus comments, quoted attribute values and the text of raw-text elements (script, style,
+    textarea, title ...) hold no tags. Once svg or math has started the raw-text rule is off (the tree
+    builder decides there), which can only add tags to the list, never remove one."""
+    out: list[tuple[int, bool, str]] = []
+    pos, foreign = 0, False
+    while (i := markup.find("<", pos)) != -1:
+        nxt = markup[i + 1:i + 2]
+        if markup.startswith("<!--", i):
+            pos = _comment_end(markup, i)
+            if pos == -1:
+                break
+            continue
+        closing = nxt == "/"
+        if nxt in ("!", "?") or (closing and not markup[i + 2:i + 3].isalpha()) or not (
+                closing or (nxt.isascii() and nxt.isalpha())):
+            if nxt in ("!", "?") or closing:
+                j = markup.find(">", i + 1)  # a bogus comment (or `</>`): never tags
+                if j == -1:
+                    break
+                pos = j + 1
+            else:
+                pos = i + 1  # `1 < 2`: text
+            continue
+        end = _tag_end(markup, i)
+        if end == -1:
+            break
+        name = _TAG_NAME.match(markup, i + 1 + closing)[0].lower()
+        out.append((i, closing, name))
+        pos = end + 1
+        if closing:
+            continue
+        if name in _FOREIGN:
+            foreign = True
+        elif name == "plaintext":
+            break
+        elif name in _RAW and not foreign and markup[end - 1] != "/":
+            m = re.compile(rf"</{name}(?=[\s/>])", re.I).search(markup, pos)
+            if m is None:
+                break
+            pos = m.start()
+    return out
+
+
+def _bounded(tokens: list[tuple[int, bool, str]]) -> int:
+    """Index of the first tag past which a browser-style tree builder would cost too much time or memory,
+    else -1. Two costs are estimated in one linear pass over the tags, and each only overestimates:
+    - nesting: every start tag walks the open elements (to close a p, find a scope ...), so the work is about
+      the sum of the open-element depth over the start tags;
+    - reconstruction: a formatting element a block or an end tag closed is re-created at the next start tag or
+      text, so N unclosed formatting elements (the active list, which table cells and objects scope off) cost
+      N clones per following tag. Distinct attributes defeat the browser's three-copies rule, so up to 8 are
+      free and the rest are charged on every tag; that bound keeps the memory use small as well."""
+    names: list[str] = []
+    marks: list[tuple[str, int, int]] = []  # (kind, formatting count, depth) where a scope opened
+    fmt = nesting = rebuild = 0
+
+    def leave(kind_stop: str) -> None:
+        """Close scopes up to and including the nearest `kind_stop` (the formatting list and the open
+        elements fall back to what they were when it opened)."""
+        nonlocal fmt
+        while marks:
+            kind, before, depth = marks.pop()
+            if kind != "t":  # formatting a table kept outside its cells stays in the list after it
+                fmt = before
+            del names[depth:]
+            if kind == kind_stop:
+                return
+
+    for pos, closing, name in tokens:
+        top = marks[-1][0] if marks else ""
+        if name in _CELLS:
+            if closing:
+                if top == "c":
+                    leave("c")
+            elif top == "c":  # a new cell closes the open one
+                leave("c")
+                marks.append(("c", fmt, len(names)))
+            else:
+                marks.append(("c", fmt, len(names)))
+        elif name in _ROWS:
+            if not closing and top == "c":
+                leave("c")
+            elif closing and top == "c":
+                leave("c")
+        elif name == "table":
+            if not closing:
+                marks.append(("t", fmt, len(names)))
+            elif any(k == "t" for k, _, _ in marks):
+                leave("t")
+        elif name in _MARKERS:
+            if not closing:
+                marks.append(("o", fmt, len(names)))
+            elif any(k == "o" for k, _, _ in marks):
+                leave("o")
+        rebuild += max(fmt - FREE_FORMATTING, 0)
+        if closing:
             if names and names[-1] == name:
                 names.pop()
-            if name in _FORMATTING:
-                work += len(names)
+                fmt -= name in _FORMATTING
         else:
-            work += len(names)
-            names.append(name)
-        if work > MAX_NESTING_WORK:
-            return markup[:m.start()], True
-    return markup, False
+            if name not in _VOID:
+                nesting += len(names)
+            if name in _FORMATTING:
+                fmt += 1
+                names.append(name)
+            elif name not in _NOT_NESTING:
+                names.append(name)
+        if nesting > MAX_NESTING_WORK or rebuild > MAX_RECONSTRUCT_WORK:
+            return pos
+    return -1
 
 
-_IN_SELECT = frozenset({"option", "optgroup", "hr", "script", "template", "select"})
-
-
-def _select_doubt(markup: str) -> int:
+def _select_doubt(tokens: list[tuple[int, bool, str]]) -> int:
     """Index where the markup must be cut because a `<select>` is not a plain dropdown, else -1. A select
     holds only options, and a browser's rules for anything else in one (a table part, input, keygen, textarea,
-    a nested select, ...) differ between specification versions and parsers: whether such a tag ends the
-    select decides if the text after it is visible. Nothing is guessed: the markup is cut at that select, so
-    the rest is dropped. A well-formed dropdown (options only, closed) costs nothing."""
+    a script, a template, a nested select ...) differ between specification versions and parsers: whether such
+    a tag ends the select decides if the text after it is visible. Nothing is guessed: the markup is cut at
+    that select. The tokens come from a real tokenizer pass, so a `</select>` in a comment, an attribute or a
+    script is not one. A well-formed dropdown (options only, closed) costs nothing."""
     opened = -1
-    for m in _TAG_TOKEN.finditer(markup):
-        name = m[2].lower()
+    for pos, closing, name in tokens:
         if opened < 0:
-            if name == "select" and not m[1]:
-                opened = m.start()
-        elif name == "select":
-            if m[1]:
-                opened = -1
-            else:
-                return opened
-        elif name not in _IN_SELECT:
+            if name == "select" and not closing:
+                opened = pos
+        elif name == "select" and closing:
+            opened = -1
+        elif name not in _IN_SELECT or (closing and name == "hr"):
             return opened
+    return -1
+
+
+def _sup_in_foreign(tokens: list[tuple[int, bool, str]]) -> int:
+    """Index of the first svg or math start tag when a sup start tag follows it, else -1. Lexbor keeps a sup
+    inside svg and math, where the specification ends the foreign content at it (so what follows is HTML
+    again, in the sup). Rewriting sup as another name would let the end tags of the two close each other, so
+    nothing is rewritten: svg and math are hidden anyway, and the markup is cut at the first one."""
+    first = -1
+    for pos, closing, name in tokens:
+        if closing:
+            continue
+        if first < 0 and name in _FOREIGN:
+            first = pos
+        elif first >= 0 and name == "sup":
+            return first
     return -1
 
 
@@ -359,15 +526,21 @@ class _Walk:
 def html_to_text_limited(markup: str, limit: int, *, styles: bool = True) -> tuple[str, bool]:
     """(text, cut): `cut` is True when the markup, its nesting cost or the text exceeded a bound.
     `styles=False` hides by tag only (no style, class or attribute rules): the Gmail reader."""
-    cut = len(markup) > MAX_HTML
-    markup, bounded = _bounded(markup[:MAX_HTML])
-    doubt = _select_doubt(markup)
-    if doubt >= 0:
-        markup, bounded = markup[:doubt], True
-    cut = cut or bounded
+    full = markup
+    markup = markup[:MAX_HTML]
+    tokens = _tokens(markup)
+    cuts = [i for i in (_bounded(tokens), _select_doubt(tokens), _sup_in_foreign(tokens)) if i >= 0]
+    if cuts:
+        markup = markup[:min(cuts)]
+    cut = bool(cuts) or len(full) > MAX_HTML
     try:
-        tree = LexborHTMLParser(b"<body>" + _SUP.sub(r"<\1var", markup).encode("utf-8", "replace"))
-        rules = hiding_rules(_style_texts(tree)) if styles else (set(), set(), set())
+        tree = LexborHTMLParser(b"<body>" + markup.encode("utf-8", "replace"))
+        rules = (set(), set(), set())
+        if styles:
+            blocks = _tree_styles(tree)
+            if cut:  # styles that were cut off (or hide in the dropped part) still apply to what is kept
+                blocks += _text_styles(full)
+            rules = hiding_rules(_capped(blocks))
         walk = _Walk(limit, rules, styles)
         if tree.root is not None:
             walk.run(tree.root)
