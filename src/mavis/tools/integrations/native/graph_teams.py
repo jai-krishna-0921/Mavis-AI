@@ -16,6 +16,7 @@ from typing import Any
 
 from mavis.domain.errors import FailureKind
 from mavis.tools.integrations.native.base import NativeProvider
+from mavis.tools.integrations.native.graph import _SCOPE_DETAIL as SCOPE_DETAIL
 from mavis.tools.integrations.native.graph import GRAPH, GraphError, seg, with_ms
 from mavis.tools.integrations.native.graph_html import html_to_text
 
@@ -99,7 +100,7 @@ class TeamsActions:
 
     @staticmethod
     def _unavailable(exc: GraphError) -> GraphError:
-        if exc.kind is FailureKind.PERMISSION_MISSING:
+        if exc.kind is FailureKind.PERMISSION_MISSING and SCOPE_DETAIL not in exc.detail:
             return GraphError(FailureKind.PERMISSION_MISSING, NO_TEAMS)
         return exc
 

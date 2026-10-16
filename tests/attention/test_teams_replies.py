@@ -204,7 +204,9 @@ async def test_slack_entries_stay_slack(setup):
 async def test_an_older_message_arriving_after_the_users_later_reply_opens_nothing(setup):
     uid = setup.user.id
     await sr.on_teams_event(_event(uid, from_me=True, mid="reply"))        # the user answered just now
-    await sr.on_teams_event(_event(uid, age_days=0.5, mid="older"))        # the older backlog arrives a tick later
+    # the older backlog arrives a tick later
+    await sr.on_teams_event(_event(uid, age_days=0.5, mid="older"))
     assert await _owed(uid) == {} and setup.booked == []
-    await sr.on_teams_event(_event(uid, age_days=-0.1, mid="newer"))       # a message after the reply does count
+    # a message after the reply does count
+    await sr.on_teams_event(_event(uid, age_days=-0.1, mid="newer"))
     assert list(await _owed(uid)) == [sr.teams_key(CHAT)] and len(setup.booked) == 1

@@ -174,5 +174,6 @@ async def test_disconnect_clears_under_the_row_lock_and_keeps_a_cursor_written_m
     provider.set_state(user.id, OL, ConnectionState.ACTIVE)
     assert await flow.disconnect(user.id, OL, forget=False) is True
     st = await users.get_state(user.id)
-    assert st["cursors"] == {"gmail_after": 9}          # the racing tick's Microsoft cursor is gone, Gmail's kept
+    # the racing tick's Microsoft cursor is gone, Gmail's is kept
+    assert st["cursors"] == {"gmail_after": 9}
     assert st["slack_owed"] == {} and st["defaults"] == {}

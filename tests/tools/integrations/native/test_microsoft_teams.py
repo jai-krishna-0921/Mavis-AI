@@ -154,3 +154,18 @@ async def test_hostile_chat_id_is_refused():
     ex, _ = g.executor()
     assert (await ex.execute(U, "teams.history", {"chat_id": "../me"})).error_kind is K.INVALID_ARGUMENT
     assert g.requests == []
+
+
+async def test_a_missing_permission_keeps_its_consent_wording_through_the_teams_handlers():
+    g = FakeGraph().on("GET", r"/v1.0/chats/c1/messages$",
+                       graph_error(403, "Authorization_RequestDenied", "Insufficient privileges"))
+    ex, _ = g.executor()
+    r = await ex.execute(U, "teams.history", {"chat_id": "ms:c1"})
+    assert r.error_kind is K.PERMISSION_MISSING and "admin consent" in r.error
+
+
+async def test_a_plain_forbidden_without_a_reason_still_says_teams_is_not_available():
+    g = FakeGraph().on("GET", r"/v1.0/chats/c1/messages$", graph_error(403, "Forbidden", "nope"))
+    ex, _ = g.executor()
+    r = await ex.execute(U, "teams.history", {"chat_id": "ms:c1"})
+    assert r.error_kind is K.PERMISSION_MISSING and "not available" in r.error

@@ -59,7 +59,7 @@ def _ts_iso(value: object) -> datetime | None:
 
 
 async def _note_reply(user_id: int, key: str, sent: datetime) -> None:
-    """Remember the newest time the user wrote in a chat (cleared with the Microsoft cursors on disconnect)."""
+    """Remember the newest time the user wrote in a chat (cleared with the Microsoft cursors)."""
     def change(cur: dict) -> dict:
         known = dict(cur.get(REPLIED_KEY) or {})
         old = _ts_iso(known.get(key))
@@ -177,7 +177,8 @@ async def on_teams_event(event: Event) -> None:
         return
     if sent is None:
         return
-    replied = _ts_iso(((await users.get_state(event.user_id)).get("cursors") or {}).get(REPLIED_KEY, {}).get(key))
+    cursors = (await users.get_state(event.user_id)).get("cursors") or {}
+    replied = _ts_iso((cursors.get(REPLIED_KEY) or {}).get(key))
     if replied is not None and sent <= replied:
         return  # backlog read newest first: the user already answered after this message
     if not p.get("from_id") or timeutil.now() - sent > FORGET_AFTER:
