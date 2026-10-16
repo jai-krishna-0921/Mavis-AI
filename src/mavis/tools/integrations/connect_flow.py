@@ -91,6 +91,7 @@ class UserState(Protocol):
     async def get(self, user_id: int) -> dict: ...
     async def update(self, user_id: int, patch: dict) -> dict: ...
     async def update_nested(self, user_id: int, key: str, patch: dict) -> dict: ...
+    async def modify_nested(self, user_id: int, key: str, change: Callable[[dict], dict]) -> dict: ...
 
 
 class RepoUserState:
@@ -108,6 +109,11 @@ class RepoUserState:
         from mavis.store.repo import users
 
         return await users.update_nested(user_id, key, patch)
+
+    async def modify_nested(self, user_id: int, key: str, change: Callable[[dict], dict]) -> dict:
+        from mavis.store.repo import users
+
+        return await users.modify_nested(user_id, key, change)
 
 
 class ReplyScope:
@@ -740,27 +746,26 @@ class ConnectFlow:
         spec = providers.provider_of_capability(capability)
         if spec is None or not (_family(capability) is not None or capability is spec.capabilities[0]):
             return
+        owed_from = spec.owed_sources
+
+        def cursors(cur: dict) -> dict:
+            return {k: v for k, v in cur.items() if not str(k).startswith(spec.state_cursors)}
+
+        def owed(cur: dict) -> dict:
+            return {k: v for k, v in cur.items()
+                    if not (isinstance(v, dict) and (v.get("source") or "slack") in owed_from)}
+
+        def defaults(cur: dict) -> dict:
+            return {k: v for k, v in cur.items() if v != spec.id}
+
+        changes = [("defaults", defaults)]
+        if spec.state_cursors:
+            changes.append(("cursors", cursors))
+        if owed_from:
+            changes.append(("slack_owed", owed))
         try:
-            st = await self.state.get(user_id)
-            patch: dict[str, Any] = {}
-            cursors = st.get("cursors")
-            if isinstance(cursors, dict) and spec.state_cursors:
-                kept = {k: v for k, v in cursors.items() if not str(k).startswith(spec.state_cursors)}
-                if kept != cursors:
-                    patch["cursors"] = kept
-            owed = st.get("slack_owed")
-            if isinstance(owed, dict) and spec.owed_sources:
-                left = {k: v for k, v in owed.items()
-                        if not (isinstance(v, dict) and (v.get("source") or "slack") in spec.owed_sources)}
-                if left != owed:
-                    patch["slack_owed"] = left
-            defaults = st.get("defaults")
-            if isinstance(defaults, dict):
-                left = {k: v for k, v in defaults.items() if v != spec.id}
-                if left != defaults:
-                    patch["defaults"] = left
-            if patch:
-                await self.state.update(user_id, patch)
+            for key, change in changes:  # each inside the row lock the poll and the nudges write under
+                await self.state.modify_nested(user_id, key, change)
         except Exception as exc:  # noqa: BLE001 - the disconnect itself already succeeded
             log.warning("connect.clear_state_failed", provider=spec.id, error=type(exc).__name__)
 

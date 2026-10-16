@@ -151,3 +151,28 @@ async def test_disconnecting_slack_clears_its_cursors_and_owed_dms_but_not_teams
     st = await state.get(1)
     assert st["cursors"] == {"gmail_after": 5, "teams_at": "t"}
     assert list(st["slack_owed"]) == ["teams:abc"]
+
+
+async def test_disconnect_clears_under_the_row_lock_and_keeps_a_cursor_written_meanwhile(
+    db, ms_env, provider, cache, fake_bus, rec, user
+):
+    from mavis.store.repo import users
+    from mavis.tools.integrations.connect_flow import RepoUserState
+
+    class Stale(RepoUserState):
+        """get() returns what a tick had written before the poll wrote gmail_after=9 (a racing writer)."""
+
+        async def get(self, user_id):
+            snap = await super().get(user_id)
+            await users.update_nested(user_id, "cursors", {"gmail_after": 9, "teams_at": "late"})
+            return snap
+
+    await users.update_state(user.id, {
+        "cursors": {"teams_at": "t", "gmail_after": 1},
+        "slack_owed": {"teams:abc": {"source": "teams"}}, "defaults": {"mail": "microsoft"}})
+    flow = make_flow(provider, cache, fake_bus, rec, Stale())
+    provider.set_state(user.id, OL, ConnectionState.ACTIVE)
+    assert await flow.disconnect(user.id, OL, forget=False) is True
+    st = await users.get_state(user.id)
+    assert st["cursors"] == {"gmail_after": 9}          # the racing tick's Microsoft cursor is gone, Gmail's kept
+    assert st["slack_owed"] == {} and st["defaults"] == {}

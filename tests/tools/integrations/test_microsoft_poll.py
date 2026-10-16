@@ -311,3 +311,22 @@ async def test_a_long_baseline_is_finished_silently_before_changes_are_published
     assert await poll_mail(poller, 1, st) == 0 and st["cursors"]["outlook_delta"] == "DELTA"
     n.results["mail.inbox_delta"] = ToolResult(ok=True, data={"messages": [mail("3")], "cursor": "DELTA2", "baseline": False, "more": False})
     assert await poll_mail(poller, 1, st) == 1                  # real changes only after the baseline ended
+
+
+async def test_a_tick_in_flight_at_disconnect_does_not_write_its_cursors_back():
+    n, st = Native(), {"cursors": {"teams_at": "2026-10-15T09:00:00+00:00"}}
+    wrote = []
+
+    async def gone(user_id, provider):
+        return None
+
+    n.provider_grant = gone
+    poller, poll_teams = P(n), hook_for(C.TEAMS)
+
+    async def spy(user_id, st_, key, value):
+        wrote.append(key)
+    poller.set_cursor = spy
+    n.results["teams.chats"] = ToolResult(ok=True, data={"chats": [chat("a", "2026-10-15T10:00:00Z")]})
+    n.results["teams.history"] = ToolResult(ok=True, data={"messages": [tmsg("a1", "2026-10-15T10:00:00Z", "a")]})
+    await poll_teams(poller, 1, st)
+    assert wrote == []

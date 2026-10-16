@@ -111,6 +111,12 @@ class FakeState:
         self.data[user_id] = merged
         return merged
 
+    async def modify_nested(self, user_id: int, key: str, change) -> dict:
+        cur = self.data.get(user_id, {}).get(key)
+        merged = change(dict(cur) if isinstance(cur, dict) else {})
+        self.data.setdefault(user_id, {})[key] = merged
+        return merged
+
 
 class Recorder:
     """Stands in for notify (Outbound) and schedule (user_id, at, reason, kind) callables."""

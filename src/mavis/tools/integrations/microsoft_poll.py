@@ -21,6 +21,7 @@ from mavis.domain.errors import FailureKind
 from mavis.domain.events import Event, EventType, Trust
 from mavis.domain.integrations import ToolResult
 from mavis.tools.integrations.microsoft_sync import is_external, native_call, own_tenant
+from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.graph_files import SHARED_UNAVAILABLE
 from mavis.tools.integrations.native.providers import PollAuthError
 from mavis.tools.integrations.normalize import (
@@ -51,6 +52,9 @@ def _cursors(st: dict) -> dict:
 
 
 async def _put(poller: Any, user_id: int, st: dict, key: str, value: object) -> None:
+    grant = getattr(poller.provider, "provider_grant", None)
+    if grant is not None and await grant(user_id, NativeProvider.MICROSOFT) is None:
+        return  # disconnected while this tick ran: a cleared provider's cursors are not written back
     await poller.set_cursor(user_id, st, key, value)
     st.setdefault("cursors", {})[key] = value  # later writes in this tick build on this one
 
