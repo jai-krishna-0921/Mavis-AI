@@ -2,10 +2,11 @@
 # Proprietary. Use is governed by LICENSE in the repository root.
 """Gmail message payloads to text and back: a MIME walk for reading, EmailMessage for sending.
 
-Reading: text/plain is preferred, html is reduced to text with the stdlib parser (scripts, styles and
-hidden head content dropped), charsets are decoded without ever raising, attachments are listed by name
-and size and never fetched. The body is capped at BODY_CAP characters. Gmail has already undone the
-content-transfer-encoding (quoted-printable, base64) of every part, so only the charset is applied here.
+Reading: text/plain is preferred, html is reduced to text with the stdlib parser, defanged and bounded
+(scripts, styles and hidden head content dropped), charsets are decoded without ever raising, attachments
+are listed by name and size and never fetched. The body is capped at BODY_CAP characters. Gmail has
+already undone the content-transfer-encoding (quoted-printable, base64) of every part, so only the charset
+is applied here.
 
 Writing: RFC 5322 through email.message.EmailMessage, base64url for the Gmail `raw` field.
 """
@@ -20,7 +21,6 @@ from collections.abc import Iterable
 from email.message import EmailMessage, Message
 from email.policy import SMTP
 from email.utils import formatdate, make_msgid
-from html.parser import HTMLParser
 from typing import Any
 
 BODY_CAP = 20_000
@@ -34,37 +34,9 @@ _BLOCK_TAGS = frozenset({
     "p", "div", "br", "tr", "table", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote",
     "pre", "hr", "section", "article", "header", "footer",
 })
-_SKIP_TAGS = frozenset({"script", "style", "head", "title", "template", "noscript"})
 _SPACES = re.compile(r"[ \t\r\f\v ​-‍﻿]+")
 _BLANK_LINES = re.compile(r"\n[ \t]*(?:\n[ \t]*)+")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-
-
-class _TextExtractor(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-        self._skip = 0
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _SKIP_TAGS:
-            self._skip += 1
-        elif tag in _BLOCK_TAGS:
-            self.parts.append("\n- " if tag == "li" else "\n")
-
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _SKIP_TAGS:
-            self._skip = max(0, self._skip - 1)
-        elif tag in _BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if not self._skip:
-            self.parts.append(data)
 
 
 def tidy(text: str) -> str:
@@ -75,13 +47,11 @@ def tidy(text: str) -> str:
 
 
 def html_to_text(markup: str) -> str:
-    parser = _TextExtractor()
-    try:
-        parser.feed(markup)
-        parser.close()
-    except Exception:  # noqa: BLE001 - malformed markup must degrade to whatever text was seen
-        pass
-    return tidy("".join(parser.parts))
+    """HTML to text: one linear pass over bounded, defanged markup; script, style, noscript, noembed,
+    noframes and similar content is dropped, failing toward hiding (see graph_html)."""
+    from mavis.tools.integrations.native import graph_html  # late: graph_html imports this module
+
+    return graph_html.html_to_text_limited(markup, graph_html.MAX_HTML, styles=False)[0]
 
 
 def b64url_decode(data: str) -> bytes:

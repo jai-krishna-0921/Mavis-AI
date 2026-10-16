@@ -7,7 +7,9 @@ Text a reader cannot see but a model can read is the injection channel this guar
 attributes hide it: display none, visibility hidden, opacity near 0, tiny font, zero width or height,
 off-screen offsets, clipping, transparent text, or text colour that matches (or, with no background set,
 is) white. Rules inside `@media` blocks are not evaluated (they would hide the real desktop body).
-When unsure the content is dropped.
+When unsure the content is dropped: noembed and noframes are hidden, attribute text on end tags is
+discarded, and an end tag that crosses open elements around a hidden one (which a browser would ignore or
+repair by re-opening the hidden element) hides the rest of the enclosing element.
 """
 
 from __future__ import annotations
@@ -22,13 +24,19 @@ MAX_DEPTH = 100  # deeper nesting ends the parse: what follows is dropped
 
 _VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
                    "source", "track", "wbr"})
-_SKIP = frozenset({"script", "style", "head", "title", "template", "noscript", "iframe", "object", "svg"})
+_SKIP = frozenset({"script", "style", "head", "title", "template", "noscript", "iframe", "object", "svg",
+                   "noembed", "noframes"})
+# Elements a browser closes on its own when an enclosing block closes: crossing them is not a doubt.
+_IMPLIED = frozenset({"p", "li", "dd", "dt", "td", "th", "tr", "tbody", "thead", "tfoot", "option",
+                      "optgroup", "colgroup", "caption"})
+_DOUBT = "#doubt"  # stack marker: an end tag crossed a hidden element, so the rest of the parent is hidden
 _BLOCK = gmail_mime._BLOCK_TAGS
 
 _CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})\s?|\\(.)", re.S)
 _BRACES = re.compile(r"[{}]")
 _ASCII_LETTER = re.compile(r"[A-Za-z]")
 _TAG_NAME = re.compile(r"<([A-Za-z][^\s/>]*)")
+_END_NAME = re.compile(r"</([A-Za-z][^\s/>]*)")
 _RAW_TEXT = {"script": re.compile(r"</script", re.I), "style": re.compile(r"</style", re.I)}
 # Raw-text and RCDATA elements HTMLParser does not know: their content is text up to the closer, never markup.
 _ESCAPED_RAW = {name: re.compile(rf"</{name}(?=[\s/>])", re.I)
@@ -212,8 +220,9 @@ def hiding_rules(markup: str) -> tuple[set[str], set[str], set[str]]:
 
 
 class _Extractor(HTMLParser):
-    def __init__(self, limit: int, rules: tuple[set[str], set[str], set[str]]) -> None:
+    def __init__(self, limit: int, rules: tuple[set[str], set[str], set[str]], styles: bool = True) -> None:
         super().__init__(convert_charrefs=True)
+        self._styles = styles
         self.parts: list[str] = []
         self.cut = False
         self._size, self._limit = 0, limit
@@ -231,6 +240,8 @@ class _Extractor(HTMLParser):
             self.cut = True
 
     def _hides(self, tag: str, attrs: list[tuple[str, str | None]], parent_bg: Bg) -> tuple[bool, Bg]:
+        if not self._styles:  # tag-only mode (Gmail): script, style, noscript, noembed ... are hidden
+            return tag in _SKIP, None
         a = {k: (v or "") for k, v in attrs}
         if tag in _SKIP or "hidden" in a or tag in self._tags:
             return True, parent_bg
@@ -272,13 +283,28 @@ class _Extractor(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if not self._open.get(tag):
             return
+        crossed: list[tuple[str, bool, Bg]] = []
+        target_hidden = False
         while self._stack:  # every element is pushed and popped once: linear overall
-            name, hid, _ = self._stack.pop()
-            self._open[name] -= 1
+            frame = self._stack.pop()
+            name, hid, _ = frame
+            if name != _DOUBT:
+                self._open[name] -= 1
             if hid:
                 self._hidden -= 1
             if name == tag:
+                target_hidden = hid
                 break
+            if name != _DOUBT:
+                crossed.append(frame)
+        # A browser ignores (or repairs by re-opening) an end tag that crosses other open elements. Only
+        # the block closers that implicitly end p, li, td ... are safe; any other crossing around a hidden
+        # element means we cannot tell where the hidden part ends, so the rest of the parent is hidden.
+        if tag in _BLOCK:
+            crossed = [f for f in crossed if f[0] not in _IMPLIED]
+        if crossed and (target_hidden or any(f[1] for f in crossed)):
+            self._stack.append((_DOUBT, True, self._stack[-1][2] if self._stack else None))
+            self._hidden += 1
         if tag in _BLOCK:
             self._emit("\n")
 
@@ -338,7 +364,11 @@ def defang(markup: str) -> str:
             end = _tag_end(markup, i)
             if end == -1:
                 return "".join(out)
-            out.append(markup[i:end + 1])
+            if nxt == "/":  # attribute text on an end tag is never content: keep only the name
+                closer = _END_NAME.match(markup, i)
+                out.append(f"</{closer[1]}>" if closer else "")
+            else:
+                out.append(markup[i:end + 1])
             pos = end + 1
             name = _TAG_NAME.match(markup, i)
             tag = name[1].lower() if name and nxt != "/" else ""
@@ -362,11 +392,12 @@ def defang(markup: str) -> str:
     return "".join(out)
 
 
-def html_to_text_limited(markup: str, limit: int) -> tuple[str, bool]:
-    """(text, cut): `cut` is True when the markup, its nesting or the text exceeded a bound."""
+def html_to_text_limited(markup: str, limit: int, *, styles: bool = True) -> tuple[str, bool]:
+    """(text, cut): `cut` is True when the markup, its nesting or the text exceeded a bound. `styles=False`
+    hides by tag only (no style, class or attribute rules): the Gmail reader."""
     cut = len(markup) > MAX_HTML
     markup = defang(markup[:MAX_HTML])
-    parser = _Extractor(limit, hiding_rules(markup))
+    parser = _Extractor(limit, hiding_rules(markup) if styles else (set(), set(), set()), styles)
     try:
         parser.feed(markup)
         parser.close()
