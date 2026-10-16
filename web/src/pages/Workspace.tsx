@@ -192,12 +192,13 @@ function ConnectorRow({ c }: { c: Connector }) {
         {c.services.length > 0 && (active || c.status === 'failed') && (
           <ul className="m-0 mt-4 flex list-none flex-wrap gap-2 p-0" aria-label={`${c.name} services`}>
             {c.services.map((s) => {
-              const granted = c.scopes_granted.includes(s)
+              const never = c.unavailable?.includes(s) ?? false
+              const granted = !never && c.scopes_granted.includes(s)
               return (
                 <li key={s} className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-[13px] capitalize ${granted ? 'border-ok/30 bg-ok-soft text-ink' : 'border-line-strong text-muted'}`}>
                   <ServiceIcon name={s} size={18} />
                   <span>{s}</span>
-                  <span className="sr-only">{granted ? 'allowed' : 'not allowed'}</span>
+                  <span className="sr-only">{never ? 'not available' : granted ? 'allowed' : 'not allowed'}</span>
                 </li>
               )
             })}
@@ -228,8 +229,14 @@ function AdminConsentNote() {
     <div className="mb-4 flex items-start gap-2 rounded-2xl border border-danger/30 bg-danger-soft p-3 text-sm text-danger" role="alert">
       <WarningCircle size={20} weight="light" className="shrink-0" aria-hidden="true" />
       <p className="m-0 min-w-0">
-        Your organisation needs an admin to approve Mavis AI first. Send this link to your IT admin, then connect again:
-        {link && <> <a className="break-all underline" href={link} target="_blank" rel="noopener noreferrer">{link}</a></>}
+        {link ? (
+          <>
+            Your organisation needs an admin to approve Mavis AI first. Send this link to your IT admin, then connect again:{' '}
+            <a className="break-all underline" href={link} target="_blank" rel="noopener noreferrer">{link}</a>
+          </>
+        ) : (
+          'Your organisation needs an admin to approve Mavis AI first. Ask your IT admin to approve it, then connect again.'
+        )}
       </p>
     </div>
   )

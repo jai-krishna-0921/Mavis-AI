@@ -42,12 +42,16 @@ async def test_connected_work_and_personal_accounts(app, tokens):
                           access_token="a", refresh_token="r", expires_at=None)
         ms = (await c.get(f"{API}/connectors")).json()[2]
         assert ms["status"] == "active" and ms["account"] == "me@corp.test" and ms["note"] is None
+        assert ms["unavailable"] == [] and "teams" in ms["scopes_granted"]
         assert ms["missing_scopes"] == []
         await tokens.save(1, M, account=_acct(PERSONAL_TENANT, "me@outlook.com"),
                           access_token="a", refresh_token="r", expires_at=None)
         ms = (await c.get(f"{API}/connectors")).json()[2]
         assert ms["account"] == "me@outlook.com"
         assert ms["note"] == "Teams is not available for personal Microsoft accounts."
+        # the chip must not read "allowed" next to that note, and it is not "missing" either
+        assert "teams" not in ms["scopes_granted"] and "teams" not in ms["missing_scopes"]
+        assert ms["unavailable"] == ["teams"] and "outlook" in ms["scopes_granted"]
 
 
 async def test_work_account_without_chat_scope_gets_the_teams_note(app, tokens):

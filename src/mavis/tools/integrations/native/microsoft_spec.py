@@ -117,6 +117,11 @@ async def remember_microsoft_identity(user_id: int, account: dict) -> None:
         await remember_identity(user_id, emails=(str(account["mail"]),))
 
 
+def unavailable_services(account: dict) -> frozenset[str]:
+    """Dashboard chips this account can never use (Teams needs a work or school account)."""
+    return frozenset({"teams"}) if account.get("tid") == PERSONAL_TENANT else frozenset()
+
+
 def grant_note(account: dict) -> str | None:
     """A short line about what this account cannot do, for the card and the announcement."""
     if account.get("tid") == PERSONAL_TENANT:
@@ -158,6 +163,7 @@ MS_SPEC = providers.register(ProviderSpec(
     pollers={C.OUTLOOK: f"{_POLL}:poll_mail", C.OUTLOOK_CALENDAR: f"{_POLL}:poll_calendar",
              C.TEAMS: f"{_POLL}:poll_teams", C.ONEDRIVE: f"{_POLL}:poll_onedrive"},
     abilities="Outlook mail, Outlook Calendar, Teams chats and OneDrive", grant_note=grant_note,
+    unavailable_services=unavailable_services,
     ability_labels={C.OUTLOOK: "Outlook mail", C.OUTLOOK_CALENDAR: "Outlook Calendar",
                     C.TEAMS: "Teams chats", C.ONEDRIVE: "OneDrive"},
     reconnect_hint="send /connect microsoft and accept every permission",

@@ -28,6 +28,7 @@ export type Connector = {
   account: string | null
   scopes_granted: string[]
   missing_scopes: string[]
+  unavailable?: string[]
   connected_at: string | null
   notice?: string | null
   note?: string | null

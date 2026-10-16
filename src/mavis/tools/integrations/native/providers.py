@@ -149,6 +149,7 @@ class ProviderSpec:
     features: tuple[tuple[str, str], ...] = ()  # (human label, action) for "what is allowed" wording
     abilities: str = ""  # "Gmail, Calendar, ..." for the announcement
     ability_labels: Mapping[Capability, str] = field(default_factory=dict)  # announcement words
+    unavailable_services: Callable[[dict], frozenset[str]] | None = None  # chips this account can never use
     grant_note: Callable[[dict], str | None] | None = None  # account facts -> a short line (or None)
     reconnect_hint: str = ""  # "send /connect google and leave every box ticked"
     nothing_allowed: str | None = None  # callback copy when features is non-empty and none is allowed

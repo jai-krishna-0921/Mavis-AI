@@ -123,7 +123,7 @@ describe('workspace connectors', () => {
     db().connectors.push({
       id: 'microsoft', name: 'Microsoft 365', description: 'Outlook mail, Outlook Calendar, Teams chats and OneDrive files.',
       icon: 'microsoft', services: ['outlook', 'calendar', 'teams', 'onedrive'], status: 'active', account: 'me@outlook.com',
-      scopes_granted: [], missing_scopes: [], connected_at: null,
+      scopes_granted: ['outlook', 'calendar', 'onedrive'], missing_scopes: [], unavailable: ['teams'], connected_at: null,
       note: 'Teams is not available for personal Microsoft accounts.', admin_link: null,
     })
     renderApp('/workspace')
@@ -131,6 +131,11 @@ describe('workspace connectors', () => {
     const chips = within(card).getByLabelText('Microsoft 365 services')
     for (const s of ['outlook', 'calendar', 'teams', 'onedrive']) expect(within(chips).getByText(s)).toBeInTheDocument()
     expect(within(card).getByText('Teams is not available for personal Microsoft accounts.')).toBeInTheDocument()
+    // the Teams chip never reads "allowed" beside that note; the others still do
+    const teams = within(chips).getByText('teams').closest('li')!
+    expect(within(teams).getByText('not available')).toBeInTheDocument()
+    expect(within(teams).queryByText('allowed')).toBeNull()
+    expect(within(within(chips).getByText('outlook').closest('li')!).getByText('allowed')).toBeInTheDocument()
   })
 
   it('explains admin approval with a forwardable link', async () => {
@@ -142,6 +147,18 @@ describe('workspace connectors', () => {
     renderApp('/workspace?error=microsoft_admin_consent')
     expect(await screen.findByText(/needs an admin to approve Mavis AI/)).toBeInTheDocument()
     expect(await screen.findByRole('link', { name: /adminconsent/ })).toHaveAttribute('href', expect.stringMatching(/^https:/))
+  })
+
+  it('does not say "send this link" when there is no link to send', async () => {
+    db().connectors.push({
+      id: 'microsoft', name: 'Microsoft 365', description: 'x', icon: 'microsoft', services: [], status: 'none',
+      account: null, scopes_granted: [], missing_scopes: [], connected_at: null, note: null, admin_link: null,
+    })
+    renderApp('/workspace?error=microsoft_admin_consent')
+    expect(await screen.findByText(/needs an admin to approve Mavis AI/)).toBeInTheDocument()
+    expect(screen.queryByText(/Send this link/)).toBeNull()
+    expect(screen.getByText(/Ask your IT admin to approve it/)).toBeInTheDocument()
+    expect(within(screen.getByRole('alert')).queryByRole('link')).toBeNull()
   })
 
   it('never links a non-https admin link', async () => {

@@ -52,7 +52,9 @@ def _listed() -> list[providers.ProviderSpec]:
 def _entry(spec: providers.ProviderSpec, grant: Grant | None) -> dict:
     cat = spec.catalog
     services = cat.services
-    granted = [name for name, scopes in services.items() if grant and grant.scopes & scopes]
+    never = spec.unavailable_services(grant.account) if spec.unavailable_services and grant else frozenset()
+    granted = [name for name, scopes in services.items()
+               if grant and name not in never and grant.scopes & scopes]
     if grant is None:
         status, account = "none", None
     else:
@@ -61,7 +63,9 @@ def _entry(spec: providers.ProviderSpec, grant: Grant | None) -> dict:
     return {"id": spec.id, "name": cat.name or spec.display_name, "description": cat.description,
             "icon": cat.icon, "services": list(services) if cat.chips else [], "status": status,
             "account": account, "scopes_granted": granted if status == "active" else [],
-            "missing_scopes": [n for n in services if n not in granted] if status == "active" else [],
+            "missing_scopes": [n for n in services if n not in granted and n not in never]
+            if status == "active" else [],
+            "unavailable": [n for n in services if n in never] if status == "active" else [],
             "connected_at": grant.updated_at.isoformat() if grant and grant.updated_at else None,
             "notice": consent_notice(spec.anchor) or None,
             "note": spec.grant_note(grant.account) if spec.grant_note and grant else None,
