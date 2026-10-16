@@ -90,3 +90,26 @@ def test_render_search_without_the_keys_is_unchanged():
     text = render_search(data)
     assert "Account:" not in text and "Note:" not in text
     assert text.splitlines()[0] == "1 email(s). Call mail_read with a message_id to read one in full."
+
+
+async def test_a_failure_while_resolving_the_sender_refuses_instead_of_queueing_a_card_without_one(router, tokens, monkeypatch):
+    await grant(tokens, G, ALL_GOOGLE)
+    await ms_grant(tokens)
+
+    async def boom(*a, **k):
+        raise RuntimeError("db blip")
+
+    monkeypatch.setattr(router.merge, "accounts", boom)
+    args = MailComposeArgs(to=["a@b.com"], subject="s", body="b", account="me@corp.test")
+    out = await prepare_sender(CTX, args)
+    assert out.refusal and "did not queue" in out.refusal and args.sender_pin is None
+    assert not any(c in out.refusal for c in "—–")
+
+
+async def test_a_needed_reconnect_still_surfaces_from_the_pre_step(router, tokens):
+    from mavis.domain.errors import ConnectionRequired
+
+    await grant(tokens, G, ALL_GOOGLE)
+    await ms_grant(tokens, status="REVOKED")
+    with pytest.raises(ConnectionRequired):
+        await prepare_sender(CTX, MailComposeArgs(to=["a@b.com"], subject="s", body="b", account="me@corp.test"))

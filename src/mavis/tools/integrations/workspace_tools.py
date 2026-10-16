@@ -20,10 +20,11 @@ from pathlib import Path
 
 import httpcore
 import httpx
+import structlog
 from pydantic import BaseModel
 
 from mavis.config import get_settings
-from mavis.domain.errors import ActionFailed, ConnectionRequired, IntegrationError
+from mavis.domain.errors import ActionFailed, ApprovalRequired, ConnectionRequired, IntegrationError
 from mavis.domain.messages import Outbound
 from mavis.domain.policy import RiskClass
 from mavis.domain.results import ToolOutput
@@ -79,6 +80,8 @@ from mavis.tools.integrations.workspace_render import (
     render_created,
 )
 from mavis.tools.registry import Prepared, PrepareFn, ToolContext
+
+log = structlog.get_logger()
 
 CustomFn = Callable[[ToolContext, BaseModel], Awaitable[str]]
 Fetch = Callable[[str], Awaitable[str]]
@@ -441,6 +444,21 @@ async def prepare_event_update(ctx: ToolContext, args: BaseModel) -> Prepared:
 
 
 async def prepare_sender(ctx: ToolContext, args: BaseModel) -> Prepared:
+    """The sender step, failing closed: a new item whose sender could not be resolved (a store or token
+    blip) is refused, never queued as a card without a "From:" line and no pin."""
+    try:
+        return await _pick_sender(ctx, args)
+    except (ApprovalRequired, ConnectionRequired):
+        raise
+    except Exception as exc:  # noqa: BLE001 - unknown means nothing is queued
+        log.warning("tool.sender_unresolved", error_type=type(exc).__name__)
+        if hasattr(args, "sender_pin"):
+            args.sender_pin = None
+        return Prepared(refusal="I could not check which account to send from just now, so I did not "
+                                "queue it. Please try again in a moment.")
+
+
+async def _pick_sender(ctx: ToolContext, args: BaseModel) -> Prepared:
     """Which account a new mail or event goes out from. The approval card always names it ("From: ...");
     with two accounts and no default nothing is queued and the model asks the user. A user without a
     Microsoft account keeps today's card."""
