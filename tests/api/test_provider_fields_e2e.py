@@ -177,7 +177,8 @@ async def test_dashboard_chip_is_unavailable_not_allowed(app, fake_env):
     async with c:
         await fp.grant(fake_env.tokens, plan="locked")
         card = next(r for r in (await c.get(f"{API}/connectors")).json() if r["id"] == "testing")
-        assert card["unavailable"] == ["notes"] and card["scopes_granted"] == [] and card["missing_scopes"] == []
+        assert card["unavailable"] == ["notes"]
+        assert card["scopes_granted"] == [] and card["missing_scopes"] == []
 
 
 async def test_account_deletion_revokes_the_fake_grant(fake_env, vendor):
