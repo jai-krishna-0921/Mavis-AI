@@ -4,6 +4,8 @@ import pytest
 
 from mavis.domain.errors import ConnectionRequired
 from mavis.domain.policy import Capability as C
+from mavis.domain.errors import FailureKind
+from mavis.domain.integrations import ToolResult
 from mavis.store.repo import users
 from mavis.tools.integrations.actions import ACTIONS, MailComposeArgs
 from mavis.tools.registry import ToolContext
@@ -97,3 +99,37 @@ def test_different_senders_are_different_actions():
     assert equivalence_key({**base, "sender_pin": "google:u1@x.com"}, ident) != equivalence_key(
         {**base, "sender_pin": "microsoft:me@corp.test"}, ident)
     assert equivalence_key(base, ident) == equivalence_key({**base, "account": "work"}, ident)
+
+
+async def test_pinned_send_with_an_explicit_account_remembers_it_as_the_default(both, tokens):
+    fb, g, m, router = both
+    await grant(tokens, G, ALL_GOOGLE)
+    await ms_grant(tokens)
+    args, _ = await card(router, account="me@corp.test")  # the real path: pre-step pins, approval runs it
+    assert (await router.execute(U, "mail.send", args.model_dump(mode="json"))).ok
+    assert (await users.get_state(1))["defaults"]["mail"] == "microsoft"
+    again, out = await card(router)  # no account this time: no question, same account
+    assert out.refusal is None and again.sender_pin == "microsoft:me@corp.test"
+
+
+async def test_pinned_send_without_an_account_argument_does_not_set_a_default(both, tokens):
+    fb, g, m, router = both
+    await grant(tokens, G, ALL_GOOGLE)
+    await ms_grant(tokens)
+    await users.update_state(1, {"defaults": {"mail": "microsoft"}})
+    args, _ = await card(router)
+    await router.execute(U, "mail.send", args.model_dump(mode="json"))
+    await users.update_state(1, {"defaults": {"mail": "google"}})
+    args, _ = await card(router)
+    await router.execute(U, "mail.send", args.model_dump(mode="json"))
+    assert (await users.get_state(1))["defaults"]["mail"] == "google"
+
+
+async def test_a_failed_pinned_send_does_not_remember_the_account(both, tokens):
+    fb, g, m, router = both
+    await grant(tokens, G, ALL_GOOGLE)
+    await ms_grant(tokens)
+    args, _ = await card(router, account="me@corp.test")
+    m.reply = ToolResult(ok=False, error_kind=FailureKind.UNKNOWN, error="boom")
+    await router.execute(U, "mail.send", args.model_dump(mode="json"))
+    assert "mail" not in ((await users.get_state(1)).get("defaults") or {})

@@ -270,8 +270,13 @@ class MailCalendarMerge:
         if hit is None or not hit.active:
             cap = MERGED[kind][1 if provider == MICROSOFT.value else 0]
             raise ConnectionRequired(cap, _purpose(cap), revoked=True)
-        return await self._run(user, hit, action,
-                               {k: v for k, v in args.items() if k not in ("account", "sender_pin")})
+        wanted = args.get("account")
+        stored = await self._stored_default(user.user_id, kind) if isinstance(wanted, str) and wanted.strip() else None
+        result = await self._run(user, hit, action,
+                                 {k: v for k, v in args.items() if k not in ("account", "sender_pin")})
+        if result.ok and isinstance(wanted, str) and wanted.strip() and not stored:
+            await self.remember_default(user.user_id, kind, hit)  # "asks once": the answer sticks
+        return result
 
     # --- existing items ---------------------------------------------------------------------------
 
