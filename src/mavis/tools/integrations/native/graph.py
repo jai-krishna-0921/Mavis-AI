@@ -34,6 +34,16 @@ REDIRECTS = (301, 302, 303, 307, 308)
 _ID_OK = re.compile(r"[A-Za-z0-9_\-=.:@!$+~]+")
 _CODE_OK = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
 _ACCESS_SCOPED = ("/chats", "/drive", "/drives")  # a 403 here is a missing permission, not "absent"
+_TEAMS_PATHS = ("/chats", "/teams")
+_MAIL_PATHS = ("/me/messages", "/me/mailFolders", "/me/sendMail")
+# Answers of a licence-less account (no Exchange Online mailbox): never "not found".
+_NO_MAILBOX_CODES = frozenset({"MailboxNotEnabledForRESTAPI", "MailboxNotSupportedForRESTAPI"})
+NO_MAILBOX = "this account has no Outlook mailbox (or mail access is not allowed for it)"
+_HINT_MEMBER, _HINT_SCOPE = "member", "scope"
+_MEMBER_WORDS = ("not a member", "not a participant")
+_SCOPE_WORDS = ("missing scope", "missing role", "insufficient privileges", "admin consent", "aadsts65001")
+_SCOPE_DETAIL = "permission or admin consent missing"
+_MEMBER_DETAIL = "not a member of that chat"
 UNCONFIRMED_DETAIL = (
     "microsoft outcome unknown: {what}. The request may or may not have been processed, so do NOT repeat it "
     "blindly. Tell the user it may have gone through and to check (for mail, the Sent folder; for a "
@@ -96,10 +106,37 @@ def _error_code(data: bytes) -> str:
     return code if isinstance(code, str) and _CODE_OK.fullmatch(code) else ""
 
 
+def _error_hint(data: bytes) -> str:
+    """What a 403 means, read from fixed phrases in error.message. The message itself is never kept: only
+    the verdict ("member" or "scope", else "") leaves this function."""
+    try:
+        err = json.loads(data)["error"]
+        message = err.get("message")
+        code = err.get("code")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return ""
+    text = message[:2000].lower() if isinstance(message, str) else ""
+    if any(w in text for w in _MEMBER_WORDS):
+        return _HINT_MEMBER
+    if code == "Authorization_RequestDenied" or any(w in text for w in _SCOPE_WORDS):
+        return _HINT_SCOPE
+    return ""
+
+
 def classify(status: int, code: str, detail: str, url: str = "",
-             on_forbidden: FailureKind | None = None) -> GraphError:
+             on_forbidden: FailureKind | None = None, hint: str = "") -> GraphError:
     """Map a Graph status and error.code to a FailureKind. `detail` is passed through unchanged.
-    `on_forbidden` is the kind a 403 gets when the caller knows what it means (else the URL decides)."""
+    `on_forbidden` is the kind a 403 gets when the caller knows what it means (else the URL decides).
+    `hint` (see `_error_hint`) separates, on Teams endpoints, a missing permission or admin consent from a
+    chat the user is not in."""
+    path = httpx.URL(url).path.removeprefix("/v1.0") if url else ""
+    denied_send = status == 403 and code == "ErrorAccessDenied" and path == "/me/sendMail"
+    if path.startswith(_MAIL_PATHS) and (code in _NO_MAILBOX_CODES or denied_send):
+        return GraphError(FailureKind.UNAVAILABLE, f"{detail}: {NO_MAILBOX}")
+    if status == 403 and hint and any(p in path for p in _TEAMS_PATHS):
+        if hint == _HINT_MEMBER:
+            return GraphError(FailureKind.NOT_FOUND, f"{detail}: {_MEMBER_DETAIL}")
+        return GraphError(FailureKind.PERMISSION_MISSING, f"{detail}: {_SCOPE_DETAIL}")
     if status == 400:
         kind = FailureKind.NOT_FOUND if code == "ErrorInvalidIdMalformed" else FailureKind.INVALID_ARGUMENT
         return GraphError(kind, detail)
@@ -108,7 +145,6 @@ def classify(status: int, code: str, detail: str, url: str = "",
     if status == 403:
         if on_forbidden is not None:
             return GraphError(on_forbidden, detail)
-        path = httpx.URL(url).path if url else ""
         if any(part in path for part in _ACCESS_SCOPED):
             return GraphError(FailureKind.PERMISSION_MISSING, detail)
         return GraphError(FailureKind.NOT_FOUND, detail)  # no access to that item: as good as absent
@@ -146,6 +182,18 @@ class GraphClient:
                     cut = True
                     break
             return resp.status_code, resp.headers, b"".join(chunks)[:cap], cut
+
+    def fresh_client(self) -> httpx.AsyncClient:
+        """A client on the same transport with its own empty cookie jar, no default credentials and no
+        redirects: for the pre-authenticated download, so nothing is shared with Graph calls. Its transport
+        belongs to the shared client, so it is deliberately not closed."""
+        base = self._client
+        return httpx.AsyncClient(
+            transport=base._transport,  # noqa: SLF001
+            timeout=base.timeout, follow_redirects=False, trust_env=False,
+            headers={"User-Agent": base.headers.get("user-agent", "mavis-ai/1.0"),
+                     "Accept-Encoding": "identity"},
+        )
 
     @property
     def http(self) -> httpx.AsyncClient:
@@ -213,7 +261,8 @@ class GraphClient:
                 backed_off = True
                 await self._sleep(SERVER_BACKOFF_S)
                 continue
-            raise classify(status, code, detail, url, on_forbidden)
+            hint = _error_hint(data) if status == 403 else ""
+            raise classify(status, code, detail, url, on_forbidden, hint)
 
     async def json(self, uid: int, method: str, url: str, **kw: Any) -> Any:
         _, data, cut = await self.raw(uid, method, url, **kw)

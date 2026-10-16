@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable
+import zlib
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from urllib.parse import quote
 
@@ -50,6 +51,8 @@ TRUSTED_SUFFIXES = (
     ".microsoftpersonalcontent.com",
     ".graph.microsoft.com",
 )
+_HOST_OK = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
+_ZLIB_BITS = {"gzip": 31, "x-gzip": 31, "deflate": 15}
 SELECT = "id,name,size,file,folder,lastModifiedDateTime,lastModifiedBy,webUrl,remoteItem,parentReference"
 SHARED_GONE = (400, 404, 410, 501)
 SHARED_UNAVAILABLE = "shared files are not available right now"
@@ -72,11 +75,12 @@ def trusted_download_url(location: str) -> httpx.URL | None:
         url = httpx.URL(location)
     except (httpx.InvalidURL, ValueError):
         return None
-    host = url.host.lower().rstrip(".") if url.host else ""
+    host = url.raw_host.decode("ascii", "ignore").lower().rstrip(".") if url.raw_host else ""
     if (
         url.scheme != "https"
         or url.port not in (None, 443)
         or url.userinfo
+        or not _HOST_OK.fullmatch(host)
         or not any(host.endswith(s) and len(host) > len(s) for s in TRUSTED_SUFFIXES)
     ):
         return None
@@ -263,10 +267,14 @@ class FilesActions:
         return await self._download(target, cap)
 
     async def _download(self, url: httpx.URL, cap: int) -> tuple[bytes, httpx.Headers, bool]:
-        """GET the pre-authenticated URL: no Authorization header, no redirects, capped while streaming.
-        Errors carry no URL and are raised `from None`, so the URL cannot reach a log through a traceback."""
+        """GET the pre-authenticated URL: no Authorization header, a cookie jar of its own, identity
+        encoding asked for, no redirects, and the DECODED size capped while streaming (a gzip answer is
+        inflated in bounded steps). Errors carry no URL and are raised `from None`, so the URL cannot reach
+        a log through a traceback."""
         try:
-            async with self.ex.graph.http.stream("GET", url, follow_redirects=False) as resp:
+            async with self.ex.graph.fresh_client().stream(
+                "GET", url, headers={"Accept-Encoding": "identity"}
+            ) as resp:
                 if resp.status_code in REDIRECTS:
                     raise UntrustedDownload()
                 if resp.status_code != 200:
@@ -277,15 +285,36 @@ class FilesActions:
                     )
                     raise GraphError(kind, f"download failed ({resp.status_code})")
                 chunks, size, cut = [], 0, False
-                async for chunk in resp.aiter_bytes():
+                async for chunk in _decoded(resp, cap):
                     chunks.append(chunk)
                     size += len(chunk)
                     if size > cap:
                         cut = True
                         break
                 return b"".join(chunks)[:cap], resp.headers, cut
-        except httpx.HTTPError:
+        except (httpx.HTTPError, zlib.error):
             raise GraphError(FailureKind.UNAVAILABLE, "download failed") from None
+
+
+async def _decoded(resp: httpx.Response, cap: int) -> AsyncIterator[bytes]:
+    """The body with its content-encoding undone in steps of at most cap + 1 bytes, so a small compressed
+    body cannot inflate past the cap in memory. Only identity, gzip and deflate are understood."""
+    encoding = resp.headers.get("content-encoding", "").strip().lower()
+    if encoding in ("", "identity"):
+        async for chunk in resp.aiter_bytes():  # nothing to decode, so this is the wire bytes
+            yield chunk
+        return
+    bits = _ZLIB_BITS.get(encoding)
+    if bits is None:
+        raise GraphError(FailureKind.UNAVAILABLE, "download failed")
+    inflater = zlib.decompressobj(bits)
+    async for chunk in resp.aiter_raw():
+        data = chunk
+        while data:
+            out = inflater.decompress(data, cap + 1)
+            if out:
+                yield out
+            data = inflater.unconsumed_tail
 
 
 def files_handlers(ex: Any) -> dict[str, Callable[[int, Any], Awaitable[Any]]]:
