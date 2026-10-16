@@ -2,10 +2,9 @@
 """The card's From: is the account the message goes out from, whatever changes after the card."""
 import pytest
 
-from mavis.domain.errors import ConnectionRequired
-from mavis.domain.policy import Capability as C
-from mavis.domain.errors import FailureKind
+from mavis.domain.errors import ConnectionRequired, FailureKind
 from mavis.domain.integrations import ToolResult
+from mavis.domain.policy import Capability as C
 from mavis.store.repo import users
 from mavis.tools.integrations.actions import ACTIONS, MailComposeArgs
 from mavis.tools.registry import ToolContext
