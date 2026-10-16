@@ -39,7 +39,7 @@ YES, NO, MUTE, ALWAYS = "at:y:", "at:n:", "at:m:", "at:a:"
 SENT, DEFERRED, DROPPED = "sent", "deferred", "dropped"
 QUESTION = "Was this you?"
 MAX_NOTIFY_URGENCY = 4  # composed notifies are untrusted: the executor caps them here
-BULK_MARKERS = ("promotional", "social", "forums", "list_unsubscribe")
+BULK_MARKERS = ("promotional", "social", "forums", "other_tab", "list_unsubscribe")
 _ISO_CURRENCY = re.compile(r"[A-Z]{3}")
 
 

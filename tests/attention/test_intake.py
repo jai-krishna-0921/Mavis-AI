@@ -668,6 +668,27 @@ async def test_security_alert_in_social_tab_is_understood_but_stays_bulk(
     assert obs.delivery == "dropped"  # bulk: no security budget bypass
 
 
+async def test_outlook_other_tab_is_bulk_and_gets_no_security_budget_bypass(
+    user, stack, fake_llm, settings, monkeypatch
+):
+    monkeypatch.setattr(settings, "ping_daily_budget", 0)
+    fake_llm.push_structured(
+        EmailUnderstanding(kind=EmailKind.SECURITY, needs_user=True, risk_flags=[RiskFlag.NEW_SIGNIN])
+    )
+    await stack.intake.on_email(
+        email(
+            user.id,
+            "oth",
+            sender="Shop <security@exampleshop.com>",
+            subject="New sign-in to your account",
+            labels=("INBOX", "CATEGORY_OTHER"),
+        )
+    )
+    obs = await only(user.id)
+    assert obs.facts["bulk"] == ["other_tab"] and is_bulk(obs)
+    assert obs.delivery == "dropped"
+
+
 async def test_spam_is_dropped_even_when_it_looks_like_security(user, stack, fake_llm):
     await stack.intake.on_email(
         email(user.id, "sp", subject="Security alert: new sign-in", labels=("SPAM", "CATEGORY_SOCIAL"))

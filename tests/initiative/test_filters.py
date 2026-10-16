@@ -46,6 +46,11 @@ async def test_promotions_are_dropped():
     assert r2.drop
 
 
+async def test_outlook_other_tab_is_dropped_like_promotions():
+    r = await EventFilter(embed=no_embed).apply(email(subject="50% off", labels=["CATEGORY_OTHER"]), [])
+    assert r.drop and r.reason == "promotional"
+
+
 async def test_security_alert_survives_promo_signals():
     async def zero(texts):
         return [[1.0, 0.0] for _ in texts]

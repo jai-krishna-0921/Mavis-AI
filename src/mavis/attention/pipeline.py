@@ -52,6 +52,7 @@ BULK_LABEL_MARKERS = {
     "CATEGORY_PROMOTIONS": "promotional",
     "CATEGORY_SOCIAL": "social",
     "CATEGORY_FORUMS": "forums",
+    "CATEGORY_OTHER": "other_tab",  # Outlook's Other inbox tab
 }
 
 

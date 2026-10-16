@@ -40,9 +40,11 @@ CATEGORY_PATTERNS: dict[str, re.Pattern[str]] = {
     cat: re.compile(r"\b(?:" + "|".join(re.escape(w) for w in words) + r")s?\b")
     for cat, words in CATEGORY_WORDS.items()
 }
-BULK_LABELS = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS"})
+BULK_LABELS = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS", "CATEGORY_OTHER"})
 DEAD_LABELS = frozenset({"SPAM", "TRASH"})  # never ping for these, even a lookalike security alert
-DROP_LABELS = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS", "SPAM", "TRASH"})
+DROP_LABELS = frozenset(
+    {"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS", "CATEGORY_OTHER", "SPAM", "TRASH"}
+)
 AUTOMATED = ("no-reply", "noreply", "notifications", "mailer-daemon", "donotreply", "do-not-reply")
 SECURITY_INTENT = (
     "Ask whether the security alert on their account was them. If not, tell them to check "

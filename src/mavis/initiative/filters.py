@@ -27,7 +27,9 @@ EXTERNAL_TYPES = frozenset(
         EventType.CALENDAR_CHANGED,
     }
 )
-PROMO_LABELS = frozenset({"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS", "SPAM"})
+PROMO_LABELS = frozenset(
+    {"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS", "CATEGORY_OTHER", "SPAM"}
+)
 URGENT = re.compile(
     r"security alert|new sign-?in|sign-?in attempt|password (reset|changed|was changed)|suspicious|"
     r"unusual activity|2-step verification|new device|"

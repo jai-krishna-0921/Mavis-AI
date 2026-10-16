@@ -48,6 +48,10 @@ async def test_newsletter_dropped_before_llm():
     assert await email_prefilter(NEWSLETTER) == "newsletter (List-Unsubscribe)"
 
 
+async def test_outlook_other_tab_dropped_unless_security():
+    assert await email_prefilter(email(labelIds=["CATEGORY_OTHER"])) == "promotional/social category"
+
+
 async def test_promotions_and_own_sent_dropped():
     assert await email_prefilter(email(labelIds=["CATEGORY_PROMOTIONS"])) == "promotional/social category"
     assert await email_prefilter(email(labelIds=["SENT"])) == "own sent mail"
