@@ -159,6 +159,27 @@ async def test_disconnect_forgets_the_prefixes_and_tells_the_vendor(fake_env):
     assert ("revoke", "a") in fp.CALLS and "I also removed what I had learned" in rec.sent[-1].text
 
 
+async def test_disconnect_clears_the_specs_cursors_and_owed_nudges(fake_env):
+    await fp.grant(fake_env.tokens)
+    flow, _ = flow_for(fake_env)
+    await flow.state.update(1, {
+        "cursors": {"tco_at": "t", "gmail_after": 3},
+        "slack_owed": {"k1": {"source": "tco", "from": "A"}, "D1": {"team": "T"}, "k2": {"source": "other"}},
+        "defaults": {"mail": "testing", "calendar": "google"}})
+    assert await flow.disconnect(1, N) is True
+    st = await flow.state.get(1)
+    assert st["cursors"] == {"gmail_after": 3} and set(st["slack_owed"]) == {"D1", "k2"}
+    assert st["defaults"] == {"calendar": "google"}
+
+
+async def test_dashboard_chip_is_unavailable_not_allowed(app, fake_env):
+    c, _ = await signed_in(app, 1)
+    async with c:
+        await fp.grant(fake_env.tokens, plan="locked")
+        card = next(r for r in (await c.get(f"{API}/connectors")).json() if r["id"] == "testing")
+        assert card["unavailable"] == ["notes"] and card["scopes_granted"] == [] and card["missing_scopes"] == []
+
+
 async def test_account_deletion_revokes_the_fake_grant(fake_env, vendor):
     await fp.grant(fake_env.tokens, user=2)
     assert (await deletion._native(2))["revoked"] == 1
