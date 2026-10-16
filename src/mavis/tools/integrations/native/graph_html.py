@@ -25,7 +25,7 @@ MAX_DEPTH = 100  # deeper nesting ends the parse: what follows is dropped
 _VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
                    "source", "track", "wbr"})
 _SKIP = frozenset({"script", "style", "head", "title", "template", "noscript", "iframe", "object", "svg",
-                   "noembed", "noframes"})
+                   "noembed", "noframes", "math"})
 # Elements a browser closes on its own when an enclosing block closes: crossing them is not a doubt.
 _IMPLIED = frozenset({"p", "li", "dd", "dt", "td", "th", "tr", "tbody", "thead", "tfoot", "option",
                       "optgroup", "colgroup", "caption"})
@@ -45,6 +45,9 @@ _CLOSES = {"li": frozenset({"li"}), "dd": frozenset({"dd", "dt"}), "dt": frozens
 _CLOSERS = gmail_mime._BLOCK_TAGS | frozenset({
     "td", "th", "dd", "dt", "dl", "tbody", "thead", "tfoot", "caption", "form", "nav", "aside", "main",
     "figure", "fieldset", "address", "center"})
+# Elements that stop a browser's search for the element an end tag closes: crossing one means it is ignored.
+_SCOPE = frozenset({"table", "td", "th", "caption", "object", "template", "applet", "marquee", "select"})
+_SCOPE_EXTRA = {"li": frozenset({"ul", "ol"}), "p": frozenset({"button"})}
 _FOREIGN = frozenset({"svg", "math"})  # self-closing children there really are empty elements
 _DOUBT = "#doubt"  # stack marker: an end tag crossed a hidden element, so the rest of the parent is hidden
 _BLOCK = gmail_mime._BLOCK_TAGS
@@ -57,7 +60,7 @@ _END_NAME = re.compile(r"</([A-Za-z][^\s/>]*)")
 _RAW_TEXT = {"script": re.compile(r"</script", re.I), "style": re.compile(r"</style", re.I)}
 # Raw-text and RCDATA elements HTMLParser does not know: their content is text up to the closer, never markup.
 _ESCAPED_RAW = {name: re.compile(rf"</{name}(?=[\s/>])", re.I)
-                for name in ("textarea", "xmp", "noembed", "noframes", "title")}
+                for name in ("textarea", "xmp", "noembed", "noframes", "title", "iframe")}
 _PLAINTEXT = "plaintext"  # swallows the rest of the document
 _STYLE_OPEN = re.compile(r"<style", re.I)
 _STYLE_CLOSE = re.compile(r"</style", re.I)
@@ -331,7 +334,9 @@ class _Extractor(HTMLParser):
         # elements a block end tag crossed. Around a hidden element either means we cannot tell where the
         # hidden part ends, so the rest of the parent is hidden. Other block closers just close what is open.
         if tag in _CLOSERS:  # a block closer only re-opens hidden formatting elements it crossed
-            doubt = any(f[1] and f[0] in _FORMATTING for f in crossed)
+            stops = _SCOPE | _SCOPE_EXTRA.get(tag, frozenset())
+            doubt = (any(f[1] and (f[0] in _FORMATTING or f[0] in _SKIP) for f in crossed)
+                     or ((target_hidden or any(f[1] for f in crossed)) and any(f[0] in stops for f in crossed)))
         else:
             doubt = bool(crossed) and (target_hidden or any(f[1] for f in crossed))
         if doubt:

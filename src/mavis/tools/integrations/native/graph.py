@@ -218,11 +218,13 @@ class GraphClient:
             idempotent = method.upper() in SAFE_METHODS
         cap = self.max_json if cap is None else cap
         token = await self._tokens.access_token(uid, NativeProvider.MICROSOFT)
-        refreshed = throttled = backed_off = False
-        write = method.upper() not in SAFE_METHODS  # a retried write (keyed by transactionId) may have run
+        refreshed = throttled = backed_off = maybe_ran = False
+        write = method.upper() not in SAFE_METHODS
 
         def give_up(kind: FailureKind, why: str) -> GraphError:
-            if write and (backed_off or kind is FailureKind.UNAVAILABLE):
+            # maybe_ran: a post-send transport error, a 5xx or a 504 came back, so an earlier attempt of this
+            # write may have been carried out. A request that never left (connect errors) did not run.
+            if write and maybe_ran:
                 return GraphError(FailureKind.UNCONFIRMED, UNCONFIRMED_DETAIL.format(what=why))
             return GraphError(kind, why)
 
@@ -231,6 +233,7 @@ class GraphClient:
                 status, resp_headers, data, cut = await self._send(
                     token, method, url, params, body, headers, cap)
             except httpx.TransportError as exc:
+                maybe_ran = maybe_ran or not isinstance(exc, NEVER_SENT)
                 if not (isinstance(exc, NEVER_SENT) or idempotent):
                     raise GraphError(FailureKind.UNCONFIRMED, UNCONFIRMED_DETAIL.format(
                         what=f"the connection failed after the request was sent ({type(exc).__name__})")
@@ -252,6 +255,7 @@ class GraphClient:
                 refreshed = True
                 continue
             retry_after = _retry_after(resp_headers)
+            maybe_ran = maybe_ran or status >= 500 and status != 503 or status == 503 and retry_after is None
             if status == 429 or (status == 503 and retry_after is not None) or (
                     status == 504 and retry_after is not None and idempotent):
                 wait = DEFAULT_RETRY_WAIT_S if retry_after is None else retry_after

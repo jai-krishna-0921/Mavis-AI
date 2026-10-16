@@ -181,3 +181,82 @@ def test_unclosed_rows_items_and_paragraphs_do_not_count_toward_depth(which):
 
 def test_implied_closes_do_not_leak_hidden_text():
     assert "SECRET" not in graph_html.html_to_text("<ul><li hidden>a<li>b</ul><p hidden>SECRET")
+
+
+# --- fix round 3: ignored block closers, iframe raw text, math breakout ---
+IGNORED_CLOSER = [
+    '<div style="display:none"><table></div>SECRET</table>',
+    '<div style="display:none"><table><tr><td>x</div>SECRET',
+    '<div><table><tr><td><span style="display:none">x</div>SECRET',
+    "<p hidden><table><tr><td>x</p>SECRET",
+    '<li style="display:none"><ul></li>SECRET',
+    "<p hidden><button>x</p>SECRET",
+    "<div hidden><caption></div>SECRET",
+    "<div hidden><select></div>SECRET",
+    "<div hidden><marquee></div>SECRET",
+    "<div hidden><object></div>SECRET",
+    "<div hidden><th>x</div>SECRET",
+]
+
+
+@pytest.mark.parametrize("html", IGNORED_CLOSER)
+def test_block_closer_a_browser_ignores_never_closes_a_hidden_element(html):
+    assert "SECRET" not in graph_html.html_to_text(html)
+
+
+@pytest.mark.parametrize("which", list(SANITIZERS))
+@pytest.mark.parametrize("html", [
+    "<div><iframe>x</div>SECRET</iframe>", "<p><iframe>x</p>SECRET</iframe>",
+    "<div><object>x</div>SECRET</object>", "<div><iframe>x</div>SECRET",
+])
+def test_iframe_and_object_content_is_never_text(which, html):
+    assert "SECRET" not in SANITIZERS[which](html)
+
+
+@pytest.mark.parametrize("html", [
+    '<math><span style="display:none"/>SECRET</math> tail', "<math><p hidden/>SECRET",
+    '<math><mtext><span style="display:none"/>SECRET',
+])
+def test_math_breakout_tags_stay_hidden(html):
+    assert "SECRET" not in graph_html.html_to_text(html)
+
+
+def test_math_does_not_blank_the_tail():
+    assert graph_html.html_to_text('<math><span style="display:none"/>SECRET</math> tail') == "tail"
+
+
+async def _post_fail(first, second, **kw):
+    import httpx as _h
+
+    from mavis.domain.errors import FailureKind as _K  # noqa: F401
+    from mavis.tools.integrations.native.graph import GraphError
+
+    from .graphfake import FakeGraph, graph_error
+
+    answers = [first, second]
+
+    def handler(request):
+        a = answers.pop(0) if len(answers) > 1 else answers[0]
+        if isinstance(a, Exception):
+            raise a
+        return a
+
+    g = FakeGraph().on("POST", r"/me/sendMail$", handler)
+    ex, _ = g.executor()
+    with pytest.raises(GraphError) as e:
+        await ex.graph.json(1, "POST", "https://graph.microsoft.com/v1.0/me/sendMail", body={}, **kw)
+    return e.value, graph_error, _h
+
+
+async def test_never_sent_writes_keep_unavailable_or_rate_limited():
+    import httpx as h
+
+    from mavis.domain.errors import FailureKind as K
+
+    req = h.Request("POST", "https://graph.microsoft.com/v1.0/me/sendMail")
+    err, graph_error, _ = await _post_fail(h.ConnectError("x", request=req), h.ConnectError("x", request=req))
+    assert err.kind is K.UNAVAILABLE
+    err, *_ = await _post_fail(h.ConnectError("x", request=req), graph_error(429, "x", headers={"Retry-After": "99"}))
+    assert err.kind is K.RATE_LIMITED
+    err, *_ = await _post_fail(h.PoolTimeout("x", request=req), h.ConnectTimeout("x", request=req))
+    assert err.kind is K.UNAVAILABLE
