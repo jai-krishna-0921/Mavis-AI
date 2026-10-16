@@ -190,3 +190,56 @@ async def test_item_level_mail_errors_are_still_not_found():
         with pytest.raises(GraphError) as e:
             await ex.graph.json(1, "GET", f"{GRAPH}/me/messages/AAA")
         assert e.value.kind is K.NOT_FOUND
+
+
+# --- fix round 2: a keyed write that was retried and still fails is UNCONFIRMED ---
+async def _keyed_post(responses):
+    g = FakeGraph().on("POST", r"/me/events$", responses)
+    ex, sleeps = g.executor()
+    with pytest.raises(GraphError) as e:
+        await ex.graph.json(1, "POST", f"{GRAPH}/me/events", body={"transactionId": "t"}, idempotent=True)
+    return e.value, len(g.requests)
+
+
+async def test_keyed_write_503_then_503_is_unconfirmed():
+    err, calls = await _keyed_post([graph_error(503, "serviceNotAvailable")])
+    assert err.kind is K.UNCONFIRMED and calls == 2 and "check" in err.detail
+
+
+async def test_keyed_write_transport_error_twice_is_unconfirmed():
+    def boom(request):
+        raise httpx.ReadError("x", request=request)
+
+    g = FakeGraph().on("POST", r"/me/events$", boom)
+    ex, _ = g.executor()
+    with pytest.raises(GraphError) as e:
+        await ex.graph.json(1, "POST", f"{GRAPH}/me/events", body={}, idempotent=True)
+    assert e.value.kind is K.UNCONFIRMED and len(g.requests) == 2
+
+
+async def test_keyed_write_504_with_long_retry_after_is_unconfirmed():
+    err, calls = await _keyed_post([graph_error(504, "gatewayTimeout", headers={"Retry-After": "600"})])
+    assert err.kind is K.UNCONFIRMED and calls == 1
+
+
+async def test_keyed_write_504_retry_after_twice_is_unconfirmed():
+    err, calls = await _keyed_post([graph_error(504, "gatewayTimeout", headers={"Retry-After": "1"})])
+    assert err.kind is K.UNCONFIRMED and calls == 2
+
+
+async def test_keyed_write_5xx_then_429_is_unconfirmed():
+    err, _ = await _keyed_post([graph_error(500, "x"), graph_error(429, "x", headers={"Retry-After": "99"})])
+    assert err.kind is K.UNCONFIRMED
+
+
+async def test_reads_and_unsent_throttles_keep_their_kinds():
+    g = FakeGraph().on("GET", r"/me/events$", graph_error(503, "x"))
+    ex, _ = g.executor()
+    with pytest.raises(GraphError) as e:
+        await ex.graph.json(1, "GET", f"{GRAPH}/me/events")
+    assert e.value.kind is K.UNAVAILABLE
+    g = FakeGraph().on("POST", r"/me/events$", graph_error(429, "x", headers={"Retry-After": "99"}))
+    ex, _ = g.executor()
+    with pytest.raises(GraphError) as e:
+        await ex.graph.json(1, "POST", f"{GRAPH}/me/events", body={}, idempotent=True)
+    assert e.value.kind is K.RATE_LIMITED

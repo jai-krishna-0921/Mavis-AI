@@ -219,6 +219,13 @@ class GraphClient:
         cap = self.max_json if cap is None else cap
         token = await self._tokens.access_token(uid, NativeProvider.MICROSOFT)
         refreshed = throttled = backed_off = False
+        write = method.upper() not in SAFE_METHODS  # a retried write (keyed by transactionId) may have run
+
+        def give_up(kind: FailureKind, why: str) -> GraphError:
+            if write and (backed_off or kind is FailureKind.UNAVAILABLE):
+                return GraphError(FailureKind.UNCONFIRMED, UNCONFIRMED_DETAIL.format(what=why))
+            return GraphError(kind, why)
+
         while True:
             try:
                 status, resp_headers, data, cut = await self._send(
@@ -229,8 +236,8 @@ class GraphClient:
                         what=f"the connection failed after the request was sent ({type(exc).__name__})")
                     ) from None
                 if backed_off:
-                    raise GraphError(FailureKind.UNAVAILABLE,
-                                     f"microsoft unreachable ({type(exc).__name__})") from None
+                    raise give_up(FailureKind.UNAVAILABLE,
+                                  f"microsoft unreachable ({type(exc).__name__})") from None
                 backed_off = True
                 await self._sleep(SERVER_BACKOFF_S)
                 continue
@@ -249,7 +256,8 @@ class GraphClient:
                     status == 504 and retry_after is not None and idempotent):
                 wait = DEFAULT_RETRY_WAIT_S if retry_after is None else retry_after
                 if throttled or wait > MAX_RETRY_WAIT_S:
-                    raise GraphError(FailureKind.RATE_LIMITED, detail)
+                    raise give_up(FailureKind.RATE_LIMITED if status != 504 else FailureKind.UNAVAILABLE,
+                                  detail)
                 throttled = True
                 await self._sleep(wait)
                 continue
@@ -257,7 +265,7 @@ class GraphClient:
                 if not idempotent:
                     raise GraphError(FailureKind.UNCONFIRMED, UNCONFIRMED_DETAIL.format(what=detail))
                 if backed_off:
-                    raise GraphError(FailureKind.UNAVAILABLE, detail)
+                    raise give_up(FailureKind.UNAVAILABLE, detail)
                 backed_off = True
                 await self._sleep(SERVER_BACKOFF_S)
                 continue

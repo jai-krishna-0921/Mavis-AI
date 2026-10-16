@@ -136,3 +136,48 @@ def test_gmail_html_input_is_size_capped():
     huge = "<p>seen</p>" + "a" * (graph_html.MAX_HTML * 2) + "<p>LATE</p>"
     text = gmail_mime.html_to_text(huge)
     assert "seen" in text and "LATE" not in text
+
+
+# --- fix round 2: no over-hiding on block closers, svg children, unclosed siblings ---
+@pytest.mark.parametrize("html,shown", [
+    ('<div style="display:none">Preview<span></div><table><tr><td>Real content</td></tr></table>',
+     "Real content"),
+    ("<table><tr><td><span style=display:none>x</td><td>Cell two</td></tr></table>", "Cell two"),
+    ("<div><p hidden>x</div>Visible", "Visible"),
+])
+def test_block_closer_over_a_hidden_inline_child_keeps_the_rest_visible(html, shown):
+    assert shown in graph_html.html_to_text(html)
+
+
+def test_block_closer_over_a_hidden_formatting_element_still_hides():
+    assert "SECRET" not in graph_html.html_to_text("<div><b hidden>A</div>SECRET")
+    assert "SECRET" not in graph_html.html_to_text('<div><a style="display:none">A</div>SECRET')
+
+
+SVG = '<a href="https://x.test">Go <svg width="9"><path d="M0"/><circle r="1"/></svg>Label</a> after'
+
+
+@pytest.mark.parametrize("which", list(SANITIZERS))
+def test_svg_self_closing_children_do_not_hide_nearby_text(which):
+    text = SANITIZERS[which](SVG)
+    assert "Label" in text and "after" in text
+
+
+def _rows(n):
+    return "<table>" + "".join(f"<tr><td>name{i}<td>val{i}" for i in range(n)) + "</table><p>END</p>"
+
+
+@pytest.mark.parametrize("which", list(SANITIZERS))
+def test_unclosed_rows_items_and_paragraphs_do_not_count_toward_depth(which):
+    text = SANITIZERS[which](_rows(40))
+    assert "val39" in text and "END" in text
+    text = SANITIZERS[which](_rows(3000))
+    assert "val2999" in text and "END" in text
+    text = SANITIZERS[which]("<ul>" + "".join(f"<li>item{i}" for i in range(500)) + "</ul>END")
+    assert "item499" in text and "END" in text
+    text = SANITIZERS[which]("".join(f"<p>para{i}" for i in range(500)) + "END")
+    assert "para499" in text and "END" in text
+
+
+def test_implied_closes_do_not_leak_hidden_text():
+    assert "SECRET" not in graph_html.html_to_text("<ul><li hidden>a<li>b</ul><p hidden>SECRET")

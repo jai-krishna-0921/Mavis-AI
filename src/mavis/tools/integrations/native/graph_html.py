@@ -29,6 +29,23 @@ _SKIP = frozenset({"script", "style", "head", "title", "template", "noscript", "
 # Elements a browser closes on its own when an enclosing block closes: crossing them is not a doubt.
 _IMPLIED = frozenset({"p", "li", "dd", "dt", "td", "th", "tr", "tbody", "thead", "tfoot", "option",
                       "optgroup", "colgroup", "caption"})
+# Formatting elements a browser re-opens after a block end tag (the adoption agency): only a hidden one of
+# these, crossed by a block closer, leaves the extent of the hidden part in doubt.
+_FORMATTING = frozenset({"a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong",
+                         "tt", "u"})
+# Elements whose start tag a browser answers by closing an open sibling of these names (top of the stack).
+_CLOSES = {"li": frozenset({"li"}), "dd": frozenset({"dd", "dt"}), "dt": frozenset({"dd", "dt"}),
+           "td": frozenset({"td", "th"}), "th": frozenset({"td", "th"}),
+           "tr": frozenset({"td", "th", "tr"}),
+           "tbody": frozenset({"td", "th", "tr", "tbody", "thead", "tfoot"}),
+           "thead": frozenset({"td", "th", "tr", "tbody", "thead", "tfoot"}),
+           "tfoot": frozenset({"td", "th", "tr", "tbody", "thead", "tfoot"}),
+           "option": frozenset({"option"})}
+# End tags a browser treats as block closers when deciding what they close (table parts, list items ...).
+_CLOSERS = gmail_mime._BLOCK_TAGS | frozenset({
+    "td", "th", "dd", "dt", "dl", "tbody", "thead", "tfoot", "caption", "form", "nav", "aside", "main",
+    "figure", "fieldset", "address", "center"})
+_FOREIGN = frozenset({"svg", "math"})  # self-closing children there really are empty elements
 _DOUBT = "#doubt"  # stack marker: an end tag crossed a hidden element, so the rest of the parent is hidden
 _BLOCK = gmail_mime._BLOCK_TAGS
 
@@ -266,6 +283,7 @@ class _Extractor(HTMLParser):
             if tag in ("br", "hr"):
                 self._emit("\n")
             return
+        self._close_siblings(tag)
         if len(self._stack) >= MAX_DEPTH:
             self.cut = True  # absurd nesting: drop the rest rather than walk it
             return
@@ -277,7 +295,19 @@ class _Extractor(HTMLParser):
         elif tag in _BLOCK:
             self._emit("\n- " if tag == "li" else "\n")
 
+    def _close_siblings(self, tag: str) -> None:
+        """Pop the open siblings a browser closes by itself (`<li>a<li>b`, `<td>a<td>b`, `<p>a<p>b`), so
+        unclosed rows and items do not stack up as depth."""
+        closes = _CLOSES.get(tag)
+        if closes is None and (tag in _BLOCK or tag == "p"):
+            closes = frozenset({"p"})
+        while closes and self._stack and self._stack[-1][0] in closes and not self._stack[-1][1]:
+            name = self._stack.pop()[0]  # a hidden sibling is left open: when in doubt, keep hiding
+            self._open[name] -= 1
+
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _FOREIGN or self._open.get("svg") or self._open.get("math"):
+            return  # `<path/>` in svg is an empty element: it never stays open
         self.handle_starttag(tag, attrs)  # HTML5 ignores the "/" on a non-void element: `<div/>` opens a div
 
     def handle_endtag(self, tag: str) -> None:
@@ -297,12 +327,14 @@ class _Extractor(HTMLParser):
                 break
             if name != _DOUBT:
                 crossed.append(frame)
-        # A browser ignores (or repairs by re-opening) an end tag that crosses other open elements. Only
-        # the block closers that implicitly end p, li, td ... are safe; any other crossing around a hidden
-        # element means we cannot tell where the hidden part ends, so the rest of the parent is hidden.
-        if tag in _BLOCK:
-            crossed = [f for f in crossed if f[0] not in _IMPLIED]
-        if crossed and (target_hidden or any(f[1] for f in crossed)):
+        # A browser ignores a non-block end tag that crosses open block elements, and re-opens formatting
+        # elements a block end tag crossed. Around a hidden element either means we cannot tell where the
+        # hidden part ends, so the rest of the parent is hidden. Other block closers just close what is open.
+        if tag in _CLOSERS:  # a block closer only re-opens hidden formatting elements it crossed
+            doubt = any(f[1] and f[0] in _FORMATTING for f in crossed)
+        else:
+            doubt = bool(crossed) and (target_hidden or any(f[1] for f in crossed))
+        if doubt:
             self._stack.append((_DOUBT, True, self._stack[-1][2] if self._stack else None))
             self._hidden += 1
         if tag in _BLOCK:
