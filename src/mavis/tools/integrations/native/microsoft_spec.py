@@ -162,6 +162,7 @@ MS_SPEC = providers.register(ProviderSpec(
                     C.TEAMS: "Teams chats", C.ONEDRIVE: "OneDrive"},
     reconnect_hint="send /connect microsoft and accept every permission",
     forget_prefixes=("outlook:", "ocal:", "teams:", "onedrive:"),
+    state_cursors=("outlook_", "ocal_", "teams_", "onedrive_", "ms_backoff_"), owed_sources=("teams",),
     memory_sources={"outlook": ("outlook:",), "outlook_calendar": ("ocal:",),
                     "teams": ("teams:",), "onedrive": ("onedrive:",)},
     catalog=CatalogEntry(  # keyword-only: CatalogEntry is kw_only=True

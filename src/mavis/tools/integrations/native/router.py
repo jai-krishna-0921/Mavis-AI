@@ -260,6 +260,9 @@ class NativeRouter:
         if provider is None or grant is None:
             return await self.fallback.disconnect(user, toolkit)
         await self.oauth.revoke(user.user_id, provider)
+        executor = self.executors.get(provider)
+        if executor is not None and hasattr(executor, "forget_user"):
+            executor.forget_user(user.user_id)  # per-user caches must not outlive the account
         try:  # a legacy Composio account for the same service goes too
             await self.fallback.disconnect(user, toolkit)
         except (NoSuchConnection, IntegrationError):

@@ -39,11 +39,16 @@ class MicrosoftExecutor:
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         self.graph = GraphClient(tokens, client, sleep=sleep)
         self._tokens = tokens
+        self.forgetters: list[Callable[[int], None]] = []  # per-user caches, dropped on disconnect
         self._handlers: dict[str, Callable[[int, Any], Awaitable[Any]]] = {"mail.profile": self._mail_profile}
         self._handlers.update(mail_handlers(self))
         self._handlers.update(calendar_handlers(self))
         self._handlers.update(teams_handlers(self))
         self._handlers.update(files_handlers(self))
+
+    def forget_user(self, user_id: int) -> None:
+        for drop in self.forgetters:
+            drop(user_id)
 
     def handles(self, action: str) -> bool:
         return action in self._handlers

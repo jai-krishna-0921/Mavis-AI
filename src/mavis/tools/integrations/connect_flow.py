@@ -726,10 +726,43 @@ class ConnectFlow:
             await release(f"first_sync:{user_id}:{dropped_name}")
         if polling != st.get("polling", {}):
             await self.state.update(user_id, {"polling": polling})
+        await self._clear_provider_state(user_id, capability)
         forgotten = await self._forget_learned(user_id, capability) if forget else 0
         await self.send(user_id, f"Disconnected {name}. I can't see it anymore."
                         + (" I also removed what I had learned from it." if forgotten else ""))
         return True
+
+    async def _clear_provider_state(self, user_id: int, capability: Capability) -> None:
+        """Whatever the provider kept in users.state goes with the connection, whether or not the learned
+        records are forgotten: its poll cursors (a reconnect starts from a fresh baseline instead of
+        replaying), the reply nudges it still owes (none may fire for a disconnected account) and the
+        default sending account that named it."""
+        spec = providers.provider_of_capability(capability)
+        if spec is None or not (_family(capability) is not None or capability is spec.capabilities[0]):
+            return
+        try:
+            st = await self.state.get(user_id)
+            patch: dict[str, Any] = {}
+            cursors = st.get("cursors")
+            if isinstance(cursors, dict) and spec.state_cursors:
+                kept = {k: v for k, v in cursors.items() if not str(k).startswith(spec.state_cursors)}
+                if kept != cursors:
+                    patch["cursors"] = kept
+            owed = st.get("slack_owed")
+            if isinstance(owed, dict) and spec.owed_sources:
+                left = {k: v for k, v in owed.items()
+                        if not (isinstance(v, dict) and (v.get("source") or "slack") in spec.owed_sources)}
+                if left != owed:
+                    patch["slack_owed"] = left
+            defaults = st.get("defaults")
+            if isinstance(defaults, dict):
+                left = {k: v for k, v in defaults.items() if v != spec.id}
+                if left != defaults:
+                    patch["defaults"] = left
+            if patch:
+                await self.state.update(user_id, patch)
+        except Exception as exc:  # noqa: BLE001 - the disconnect itself already succeeded
+            log.warning("connect.clear_state_failed", provider=spec.id, error=type(exc).__name__)
 
     async def _forget_learned(self, user_id: int, capability: Capability) -> int:
         """Forget is the default: what was learned from mail or Slack records goes with the connection."""

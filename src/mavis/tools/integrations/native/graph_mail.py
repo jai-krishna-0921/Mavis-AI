@@ -354,6 +354,10 @@ class MailActions:
         self.graph = ex.graph
         self._folders: dict[int, tuple[float, dict[str, str]]] = {}
 
+    def forget(self, uid: int) -> None:
+        """Drop this user's cached folder ids (a disconnect, then a reconnect to another mailbox)."""
+        self._folders.pop(uid, None)
+
     async def _call(self, uid: int, method: str, url: str, **kw: Any) -> Any:
         return await self.graph.json(uid, method, url, **kw)
 
@@ -636,6 +640,8 @@ class MailActions:
 
 def mail_handlers(ex: Any) -> dict[str, Callable[[int, Any], Awaitable[Any]]]:
     m = MailActions(ex)
+    if hasattr(ex, "forgetters"):
+        ex.forgetters.append(m.forget)
     return {"mail.inbox_delta": m.inbox_delta,
             "mail.search": m.search, "mail.read": m.read, "mail.thread": m.thread, "mail.draft": m.draft,
             "mail.send": m.send, "mail.reply": m.reply, "mail.archive": m.archive,

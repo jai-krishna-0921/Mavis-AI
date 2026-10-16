@@ -115,3 +115,39 @@ async def test_personal_announcement_drops_teams_and_adds_the_note(
     assert text == ("Connected ✓ I can now work with your Outlook mail, Outlook Calendar and OneDrive. "
                     "Note: Teams is not available for personal Microsoft accounts.")
     assert "Not allowed on" not in text
+
+
+async def test_disconnect_clears_microsoft_cursors_teams_owed_and_its_defaults_only(
+    db, ms_env, provider, cache, fake_bus, rec, state
+):
+    await state.update(1, {
+        "cursors": {"outlook_delta": "L", "ocal_delta": "L", "ocal_delta_at": "t", "teams_at": "t",
+                    "teams_chats": {"ms:a": "t"}, "teams_resume": {"ms:a": {}}, "onedrive_seen": ["x"],
+                    "onedrive_at": "t", "ms_backoff_n": 2, "ms_backoff_until": "t",
+                    "gmail_after": 5, "slack_ts": {"C1": "1.0"}},
+        "slack_owed": {"teams:abc": {"source": "teams", "chat": "ms:a", "from": "Alex", "ts": "1.0"},
+                       "D123": {"team": "T", "from": "Sam", "ts": "2.0", "notified": False}},
+        "defaults": {"mail": "microsoft", "calendar": "google"},
+    })
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    _live(provider, OL, OC, OD)
+    assert await flow.disconnect(1, TE, forget=False) is True
+    st = await state.get(1)
+    assert st["cursors"] == {"gmail_after": 5, "slack_ts": {"C1": "1.0"}}
+    assert list(st["slack_owed"]) == ["D123"]
+    assert st["defaults"] == {"calendar": "google"}
+
+
+async def test_disconnecting_slack_clears_its_cursors_and_owed_dms_but_not_teams(
+    db, settings, provider, cache, fake_bus, rec, state
+):
+    await state.update(1, {
+        "cursors": {"slack_ts": {"C1": "1.0"}, "slack_offset": 3, "gmail_after": 5, "teams_at": "t"},
+        "slack_owed": {"teams:abc": {"source": "teams", "chat": "ms:a"}, "D123": {"team": "T", "ts": "2.0"}},
+    })
+    flow = make_flow(provider, cache, fake_bus, rec, state)
+    provider.set_state(1, C.SLACK, ConnectionState.ACTIVE)
+    assert await flow.disconnect(1, C.SLACK, forget=False) is True
+    st = await state.get(1)
+    assert st["cursors"] == {"gmail_after": 5, "teams_at": "t"}
+    assert list(st["slack_owed"]) == ["teams:abc"]

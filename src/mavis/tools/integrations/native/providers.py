@@ -157,6 +157,8 @@ class ProviderSpec:
     #   capability -> "module:function"; async fn(poller, user_id, state) -> int; raises PollAuthError
     # memory
     forget_prefixes: tuple[str, ...] = ()  # origin prefixes erased by disconnect-and-forget ("gmail:")
+    state_cursors: tuple[str, ...] = ()  # users.state["cursors"] key prefixes cleared on disconnect
+    owed_sources: tuple[str, ...] = ()  # users.state["slack_owed"] entries with this source ("" counts as slack)
     memory_sources: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     #   vault connector name -> origin prefixes
     # dashboard
