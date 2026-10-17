@@ -44,7 +44,7 @@ def verify_fathom_signature(secret: str, headers: Mapping[str, str], body: bytes
     holds one or more space separated `v1,<base64>` values and any one may match. Never raises."""
     lowered = {str(k).lower(): str(v) for k, v in headers.items()}
     wid, ts, sigs = (lowered.get(k, "") for k in ("webhook-id", "webhook-timestamp", "webhook-signature"))
-    if not (wid and ts.isdigit() and sigs and secret):
+    if not (wid and ts.isascii() and ts.isdigit() and sigs and secret):
         return False
     if abs(now - int(ts)) > WEBHOOK_TOLERANCE_S:
         return False

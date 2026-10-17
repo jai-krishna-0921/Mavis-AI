@@ -123,14 +123,47 @@ async def test_action_items_split_commitment_waiting_skip_unassigned_and_complet
 async def test_ingest_is_idempotent_per_recording(env):
     m = meeting(invitees=("me@acme.test",), items=("Send deck",))
     m["action_items"][0]["assignee"] = {"name": "Me", "email": "me@acme.test", "team": None}
+    env.fake.add_meeting(m, transcript=[("Priya", "Ship it.")])
     k1 = await ingest_meeting(env.uid, m, source="webhook")
     env.events.append(cal("late", "Budget review", 0, 30))  # the calendar changed in between
+    first_calls = len(env.fake.requests)
     k2 = await ingest_meeting(env.uid, m, source="poll")
     assert k1 == k2 == "fathom:42"
     assert len(await loops_repo.list_open(env.uid)) == 1
-    learn = [j for j in env.bus.jobs if j.kind is JobKind.LEARN]
-    assert len(learn) == 2  # submit dedupes by the learned marker only once the job ran; ids are equal
-    assert learn[0].id == learn[1].id
+    assert len(env.fake.requests) == first_calls  # no vendor call at all on the repeat
+    assert len([j for j in env.bus.jobs if j.kind is JobKind.LEARN]) == 1  # and no second memory record
+
+
+async def test_repeat_makes_no_recordings_calls_even_without_a_payload_summary(env):
+    env.fake.add_meeting(meeting(summary="From the API."), transcript=[("Priya", "Ship it on Friday.")])
+    listed = meeting(summary=None)
+    await ingest_meeting(env.uid, listed, source="poll")
+    seen = len(env.fake.requests)
+    assert any("/recordings/" in str(r.url) for r in env.fake.requests)
+    await ingest_meeting(env.uid, listed, source="webhook")
+    assert not [r for r in env.fake.requests[seen:] if "/recordings/" in str(r.url)]
+    assert (await meeting_notes.by_recording(env.uid, "42")).summary == "From the API."
+
+
+async def test_transcript_fetch_is_limited_to_the_room_the_record_has(env):
+    from mavis.memory import records
+
+    lines = [("Priya", f"Line number {i} of the long meeting.") for i in range(400)]
+    env.fake.add_meeting(meeting(), transcript=lines)
+    await ingest_meeting(env.uid, meeting(summary="Short summary."), source="webhook")
+    (job,) = [j for j in env.bus.jobs if j.kind is JobKind.LEARN]
+    text = job.payload["text"]
+    assert len(text) <= records.RECORD_TEXT_CAP
+    assert "Priya: Line number 0 of the long meeting." in text and "Line number 399" not in text
+    assert len(text) > records.RECORD_TEXT_CAP - 100  # the room was used, line by line
+
+
+async def test_no_transcript_fetch_when_the_summary_fills_the_record(env):
+    env.fake.add_meeting(meeting(), transcript=[("Priya", "Never fetched.")])
+    await ingest_meeting(env.uid, meeting(summary="word " * 2000), source="webhook")
+    assert not [r for r in env.fake.requests if r.url.path.endswith("/transcript")]
+    (job,) = [j for j in env.bus.jobs if j.kind is JobKind.LEARN]
+    assert "Never fetched." not in job.payload["text"]
 
 
 async def test_memory_record_is_untrusted_with_fathom_prefix(env):
@@ -198,3 +231,15 @@ async def test_poll_fallback_every_15_min_and_skips_known(env):
     assert len(env.fake.requests) > calls
     queued = [j for j in env.bus.jobs if j.kind is JobKind.FATHOM_RECORDING]
     assert len(queued) == 2  # re-listed and queued again: its note does not exist yet
+
+
+async def test_poll_error_is_not_retried_before_15_minutes(env):
+    now = T0 + timedelta(hours=1)
+    poller, st = FakePoller(now), {}
+    env.fake.script_error(500, n=4)
+    assert await fathom_poll.poll_fathom(poller, env.uid, st) == 0
+    assert st["cursors"]["fathom_poll_at"]
+    calls = len(env.fake.requests)
+    poller.now = now + timedelta(minutes=2)
+    assert await fathom_poll.poll_fathom(poller, env.uid, st) == 0
+    assert len(env.fake.requests) == calls

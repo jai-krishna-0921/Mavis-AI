@@ -37,7 +37,7 @@ log = structlog.get_logger(__name__)
 WINDOW = timedelta(hours=2)
 NEAR = timedelta(minutes=15)
 MIN_OVERLAP_S = 60.0
-TRANSCRIPT_CHARS = 30000
+MIN_TRANSCRIPT_ROOM = 200
 SUMMARY_CHARS = 20000
 MAX_INVITEES = 50
 MAX_ITEMS = 50
@@ -197,41 +197,52 @@ async def _loops(user_id: int, m: dict, self_emails: set[str]) -> None:
 async def _memory(user_id: int, api: FathomApi | None, m: dict, summary: str, identities: dict) -> None:
     if "fathom" in await controls.paused(user_id):
         return
-    transcript = ""
-    if api is not None:
-        transcript = await _fetch(api.transcript(user_id, m["recording_id"], TRANSCRIPT_CHARS))
-    text = f"{summary}\n\n{transcript[:TRANSCRIPT_CHARS]}".strip()
-    if not text:
-        return
     user = await users.get(user_id)
-    job = records.meeting_record(user_id, m["recording_id"], m["title"], m["start"], m["invitees"], text,
-                                 self_ids=identities, self_names=[user.name or ""])
-    if job is not None:
+
+    def record(text: str):
+        return records.meeting_record(user_id, m["recording_id"], m["title"], m["start"], m["invitees"], text,
+                                      self_ids=identities, self_names=[user.name or ""])
+
+    job = record(summary)
+    if job is None:
+        return
+    # the record keeps RECORD_TEXT_CAP characters in all: only ask for the transcript the room left holds
+    room = records.RECORD_TEXT_CAP - len(job.text) - len("\n\n")
+    if api is not None and room >= MIN_TRANSCRIPT_ROOM:
+        transcript = await _fetch(api.transcript(user_id, m["recording_id"], room))
+        if transcript.strip():
+            job = record(f"{summary}\n\n{transcript[:room]}".strip()) or job
+    if job.text.partition("\n\n")[2].strip():
         await records.submit(job)
 
 
 async def ingest_meeting(user_id: int, meeting: dict, *, source: str) -> str | None:
     """Store one recording. Returns the meeting's event key (a calendar event id, else `fathom:<id>`), or
-    None when the payload has no usable recording id."""
+    None when the payload has no usable recording id. A recording already ingested (the webhook and the poll
+    both deliver, Fathom re-delivers) makes no Fathom call and no memory record; its note, loops and Notion
+    sync are refreshed from the payload."""
     m = coerce(meeting)
     if m is None:
         return None
-    api = fathom_api()
-    summary = m["summary"]
+    known = await meeting_notes.by_recording(user_id, str(m["recording_id"]))
+    api = None if known is not None else fathom_api()
+    summary = m["summary"] or (known.summary if known is not None else "")
     if not summary and api is not None:
         summary = (await _fetch(api.summary(user_id, m["recording_id"])))[:SUMMARY_CHARS].strip()
-    key = await _event_key(user_id, m)
+    key = known.event_key if known is not None else await _event_key(user_id, m)
+    identities = await load_identities(user_id)
+    if known is None:  # the note is written last, so a retry after a failure here starts over
+        await _memory(user_id, api, m, summary, identities)
+    await _loops(user_id, m, set(identities["emails"]))
     await meeting_notes.upsert(
         user_id, key, recording_id=str(m["recording_id"]), fathom_url=m["url"], summary=summary,
         action_items=m["action_items"], title=m["title"], starts_at=m["start"], ends_at=m["end"],
         attendees=m["invitees"])
-    identities = await load_identities(user_id)
-    await _loops(user_id, m, set(identities["emails"]))
-    await _memory(user_id, api, m, summary, identities)
     grant = await notion_grant(user_id)
     if grant is not None and grant.status == ACTIVE:
         await enqueue_sync(user_id, force={"meetings"})
-    log.info("fathom.ingested", user_id=user_id, recording_id=m["recording_id"], source=source)
+    log.info("fathom.ingested", user_id=user_id, recording_id=m["recording_id"], source=source,
+             repeat=known is not None)
     return key
 
 

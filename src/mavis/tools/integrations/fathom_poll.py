@@ -44,6 +44,8 @@ async def poll_fathom(poller, user_id: int, st: dict) -> int:
     api = fathom_api()
     if api is None:
         return 0
+    # stamped before the call: a Fathom outage or a refused token is retried in 15 minutes, not every poll
+    await poller.set_cursor(user_id, st, "fathom_poll_at", now.isoformat())
     seen = _when(cursors.get("fathom_seen"))
     after = (seen - OVERLAP) if seen else now - FIRST_LOOKBACK
     try:
@@ -70,5 +72,4 @@ async def poll_fathom(poller, user_id: int, st: dict) -> int:
     else:
         newest = min(max(created, default=now), now)
     await poller.set_cursor(user_id, st, "fathom_seen", newest.isoformat())
-    await poller.set_cursor(user_id, st, "fathom_poll_at", now.isoformat())
     return queued

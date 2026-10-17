@@ -100,3 +100,14 @@ async def test_non_int_recording_id_400(env):
         assert (await post(app, body, signed(body, wid=f"w{bad}"))).status_code == 400
     assert (await post(app, b"not json", signed(b"not json", wid="wjson"))).status_code == 400
     assert bus.jobs == []
+
+
+async def test_non_ascii_timestamp_is_401_not_500(env):
+    app, bus = env
+    body = payload()
+    h = signed(body)
+    h["webhook-timestamp"] = "2"
+    raw = [(k.encode(), v.encode()) for k, v in h.items() if k != "webhook-timestamp"]
+    raw.append((b"webhook-timestamp", b"\xb2"))  # latin-1 superscript two: isdigit() is True, int() raises
+    assert (await post(app, body, raw)).status_code == 401
+    assert bus.jobs == []
