@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -100,8 +101,19 @@ class FakeNotion:
         return NotionExecutor(tokens or _FakeTokens(), self.client(), sleep=sleep), sleeps
 
     def _id(self, kind: str) -> str:
+        """Deterministic dashed lowercase UUIDs like real Notion ids (property ids keep a short form)."""
         self._n += 1
-        return f"{kind}-{self._n}"
+        return f"prop-{self._n}" if kind == "prop" else str(uuid.UUID(int=self._n))
+
+    def add_page(self, title: str, text: str = "", parent: dict | None = None) -> dict:
+        """Seed a page (as if shared with the integration), optionally with one paragraph of text."""
+        page = self._page_obj(parent or {"type": "workspace", "workspace": True},
+                              {"title": {"title": [{"type": "text", "text": {"content": title}}]}})
+        self.blocks[page["id"]] = []
+        if text:
+            self._insert(page["id"], [{"type": "paragraph", "paragraph": {"rich_text": [
+                {"type": "text", "text": {"content": text}}]}}], {"type": "end"})
+        return page
 
     def _now(self) -> str:
         return self.clock().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:00.000Z")
