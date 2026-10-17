@@ -6,11 +6,13 @@ from types import SimpleNamespace
 import pytest
 
 from mavis.domain import timeutil
+from mavis.domain.errors import FailureKind
 from mavis.domain.events import Trust
 from mavis.domain.loops import LoopKind, LoopOrigin, LoopStatus, LoopUpsert
 from mavis.loops.service import LoopService
 from mavis.store.repo import loops as loop_repo
 from mavis.store.repo import notion_links, users
+from mavis.tools.integrations.native.notion_api import NotionError
 from mavis.tools.integrations.notion_sync import runner
 from mavis.tools.integrations.notion_sync.home import ensure_home
 from mavis.tools.integrations.notion_sync.todos import KINDS, todos_pass
@@ -297,3 +299,68 @@ async def test_trashed_row_drops_loop(env):
     env.clock.advance(minutes=5)
     await env.run()
     assert env.rows() == []  # the dropped loop is not rebuilt as a new row
+
+
+async def test_failed_writeback_retry_creates_one_loop(env, monkeypatch):
+    env.clock.advance(minutes=5)
+    page = env.fake._page_obj({"type": "data_source_id", "data_source_id": env.ds}, {})
+    env.fake.blocks[page["id"]] = []
+    env.fake.user_edit(page["id"], edit_title("Call the plumber"))
+    real, calls = env.api.update_page, []
+
+    async def flaky(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise NotionError(FailureKind.UNKNOWN, "internal_server_error")
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(env.api, "update_page", flaky)
+    with pytest.raises(NotionError):
+        await env.run()
+    assert len(await loop_repo.list_open(env.uid)) == 1
+    env.clock.advance(minutes=5)
+    await env.run()
+    [loop] = await loop_repo.list_open(env.uid)
+    assert text(env.fake.pages[page["id"]], "Mavis key") == f"loop:{loop.id}"
+    env.clock.advance(minutes=5)
+    await env.run()
+    assert len(await loop_repo.list_open(env.uid)) == 1
+
+
+async def test_same_minute_conflict_goes_to_the_owner(env):
+    loop = await env.add()
+    await env.run()
+    env.clock.advance(minutes=5)
+    env.fake.user_edit(env.rows()[0]["id"], edit_title("Owner title"))
+    env.clock.advance(seconds=10)  # Mavis edits later in the same minute: the stamp cannot tell
+    await env.svc.upsert(env.uid, LoopUpsert(id=loop.id, title="Mavis title", trust=Trust.USER))
+    env.clock.advance(seconds=10)
+    await env.run()
+    assert (await env.svc.get(loop.id)).title == "Owner title"
+
+
+async def test_push_continues_past_the_changed_cap(env, monkeypatch):
+    monkeypatch.setattr(loop_repo, "CHANGED_LIMIT", 2)
+    for word in ("plumber", "invoice", "passport", "dentist", "garden"):
+        await env.add(f"Call about {word}")
+        env.clock.advance(seconds=1)
+    await env.run()
+    assert len(env.rows()) == 5
+    env.clock.advance(minutes=5)
+    await env.add("Renew insurance")
+    await env.run()
+    assert len(env.rows()) == 6
+
+
+async def test_trash_by_someone_else_mentions_once_and_keeps_loop(env):
+    loop = await env.add()
+    await env.run()
+    env.clock.advance(minutes=5)
+    pid = env.rows()[0]["id"]
+    env.fake.user_edit(pid, {}, editor_id="user-someone-else")
+    env.fake.pages[pid]["in_trash"] = True
+    await env.run()
+    env.clock.advance(minutes=5)
+    await env.run()
+    assert (await env.svc.get(loop.id)).status == LoopStatus.OPEN
+    assert len(env.notices.sent) == 1 and env.notices.sent[0][1]["untrusted"] is True

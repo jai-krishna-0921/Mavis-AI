@@ -44,6 +44,7 @@ STATUS_LABEL = {
 }
 CLOSED = (LoopStatus.DONE, LoopStatus.DROPPED, LoopStatus.EXPIRED)
 OVERLAP = timedelta(minutes=2)
+MINUTE = timedelta(minutes=1)  # Notion truncates last_edited_time to the minute: ties go to the owner
 ARCHIVE_AFTER = timedelta(days=30)
 ARCHIVE_EVERY = timedelta(days=1)
 FIRST_PUSH_BACK = timedelta(days=3650)
@@ -204,6 +205,11 @@ async def _pull_row(ctx: SyncCtx, service: LoopService, names: Names, tz: str, p
     link = await notion_links.by_page(uid, page["id"])
     link = link if link is not None and link.kind == LINK else None
     canon = _canon_page(page, tz)
+    if link is not None and link.meta.get("adopting"):
+        loop = await service.get(int(link.local_key))
+        if loop is not None:
+            await _write_key(ctx, loop, page, canon, tz)  # a retry: the loop exists, finish the writeback
+        return
     if link is not None and content_hash(canon) == link.pushed_hash:
         return  # not a change to anything Mavis syncs
     if editor != ctx.account.get("owner_id"):
@@ -232,15 +238,22 @@ async def _adopt_row(ctx, service, names, tz, page, canon) -> None:
     if canon["status"] in ("Done", "Dropped"):
         loop = await service.close(
             loop.id, LoopStatus.DONE if canon["status"] == "Done" else LoopStatus.DROPPED) or loop
+    # link first: if the writeback below fails, the retry finds this link and creates no second loop
+    await notion_links.upsert(ctx.user_id, LINK, str(loop.id), page["id"], pushed_hash="",
+                              meta={"adopting": True})
+    await _write_key(ctx, loop, page, canon, tz)
+
+
+async def _write_key(ctx, loop: Loop, page: dict, canon: dict, tz: str) -> None:
     patch = {"Mavis key": {"rich_text": _rich(_key(loop.id))}}
     if not canon["kind"]:
-        patch["Kind"] = {"select": {"name": KIND_LABEL[kind]}}
+        patch["Kind"] = {"select": {"name": KIND_LABEL[loop.kind]}}
     if not canon["status"]:
         patch["Status"] = {"select": {"name": STATUS_LABEL[loop.status]}}
     fresh = await ctx.api.update_page(ctx.user_id, page["id"], properties=patch)
     await notion_links.upsert(
         ctx.user_id, LINK, str(loop.id), page["id"], pushed_hash=content_hash(_canon_page(fresh, tz)),
-        pushed_at=timeutil.now(), edited_at=_edited(fresh))
+        pushed_at=timeutil.now(), edited_at=_edited(fresh), meta={})
 
 
 def _day(day: str | None, tz: str) -> datetime | None:
@@ -255,7 +268,7 @@ async def _apply_edit(ctx, service, names, tz, page, canon, link) -> None:
     if loop is None or loop.kind not in KINDS:
         return
     touched = await loop_repo.touched_at(loop.id)
-    if touched and touched > _edited(page) and link.pushed_at and touched > link.pushed_at:
+    if touched and touched >= _edited(page) + MINUTE and link.pushed_at and touched > link.pushed_at:
         # Mavis changed the loop after the owner's edit: Mavis wins, and the push overwrites the row
         await notion_links.upsert(uid, LINK, link.local_key, link.page_id, pushed_hash="-")
         return
@@ -319,8 +332,11 @@ async def _trash_check(ctx: SyncCtx, service: LoopService) -> bool:
         if _editor(page) == ctx.account.get("owner_id"):
             await _row_trashed(service, uid, link)
         else:
-            # trashed by someone else: forget it; a later change to the loop makes a fresh row
-            await notion_links.delete(uid, LINK, link.local_key)
+            # trashed by someone else: say so once and change nothing; the tombstone stops re-checking
+            props = page.get("properties") or {}
+            await _mention_foreign(ctx, page, _plain(props.get("Name"), "title"))
+            await notion_links.upsert(uid, LINK, link.local_key, link.page_id,
+                                      meta={**link.meta, "trashed": True})
     return True
 
 
@@ -335,14 +351,24 @@ async def _push(ctx: SyncCtx, names: Names, tz: str, cursors: dict) -> bool:
         since = (home.created_at if home and home.created_at else ctx.now) - FIRST_PUSH_BACK
     else:
         since = stored
-    todo = {lp.id: lp for lp in await loop_repo.list_changed_since(uid, since, KINDS)}
-    if stored is None:
-        todo.update({lp.id: lp for lp in await loop_repo.list_open(uid) if lp.kind in KINDS})
     stale = {lp.id for lp in await loop_repo.list_closed_before(uid, ctx.now - ARCHIVE_AFTER, KINDS)}
-    for loop in sorted(todo.values(), key=lambda lp: lp.id):
-        if not ctx.left():
-            return False
-        await _push_one(ctx, loop, names, tz, skip_new=loop.id in stale)
+    if stored is None:
+        for loop in await loop_repo.list_open(uid):
+            if loop.kind in KINDS:
+                if not ctx.left():
+                    return False
+                await _push_one(ctx, loop, names, tz, skip_new=loop.id in stale)
+    while True:
+        # oldest change first and capped: continue from the last loop done until a batch comes back short
+        batch = await loop_repo.list_changed_since(uid, since, KINDS)
+        for loop in batch:
+            if not ctx.left():
+                return False
+            await _push_one(ctx, loop, names, tz, skip_new=loop.id in stale)
+        last = await loop_repo.touched_at(batch[-1].id) if batch else None
+        if len(batch) < loop_repo.CHANGED_LIMIT or last is None or last <= since:
+            break
+        since = last
     await _put(uid, notion_todos_pushed=started.isoformat())
     return True
 
@@ -373,7 +399,7 @@ async def _push_one(ctx: SyncCtx, loop: Loop, names: Names, tz: str, *, skip_new
         page = await ctx.api.create_page(
             uid, {"type": "data_source_id", "data_source_id": ctx.home.ds["todos"]}, props)
     await notion_links.upsert(uid, LINK, str(loop.id), page["id"], pushed_hash=digest,
-                              pushed_at=timeutil.now(), edited_at=_edited(page))
+                              pushed_at=timeutil.now(), edited_at=_edited(page), meta={})
 
 
 # ----- archive
