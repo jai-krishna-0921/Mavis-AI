@@ -96,7 +96,7 @@ async def test_disabled_restores_the_pre_attention_wiring_exactly(settings, db, 
     handlers.register_default_handlers()
     assert _snapshot() == legacy
     assert runner._event_handlers[EventType.EMAIL_RECEIVED] == [initiative_wiring.current().handler.handle]
-    assert sorted(legacy["brief"]) == ["calendar", "inbox"]
+    assert sorted(legacy["brief"]) == ["calendar", "inbox", "notion"]
 
 
 async def test_default_handlers_wire_attention_without_duplicates(settings, db, bus, memory):
@@ -114,8 +114,9 @@ async def test_default_handlers_wire_attention_without_duplicates(settings, db, 
         get_intake().on_task_completed,
     ]
     assert {"conn:", "at:", "ap:"} <= set(buttons.BUTTON_HANDLERS)
-    # calendar stays, the live-search inbox source is replaced: no duplicate inbox lines
-    assert [s.name for s in routines.brief_sources()] == ["calendar", "attention"]
+    # calendar stays, the live-search inbox source is replaced: no duplicate inbox lines (the Notion source
+    # adds no lines, it only hears when a brief went out)
+    assert [s.name for s in routines.brief_sources()] == ["calendar", "notion", "attention"]
     assert context_hooks.CONTEXT_PROVIDERS == [get_digest().context]
 
 

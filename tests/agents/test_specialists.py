@@ -55,6 +55,7 @@ def test_tool_sets_per_specialist():
                                          "calendar.respond"}
     assert agent_actions("knowledge") == {"notion.search", "notion.read", "notion.create_page",
                                           "notion.append",
+                                          "fathom.meetings", "fathom.meeting",
                                           "onedrive.search", "onedrive.read"}
     assert agent_actions("conversation") == {
         "mail.search", "mail.read", "mail.draft", "mail.send", "mail.reply",
@@ -79,6 +80,8 @@ def test_tool_sets_per_specialist():
         "teams.chats", "teams.history", "teams.send",
         # OneDrive search and read
         "onedrive.search", "onedrive.read",
+        # Fathom meeting notes (read only)
+        "fathom.meetings", "fathom.meeting",
     }
 
 
