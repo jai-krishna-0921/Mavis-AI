@@ -365,6 +365,13 @@ async def list_changed_since(user_id: int, since: datetime, kinds: frozenset[Loo
         return [to_domain(r) for r in rows]
 
 
+async def touched_at(loop_id: int) -> datetime | None:
+    """When the loop last changed (None if it does not exist)."""
+    async with Session() as s:
+        row = await s.get(LoopRow, loop_id)
+        return timeutil.ensure_utc(row.updated_at) if row else None
+
+
 async def list_closed_before(user_id: int, before: datetime, kinds: frozenset[LoopKind]) -> list[Loop]:
     """DONE, DROPPED or EXPIRED loops of `kinds` last touched before `before`."""
     async with Session() as s:
