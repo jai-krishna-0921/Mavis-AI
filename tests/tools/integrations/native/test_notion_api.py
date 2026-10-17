@@ -249,7 +249,7 @@ async def test_database_roundtrip_and_query():
     assert await api.query(1, ds_id, filter=None, sorts=None, limit=10) == []
     blk = (await api.append(1, home["id"], blocks(1)))[0]
     await api.delete_block(1, blk)
-    assert fake.blocks[home["id"]] == []
+    assert [b for b in fake.blocks[home["id"]] if b["type"] != "child_database"] == []
 
 
 def test_page_text_plain_text_of_known_blocks():

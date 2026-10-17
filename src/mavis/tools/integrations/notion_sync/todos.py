@@ -26,6 +26,7 @@ from mavis.memory.names import normalize_name
 from mavis.store.repo import loops as loop_repo
 from mavis.store.repo import notion_links, users
 from mavis.tools.integrations.native.notion_api import NotionError
+from mavis.tools.integrations.notion_sync import rows
 from mavis.tools.integrations.notion_sync.blocks import TEXT_LIMIT, content_hash
 from mavis.tools.integrations.notion_sync.home import HOME_LINK
 from mavis.tools.integrations.notion_sync.runner import SyncCtx, _cursors, _put, _when, register_pass
@@ -199,6 +200,7 @@ async def _pull(ctx: SyncCtx, service: LoopService, names: Names, tz: str, curso
 
 async def _pull_row(ctx: SyncCtx, service: LoopService, names: Names, tz: str, page: dict) -> None:
     uid = ctx.user_id
+    page = rows.canonical(ctx.home, "todos", page)  # matched by property id: a renamed column still reads
     editor = _editor(page)
     if editor == ctx.account.get("bot_user_id"):
         return
@@ -250,7 +252,8 @@ async def _write_key(ctx, loop: Loop, page: dict, canon: dict, tz: str) -> None:
         patch["Kind"] = {"select": {"name": KIND_LABEL[loop.kind]}}
     if not canon["status"]:
         patch["Status"] = {"select": {"name": STATUS_LABEL[loop.status]}}
-    fresh = await ctx.api.update_page(ctx.user_id, page["id"], properties=patch)
+    fresh = await ctx.api.update_page(ctx.user_id, page["id"], properties=rows.wire(ctx.home, "todos", patch))
+    fresh = rows.canonical(ctx.home, "todos", fresh)
     await notion_links.upsert(
         ctx.user_id, LINK, str(loop.id), page["id"], pushed_hash=content_hash(_canon_page(fresh, tz)),
         pushed_at=timeutil.now(), edited_at=_edited(fresh), meta={})
@@ -281,6 +284,8 @@ async def _apply_edit(ctx, service, names, tz, page, canon, link) -> None:
         changes["title"] = canon["name"].strip()
     if canon["due"] and canon["due"] != current["due"]:
         changes["due_at"] = _row_due(page["properties"].get("Due"), tz)[1] or _day(canon["due"], tz)
+    elif not canon["due"] and current["due"]:
+        await service.clear_due(loop.id)  # the owner cleared Due: keep it cleared (T9 minor)
     people = [n for n in names.names_of(canon["people"] + canon["project"])
               if normalize_name(n) not in {normalize_name(e) for e in loop.entities}]
     if people:
@@ -327,6 +332,7 @@ async def _trash_check(ctx: SyncCtx, service: LoopService) -> bool:
             if exc.kind is FailureKind.NOT_FOUND:
                 continue
             raise
+        page = rows.canonical(ctx.home, "todos", page)
         if not (page.get("in_trash") or page.get("is_archived")):
             continue
         if _editor(page) == ctx.account.get("owner_id"):
@@ -389,17 +395,14 @@ async def _push_one(ctx: SyncCtx, loop: Loop, names: Names, tz: str, *, skip_new
         return  # closed long ago: it would only be archived again
     page = None
     if link is not None:
-        try:
-            page = await ctx.api.update_page(uid, link.page_id, properties=props)
-        except NotionError as exc:
-            if exc.kind not in (FailureKind.NOT_FOUND, FailureKind.INVALID_ARGUMENT):
-                raise
+        page = await rows.update_row(ctx.api, uid, ctx.home, "todos", link.page_id, props)
+        if page is None:
             await notion_links.delete(uid, LINK, str(loop.id))  # the row is gone (trashed): make a new one
     if page is None:
-        page = await ctx.api.create_page(
-            uid, {"type": "data_source_id", "data_source_id": ctx.home.ds["todos"]}, props)
+        page = await rows.create_row(ctx.api, uid, ctx.home, "todos", LINK, str(loop.id), props)
     await notion_links.upsert(uid, LINK, str(loop.id), page["id"], pushed_hash=digest,
                               pushed_at=timeutil.now(), edited_at=_edited(page), meta={})
+    await rows.created(uid, LINK, str(loop.id))
 
 
 # ----- archive

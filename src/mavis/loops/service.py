@@ -124,6 +124,19 @@ class LoopService:
                 await self._emit(loop, EventType.LOOP_UPDATED)
         return loop
 
+    async def clear_due(self, loop_id: int) -> Loop | None:
+        current = await repo.get(loop_id)
+        if current is None:
+            return None
+        async with lock(f"loops:{current.user_id}"):
+            result = await repo.clear_due(current.user_id, loop_id)
+            if result is None:
+                return None
+            loop, changed = result
+            if changed:
+                await self._emit(loop, EventType.LOOP_UPDATED)
+        return loop
+
     async def on_user_message(self, user_id: int, text: str) -> int:
         """Close loops whose follow-up the user is answering: the message names the loop, or it directly
         follows that loop's follow-up message (not just any proactive message)."""

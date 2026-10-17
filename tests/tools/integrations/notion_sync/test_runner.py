@@ -242,3 +242,86 @@ async def test_setup_stuck_notifies_once_after_three_failed_runs(fake, env):
     [intent] = env.notices.sent
     assert intent.dedupe_key == "notion_setup_stuck" and intent.urgency == 3
     assert "reconnecting Notion" in intent.intent
+
+
+# ----- final review fix wave
+
+async def test_i2_rebuild_with_the_template_copy_deleted_tells_the_user(fake, env):
+    await NotionSync().run(env.uid)
+    tpl = env.account["template_page_id"]
+    for page in fake.pages.values():  # the user trashes the top level page; Notion trashes what is under it
+        page["in_trash"] = True
+    await NotionSync().run(env.uid)
+    assert (await cursors(env.uid))["notion_problem"]["kind"] == "gone"
+    await runner.rebuild_home(env.uid)
+    await NotionSync().run(env.uid)
+    assert tpl in fake.pages
+    assert (await cursors(env.uid))["notion_problem"]["kind"] == "no_page"
+    assert [i.dedupe_key for i in env.notices.sent] == ["notion_home:gone", "notion_home:no_page"]
+
+
+async def test_i2_home_build_failures_are_counted_and_told_once(fake, env):
+    for _ in range(5):
+        fake.script_error(403, "restricted_resource")
+        await NotionSync().run(env.uid)
+    stuck = [i for i in env.notices.sent if i.dedupe_key == "notion_setup_stuck"]
+    assert len(stuck) == 1
+    assert (await cursors(env.uid))["notion_fail_home"] == 5
+
+
+async def test_i2_rebuild_resets_the_failure_counters(fake, env):
+    await users.update_nested(env.uid, "cursors", {"notion_fail_home": 7, "notion_fail_todos": 4,
+                                                   "notion_stuck_told": True})
+    await runner.rebuild_home(env.uid)
+    st = await cursors(env.uid)
+    assert st["notion_fail_home"] == 0 and st["notion_fail_todos"] == 0 and not st["notion_stuck_told"]
+
+
+async def test_c1_a_pass_that_keeps_failing_after_setup_is_told_once(fake, env):
+    from mavis.domain.errors import FailureKind
+    from mavis.tools.integrations.native.notion_api import NotionError
+
+    async def boom(ctx):
+        raise NotionError(FailureKind.INVALID_ARGUMENT, "validation_error")
+
+    register_pass("todos", timedelta(minutes=0), boom, order=40)
+    await users.update_nested(env.uid, "cursors", {"notion_setup": "done"})
+    for _ in range(5):
+        await NotionSync().run(env.uid)
+    assert len([i for i in env.notices.sent if i.dedupe_key == "notion_setup_stuck"]) == 1
+
+
+async def test_i8_the_job_budget_is_one_minute():
+    assert runner.BUDGET_S == 60
+
+
+async def test_m1_continuation_is_queued_after_the_claim_is_released(fake, env, monkeypatch):
+    from mavis.worker import locks
+
+    t = [0.0]
+    register_pass("people", timedelta(hours=1), recorder([], "people", 500, t), order=10)
+    claimed_when_queued = []
+    real = runner.enqueue_sync
+
+    async def spy(*a, **kw):
+        claimed_when_queued.append(not await locks.claim(f"notion_sync:{env.uid}", 5))
+        await locks.release(f"notion_sync:{env.uid}")
+        await real(*a, **kw)
+
+    monkeypatch.setattr(runner, "enqueue_sync", spy)
+    await NotionSync(clock=lambda: t[0]).run(env.uid)
+    assert claimed_when_queued == [False]
+
+
+async def test_i3_rebuild_tool_refuses_on_a_healthy_home_and_needs_approval(fake, env):
+    from mavis.tools import assistant
+    from mavis.tools.registry import TaintPolicy
+
+    await NotionSync().run(env.uid)
+    tool = next(t for t in assistant.TOOLS if t.name == "notion_rebuild_home")
+    assert tool.on_taint is TaintPolicy.APPROVE
+    before = len(await notion_links.all_of(env.uid, "db"))
+    out = await tool.fn(env.uid, assistant.NoArgs())
+    assert "nothing to rebuild" in str(out)
+    assert len(await notion_links.all_of(env.uid, "db")) == before == 5
+    assert not [j for j in env.bus.jobs if j.kind is JobKind.NOTION_SYNC and j.payload.get("again")]

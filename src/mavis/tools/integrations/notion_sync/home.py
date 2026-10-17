@@ -130,7 +130,7 @@ async def _adopt(api: NotionApi, user_id: int, page_id: str) -> Home | HomeProbl
 
 async def _pick_parent(api: NotionApi, user_id: int, account: dict) -> str | None:
     template = notion_id(str(account.get("template_page_id") or ""))
-    if template:
+    if template and await _reachable(api, user_id, template):  # a deleted template copy is not a parent (I2)
         return template
     pages = [p for p in await api.search(user_id, "", "page", 50) if not _page_gone(p) and p.get("id")]
     if not pages:
@@ -139,22 +139,50 @@ async def _pick_parent(api: NotionApi, user_id: int, account: dict) -> str | Non
     return str((top or pages)[0]["id"])  # search is newest edit first
 
 
-async def _create_missing(api: NotionApi, user_id: int, page_id: str) -> None:
+async def _earlier_child(api: NotionApi, user_id: int, parent_id: str, kind: str, title: str,
+                         bot_id: str) -> str | None:
+    """The id of a child page or database the bot already made under `parent_id` with this title: the
+    result of an earlier create whose outcome was never seen (I1)."""
+    for block in await api.children(user_id, parent_id, limit=500):
+        inner = block.get(kind) if block.get("type") == kind else None
+        if not isinstance(inner, dict) or str(inner.get("title") or "").strip() != title:
+            continue
+        if block.get("in_trash") or (bot_id and (block.get("created_by") or {}).get("id") != bot_id):
+            continue
+        return str(block.get("id") or "") or None
+    return None
+
+
+async def _create_missing(api: NotionApi, user_id: int, page_id: str, bot_id: str = "") -> None:
     """Create the databases that have no link yet, saving each link the moment its database exists, so a
-    retry after a failure continues here instead of starting a second home."""
+    retry after a failure continues here instead of starting a second home. An `attempt` link is saved
+    before each create: if the create's result was lost, the retry adopts the database it made."""
     for name in DBS:
         if await notion_links.get(user_id, "db", name) is not None:
             continue
-        plain = {p: s for p, s in SCHEMAS[name].items() if not _is_relation(s)}
-        db_id, ds_id = await api.create_database(user_id, page_id, TITLES[name], plain, DESCRIPTION)
+        attempt = f"db:{name}"
+        found = None
+        if await notion_links.get(user_id, "attempt", attempt) is not None:
+            found = await _earlier_child(api, user_id, page_id, "child_database", TITLES[name], bot_id)
+        if found:
+            sources = (await api.database(user_id, found)).get("data_sources") or []
+            ds_id = str(sources[0].get("id") or "") if sources and isinstance(sources[0], dict) else ""
+            if not ds_id:
+                raise NotionError(FailureKind.UNKNOWN, "no_data_source")
+            db_id = found
+        else:
+            await notion_links.upsert(user_id, "attempt", attempt, f"attempt:{attempt}", meta={})
+            plain = {p: s for p, s in SCHEMAS[name].items() if not _is_relation(s)}
+            db_id, ds_id = await api.create_database(user_id, page_id, TITLES[name], plain, DESCRIPTION)
         await notion_links.upsert(user_id, "db", name, db_id,
                                   meta={"db_id": db_id, "ds_id": ds_id, "props": {}})
+        await notion_links.delete(user_id, "attempt", attempt)
 
 
-async def _finish(api: NotionApi, user_id: int, page_id: str) -> Home | HomeProblem:
+async def _finish(api: NotionApi, user_id: int, page_id: str, bot_id: str = "") -> Home | HomeProblem:
     """Build or resume: create what is missing, add the relations (every target exists now) through the
     repair path, then mark the home built."""
-    await _create_missing(api, user_id, page_id)
+    await _create_missing(api, user_id, page_id, bot_id)
     result = await _adopt(api, user_id, page_id)
     if isinstance(result, Home):
         link = await notion_links.get(user_id, *HOME_LINK)
@@ -163,27 +191,37 @@ async def _finish(api: NotionApi, user_id: int, page_id: str) -> Home | HomeProb
     return result
 
 
-async def _start(api: NotionApi, user_id: int, parent_id: str) -> Home | HomeProblem:
-    page = await api.create_page(
-        user_id, {"type": "page_id", "page_id": parent_id},
-        {"title": {"title": [{"type": "text", "text": {"content": HOME_TITLE}}]}},
-        blocks.para("Mavis AI keeps these databases up to date. Add your own columns and notes freely."))
-    await notion_links.upsert(user_id, *HOME_LINK, page["id"], meta={})
-    return await _finish(api, user_id, page["id"])
+async def _start(api: NotionApi, user_id: int, parent_id: str, bot_id: str = "") -> Home | HomeProblem:
+    """Create the home page. An `attempt` link is saved first; if the create's result was lost (a 5xx after
+    the request left), the next try adopts the page the bot already made instead of making a second (I1)."""
+    page_id = None
+    if await notion_links.get(user_id, "attempt", "home") is not None:
+        page_id = await _earlier_child(api, user_id, parent_id, "child_page", HOME_TITLE, bot_id)
+    if page_id is None:
+        await notion_links.upsert(user_id, "attempt", "home", "attempt:home", meta={})
+        page = await api.create_page(
+            user_id, {"type": "page_id", "page_id": parent_id},
+            {"title": {"title": [{"type": "text", "text": {"content": HOME_TITLE}}]}},
+            blocks.para("Mavis AI keeps these databases up to date. Add your own columns and notes freely."))
+        page_id = page["id"]
+    await notion_links.upsert(user_id, *HOME_LINK, page_id, meta={})
+    await notion_links.delete(user_id, "attempt", "home")
+    return await _finish(api, user_id, page_id, bot_id)
 
 
 async def ensure_home(api: NotionApi, user_id: int, account: dict) -> Home | HomeProblem:
     """Adopt the stored home (repairing missing columns, finishing a build that was cut short), else build
     one. "gone": the home page or a database was deleted, left for the user to rebuild. "no_page": the user
     has shared no page to build under."""
+    bot_id = str(account.get("bot_user_id") or "")
     link = await notion_links.get(user_id, *HOME_LINK)
     if link is not None:
         if not await _reachable(api, user_id, link.page_id):
             return "gone"
         if link.meta.get("built"):
             return await _adopt(api, user_id, link.page_id)
-        return await _finish(api, user_id, link.page_id)
+        return await _finish(api, user_id, link.page_id, bot_id)
     parent = await _pick_parent(api, user_id, account)
     if parent is None:
         return "no_page"
-    return await _start(api, user_id, parent)
+    return await _start(api, user_id, parent, bot_id)

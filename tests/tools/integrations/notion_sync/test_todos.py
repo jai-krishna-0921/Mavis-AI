@@ -364,3 +364,77 @@ async def test_trash_by_someone_else_mentions_once_and_keeps_loop(env):
     await env.run()
     assert (await env.svc.get(loop.id)).status == LoopStatus.OPEN
     assert len(env.notices.sent) == 1 and env.notices.sent[0][1]["untrusted"] is True
+
+
+# ----- final review fix wave
+
+async def test_c1_renamed_columns_keep_syncing_without_duplicates(env):
+    """C1: the user renames Name and Status; writes and reads follow the property ids."""
+    loop = await env.add()
+    await env.run()
+    await env.api.update_data_source(env.uid, env.ds, {"Name": {"name": "Task"}, "Status": {"name": "State"}})
+    env.clock.advance(minutes=10)
+    await env.svc.upsert(env.uid, LoopUpsert(id=loop.id, title="Send deck v2", trust=Trust.USER))
+    await env.run()
+    [row] = env.rows()
+    assert text(row, "Task") == "Send deck v2" and "Name" not in row["properties"]
+    link = await link_of(env, loop)
+    assert link.page_id == row["id"]
+    # the owner edits the renamed columns: the edit reaches the same loop
+    env.clock.advance(minutes=5)
+    env.fake.user_edit(row["id"], {"State": select("Done"),
+                                   "Task": {"title": [{"type": "text", "text": {"content": "Deck sent"}}]}})
+    env.clock.advance(minutes=1)
+    await env.run()
+    got = await env.svc.get(loop.id)
+    assert got.status == LoopStatus.DONE and got.title == "Deck sent"
+    assert len(env.rows()) == 1
+    assert len(await loop_repo.list_open(env.uid)) == 0  # no second loop
+
+
+async def test_c1_rejected_update_on_a_live_row_is_not_row_gone(env, monkeypatch):
+    loop = await env.add()
+    await env.run()
+    [row] = env.rows()
+    env.clock.advance(minutes=10)
+    await env.svc.upsert(env.uid, LoopUpsert(id=loop.id, title="Send deck v2", trust=Trust.USER))
+    real = env.api.update_page
+
+    async def rejected(*a, **kw):
+        raise NotionError(FailureKind.INVALID_ARGUMENT, "validation_error", status=400)
+
+    monkeypatch.setattr(env.api, "update_page", rejected)
+    with pytest.raises(NotionError) as err:
+        await env.run()
+    assert err.value.kind is FailureKind.INVALID_ARGUMENT
+    assert (await link_of(env, loop)).page_id == row["id"]  # link kept, nothing created
+    assert len(env.rows()) == 1
+    monkeypatch.setattr(env.api, "update_page", real)
+    await env.run()
+    assert text(env.rows()[0], "Name") == "Send deck v2" and len(env.rows()) == 1
+
+
+async def test_i1_lost_create_answer_finds_the_row_again(env):
+    """I1: a create whose answer was lost (503) is found by its Mavis key, not created twice."""
+    loop = await env.add()
+    env.fake.script_lost("POST", r"/pages")
+    with pytest.raises(NotionError) as err:
+        await env.run()
+    assert err.value.kind is FailureKind.UNCONFIRMED
+    assert len(env.rows()) == 1  # the write did land
+    await env.run()
+    assert len(env.rows()) == 1
+    assert await notion_links.get(env.uid, "attempt", f"todo:{loop.id}") is None
+    assert (await link_of(env, loop)).page_id == env.rows()[0]["id"]
+
+
+async def test_t9_clearing_due_in_notion_clears_the_loop(env):
+    due_at = datetime(2026, 10, 20, 8, 0, tzinfo=UTC)
+    loop = await env.add(due_at=due_at)
+    await env.run()
+    env.clock.advance(minutes=5)
+    env.fake.user_edit(env.rows()[0]["id"], {"Due": None})
+    env.clock.advance(minutes=1)
+    await env.run()
+    assert (await env.svc.get(loop.id)).due_at is None
+    assert due(env.rows()[0]) is None  # and the next push does not put it back

@@ -31,7 +31,7 @@ async def env(fake, api, user):
         return [p for p in fake.pages.values()
                 if p["parent"].get("data_source_id") == home.ds["briefings"] and not p["in_trash"]]
 
-    return SimpleNamespace(uid=user.id, ctx=ctx, pages=pages, api=api)
+    return SimpleNamespace(uid=user.id, ctx=ctx, pages=pages, api=api, fake=fake)
 
 
 async def brief(uid, day, text):
@@ -120,3 +120,13 @@ async def test_a_150_line_briefing_is_appended_whole(env):
     await briefings_pass(env.ctx())
     [page] = env.pages()
     assert len(await env.api.children(env.uid, page["id"])) == 150
+
+
+async def test_i1_lost_briefing_create_answer_does_not_duplicate_the_page(env):
+    await brief(env.uid, "2026-10-17", "Good morning.")
+    env.fake.script_lost("POST", r"/pages")
+    with pytest.raises(NotionError):
+        await briefings_pass(env.ctx())
+    assert len(env.pages()) == 1
+    await briefings_pass(env.ctx())
+    assert len(env.pages()) == 1

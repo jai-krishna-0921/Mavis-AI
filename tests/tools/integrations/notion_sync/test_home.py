@@ -145,3 +145,48 @@ async def test_build_cut_short_resumes_into_one_home(fake, api, monkeypatch):
     assert len([p for p in fake.pages.values() if p["parent"].get("page_id") == tpl]) == 1
     assert fake.data_sources[home.ds["todos"]]["properties"]["People"]["type"] == "relation"
     assert (await notion_links.get(UID, "home", "home")).meta["built"] is True
+
+
+# ----- final review fix wave
+
+async def test_i1_lost_home_create_answer_adopts_the_page(fake, api):
+    """I1: the home page was created but the answer was a 503; the retry finds it, no second home."""
+    from mavis.domain.errors import FailureKind
+    from mavis.tools.integrations.native.notion_api import NotionError
+
+    account = {"template_page_id": fake.add_page("T")["id"], "bot_user_id": "bot-0000"}
+    fake.script_lost("POST", r"/pages")
+    with pytest.raises(NotionError) as err:
+        await ensure_home(api, UID, account)
+    assert err.value.kind is FailureKind.UNCONFIRMED
+    home = await ensure_home(api, UID, account)
+    assert isinstance(home, Home)
+    mavis_pages = [p for p in fake.pages.values()
+                   if p["properties"].get("title", {}).get("title")
+                   and p["properties"]["title"]["title"][0]["text"]["content"] == "Mavis AI"]
+    assert len(mavis_pages) == 1 and len(fake.databases) == 5
+    assert await notion_links.get(UID, "attempt", "home") is None
+
+
+async def test_i1_lost_database_create_answer_adopts_the_database(fake, api):
+    from mavis.domain.errors import FailureKind
+    from mavis.tools.integrations.native.notion_api import NotionError
+
+    account = {"template_page_id": fake.add_page("T")["id"], "bot_user_id": "bot-0000"}
+    fake.script_lost("POST", r"/databases")
+    with pytest.raises(NotionError) as err:
+        await ensure_home(api, UID, account)
+    assert err.value.kind is FailureKind.UNCONFIRMED
+    home = await ensure_home(api, UID, account)
+    assert isinstance(home, Home)
+    assert [t for t, _ in titles(fake)] == ["People", "Projects", "Meetings", "Briefings", "Todos"]
+    assert home.ds["people"] in fake.data_sources and len(fake.databases) == 5
+
+
+async def test_i2_deleted_template_copy_falls_back_to_a_shared_page(fake, api):
+    """I2: a template id that no longer exists is not a parent."""
+    tpl = fake.add_page("T")["id"]
+    other = fake.add_page("Other")["id"]
+    fake.pages[tpl]["in_trash"] = True
+    home = await ensure_home(api, UID, {"template_page_id": tpl})
+    assert isinstance(home, Home) and fake.pages[home.page_id]["parent"]["page_id"] == other

@@ -262,6 +262,9 @@ class NotionApi:
         return await self.request(user_id, "PATCH", f"/data_sources/{_seg(ds_id)}",
                                   json={"properties": properties})
 
+    async def database(self, user_id: int, db_id: str) -> dict:
+        return await self.request(user_id, "GET", f"/databases/{_seg(db_id)}")
+
     async def data_source(self, user_id: int, ds_id: str) -> dict:
         return await self.request(user_id, "GET", f"/data_sources/{_seg(ds_id)}")
 

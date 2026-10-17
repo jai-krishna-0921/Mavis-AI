@@ -16,7 +16,7 @@ import structlog
 
 from mavis.store.repo import messages, notion_links
 from mavis.tools.integrations.native.tokens import ACTIVE
-from mavis.tools.integrations.notion_sync import blocks
+from mavis.tools.integrations.notion_sync import blocks, rows
 from mavis.tools.integrations.notion_sync.blocks import TEXT_LIMIT
 from mavis.tools.integrations.notion_sync.runner import (
     SyncCtx,
@@ -61,10 +61,10 @@ async def briefings_pass(ctx: SyncCtx) -> None:
                 "Mavis key": {"rich_text": _rich(f"briefing:{day}")},
                 "Date": {"date": {"start": day}},
             }
-            page = await ctx.api.create_page(
-                uid, {"type": "data_source_id", "data_source_id": ctx.home.ds["briefings"]}, props)
+            page = await rows.create_row(ctx.api, uid, ctx.home, "briefings", LINK, day, props)
             # link first: if the body write fails, the retry finishes this page instead of making another
             await notion_links.upsert(uid, LINK, day, page["id"], pushed_hash="", meta={"fresh": True})
+            await rows.created(uid, LINK, day)
             page_id = page["id"]
         else:
             page_id = link.page_id

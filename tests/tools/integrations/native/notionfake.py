@@ -67,6 +67,7 @@ class FakeNotion:
         self.unrouted: list[httpx.Request] = []
         self.clock: Callable[[], datetime] = lambda: datetime(2026, 10, 17, 12, 0, 30, tzinfo=UTC)
         self._scripted: list[httpx.Response] = []
+        self._lost: list[tuple[str, str, int]] = []
         self._n = 0
 
     # ----- scripting and plumbing
@@ -78,6 +79,11 @@ class FakeNotion:
 
     def script_error(self, status: int, code: str, n: int = 1) -> None:
         self._scripted += [_err(status, code) for _ in range(n)]
+
+    def script_lost(self, method: str, path_pattern: str, status: int = 503) -> None:
+        """The next matching request is carried out, but its answer is a `status` error: a write whose
+        result the caller never sees."""
+        self._lost.append((method, path_pattern, status))
 
     def assert_all_routed(self) -> None:
         assert not self.unrouted, "unrouted requests: " + ", ".join(
@@ -170,6 +176,25 @@ class FakeNotion:
                 **value,
             }
 
+    @staticmethod
+    def _named(schema: dict, props: dict) -> dict:
+        """Notion accepts a property id or its name as the key of a write: resolve ids to names."""
+        by_id = {d["id"]: n for n, d in schema.items()}
+        return {by_id.get(k, k): v for k, v in props.items()}
+
+    def _child_block(self, parent: dict, node_id: str, kind: str, title: str) -> None:
+        """The child_page / child_database block a page or database shows in its parent page."""
+        if parent.get("type") != "page_id":
+            return
+        block = {"object": "block", "id": node_id, "type": kind, kind: {"title": title},
+                 "created_time": self._now(), "last_edited_time": self._now(),
+                 "created_by": {"object": "user", "id": BOT_ID},
+                 "last_edited_by": {"object": "user", "id": BOT_ID}, "in_trash": False,
+                 "has_children": True}
+        self.block_index[node_id] = block
+        self.blocks.setdefault(parent["page_id"], []).append(block)
+        self.block_parent[node_id] = parent["page_id"]
+
     def _schema_of(self, page: dict) -> dict:
         ds = self.data_sources.get(page["parent"].get("data_source_id", ""))
         return ds["properties"] if ds else {}
@@ -193,7 +218,13 @@ class FakeNotion:
         if self._scripted:
             return self._scripted.pop(0)
         body = json.loads(request.content) if request.content else {}
-        return handler(request, body)
+        response = handler(request, body)
+        path = request.url.path.removeprefix("/v1")
+        for i, (method, pattern, status) in enumerate(self._lost):
+            if method == request.method and re.fullmatch(pattern, path):
+                del self._lost[i]
+                return _err(status, "service_unavailable")
+        return response
 
     def _route(self, request: httpx.Request):
         m, path = request.method, request.url.path.removeprefix("/v1")
@@ -204,6 +235,7 @@ class FakeNotion:
             ("GET", r"/pages/([^/]+)", self._get_page),
             ("PATCH", r"/pages/([^/]+)", self._patch_page),
             ("POST", r"/databases", self._create_database),
+            ("GET", r"/databases/([^/]+)", self._get_db),
             ("GET", r"/data_sources/([^/]+)", self._get_ds),
             ("PATCH", r"/data_sources/([^/]+)", self._patch_ds),
             ("POST", r"/data_sources/([^/]+)/query", self._query),
@@ -280,11 +312,14 @@ class FakeNotion:
         if len(children) > MAX_CHILDREN or _too_long(body):
             return _err(400, "validation_error", "body failed validation")
         schema = self.data_sources.get(parent.get("data_source_id", ""), {}).get("properties", {})
-        for name, value in (body.get("properties") or {}).items():
+        props = self._named(schema, body.get("properties") or {})
+        for name, value in props.items():
             if schema and (name not in schema or (value is not None and schema[name]["type"] not in value)):
                 return _err(400, "validation_error", f"{name} is not a valid property.")
-        page = self._page_obj(parent, body.get("properties") or {})
+        page = self._page_obj(parent, props)
         self.blocks[page["id"]] = []
+        title = next((_plain(v["title"]) for v in props.values() if "title" in v), "")
+        self._child_block(parent, page["id"], "child_page", title)
         self._insert(page["id"], children, {"type": "end"})
         return httpx.Response(200, json=page)
 
@@ -298,13 +333,15 @@ class FakeNotion:
             return _err(404, "object_not_found")
         if _too_long(body):
             return _err(400, "validation_error", "body failed validation")
-        props = body.get("properties") or {}
+        props = self._named(self._schema_of(page), body.get("properties") or {})
         if props and page["in_trash"] and body.get("in_trash") is not False:
             return _err(400, "validation_error", "Can't edit block that is in trash.")
         if problem := self._check_props(page, props):
             return _err(400, "validation_error", problem)
         if "in_trash" in body:
             page["in_trash"] = page["is_archived"] = bool(body["in_trash"])
+            if pid in self.block_index:
+                self.block_index[pid]["in_trash"] = bool(body["in_trash"])
         self._apply_props(page, props)
         page["last_edited_time"] = self._now()
         page["last_edited_by"] = {"object": "user", "id": BOT_ID}
@@ -343,7 +380,12 @@ class FakeNotion:
               "is_inline": bool(body.get("is_inline")), "url": f"https://www.notion.so/{db_id}",
               "data_sources": [{"id": ds_id, "name": _plain(title)}], **common}
         self.databases[db_id], self.data_sources[ds_id] = db, ds
+        self._child_block(body.get("parent") or {}, db_id, "child_database", _plain(title))
         return httpx.Response(200, json=db)
+
+    def _get_db(self, req, body, db_id):
+        db = self.databases.get(db_id)
+        return httpx.Response(200, json=db) if db else _err(404, "object_not_found")
 
     def _get_ds(self, req, body, ds_id):
         ds = self.data_sources.get(ds_id)
@@ -380,7 +422,14 @@ class FakeNotion:
         pages = [p for p in self.pages.values()
                  if p["parent"].get("data_source_id") == ds_id and not p["in_trash"]]
         flt = body.get("filter")
-        if flt:
+        if flt and "property" in flt:
+            schema = self.data_sources[ds_id]["properties"]
+            name = self._named(schema, {flt["property"]: None}).popitem()[0]
+            want = (flt.get("rich_text") or {}).get("equals")
+            if name not in schema or want is None:
+                return _err(400, "validation_error", "FakeNotion only supports rich_text equals")
+            pages = [p for p in pages if _plain(p["properties"][name].get("rich_text") or []) == want]
+        elif flt:
             rule = flt.get("last_edited_time", {})
             if flt.get("timestamp") != "last_edited_time" or "on_or_after" not in rule:
                 return _err(400, "validation_error", "FakeNotion only supports last_edited_time on_or_after")

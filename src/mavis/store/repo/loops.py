@@ -286,6 +286,14 @@ def normalise_title(title: str) -> str:
     return " ".join(re.sub(r"[^\w\s]", " ", title.casefold()).split())
 
 
+async def exists_from_source(user_id: int, source: str, title: str) -> bool:
+    """A loop of this source with this (or a look-alike) title in any status, closed ones included."""
+    async with Session() as s:
+        rows = await s.scalars(select(LoopRow).where(LoopRow.user_id == user_id, LoopRow.source == source))
+        return any(normalise_title(r.title) == normalise_title(title) or similar_titles(r.title, title)
+                   for r in rows)
+
+
 async def find_recently_closed(user_id: int, title: str, since: datetime) -> Loop | None:
     """A DONE/DROPPED (or awaiting-reply) loop with the same normalised title closed after `since`."""
     wanted = normalise_title(title)
@@ -314,6 +322,22 @@ async def set_status(user_id: int, loop_id: int, status: LoopStatus,
             return to_domain(row), False
         row.status = status.value
         row.blocked_by = blocked_by if status is LoopStatus.BLOCKED else None
+        row.updated_at = timeutil.now()
+        row.version = (row.version or 1) + 1
+        await s.commit()
+        await s.refresh(row)
+        return to_domain(row), True
+
+
+async def clear_due(user_id: int, loop_id: int) -> tuple[Loop, bool] | None:
+    """Remove the due date (`update` never clears one: an unset field there means "leave it")."""
+    async with Session() as s:
+        row = await s.get(LoopRow, loop_id)
+        if row is None or row.user_id != user_id:
+            return None
+        if row.due_at is None:
+            return to_domain(row), False
+        row.due_at = None
         row.updated_at = timeutil.now()
         row.version = (row.version or 1) + 1
         await s.commit()
