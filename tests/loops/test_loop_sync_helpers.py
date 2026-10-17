@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from mavis.domain import timeutil
+from mavis.domain.events import EventType
 from mavis.domain.loops import LoopKind, LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.messages import Role
 from mavis.loops.service import LoopService
@@ -31,8 +32,7 @@ async def test_create_exact_does_not_merge_similar_title(user, recording_bus, cl
     b = await svc.create_exact(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="interview PREP",
                                                    origin=LoopOrigin.NOTION))
     assert a.id != b.id and b.origin is LoopOrigin.NOTION
-    types = [e.type.value for e in recording_bus.take()]
-    assert types == ["LOOP_CREATED", "LOOP_CREATED"] or len(types) == 2
+    assert [e.type for e in recording_bus.take()] == [EventType.LOOP_CREATED, EventType.LOOP_CREATED]
     assert len(await svc.active(user.id)) == 2
 
 

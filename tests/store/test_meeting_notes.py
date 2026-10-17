@@ -27,7 +27,9 @@ async def test_clear_fathom_keeps_user_notes(user):
     await meeting_notes.upsert(user.id, "keep", title="K", recording_id="r1", fathom_url="u",
                                summary="s", action_items=[{"t": 1}], user_notes="mine")
     await meeting_notes.upsert(user.id, "drop", title="D", recording_id="r2", summary="s")
+    await meeting_notes.upsert(user.id, "cal", title="C", asked_at=timeutil.now())
     assert await meeting_notes.clear_fathom(user.id) == 2
+    assert (await meeting_notes.get(user.id, "cal")).asked_at is not None
     kept = await meeting_notes.get(user.id, "keep")
     assert kept.user_notes == "mine" and kept.recording_id is None and kept.summary == ""
     assert kept.fathom_url == "" and kept.action_items == []

@@ -128,16 +128,17 @@ async def clear_fathom(user_id: int) -> int:
     async with Session() as s:
         rows = list(await s.scalars(select(MeetingNote).where(MeetingNote.user_id == user_id)))
         touched = 0
+        emptied: list[int] = []
         for r in rows:
             if not (r.recording_id or r.fathom_url or r.summary or r.action_items):
-                continue
+                continue  # calendar-only row: nothing from Fathom, keep it as it is (asked_at etc.)
             touched += 1
             if r.user_notes:
                 r.recording_id, r.fathom_url, r.summary, r.action_items = None, "", "", []
                 r.updated_at = timeutil.now()
-        await s.flush()
-        await s.execute(delete(MeetingNote).where(
-            MeetingNote.user_id == user_id, MeetingNote.user_notes == "",
-            MeetingNote.id.in_([r.id for r in rows if not r.user_notes])))
+            else:
+                emptied.append(r.id)
+        if emptied:
+            await s.execute(delete(MeetingNote).where(MeetingNote.id.in_(emptied)))
         await s.commit()
         return touched
