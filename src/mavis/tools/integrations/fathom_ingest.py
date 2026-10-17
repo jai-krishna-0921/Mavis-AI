@@ -22,6 +22,7 @@ from mavis.domain.integrations import UserRef
 from mavis.domain.loops import LoopKind, LoopOrigin, LoopUpsert
 from mavis.loops.service import LoopService
 from mavis.memory import controls, records
+from mavis.store.repo import loops as loop_repo
 from mavis.store.repo import meeting_notes, users
 from mavis.store.repo.loops import similar_titles
 from mavis.tools.integrations import get_provider
@@ -187,6 +188,8 @@ async def _loops(user_id: int, m: dict, self_emails: set[str]) -> None:
             kind, entities = LoopKind.WAITING_ON, [item["assignee_name"] or email]
         else:
             continue
+        if await loop_repo.exists_from_source(user_id, ref, item["description"]):
+            continue  # already tracked, maybe ticked done since: a re-ingest never reopens it (I4)
         await service.upsert(
             user_id,
             LoopUpsert(kind=kind, title=item["description"], entities=entities, trust=Trust.UNTRUSTED,
@@ -233,7 +236,8 @@ async def ingest_meeting(user_id: int, meeting: dict, *, source: str) -> str | N
     identities = await load_identities(user_id)
     if known is None:  # the note is written last, so a retry after a failure here starts over
         await _memory(user_id, api, m, summary, identities)
-    await _loops(user_id, m, set(identities["emails"]))
+    if known is None:  # a recording seen before already made its loops; closed ones stay closed (I4)
+        await _loops(user_id, m, set(identities["emails"]))
     await meeting_notes.upsert(
         user_id, key, recording_id=str(m["recording_id"]), fathom_url=m["url"], summary=summary,
         action_items=m["action_items"], title=m["title"], starts_at=m["start"], ends_at=m["end"],

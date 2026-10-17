@@ -243,3 +243,27 @@ async def test_poll_error_is_not_retried_before_15_minutes(env):
     poller.now = now + timedelta(minutes=2)
     assert await fathom_poll.poll_fathom(poller, env.uid, st) == 0
     assert len(env.fake.requests) == calls
+
+
+def _own_item(m):
+    m["action_items"][0]["assignee"] = {"name": "Me", "email": "me@acme.test", "team": None}
+    return m
+
+
+async def test_i4_reingest_never_reopens_an_item_the_user_closed(env):
+    from mavis.bus import get_bus
+    from mavis.domain.loops import LoopStatus
+    from mavis.loops.service import LoopService
+
+    m = _own_item(meeting(invitees=("me@acme.test",), items=("Send deck",)))
+    await ingest_meeting(env.uid, m, source="webhook")
+    [loop] = await loops_repo.list_open(env.uid)
+    await LoopService(get_bus()).close(loop.id, LoopStatus.DONE)
+    # a repeat delivery of a known recording
+    await ingest_meeting(env.uid, m, source="poll")
+    assert await loops_repo.list_open(env.uid) == []
+    # disconnect with forget clears the notes; the reconnect reads the same recording again
+    await meeting_notes.clear_fathom(env.uid)
+    await ingest_meeting(env.uid, m, source="poll")
+    assert await loops_repo.list_open(env.uid) == []
+

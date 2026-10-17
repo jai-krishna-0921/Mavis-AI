@@ -259,6 +259,7 @@ async def _notion_first_sync(user_id: int) -> list[str]:
 
 async def _fathom_first_sync(user_id: int) -> list[str]:
     """Queue the last two weeks of Fathom meetings through the same job the poll fallback uses."""
+    from mavis.store.repo import meeting_notes
     from mavis.tools.integrations import fathom_ingest
     from mavis.tools.integrations.native.base import ReauthRequired
     from mavis.tools.integrations.native.fathom_api import FathomError
@@ -276,6 +277,8 @@ async def _fathom_first_sync(user_id: int) -> list[str]:
         rid = m.get("recording_id")
         if isinstance(rid, bool) or not isinstance(rid, int) or rid < 1:
             continue
+        if await meeting_notes.by_recording(user_id, str(rid)) is not None:
+            continue  # already read (a reconnect within the window): nothing to redo (I4)
         await get_bus().enqueue(Job(id=f"fathom:{user_id}:{rid}", user_id=user_id,
                                     kind=JobKind.FATHOM_RECORDING, payload={"meeting": m, "source": "poll"}))
         queued += 1

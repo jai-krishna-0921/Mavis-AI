@@ -247,6 +247,7 @@ async def _find_meeting(user_id: int, query: str) -> tuple[str, str, datetime | 
         hits = [c for c in candidates if c[1] and similar_titles(query, c[1])]
         if hits:
             return max(hits, key=lambda c: c[2] or now - MEETING_LOOKBACK)
+        return None  # a named meeting that matches nothing: ask which, never guess the last-asked one (T11)
     ask = (await users.get_state(user_id)).get("meeting_ask") or {}
     try:
         asked_at = timeutil.ensure_utc(datetime.fromisoformat(str(ask.get("asked_at"))))
@@ -281,6 +282,9 @@ async def meeting_note(user_id: int, args: MeetingNoteArgs) -> str:
 async def notion_rebuild_home(user_id: int, args: NoArgs) -> str:
     from mavis.tools.integrations.notion_sync.runner import rebuild_home
 
+    problem = ((await users.get_state(user_id)).get("cursors") or {}).get("notion_problem")
+    if not (isinstance(problem, dict) and problem.get("kind") == "gone"):
+        return "The Mavis AI home in Notion is fine, so there is nothing to rebuild."  # I3
     await rebuild_home(user_id)
     return ("Rebuilding the Mavis AI home in Notion; it is ready in a few minutes. Pages Mavis made before "
             "stay where they are, in case you want to keep anything from them.")
@@ -512,7 +516,8 @@ TOOLS = [
               on_taint=TaintPolicy.APPROVE, provenance=("text",)),
     MavisTool("notion_rebuild_home", "Recreate the Mavis AI home (its databases) in the user's Notion after "
               "part of it was deleted. Pages made before stay in Notion.", NoArgs, RiskClass.WRITE_SELF,
-              notion_rebuild_home, _CONV, requires=Capability.NOTION, priority=30),
+              notion_rebuild_home, _CONV, requires=Capability.NOTION, priority=30,
+              preview=lambda a: "Rebuild the Mavis AI home in Notion", on_taint=TaintPolicy.APPROVE),
     MavisTool("pending", "What is pending: actions and tasks that recently failed, open items with how "
               "due they are, approvals waiting for the user's OK and background work. Call it for any "
               "question about what is open, due, left or whether something went through.",

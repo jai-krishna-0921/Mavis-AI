@@ -110,3 +110,25 @@ async def test_disconnect_clears_notion_and_fathom_cursors(db, user, provider, c
     cursors = (await state.get(user.id))["cursors"]
     assert "notion_setup" not in cursors and "fathom_seen" not in cursors
     assert cursors.get("gmail_x") == "k"
+
+
+async def test_i4_first_sync_skips_recordings_that_already_have_a_note(db, user, recording_bus, monkeypatch):
+    from mavis.store.repo import meeting_notes
+
+    fake = FakeFathom()
+    api = fake.executor()[0].api
+    now = timeutil.now()
+    for rid in (1, 2):
+        start = now - timedelta(days=1, minutes=rid)
+        fake.add_meeting(fathom_meeting(rid, f"M{rid}", start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                        (start + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")))
+    await meeting_notes.upsert(user.id, "fathom:1", recording_id="1", title="M1")
+    monkeypatch.setattr(fathom_ingest, "fathom_api", lambda: api)
+    bus_mod.set_bus(recording_bus)
+    try:
+        lines = await wiring._fathom_first_sync(user.id)
+    finally:
+        bus_mod.set_bus(None)
+    jobs = [j for j in recording_bus.jobs if j.kind is JobKind.FATHOM_RECORDING]
+    assert [j.id.rsplit(":", 1)[1] for j in jobs] == ["2"]
+    assert lines == ["Reading 1 recent Fathom meeting for notes and action items."]

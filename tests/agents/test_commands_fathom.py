@@ -36,3 +36,8 @@ def test_fathom_tools_offered_when_configured(fathom_env):
 @pytest.mark.parametrize("text", ["notion", "slack"])
 def test_other_words_unchanged(fathom_env, text):
     assert capability_from_text(text) is not C.FATHOM
+
+
+def test_t3_connect_fathom_meeting_notes_is_fathom_not_the_calendar(fathom_env):
+    assert capability_from_text("connect fathom meeting notes") is C.FATHOM
+    assert capability_from_text("my meeting schedule") is C.CALENDAR

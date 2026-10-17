@@ -52,11 +52,11 @@ _MS_WORDS = _MicrosoftWords()
 _FATHOM_WORD = re.compile(r"\bfathom\b", re.I)
 _KEYWORDS: tuple[tuple[re.Pattern[str], Capability], ...] = (
     (_MS_WORDS, MICROSOFT_ANCHOR),  # type: ignore[arg-type]
+    (_FATHOM_WORD, Capability.FATHOM),  # before the generic "meeting": "connect fathom meeting notes"
     (re.compile(r"\b(g?cal(endar)?|meetings?|schedule)\b", re.I), Capability.CALENDAR),
     (re.compile(r"\b(gmail|e-?mails?|mail|inbox)\b", re.I), Capability.GMAIL),
     (re.compile(r"\bslack\b", re.I), Capability.SLACK),
     (re.compile(r"\bnotion\b", re.I), Capability.NOTION),
-    (_FATHOM_WORD, Capability.FATHOM),
 )
 
 
