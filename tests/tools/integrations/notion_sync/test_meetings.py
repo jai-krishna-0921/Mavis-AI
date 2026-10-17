@@ -380,3 +380,16 @@ async def test_t11_a_named_meeting_that_matches_nothing_asks_which(env):
     assert await assistant._find_meeting(env.uid, "quarterly planning offsite") is None
     found = await assistant._find_meeting(env.uid, "")
     assert found is not None and found[0] == "evt-asked"
+
+
+async def test_n1_facts_of_a_person_without_a_page_link_leave_the_prep(env):
+    await notion_links.upsert(env.uid, "person", "arun", "page-arun",
+                              meta={"name": "Arun Rao", "email": "arun@x.test"})
+    env.graph.facts["Arun Rao"] = ["is allergic to nuts"]
+    env.state.events = [cal(start=-120, end=-90, attendees=(("Arun", "arun@x.test"),))]
+    await env.run()
+    [page] = env.pages()
+    await notion_links.delete(env.uid, "person", "arun")  # retired by the People pass, no suppression key
+    await env.run()
+    assert not [t for _, t in await env.body(page) if "allergic" in t]
+    assert "allergic" not in str((await notion_links.get(env.uid, "meeting", "evt-1")).meta)

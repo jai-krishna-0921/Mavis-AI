@@ -257,19 +257,25 @@ def _person_props(a: PersonAgg, name: str) -> dict:
     return props
 
 
-async def _archive_people(ctx: SyncCtx, suppressed: set[str], page_keys: dict[str, str]) -> None:
+async def _archive_people(ctx: SyncCtx, aggs: list[PersonAgg], suppressed: set[str], mem: _Memory,
+                          page_keys: dict[str, str]) -> None:
+    present, known = {a.key for a in aggs}, mem.known_names()
     for link in await notion_links.all_of(ctx.user_id, PERSON_LINK):
         key = link.local_key
         keys = set(link.meta.get("keys") or []) | {key}
         merged_away = page_keys.get(key, key) != key  # now shown on another key's page
         # only an explicit forget trashes a page; someone who merely went quiet keeps theirs (I6)
         forgotten = any(is_suppressed(k, suppressed) for k in keys)
-        if not (forgotten or merged_away):
+        # forgotten without a suppression key (the dashboard's default): no signal and no graph entity left
+        gone = not (keys & present) and normalize_name(str(link.meta.get("name") or "")) not in known
+        if not (forgotten or merged_away or gone):
             continue
         if not ctx.left():
             return
         if forgotten:
             await _trash(ctx, PERSON_LINK, key, link.page_id)
+        elif gone:  # trashed only if the user wrote nothing there, else Mavis's blocks come off (N1)
+            await _retire(ctx, PERSON_LINK, link)
         else:  # merged away: Mavis stops managing the page, it stays as the user's (their notes are theirs)
             await notion_links.delete(ctx.user_id, PERSON_LINK, key)
 
@@ -287,7 +293,7 @@ async def people_pass(ctx: SyncCtx) -> None:
         owner = next((r.local_key for r in existing
                       if keys & ({r.local_key} | set(r.meta.get("keys") or []))), a.key)
         page_keys.update({k: owner for k in keys})
-    await _archive_people(ctx, suppressed, page_keys)
+    await _archive_people(ctx, aggs, suppressed, mem, page_keys)
     meeting_links = await notion_links.all_of(uid, MEETING_LINK)
     for a in real:
         if not ctx.left():

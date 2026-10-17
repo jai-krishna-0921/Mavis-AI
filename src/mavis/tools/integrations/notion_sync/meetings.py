@@ -142,7 +142,7 @@ async def _prep(uid: int, m: Meeting, links: dict) -> dict:
         if link is None or not name:
             continue
         for fact in await graph.neighborhood(uid, [name], hops=1, limit=FACTS_PER_PERSON):
-            items.append({"t": f"{name}: {fact}", "e": [p["email"]]})
+            items.append({"t": f"{name}: {fact}", "e": [p["email"]], "k": "fact"})
     by_name: dict[str, list[str]] = {}
     for (p, _), name in zip(people, names, strict=True):
         if name:
@@ -173,6 +173,18 @@ def _prep_blocks(prep: dict, suppressed: set[str]) -> list[dict]:
 def _prep_hit(prep: dict, suppressed: set[str]) -> bool:
     return any(_hit([w.get("e", "")], suppressed) for w in prep.get("with") or []) or any(
         _hit(i.get("e") or [], suppressed) for i in prep.get("items") or [])
+
+
+async def _gone_emails(uid: int, linked: dict) -> set[str]:
+    """Emails whose facts a frozen Prep holds but who no longer have a People page link: forgotten without
+    a suppression key (N1). Their fact lines are dropped like a suppressed person's."""
+    out: set[str] = set()
+    for link in await notion_links.all_of(uid, LINK):
+        prep = link.meta.get("prep")
+        for item in (prep.get("items") or []) if isinstance(prep, dict) else []:
+            if item.get("k") == "fact":
+                out |= {e for e in item.get("e") or [] if e and e not in linked}
+    return out
 
 
 async def _scrub(ctx: SyncCtx, suppressed: set[str]) -> None:
@@ -315,6 +327,7 @@ async def meetings_pass(ctx: SyncCtx) -> None:
     links = {str(r.meta.get("email") or "").lower(): r for r in await notion_links.all_of(uid, PERSON_LINK)
              if r.meta.get("email")}
     suppressed = await personal_repo.suppressed_keys(uid)
+    suppressed |= await _gone_emails(uid, links)
     await _scrub(ctx, suppressed)
     for m in sorted(found.values(), key=lambda x: x.start):
         if not ctx.left():

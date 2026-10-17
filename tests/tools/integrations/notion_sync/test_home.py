@@ -190,3 +190,20 @@ async def test_i2_deleted_template_copy_falls_back_to_a_shared_page(fake, api):
     fake.pages[tpl]["in_trash"] = True
     home = await ensure_home(api, UID, {"template_page_id": tpl})
     assert isinstance(home, Home) and fake.pages[home.page_id]["parent"]["page_id"] == other
+
+
+async def test_i1_retry_without_a_template_looks_under_the_same_parent(fake, api):
+    from mavis.tools.integrations.native.notion_api import NotionError
+
+    first = fake.add_page("First")["id"]
+    account = {"bot_user_id": "bot-0000"}
+    fake.script_lost("POST", r"/pages")
+    with pytest.raises(NotionError):
+        await ensure_home(api, UID, account)
+    fake.pages[first]["last_edited_time"] = "2026-10-01T00:00:00.000Z"
+    newer = fake.add_page("Newer")["id"]  # now the newest shared page
+    fake.pages[newer]["last_edited_time"] = "2026-10-17T13:00:00.000Z"
+    home = await ensure_home(api, UID, account)
+    homes = [p for p in fake.pages.values() if p["parent"].get("page_id") in (first, newer)
+             and p["properties"]["title"]["title"][0]["text"]["content"] == "Mavis AI"]
+    assert len(homes) == 1 and fake.pages[home.page_id]["parent"]["page_id"] == first

@@ -206,8 +206,8 @@ async def test_forget_person_archives_page(env):
     [raj] = env.pages("people")
     env.state.aggs = []
     await env.people()
-    # I6: no longer aggregated is not a forget: the page and its link stay
-    assert env.pages("people") == [raj] and not env.fake.pages[raj["id"]]["in_trash"]
+    # N1: no signal and no graph entity left, nothing of the user's on the page: trashed
+    assert env.pages("people") == [] and env.fake.pages[raj["id"]]["in_trash"]
 
 
 async def test_quiet_person_keeps_page(env):
@@ -388,3 +388,52 @@ async def test_i7_your_notes_are_learned_by_who_wrote_them(env, monkeypatch):
     await env.people()
     assert len(env.bus.jobs) == learned
     assert [r for r in env.fake.requests[n:] if r.url.path.endswith("/children")] == []
+
+
+async def test_n1_forgotten_without_suppression_retires_the_page(env):
+    """N1: the dashboard forget removes signals and the graph entity but adds no suppression key."""
+    env.state.aggs = [agg("dana@x.test", "Dana Cole", sent=3, received=2),
+                      agg("raj@x.test", "Raj Rao", sent=3, received=2)]
+    env.graph.add("Dana Cole", "Budget", "Dana runs the budget")
+    env.graph.add("Raj Rao", "Tea", "Raj likes tea")
+    await env.people()
+    pages = {text(p, "Name"): p for p in env.pages("people")}
+    _user_note(env.fake, pages["Raj Rao"]["id"], "my own note on Raj", OWNER_ID)
+    env.state.aggs = []
+    env.graph.ents.clear()
+    env.graph.rows.clear()
+    await env.people()
+    assert env.fake.pages[pages["Dana Cole"]["id"]]["in_trash"]  # nothing of the user's: trashed
+    raj = env.fake.pages[pages["Raj Rao"]["id"]]
+    texts = [t for _, t in await env.body(raj)]
+    assert not raj["in_trash"] and "my own note on Raj" in texts and "Raj likes tea" not in texts
+    assert await notion_links.get(env.uid, "person", "raj@x.test") is None
+
+
+async def test_n2_n3_notes_name_their_subject_and_respect_the_pause(env, monkeypatch):
+    from datetime import timedelta
+
+    from mavis.domain.events import JobKind
+    from mavis.memory import controls
+    from mavis.tools.integrations.notion_sync import notes
+
+    monkeypatch.setattr(notes, "get_bus", lambda: env.bus)
+    env.state.aggs = [agg("dana@x.test", "Dana Cole", sent=3, received=2)]
+    env.graph.add("Dana Cole", "Budget", "Dana runs the budget")
+    await env.people()
+    [page] = env.pages("people")
+    env.fake.clock = lambda: T0 + timedelta(hours=1)
+    _user_note(env.fake, page["id"], "prefers calls before 10", OWNER_ID)
+    paused = {"notion"}
+
+    async def fake_paused(uid):
+        return set(paused)
+
+    monkeypatch.setattr(controls, "paused", fake_paused)
+    await env.people()
+    assert [j for j in env.bus.jobs if j.kind is JobKind.LEARN] == []  # N3
+    paused.clear()
+    await env.people()
+    [job] = [j for j in env.bus.jobs if j.kind is JobKind.LEARN]
+    assert "Dana Cole (person)" in job.payload["text"]  # N2
+    assert "prefers calls before 10" in job.payload["text"]

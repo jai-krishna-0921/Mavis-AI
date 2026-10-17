@@ -198,7 +198,7 @@ async def _start(api: NotionApi, user_id: int, parent_id: str, bot_id: str = "")
     if await notion_links.get(user_id, "attempt", "home") is not None:
         page_id = await _earlier_child(api, user_id, parent_id, "child_page", HOME_TITLE, bot_id)
     if page_id is None:
-        await notion_links.upsert(user_id, "attempt", "home", "attempt:home", meta={})
+        await notion_links.upsert(user_id, "attempt", "home", "attempt:home", meta={"parent": parent_id})
         page = await api.create_page(
             user_id, {"type": "page_id", "page_id": parent_id},
             {"title": {"title": [{"type": "text", "text": {"content": HOME_TITLE}}]}},
@@ -221,7 +221,10 @@ async def ensure_home(api: NotionApi, user_id: int, account: dict) -> Home | Hom
         if link.meta.get("built"):
             return await _adopt(api, user_id, link.page_id)
         return await _finish(api, user_id, link.page_id, bot_id)
-    parent = await _pick_parent(api, user_id, account)
+    attempt = await notion_links.get(user_id, "attempt", "home")
+    # a retry looks where the lost create went, even if another page is the newest shared one now
+    parent = str(attempt.meta.get("parent") or "") if attempt else ""
+    parent = parent or await _pick_parent(api, user_id, account)
     if parent is None:
         return "no_page"
     return await _start(api, user_id, parent, bot_id)
