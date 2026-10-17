@@ -78,6 +78,19 @@ class LoopService:
                 await self._emit(loop, EventType.LOOP_UPDATED)
         return loop
 
+    async def create_exact(
+        self, user_id: int, data: LoopUpsert, *, anchor_at: datetime | None = None
+    ) -> Loop:
+        """Insert a new loop exactly as given: same lock and date absolutising as `upsert`, but never merged
+        into a look-alike (a Notion or meeting item is its own row). Emits LOOP_CREATED."""
+        async with lock(f"loops:{user_id}"):
+            if data.title:
+                title = absolutize(data.title, anchor_at or timeutil.now(), await _timezone(user_id))
+                data = data.model_copy(update={"title": title})
+            loop = await repo.insert(user_id, data)
+            await self._emit(loop, EventType.LOOP_CREATED)
+        return loop
+
     async def active(
         self, user_id: int, entities: list[str] | None = None, due_within: timedelta | None = None
     ) -> list[Loop]:

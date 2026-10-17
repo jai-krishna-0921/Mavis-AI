@@ -38,6 +38,8 @@ class LoopOrigin(StrEnum):
     REASONER = "reasoner"          # the initiative reasoner's `track`
     FEEDBACK = "feedback"          # a user's button press (attention dispute)
     ROUTINE = "routine"            # seeded by Mavis itself (morning check-in)
+    NOTION = "notion"              # a todo the user added in Notion
+    MEETING = "meeting"            # an action item from a meeting
     UNKNOWN = "unknown"            # rows written before provenance was recorded
 
 

@@ -17,6 +17,7 @@ USER_TABLES: tuple[str, ...] = (
     "web_sessions", "web_login_nonces", "user_emails",
     "personal_layers", "learning_suppressions", "personal_signals",
     "invite_redemptions", "native_oauth_states", "native_grants", "mcp_oauth_states", "mcp_servers",
+    "notion_links", "meeting_notes",
     "artifacts", "task_cards",
     "pending_approvals", "tasks", "initiative_decisions",
     "wakeups",

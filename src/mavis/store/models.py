@@ -766,3 +766,53 @@ class UserQuota(Base):
     key: Mapped[str] = mapped_column(String(40))
     value: Mapped[float] = mapped_column(Float)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class NotionLink(Base):
+    """Maps one local thing (a todo loop, a meeting, a briefing...) to its Notion page, with the hash of
+    what Mavis last pushed so an unchanged row is never rewritten. `kind` is home, db, todo, meeting,
+    briefing, person or project."""
+
+    __tablename__ = "notion_links"
+    __table_args__ = (
+        UniqueConstraint("user_id", "kind", "local_key", name="uq_notion_links_user_kind_key"),
+        UniqueConstraint("user_id", "page_id", name="uq_notion_links_user_page"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    local_key: Mapped[str] = mapped_column(String(200))
+    page_id: Mapped[str] = mapped_column(String(64))
+    pushed_hash: Mapped[str] = mapped_column(String(64), default="")
+    pushed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    edited_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class MeetingNote(Base):
+    """One meeting: the calendar event, the Fathom recording once it lands, and what the user told Mavis."""
+
+    __tablename__ = "meeting_notes"
+    __table_args__ = (
+        UniqueConstraint("user_id", "event_key", name="uq_meeting_notes_user_event"),
+        UniqueConstraint("user_id", "recording_id", name="uq_meeting_notes_user_recording"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    event_key: Mapped[str] = mapped_column(String(200))
+    title: Mapped[str] = mapped_column(String(300), default="")
+    starts_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    attendees: Mapped[list] = mapped_column(JSON, default=list)
+    recording_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    fathom_url: Mapped[str] = mapped_column(String(500), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    action_items: Mapped[list] = mapped_column(JSON, default=list)
+    user_notes: Mapped[str] = mapped_column(Text, default="")
+    asked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow)

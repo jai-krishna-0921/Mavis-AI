@@ -350,6 +350,32 @@ async def list_done_since(user_id: int, since: datetime) -> list[Loop]:
         return [to_domain(r) for r in rows]
 
 
+CHANGED_LIMIT = 500
+_CLOSED = (LoopStatus.DONE.value, LoopStatus.DROPPED.value, LoopStatus.EXPIRED.value)
+
+
+async def list_changed_since(user_id: int, since: datetime, kinds: frozenset[LoopKind]) -> list[Loop]:
+    """Loops of `kinds` in any status touched at or after `since`, oldest change first (at most 500)."""
+    async with Session() as s:
+        rows = await s.scalars(
+            select(LoopRow).where(LoopRow.user_id == user_id, LoopRow.kind.in_([k.value for k in kinds]),
+                                  LoopRow.updated_at >= since)
+            .order_by(LoopRow.updated_at, LoopRow.id).limit(CHANGED_LIMIT)
+        )
+        return [to_domain(r) for r in rows]
+
+
+async def list_closed_before(user_id: int, before: datetime, kinds: frozenset[LoopKind]) -> list[Loop]:
+    """DONE, DROPPED or EXPIRED loops of `kinds` last touched before `before`."""
+    async with Session() as s:
+        rows = await s.scalars(
+            select(LoopRow).where(LoopRow.user_id == user_id, LoopRow.kind.in_([k.value for k in kinds]),
+                                  LoopRow.status.in_(_CLOSED), LoopRow.updated_at < before)
+            .order_by(LoopRow.updated_at, LoopRow.id)
+        )
+        return [to_domain(r) for r in rows]
+
+
 async def list_awaiting(user_id: int, since: datetime) -> list[tuple[Loop, datetime]]:
     """Loops waiting on the user's reply to a follow-up sent after `since`, with when they started waiting."""
     async with Session() as s:

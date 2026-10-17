@@ -58,6 +58,20 @@ async def recent(user_id: int, limit: int = 20) -> list[Message]:
         return list(reversed(list(rows)))
 
 
+async def proactive_since(user_id: int, prefix: str, since: datetime) -> list[Message]:
+    """Assistant rows whose event id starts with `prefix` (e.g. "proactive:morning:") created at or after
+    `since`, newest first."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    async with Session() as s:
+        rows = await s.scalars(
+            select(Message).where(Message.user_id == user_id, Message.role == Role.ASSISTANT.value,
+                                  Message.event_id.like(escaped + "%", escape="\\"),
+                                  Message.created_at >= since)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+        )
+        return list(rows)
+
+
 async def has_user_message_since(user_id: int, since: datetime) -> bool:
     async with Session() as s:
         found = await s.scalar(
