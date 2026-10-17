@@ -18,7 +18,7 @@ SB = Capability.SANDBOX
 BUILTIN_POLLED = frozenset({
     Capability.GMAIL, Capability.CALENDAR, Capability.SLACK,
     Capability.OUTLOOK, Capability.OUTLOOK_CALENDAR, Capability.TEAMS, Capability.ONEDRIVE,
-    Capability.NOTION})
+    Capability.NOTION, Capability.FATHOM})
 
 
 @pytest.fixture

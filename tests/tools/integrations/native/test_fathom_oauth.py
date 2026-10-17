@@ -45,7 +45,8 @@ def test_specs_are_registered():
     assert FATHOM_SPEC.toolkits == frozenset({"fathom"})
     assert FATHOM_SPEC.executor == ("fathom", "FathomExecutor")
     assert FATHOM_SPEC.forget_prefixes == ("fathom:",) and FATHOM_SPEC.state_cursors == ("fathom_",)
-    assert FATHOM_SPEC.memory_sources == {"fathom": ("fathom:",)} and not FATHOM_SPEC.pollers
+    assert FATHOM_SPEC.memory_sources == {"fathom": ("fathom:",)}
+    assert FATHOM_SPEC.pollers == {C.FATHOM: "mavis.tools.integrations.fathom_poll:poll_fathom"}
 
 
 async def test_authorize_url(oauth):

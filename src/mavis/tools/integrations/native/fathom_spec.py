@@ -147,6 +147,7 @@ FATHOM_SPEC = providers.register(ProviderSpec(
     external_label=lambda a: "a Fathom account",
     capabilities=(C.FATHOM,), anchor=C.FATHOM, toolkits=frozenset({"fathom"}),
     executor=("fathom", "FathomExecutor"),
+    pollers={C.FATHOM: "mavis.tools.integrations.fathom_poll:poll_fathom"},
     abilities="your Fathom meeting notes and action items",
     forget_prefixes=("fathom:",), state_cursors=("fathom_",), memory_sources={"fathom": ("fathom:",)},
     catalog=CatalogEntry(

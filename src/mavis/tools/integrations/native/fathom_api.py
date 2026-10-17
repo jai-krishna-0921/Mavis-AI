@@ -10,9 +10,13 @@ and a short `error` code survive, mapped to a FailureKind. Everything is read-on
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
+import hmac
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -31,6 +35,31 @@ BACKOFF_S = 1.0
 MAX_LIST_REQUESTS = 20  # a runaway cursor cannot loop forever
 FIND_REQUESTS = 3  # pages scanned to find one meeting's details
 _CODE_OK = re.compile(r"[A-Za-z_]{1,64}")
+WEBHOOK_TOLERANCE_S = 300
+
+
+def verify_fathom_signature(secret: str, headers: Mapping[str, str], body: bytes, now: float) -> bool:
+    """Standard Webhooks: HMAC-SHA256 over `{webhook-id}.{webhook-timestamp}.{body}` keyed by the base64
+    part of the `whsec_` secret. The timestamp must be within five minutes of `now`; the signature header
+    holds one or more space separated `v1,<base64>` values and any one may match. Never raises."""
+    lowered = {str(k).lower(): str(v) for k, v in headers.items()}
+    wid, ts, sigs = (lowered.get(k, "") for k in ("webhook-id", "webhook-timestamp", "webhook-signature"))
+    if not (wid and ts.isdigit() and sigs and secret):
+        return False
+    if abs(now - int(ts)) > WEBHOOK_TOLERANCE_S:
+        return False
+    try:
+        key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    mac = hmac.new(key, f"{wid}.{ts}.".encode() + body, hashlib.sha256).digest()
+    expected = base64.b64encode(mac).decode()
+    ok = False
+    for part in sigs.split():
+        version, _, value = part.partition(",")
+        if version == "v1" and hmac.compare_digest(value.encode(), expected.encode()):
+            ok = True  # keep going: the time spent does not depend on which one matched
+    return ok
 
 
 class FathomError(Exception):
