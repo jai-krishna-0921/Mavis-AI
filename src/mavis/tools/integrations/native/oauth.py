@@ -359,7 +359,8 @@ class NativeOAuth:
                 return await send_capped(self._http, method, url, max_bytes=TOKEN_BYTES, **kw)
 
             try:
-                await spec.revoke(RevokeRequest(post=raw, access_token=access, refresh_token=refresh))
+                await spec.revoke(RevokeRequest(post=raw, access_token=access, refresh_token=refresh,
+                                              tokens=self.tokens, user_id=user_id))
             except (ResponseTooLarge, httpx.HTTPError):
                 pass
         await self.tokens.delete(user_id, provider)

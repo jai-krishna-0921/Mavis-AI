@@ -109,7 +109,7 @@ def local_time(user: _UserLike, now: datetime) -> datetime:
 
 
 CONNECTION_LABELS = {"gmail": "Gmail", "googlecalendar": "Google Calendar", "slack": "Slack",
-                     "notion": "Notion"}
+                     "notion": "Notion", "fathom": "Fathom"}
 KNOWN_STATES = ("connected", "not connected", "pending", "needs reconnecting")
 RECENT_WINDOW = timedelta(hours=12)  # older messages do not count as "the conversation we are in"
 

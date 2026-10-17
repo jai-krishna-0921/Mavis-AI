@@ -40,6 +40,7 @@ from mavis.tools.integrations.actions import (
     MICROSOFT_CAPABILITIES,
     active_capabilities,
     display_name,
+    fathom_enabled,
     microsoft_enabled,
     serving,
     workspace_enabled,
@@ -379,6 +380,8 @@ def tool_available(tool: MavisTool) -> bool:
         return get_settings().web_search_enabled  # web tools exist only when WEB is configured
     if tool.requires in MICROSOFT_CAPABILITIES:
         return microsoft_enabled()  # the only place a teams_* or onedrive_* tool is hidden
+    if tool.requires is Capability.FATHOM:
+        return fathom_enabled()
     if tool.requires not in active_capabilities():
         return tool.requires is None or tool.requires not in GOOGLE_CAPABILITIES
     from mavis.tools import integrations

@@ -259,7 +259,7 @@ def test_load_executors_skips_absent_modules_but_not_broken_ones(monkeypatch, cl
         seen.append(name)
         raise ModuleNotFoundError(name=name)
     monkeypatch.setattr(importlib, "import_module", fake_import)
-    assert _load_executors(None, client) == [] and len(seen) == 4  # google, slack, microsoft, notion
+    assert _load_executors(None, client) == [] and len(seen) == 5  # google, slack, fathom, microsoft, notion
 
     def broken(name):
         raise ModuleNotFoundError(name="some_missing_dependency")

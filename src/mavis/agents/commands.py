@@ -16,6 +16,7 @@ from mavis.tools.integrations.actions import (
     GOOGLE_ANCHOR,
     MICROSOFT_CAPABILITIES,
     active_capabilities,
+    fathom_enabled,
     is_google,
     microsoft_enabled,
     workspace_enabled,
@@ -48,12 +49,14 @@ class _MicrosoftWords:
 
 
 _MS_WORDS = _MicrosoftWords()
+_FATHOM_WORD = re.compile(r"\bfathom\b", re.I)
 _KEYWORDS: tuple[tuple[re.Pattern[str], Capability], ...] = (
     (_MS_WORDS, MICROSOFT_ANCHOR),  # type: ignore[arg-type]
     (re.compile(r"\b(g?cal(endar)?|meetings?|schedule)\b", re.I), Capability.CALENDAR),
     (re.compile(r"\b(gmail|e-?mails?|mail|inbox)\b", re.I), Capability.GMAIL),
     (re.compile(r"\bslack\b", re.I), Capability.SLACK),
     (re.compile(r"\bnotion\b", re.I), Capability.NOTION),
+    (_FATHOM_WORD, Capability.FATHOM),
 )
 
 
@@ -153,9 +156,9 @@ _GENERIC_GOOGLE = frozenset({Capability.GMAIL, Capability.CALENDAR})
 def _keywords() -> tuple[tuple[re.Pattern[str], Capability], ...]:
     """The keyword table; the Microsoft words count only where Microsoft is set up ("teams" elsewhere is
     just a word)."""
-    if microsoft_enabled():
-        return _KEYWORDS
-    return tuple(entry for entry in _KEYWORDS if entry[0] is not _MS_WORDS)
+    drop = ((() if microsoft_enabled() else (_MS_WORDS,))
+            + (() if fathom_enabled() else (_FATHOM_WORD,)))
+    return tuple(entry for entry in _KEYWORDS if entry[0] not in drop)
 
 
 def capability_from_text(text: str) -> Capability | None:

@@ -66,7 +66,7 @@ class StartTaskArgs(ToolArgs):
 
 
 class ConnectArgs(ToolArgs):
-    service: str = Field(min_length=2, max_length=40, description="gmail, calendar, slack or notion")
+    service: str = Field(min_length=2, max_length=40, description="gmail, calendar, slack, notion or fathom")
 
 
 class GoogleConnectArgs(ConnectArgs):

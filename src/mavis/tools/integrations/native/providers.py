@@ -60,6 +60,8 @@ class RevokeRequest:
     post: Callable[..., Awaitable[object]]
     access_token: str
     refresh_token: str | None
+    tokens: Any = None  # NativeTokenStore, for a revoke hook that must read its companion grant
+    user_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -259,6 +261,7 @@ def configured(spec: ProviderSpec) -> bool:
 
 from mavis.tools.integrations.native import (  # noqa: E402,F401  (register the vendors)
     builtin,
+    fathom_spec,
     microsoft_spec,
     notion_spec,
 )

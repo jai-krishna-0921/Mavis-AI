@@ -38,7 +38,7 @@ GOOGLE_NAME = "Google"
 GOOGLE_ANCHOR = Capability.DRIVE
 DISPLAY_NAMES: dict[Capability, str] = {
     Capability.GMAIL: "Gmail", Capability.CALENDAR: "Google Calendar",
-    Capability.SLACK: "Slack", Capability.NOTION: "Notion",
+    Capability.SLACK: "Slack", Capability.NOTION: "Notion", Capability.FATHOM: "Fathom",
     Capability.DRIVE: "Google Drive", Capability.DOCS: "Google Docs", Capability.SHEETS: "Google Sheets",
     Capability.TASKS: "Google Tasks", Capability.CONTACTS: "Google Contacts", Capability.MEET: "Google Meet",
     Capability.OUTLOOK: "Outlook", Capability.OUTLOOK_CALENDAR: "Outlook Calendar",
@@ -46,7 +46,7 @@ DISPLAY_NAMES: dict[Capability, str] = {
 }
 BRANDS: dict[Capability, str] = {
     Capability.GMAIL: "Google", Capability.CALENDAR: "Google",
-    Capability.SLACK: "Slack", Capability.NOTION: "Notion",
+    Capability.SLACK: "Slack", Capability.NOTION: "Notion", Capability.FATHOM: "Fathom",
     **{c: "Google" for c in WORKSPACE_CAPABILITIES},
     **{c: "Microsoft" for c in (Capability.OUTLOOK, Capability.OUTLOOK_CALENDAR, Capability.TEAMS,
                                 Capability.ONEDRIVE)},
@@ -68,6 +68,7 @@ CAPABILITY_PURPOSE: dict[Capability, str] = {
     Capability.CALENDAR: "work with your calendar",
     Capability.SLACK: "work with your Slack",
     Capability.NOTION: "work with your Notion pages",
+    Capability.FATHOM: "read your Fathom meeting notes and action items",
     Capability.DRIVE: "find and work with your Drive files",
     Capability.DOCS: "read and write your Google Docs, Slides and Forms",
     Capability.SHEETS: "work with your Google Sheets",
@@ -105,10 +106,19 @@ def microsoft_enabled() -> bool:
     return spec is not None and providers.configured(spec)
 
 
+def fathom_enabled() -> bool:
+    """The Fathom provider is registered and has its client id, secret and token key."""
+    from mavis.tools.integrations.native import providers
+
+    spec = providers.spec_of("fathom")
+    return spec is not None and providers.configured(spec)
+
+
 def active_capabilities() -> tuple[Capability, ...]:
     """Capabilities Mavis offers right now. With the Workspace flag off this is exactly the old four."""
     caps = INTEGRATION_CAPABILITIES + (WORKSPACE_CAPABILITIES if workspace_enabled() else ())
-    return caps + MICROSOFT_CAPABILITIES if microsoft_enabled() else caps
+    caps = caps + MICROSOFT_CAPABILITIES if microsoft_enabled() else caps
+    return caps + (Capability.FATHOM,) if fathom_enabled() else caps
 
 
 # A Microsoft account serves the same mail and calendar tools as Google, so either one satisfies a gate.

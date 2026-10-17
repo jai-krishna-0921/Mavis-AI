@@ -328,7 +328,7 @@ def test_connect_account_mentions_google_services_when_workspace_is_on(workspace
 def test_connect_account_keeps_the_old_wording_with_the_flag_off(settings):
     tool = _connect_tool()
     assert "Drive" not in tool.description
-    assert tool.args_model.model_fields["service"].description == "gmail, calendar, slack or notion"
+    assert tool.args_model.model_fields["service"].description == "gmail, calendar, slack, notion or fathom"
 
 
 def test_google_tasks_and_mavis_background_tasks_are_told_apart():
