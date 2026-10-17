@@ -260,4 +260,4 @@ async def notion_sync_job(job: Job) -> None:
 
 # Importing the runner (what the job handler does) registers every pass. At the bottom because the pass
 # modules import this one.
-from mavis.tools.integrations.notion_sync import meetings, todos  # noqa: E402,F401
+from mavis.tools.integrations.notion_sync import meetings, people, todos  # noqa: E402,F401

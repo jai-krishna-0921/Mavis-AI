@@ -200,7 +200,9 @@ async def _sync_one(ctx: SyncCtx, m: Meeting, links: dict) -> None:
     else:
         ids = await blocks.replace_owned(ctx.api, uid, page_id, list(link.meta.get("blocks") or []), owned)
     await notion_links.upsert(uid, LINK, m.key, page_id, pushed_hash=digest, pushed_at=timeutil.now(),
-                              meta={"blocks": ids, "prep": prep})
+                              meta={"blocks": ids, "prep": prep, "title": m.title,
+                                    "start": m.start.isoformat(),
+                                    "emails": sorted(p["email"] for p in m.attendees if p["email"])})
 
 
 # ----- the ask
