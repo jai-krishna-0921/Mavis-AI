@@ -256,3 +256,8 @@ async def poll_notion(poller, user_id: int, st: dict) -> int:
 async def notion_sync_job(job: Job) -> None:
     await NotionSync().run(job.user_id, job.payload.get("force") or (),
                            again=int(job.payload.get("again") or 0))
+
+
+# Importing the runner (what the job handler does) registers every pass. At the bottom because the pass
+# modules import this one.
+from mavis.tools.integrations.notion_sync import meetings, todos  # noqa: E402,F401
