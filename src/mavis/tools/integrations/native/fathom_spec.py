@@ -118,9 +118,17 @@ async def fathom_revoke(r: RevokeRequest) -> None:
     webhook_id = str((account or {}).get("webhook_id") or "")
     if not webhook_id:
         return
+    url = f"{FATHOM_WEBHOOKS_URL}/{webhook_id}"
+    token = r.access_token
     try:
-        resp = await r.post(f"{FATHOM_WEBHOOKS_URL}/{webhook_id}", method="DELETE",
-                            headers=_auth(r.access_token))
+        for force in (False, True):  # the stored token may be expired: refresh first, once more after a 401
+            try:
+                token = await r.tokens.access_token(r.user_id, NativeProvider.FATHOM, force=force)
+            except Exception:  # noqa: BLE001 - ReauthRequired or a refresh failure: try the stored token
+                pass
+            resp = await r.post(url, method="DELETE", headers=_auth(token))
+            if resp.status_code != 401:
+                break
     except httpx.HTTPError:
         log.info("fathom.webhook_delete_failed")
         return

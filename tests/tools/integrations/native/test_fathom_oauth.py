@@ -147,3 +147,45 @@ async def test_disconnect_without_companion_just_deletes(oauth, tokens, vendor):
     await oauth.revoke(1, F)
     assert not [r for r in vendor.requests if r.method == "DELETE"]
     assert await tokens.grant(1, F) is None
+
+
+async def _expire(user=1):
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    from mavis.domain import timeutil
+    from mavis.store import db as dbm
+    from mavis.store.models import NativeGrant
+
+    async with dbm.Session() as s:
+        await s.execute(update(NativeGrant).where(
+            NativeGrant.user_id == user, NativeGrant.provider == "fathom").values(
+            expires_at=timeutil.now() - timedelta(hours=1)))
+        await s.commit()
+
+
+async def test_disconnect_refreshes_an_expired_token_before_deleting(oauth, tokens, vendor):
+    fathom_vendor(vendor)
+    await connect(oauth)
+    await _expire()
+    vendor.routes[TOKEN] = lambda r: httpx.Response(200, json={
+        "access_token": "fa_new", "refresh_token": "fa_refresh2", "expires_in": 3600})
+    vendor.routes[HOOKS + "/wh1"] = lambda r: httpx.Response(
+        204 if r.headers["authorization"] == "Bearer fa_new" else 401)
+    await oauth.revoke(1, F)
+    dels = [r for r in vendor.requests if r.method == "DELETE"]
+    assert [d.headers["authorization"] for d in dels] == ["Bearer fa_new"]
+    assert await tokens.grant(1, F) is None and await tokens.grant(1, H) is None
+
+
+async def test_disconnect_retries_once_with_a_refreshed_token_on_401(oauth, tokens, vendor):
+    fathom_vendor(vendor)
+    await connect(oauth)
+    vendor.routes[TOKEN] = lambda r: httpx.Response(200, json={
+        "access_token": "fa_new", "refresh_token": "fa_refresh2", "expires_in": 3600})
+    vendor.routes[HOOKS + "/wh1"] = lambda r: httpx.Response(
+        204 if r.headers["authorization"] == "Bearer fa_new" else 401)
+    await oauth.revoke(1, F)
+    dels = [r for r in vendor.requests if r.method == "DELETE"]
+    assert [d.headers["authorization"] for d in dels] == ["Bearer fa_access", "Bearer fa_new"]
