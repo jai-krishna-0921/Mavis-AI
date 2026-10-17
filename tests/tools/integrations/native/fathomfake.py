@@ -156,8 +156,9 @@ class FakeFathom:
 
     async def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        path = request.url.path.removeprefix("/external/v1")
-        routed = self._route(request, path)
+        prefix = "/external/v1/"
+        on_api = request.url.host == "api.fathom.ai" and request.url.path.startswith(prefix)
+        routed = self._route(request, request.url.path.removeprefix(prefix[:-1])) if on_api else None
         if routed is None:
             self.unrouted.append(request)
             return _error(404, "UnroutedInFakeFathom")

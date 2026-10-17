@@ -1,8 +1,9 @@
 from datetime import UTC, datetime
 
+import httpx
 import pytest
 
-from .notionfake import BOT_ID, FakeNotion
+from .notionfake import BOT_ID, HEADERS, FakeNotion
 
 BASE = "https://api.notion.com/v1"
 
@@ -14,6 +15,12 @@ def para(text: str) -> dict:
 
 def title(text: str) -> dict:
     return {"title": [{"text": {"content": text}}]}
+
+
+async def make_page(c, name: str = "p") -> str:
+    r = await c.post(f"{BASE}/pages", json={"parent": {"type": "page_id", "page_id": "root"},
+                                             "properties": {"title": title(name)}})
+    return r.json()["id"]
 
 
 async def make_ds(c):
@@ -29,7 +36,7 @@ async def make_ds(c):
 async def test_query_filters_by_minute_truncated_last_edited_time():
     n = FakeNotion()
     n.clock = lambda: datetime(2026, 10, 17, 12, 5, 59, tzinfo=UTC)
-    async with n.client() as c:
+    async with n.client(HEADERS) as c:
         _, ds = await make_ds(c)
         a = (await c.post(f"{BASE}/pages", json={"parent": {"type": "data_source_id", "data_source_id": ds},
                                                   "properties": {"Name": title("a")}})).json()
@@ -51,7 +58,7 @@ async def test_query_filters_by_minute_truncated_last_edited_time():
 
 async def test_query_paginates():
     n = FakeNotion()
-    async with n.client() as c:
+    async with n.client(HEADERS) as c:
         _, ds = await make_ds(c)
         for i in range(3):
             await c.post(f"{BASE}/pages", json={"parent": {"type": "data_source_id", "data_source_id": ds},
@@ -64,17 +71,18 @@ async def test_query_paginates():
 
 async def test_append_children_position_start_inserts_first():
     n = FakeNotion()
-    async with n.client() as c:
-        await c.patch(f"{BASE}/blocks/p1/children", json={"children": [para("one"), para("two")]})
-        r = (await c.patch(f"{BASE}/blocks/p1/children",
+    async with n.client(HEADERS) as c:
+        p1 = await make_page(c)
+        await c.patch(f"{BASE}/blocks/{p1}/children", json={"children": [para("one"), para("two")]})
+        r = (await c.patch(f"{BASE}/blocks/{p1}/children",
                            json={"children": [para("zero")], "position": {"type": "start"}})).json()
-        first_id = n.blocks["p1"][1]["id"]
-        await c.patch(f"{BASE}/blocks/p1/children", json={
+        first_id = n.blocks[p1][1]["id"]
+        await c.patch(f"{BASE}/blocks/{p1}/children", json={
             "children": [para("one-and-half")],
             "position": {"type": "after_block", "after_block": {"id": first_id}}})
-        listed = (await c.get(f"{BASE}/blocks/p1/children")).json()
+        listed = (await c.get(f"{BASE}/blocks/{p1}/children")).json()
         await c.delete(f"{BASE}/blocks/{first_id}")
-        after = (await c.get(f"{BASE}/blocks/p1/children")).json()
+        after = (await c.get(f"{BASE}/blocks/{p1}/children")).json()
 
     def texts(res):
         return [b["paragraph"]["rich_text"][0]["text"]["content"] for b in res["results"]]
@@ -86,18 +94,19 @@ async def test_append_children_position_start_inserts_first():
 
 async def test_children_over_100_is_validation_error():
     n = FakeNotion()
-    async with n.client() as c:
-        r = await c.patch(f"{BASE}/blocks/p1/children", json={"children": [para("x")] * 101})
-        long = await c.patch(f"{BASE}/blocks/p1/children", json={"children": [para("x" * 2001)]})
-        ok = await c.patch(f"{BASE}/blocks/p1/children", json={"children": [para("x" * 2000)] * 100})
+    async with n.client(HEADERS) as c:
+        p1 = await make_page(c)
+        r = await c.patch(f"{BASE}/blocks/{p1}/children", json={"children": [para("x")] * 101})
+        long = await c.patch(f"{BASE}/blocks/{p1}/children", json={"children": [para("x" * 2001)]})
+        ok = await c.patch(f"{BASE}/blocks/{p1}/children", json={"children": [para("x" * 2000)] * 100})
     assert r.status_code == 400 and r.json()["code"] == "validation_error"
     assert long.status_code == 400 and long.json()["code"] == "validation_error"
-    assert ok.status_code == 200 and len(n.blocks["p1"]) == 100
+    assert ok.status_code == 200 and len(n.blocks[p1]) == 100
 
 
 async def test_user_edit_sets_editor():
     n = FakeNotion()
-    async with n.client() as c:
+    async with n.client(HEADERS) as c:
         _, ds = await make_ds(c)
         p = (await c.post(f"{BASE}/pages", json={"parent": {"type": "data_source_id", "data_source_id": ds},
                                                   "properties": {"Name": title("t")}})).json()
@@ -112,7 +121,7 @@ async def test_user_edit_sets_editor():
 
 async def test_database_data_source_properties_and_relation():
     n = FakeNotion()
-    async with n.client() as c:
+    async with n.client(HEADERS) as c:
         db, ds = await make_ds(c)
         assert db["data_sources"][0]["name"] == "Todos"
         got = (await c.get(f"{BASE}/data_sources/{ds}")).json()
@@ -131,7 +140,7 @@ async def test_database_data_source_properties_and_relation():
 
 async def test_search_users_me_and_trash():
     n = FakeNotion()
-    async with n.client() as c:
+    async with n.client(HEADERS) as c:
         _, ds = await make_ds(c)
         p = (await c.post(f"{BASE}/pages", json={"parent": {"type": "data_source_id", "data_source_id": ds},
                                                   "properties": {"Name": title("t")}})).json()
@@ -152,7 +161,7 @@ async def test_scripted_failures_and_routing_log():
     n = FakeNotion()
     n.script_429(1)
     n.script_error(503, "service_unavailable")
-    async with n.client() as c:
+    async with n.client(HEADERS) as c:
         a = await c.get(f"{BASE}/users/me")
         b = await c.get(f"{BASE}/users/me")
         ok = await c.get(f"{BASE}/users/me")
@@ -164,3 +173,74 @@ async def test_scripted_failures_and_routing_log():
     assert odd.status_code == 404 and len(n.requests) == 5
     with pytest.raises(AssertionError, match="/v1/whatever"):
         n.assert_all_routed()
+
+
+async def test_envelope_version_auth_host_and_prefix_are_enforced():
+    n = FakeNotion()
+    url = f"{BASE}/users/me"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(n)) as raw:
+        none = await raw.get(url, headers={"Authorization": "Bearer t"})
+        old = await raw.get(url, headers={"Authorization": "Bearer t", "Notion-Version": "2022-06-28"})
+        anon = await raw.get(url, headers={"Notion-Version": "2026-03-11"})
+        ok = await raw.get(url, headers=HEADERS)
+        wrong_host = await raw.get("https://api.notion.example/v1/users/me", headers=HEADERS)
+        wrong_prefix = await raw.get("https://api.notion.com/users/me", headers=HEADERS)
+    assert none.status_code == 400 and none.json()["code"] == "missing_version"
+    assert old.status_code == 400 and old.json()["code"] == "invalid_request"
+    assert anon.status_code == 401 and anon.json()["code"] == "unauthorized"
+    assert ok.status_code == 200
+    assert wrong_host.status_code == 404 and wrong_prefix.status_code == 404 and len(n.unrouted) == 2
+
+
+async def test_block_writes_stamp_the_owning_page():
+    n = FakeNotion()
+    async with n.client(HEADERS) as c:
+        p = await make_page(c)
+        nested = (await c.patch(f"{BASE}/blocks/{p}/children", json={"children": [
+            {"object": "block", "type": "toggle", "toggle": {"rich_text": [], "children": [para("in")]}}
+        ]})).json()["results"][0]
+        inner = n.blocks[nested["id"]][0]["id"]
+        n.clock = lambda: datetime(2031, 1, 1, 1, 1, 1, tzinfo=UTC)
+        n.user_edit(p, {"title": title("x")}, "user-9")
+        n.clock = lambda: datetime(2031, 1, 1, 1, 5, 0, tzinfo=UTC)
+        await c.patch(f"{BASE}/blocks/{nested['id']}/children", json={"children": [para("more")]})
+        assert n.pages[p]["last_edited_time"] == "2031-01-01T01:05:00.000Z"
+        assert n.pages[p]["last_edited_by"]["id"] == BOT_ID
+        n.user_edit(p, {"title": title("y")}, "user-9")
+        n.clock = lambda: datetime(2031, 1, 1, 1, 9, 0, tzinfo=UTC)
+        await c.delete(f"{BASE}/blocks/{inner}")
+    assert n.pages[p]["last_edited_time"] == "2031-01-01T01:09:00.000Z"
+    assert n.pages[p]["last_edited_by"]["id"] == BOT_ID
+
+
+async def test_page_properties_are_checked_against_the_schema():
+    n = FakeNotion()
+    async with n.client(HEADERS) as c:
+        _, ds = await make_ds(c)
+        parent = {"type": "data_source_id", "data_source_id": ds}
+        unknown = await c.post(f"{BASE}/pages", json={"parent": parent, "properties": {"Nope": title("x")}})
+        wrong = await c.post(f"{BASE}/pages", json={"parent": parent, "properties": {"Done": title("x")}})
+        good = {"parent": parent, "properties": {"Name": title("t")}}
+        p = (await c.post(f"{BASE}/pages", json=good)).json()
+        assert set(p["properties"]) == {"Name", "Done"}
+        assert p["properties"]["Done"]["checkbox"] is False and p["properties"]["Done"]["id"]
+        bad_patch = await c.patch(f"{BASE}/pages/{p['id']}", json={"properties": {"Done": {"select": None}}})
+        await c.patch(f"{BASE}/pages/{p['id']}", json={"in_trash": True})
+        edit_trashed = await c.patch(f"{BASE}/pages/{p['id']}",
+                                     json={"properties": {"Done": {"checkbox": True}}})
+        restore = await c.patch(f"{BASE}/pages/{p['id']}", json={"in_trash": False})
+        await c.patch(f"{BASE}/data_sources/{ds}", json={"properties": {"Notes": {"rich_text": {}}}})
+        later = (await c.get(f"{BASE}/pages/{p['id']}")).json()
+    for r in (unknown, wrong, bad_patch, edit_trashed):
+        assert r.status_code == 400 and r.json()["code"] == "validation_error"
+    assert restore.status_code == 200 and restore.json()["in_trash"] is False
+    assert later["properties"]["Notes"]["rich_text"] == []
+
+
+async def test_unknown_block_parents_are_not_found():
+    n = FakeNotion()
+    async with n.client(HEADERS) as c:
+        append = await c.patch(f"{BASE}/blocks/ghost/children", json={"children": [para("x")]})
+        listed = await c.get(f"{BASE}/blocks/ghost/children")
+    assert append.status_code == 404 and append.json()["code"] == "object_not_found"
+    assert listed.status_code == 404 and "ghost" not in n.blocks

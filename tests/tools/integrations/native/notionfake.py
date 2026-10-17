@@ -14,6 +14,11 @@ import httpx
 
 BOT_ID = "bot-0000"
 OWNER_ID = "user-owner"
+HEADERS = {"Notion-Version": "2026-03-11", "Authorization": "Bearer tok"}
+EMPTY_VALUE: dict[str, Any] = {
+    "title": [], "rich_text": [], "people": [], "relation": [], "multi_select": [], "files": [],
+    "checkbox": False,
+}
 MAX_CHILDREN = 100
 MAX_TEXT = 2000
 
@@ -54,6 +59,7 @@ class FakeNotion:
         self.pages: dict[str, dict] = {}
         self.blocks: dict[str, list[dict]] = {}
         self.block_index: dict[str, dict] = {}
+        self.block_parent: dict[str, str] = {}
         self.databases: dict[str, dict] = {}
         self.data_sources: dict[str, dict] = {}
         self.requests: list[httpx.Request] = []
@@ -77,8 +83,10 @@ class FakeNotion:
             f"{r.method} {r.url.path}" for r in self.unrouted
         )
 
-    def client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(transport=httpx.MockTransport(self))
+    def client(self, headers: dict[str, str] | None = None) -> httpx.AsyncClient:
+        """No default headers: the code under test must send Notion-Version and Authorization itself.
+        Self-tests pass `HEADERS`."""
+        return httpx.AsyncClient(transport=httpx.MockTransport(self), headers=headers)
 
     def executor(self, tokens: Any = None):
         """(NotionExecutor, recorded sleeps). Imported lazily: the executor lands after this fake."""
@@ -103,16 +111,40 @@ class FakeNotion:
     def user_edit(self, page_id: str, props: dict, editor_id: str = OWNER_ID) -> dict:
         """A human edit: merge property values, bump last_edited_time, set last_edited_by."""
         page = self.pages[page_id]
+        problem = self._check_props(page, props)
+        assert problem is None, problem
         self._apply_props(page, props)
         page["last_edited_time"] = self._now()
         page["last_edited_by"] = {"object": "user", "id": editor_id}
         return page
 
+    def _check_props(self, page: dict, props: dict) -> str | None:
+        """Reason a write is invalid against the data source schema, else None (pages outside a
+        data source are not checked)."""
+        schema = self._schema_of(page)
+        if not schema:
+            return None
+        for name, value in props.items():
+            if name not in schema:
+                return f"{name} is not a property that exists."
+            ptype = schema[name]["type"]
+            if value is not None and ptype not in value:
+                return f"{name} is expected to be {ptype}."
+        return None
+
+    def _blank(self, definition: dict) -> dict:
+        ptype = definition["type"]
+        empty = EMPTY_VALUE.get(ptype)
+        return {"id": definition["id"], "type": ptype, ptype: [] if isinstance(empty, list) else empty}
+
     def _apply_props(self, page: dict, props: dict) -> None:
         schema = self._schema_of(page)
         for name, value in props.items():
             if value is None:
-                page["properties"].pop(name, None)
+                if name in schema:
+                    page["properties"][name] = self._blank(schema[name])
+                else:
+                    page["properties"].pop(name, None)
                 continue
             old = page["properties"].get(name, {})
             ptype = schema.get(name, {}).get("type") or old.get("type") or next(iter(value), "rich_text")
@@ -134,11 +166,18 @@ class FakeNotion:
 
     async def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        handler = self._route(request)
+        on_api = request.url.host == "api.notion.com" and request.url.path.startswith("/v1/")
+        handler = self._route(request) if on_api else None
         if handler is None:
             self.unrouted.append(request)
             where = f"{request.method} {request.url.path}"
             return _err(404, "unrouted_in_fake_notion", f"no fake route for {where}")
+        if "Notion-Version" not in request.headers:
+            return _err(400, "missing_version", "Notion-Version header is required.")
+        if request.headers["Notion-Version"] != "2026-03-11":
+            return _err(400, "invalid_request", "Unsupported Notion-Version.")
+        if not request.headers.get("Authorization", "").startswith("Bearer "):
+            return _err(401, "unauthorized", "API token is invalid.")
         if self._scripted:
             return self._scripted.pop(0)
         body = json.loads(request.content) if request.content else {}
@@ -217,6 +256,7 @@ class FakeNotion:
             "url": f"https://www.notion.so/{pid}", "public_url": None, "icon": None, "cover": None,
         }
         self.pages[pid] = page
+        page["properties"] = {n: self._blank(d) for n, d in self._schema_of(page).items()}
         self._apply_props(page, props)
         return page
 
@@ -227,6 +267,10 @@ class FakeNotion:
         children = body.get("children") or []
         if len(children) > MAX_CHILDREN or _too_long(body):
             return _err(400, "validation_error", "body failed validation")
+        schema = self.data_sources.get(parent.get("data_source_id", ""), {}).get("properties", {})
+        for name, value in (body.get("properties") or {}).items():
+            if schema and (name not in schema or (value is not None and schema[name]["type"] not in value)):
+                return _err(400, "validation_error", f"{name} is not a valid property.")
         page = self._page_obj(parent, body.get("properties") or {})
         self.blocks[page["id"]] = []
         self._insert(page["id"], children, {"type": "end"})
@@ -242,9 +286,14 @@ class FakeNotion:
             return _err(404, "object_not_found")
         if _too_long(body):
             return _err(400, "validation_error", "body failed validation")
-        self._apply_props(page, body.get("properties") or {})
+        props = body.get("properties") or {}
+        if props and page["in_trash"] and body.get("in_trash") is not False:
+            return _err(400, "validation_error", "Can't edit block that is in trash.")
+        if problem := self._check_props(page, props):
+            return _err(400, "validation_error", problem)
         if "in_trash" in body:
             page["in_trash"] = page["is_archived"] = bool(body["in_trash"])
+        self._apply_props(page, props)
         page["last_edited_time"] = self._now()
         page["last_edited_by"] = {"object": "user", "id": BOT_ID}
         return httpx.Response(200, json=page)
@@ -301,6 +350,13 @@ class FakeNotion:
             if old and new["name"] != name:
                 del ds["properties"][name]
             ds["properties"][new["name"]] = new
+        for page in self.pages.values():
+            if page["parent"].get("data_source_id") != ds_id:
+                continue
+            old_props, page["properties"] = page["properties"], {}
+            by_id = {v["id"]: v for v in old_props.values()}
+            for name, definition in ds["properties"].items():
+                page["properties"][name] = by_id.get(definition["id"]) or self._blank(definition)
         if "title" in body:
             ds["title"] = body["title"]
         ds["last_edited_time"] = self._now()
@@ -333,8 +389,22 @@ class FakeNotion:
                  "has_children": bool(nested)}
         self.block_index[block["id"]] = block
         if nested:
-            self.blocks[block["id"]] = [self._block(c) for c in nested]
+            kids = self.blocks[block["id"]] = [self._block(c) for c in nested]
+            for kid in kids:
+                self.block_parent[kid["id"]] = block["id"]
         return block
+
+    def _owning_page(self, node_id: str) -> dict | None:
+        while node_id not in self.pages:
+            node_id = self.block_parent.get(node_id, "")
+            if not node_id:
+                return None
+        return self.pages[node_id]
+
+    def _stamp(self, node_id: str) -> None:
+        if page := self._owning_page(node_id):
+            page["last_edited_time"] = self._now()
+            page["last_edited_by"] = {"object": "user", "id": BOT_ID}
 
     def _insert(self, parent: str, children: list[dict], position: dict) -> list[dict] | None:
         siblings = self.blocks.setdefault(parent, [])
@@ -349,22 +419,30 @@ class FakeNotion:
                 return None
             at = ids.index(anchor) + 1
         siblings[at:at] = new
+        for block in new:
+            self.block_parent[block["id"]] = parent
         return new
 
     def _append_children(self, req, body, parent):
         children = body.get("children") or []
         if len(children) > MAX_CHILDREN or _too_long(children):
             return _err(400, "validation_error", "body failed validation")
+        if not self._known_parent(parent):
+            return _err(404, "object_not_found", "block not found")
         new = self._insert(parent, children, body.get("position") or {"type": "end"})
         if new is None:
             return _err(404, "object_not_found", "after_block not found")
-        if parent in self.pages:
-            self.pages[parent]["last_edited_time"] = self._now()
-            self.pages[parent]["last_edited_by"] = {"object": "user", "id": BOT_ID}
+        self._stamp(parent)
         return httpx.Response(200, json={"object": "list", "results": new, "next_cursor": None,
                                          "has_more": False, "type": "block"})
 
+    def _known_parent(self, node_id: str) -> bool:
+        block = self.block_index.get(node_id)
+        return node_id in self.pages or (block is not None and not block["in_trash"])
+
     def _list_children(self, req, body, parent):
+        if not self._known_parent(parent):
+            return _err(404, "object_not_found", "block not found")
         items = [b for b in self.blocks.get(parent, []) if not b["in_trash"]]
         return self._list(items, req, {})
 
@@ -373,6 +451,7 @@ class FakeNotion:
         if block is None:
             return _err(404, "object_not_found")
         block["in_trash"] = True
+        self._stamp(bid)
         for siblings in self.blocks.values():
             if block in siblings:
                 siblings.remove(block)

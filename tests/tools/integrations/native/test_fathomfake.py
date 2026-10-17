@@ -103,3 +103,13 @@ async def test_auth_failures_scripts_and_unrouted():
     assert miss.status_code == 404
     with pytest.raises(AssertionError, match="/nothing"):
         f.assert_all_routed()
+
+
+async def test_wrong_host_or_prefix_is_unrouted():
+    f = FakeFathom()
+    async with f.client() as c:
+        host = await c.get("https://api.fathom.example/external/v1/meetings", headers=H)
+        prefix = await c.get("https://api.fathom.ai/v1/meetings", headers=H)
+        ok = await c.get(f"{BASE}/meetings", headers=H)
+    assert host.status_code == 404 and prefix.status_code == 404 and ok.status_code == 200
+    assert len(f.unrouted) == 2
