@@ -108,33 +108,68 @@ def strip_comments(text: str) -> str:
 _OPEN, _CLOSE = "([{", ")]}"
 
 
+_COMMENT_OR_STRING = re.compile(
+    r"/\*.*?(?:\*/|\Z)"
+    r"|\"(?:\\.|[^\"\\\n\r\f])*[\"\n\r\f]?"
+    r"|'(?:\\.|[^'\\\n\r\f])*['\n\r\f]?", re.S)
+
+
+def _strip_comments_outside_strings(css: str) -> str:
+    """Remove comments but keep a `/*` that sits inside a string (a string ends at a newline, as in CSS)."""
+    return _COMMENT_OR_STRING.sub(lambda m: "" if m[0].startswith("/*") else m[0], css)
+
+
+_URL = re.compile(r"url\(\s*", re.I)
+
+
 def _split_declarations(css: str) -> list[str]:
-    """Split a declaration block at the `;` that end declarations: not inside a string, after a backslash, or
-    inside (), [] or {} (a url, a var() or a function). An unterminated string or bracket runs to the end of
-    the block, as in a browser, so nothing after it is invented as a declaration."""
+    """Split a declaration block at the `;` that end declarations, following the CSS tokenizer closely:
+    - a string ends at its quote or at a newline (`\\n`, `\\r`, `\\f`: a bad string), and a backslash escapes;
+    - an unquoted `url(` runs to the next `)` whatever quotes or parentheses it holds (a bad url);
+    - `()`, `[]` and `{}` nest; an unterminated one runs to the end of the block;
+    - comments are dropped here, in the same scan and only outside strings.
+    `declarations` also applies a naive split, so this one can only add what the naive one cannot see."""
     items: list[str] = []
-    start = depth = 0
+    buf: list[str] = []
+    depth = 0
     quote = ""
     i, n = 0, len(css)
     while i < n:
         ch = css[i]
         if ch == "\\":
+            buf.append(css[i:i + 2])
             i += 2
             continue
         if quote:
-            if ch == quote:
+            if ch == quote or ch in "\n\r\f":
                 quote = ""
-        elif ch in "\"'":
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "/" and css.startswith("/*", i):
+            j = css.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        if ch in "\"'":
             quote = ch
+        elif ch in "uU" and (m := _URL.match(css, i)) and css[m.end():m.end() + 1] not in ("", '"', "'"):
+            j = css.find(")", m.end())
+            j = n if j == -1 else j + 1
+            buf.append(css[i:j])
+            i = j
+            continue
         elif ch in _OPEN:
             depth += 1
         elif ch in _CLOSE:
             depth = max(depth - 1, 0)
         elif ch == ";" and depth == 0:
-            items.append(css[start:i])
-            start = i + 1
+            items.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
         i += 1
-    items.append(css[start:])
+    items.append("".join(buf))
     return items
 
 
@@ -142,11 +177,13 @@ def declarations(css: str) -> dict[str, str]:
     """name -> lowercase value of one declaration block, with comments removed and CSS escapes decoded. A
     property that any of its declarations hides stays hidden whatever a later one says: a browser would drop
     an invalid later value or honour `!important`, and which applies is not worth guessing (validity is not
-    modelled; when in doubt the text is hidden). A block too long to inspect cheaply is treated as hiding."""
+    modelled; when in doubt the text is hidden). The block is split twice, by the tokenizer-like scan and
+    naively at every `;`, and a hiding declaration found by either one hides. A block too long to inspect
+    cheaply is treated as hiding."""
     if len(css) > MAX_DECLARATIONS:
         return {"display": "none"}
     out: dict[str, str] = {}
-    for item in _split_declarations(strip_comments(css)):
+    for item in _split_declarations(css) + strip_comments(css).split(";"):
         name, sep, value = _CSS_ESCAPE.sub(_unescape, item).partition(":")
         if sep:
             name = name.strip().lower()
@@ -248,7 +285,7 @@ def hiding_rules(blocks: list[str]) -> tuple[set[str], set[str], set[str]]:
     tags: set[str] = set()
     rules = 0
     for block in blocks:
-        css = strip_comments(block)
+        css = _strip_comments_outside_strings(block)
         depth = last = body_start = 0
         prelude = ""
         for m in _BRACES.finditer(css):
@@ -417,12 +454,12 @@ class _Walk:
                         self._emit("\n")  # a hidden block still separates what is around it
                 else:
                     self._open(tag)
-                    label = (node.attributes.get("label") or "").strip() if tag in _DROPDOWN else ""
-                    if label and tag == "optgroup":
-                        self._emit("\n" + label)
-                    elif label:  # a browser lists an option by its label and never shows its content
-                        self._emit(label)
-                    if node.child is not None and not (label and tag == "option"):
+                    raw = node.attributes.get("label") if tag in _DROPDOWN else None
+                    if raw and tag == "optgroup":
+                        self._emit("\n" + raw.strip())
+                    elif raw:  # a browser lists an option by its label (even a blank one), never its content
+                        self._emit(raw.strip())
+                    if node.child is not None and not (raw and tag == "option"):
                         open_tags.append(tag)
                         bgs.append(bg)
                         node = node.child

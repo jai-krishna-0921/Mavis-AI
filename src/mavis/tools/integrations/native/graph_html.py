@@ -235,8 +235,9 @@ _budget: contextvars.ContextVar[_Budget | None] = contextvars.ContextVar("html_p
 
 @contextlib.contextmanager
 def parse_budget() -> Iterator[_Budget]:
-    """Within this scope the parses of one call share a time budget: once it is spent every further body
-    gets the notice without a parse, so a list of hostile mails costs the budget plus one timeout."""
+    """Within this scope the parses of one call share a time budget for the ones that fail closed (timeout,
+    death, limit): once it is spent every further body gets the notice without a parse, so a list of hostile
+    mails costs the budget plus one timeout. Legitimate parses are not charged."""
     budget = _Budget()
     token = _budget.set(budget)
     try:
@@ -259,10 +260,10 @@ def html_to_text_limited(markup: str, limit: int, *, styles: bool = True) -> tup
     if budget.left <= 0:
         return _failed("budget_spent", markup)
     started = time.monotonic()
-    try:
-        return _pool.run(markup, limit, styles)
-    finally:
+    result = _pool.run(markup, limit, styles)
+    if result == FAILED:  # only what failed closed is charged: a legitimate parse costs the call nothing
         budget.left -= time.monotonic() - started
+    return result
 
 
 def html_to_text(markup: str, limit: int = MAX_HTML) -> str:

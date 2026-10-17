@@ -144,19 +144,20 @@ def test_a_worker_has_an_address_space_limit_and_a_normal_call_is_fast():
     assert (time.perf_counter() - start) / 20 < 0.05
 
 
-def test_a_timeout_fails_closed_and_the_worker_is_replaced(monkeypatch):
+def test_a_timeout_fails_closed_and_the_pre_existing_worker_is_replaced(monkeypatch):
     graph_html.html_to_text("<p>warm</p>")
-    before = {w.proc.pid for w in _workers()}
+    graph_html.html_to_text("<p>warm</p>")  # both slots now hold a started worker (the queue is FIFO)
+    before = {w.proc.pid: w for w in _workers()}
+    assert len(before) == graph_html.WORKERS
     monkeypatch.setattr(graph_html, "TIMEOUT_S", 0.001)
-    slow = "<table>" + "<tr><td>x" * 15_000
-    assert graph_html.html_to_text_limited(slow, 10**6) == (NOTICE, True)
+    assert graph_html.html_to_text_limited("<table>" + "<tr><td>x" * 15_000, 10**6) == (NOTICE, True)
     monkeypatch.undo()
+    gone = [w for w in before.values() if w.proc.poll() is not None]
+    assert len(gone) == 1  # the one that timed out was killed...
     assert graph_html.html_to_text("<p>after</p>") == "after"
     after = {w.proc.pid for w in _workers()}
+    assert gone[0].proc.pid not in after  # ...and replaced, not reused
     assert len(after) <= graph_html.WORKERS
-    for pid in before - after:  # the one that timed out is gone for good
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
 
 
 def test_a_killed_worker_fails_closed_once_and_the_next_call_works():
@@ -309,6 +310,25 @@ def test_a_parse_budget_gives_the_rest_of_a_list_the_notice(monkeypatch):
     assert elapsed < 0.8 + 0.3 + 0.5, elapsed  # the budget plus one last timeout, not five timeouts
 
 
+def test_only_failed_closed_parses_count_against_the_budget(monkeypatch):
+    """A tick with 2 hostile mails and 20 legitimate ones parses all 20: legitimate time is not budgeted."""
+    monkeypatch.setattr(graph_html, "PARSE_BUDGET_S", 0.5)
+
+    def fake_run(markup, limit, styles):
+        if "HOSTILE" in markup:
+            time.sleep(0.2)
+            return graph_html.FAILED
+        time.sleep(0.05)  # 20 of these are 1.0 s, twice the budget
+        return markup, False
+
+    monkeypatch.setattr(graph_html._pool, "run", fake_run)
+    mails = ["HOSTILE"] * 2 + [f"ok{i}" for i in range(20)]
+    with graph_html.parse_budget():
+        out = [graph_html.html_to_text_limited(m, 10**6) for m in mails]
+    assert out[:2] == [(NOTICE, True)] * 2
+    assert out[2:] == [(f"ok{i}", False) for i in range(20)]
+
+
 def test_nothing_is_parsed_once_the_budget_is_spent(monkeypatch):
     monkeypatch.setattr(graph_html, "PARSE_BUDGET_S", 0.0)
     with graph_html.parse_budget():
@@ -433,21 +453,52 @@ def test_any_hiding_declaration_of_a_property_hides_the_text(css):
 @pytest.mark.parametrize("css", [
     "display:block;color:red",
     "display:inline;display:block",
-    'font-family:"a;display:none;b"',            # a `;` inside a string is no declaration
-    "font-family:'x;display:none;'",
-    "background:url(x;display:none;)",
-    "width:var(--a;display:none;x)",
-    "content:\";display:none;\"",
-    "font-family:a\\;display:none",              # an escaped `;` is no declaration
     "color:#333;font-size:14px;line-height:1.4",
+    'font-family:"Segoe UI",Arial;margin:0',
 ])
-def test_a_hiding_declaration_inside_a_string_or_block_is_not_invented(css):
+def test_plain_declarations_still_show(css):
     assert "SHOWN" in _style(css)
 
 
+@pytest.mark.parametrize("css", [
+    # a naive `;` split is applied as well as the tokenizer-like one and either hides: when in doubt, hide
+    'font-family:"a;display:none;b"',
+    "font-family:'x;display:none;'",
+    "background:url(x;display:none;)",
+    "width:var(--a;display:none;x)",
+    "font-family:a\\;display:none",
+])
+def test_a_hiding_declaration_inside_a_string_or_block_hides_too(css):
+    assert "SHOWN" not in _style(css)
+
+
+# the tokenizer rules the splitter used to miss (rereview 7): each leaked, and Chrome hides all of them
+TOKENIZER_SHAPES = [
+    'font-family:"x\n;display:none',        # a newline ends a string
+    "font-family:'x\n;display:none",
+    'font-family:"x\r;display:none',
+    'font-family:"x\f;display:none',
+    'background:url(a"b);display:none',      # a quote or paren inside an unquoted url is a bad url
+    "background:url(a'b);display:none",
+    "background:url(a(b);display:none",
+    'content:"/*";display:none',             # a comment opener inside a string is no comment
+    'font-family:"/*";display:none;x:"*/"',
+]
+
+
+@pytest.mark.parametrize("css", TOKENIZER_SHAPES)
+def test_tokenizer_edge_shapes_hide_in_a_style_attribute(css):
+    assert "SHOWN" not in _style(css)
+
+
+@pytest.mark.parametrize("css", TOKENIZER_SHAPES)
+def test_tokenizer_edge_shapes_hide_in_a_style_rule(css):
+    out = graph_html.html_to_text(f"<style>.h{{{css}}}</style><p>A</p><p class=h>SHOWN</p>")
+    assert "SHOWN" not in out
+
+
 def test_a_style_rule_follows_the_same_cascade():
-    css = ("<style>.t{font-size:0;font-size:16px}.h{display:none;display:bogus}"
-           ".s{content:\";display:none;\"}</style>")
+    css = "<style>.t{font-size:0;font-size:16px}.h{display:none;display:bogus}.s{color:red}</style>"
     out = graph_html.html_to_text(css + '<p class="t">GONE1</p><p class="h">GONE</p><p class="s">SEEN</p>')
     assert "SEEN" in out and "GONE" not in out and "GONE1" not in out
 
@@ -558,6 +609,13 @@ def test_other_html_inside_foreignobject_still_reads():
 def test_an_option_with_a_label_shows_the_label_and_not_its_content(which):
     text = SANITIZERS[which]("<select><option label=Choose>SECRET</option><option>Plain</option></select>")
     assert "Choose" in text and "Plain" in text and "SECRET" not in text
+
+
+@pytest.mark.parametrize("label", ['" "', '"\t"', '"   "'])
+def test_a_blank_but_present_label_still_replaces_the_content(label):
+    html = f"<select><option label={label}>SECRET</option><option label=''>Shown</option></select>"
+    text = graph_html.html_to_text(html)
+    assert "SECRET" not in text and "Shown" in text  # an empty label attribute means no label
 
 
 def test_an_optgroup_label_is_shown():
