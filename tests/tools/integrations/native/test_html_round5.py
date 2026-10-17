@@ -1,81 +1,15 @@
-"""Round 5: the nesting/reconstruction cost bound, sup and var, styles after a cut, the select guard, the
-inline-style cascade and the Gmail cut flag. Each expectation agrees with WHATWG parsing (html5lib where it
-is current)."""
+"""Round 5 survivors: sup and var, styles that follow a cut, select text in non-markup, the Gmail cut flag.
+The estimator-era tests (reconstruction and depth shapes, the select guard, "hiding wins") went with the
+estimator: test_html_isolation.py covers the shapes in one subprocess and the new cascade."""
 
-import json
-import subprocess
-import sys
-import textwrap
+import base64
 
 import pytest
 
 from mavis.tools.integrations.native import gmail_mime, graph_html
 
 SANITIZERS = {"graph": graph_html.html_to_text, "gmail": gmail_mime.html_to_text}
-CAP = 400_000
-
-_RUNNER = textwrap.dedent("""
-    import json, resource, sys, time
-    resource.setrlimit(resource.RLIMIT_AS, (1_500_000_000, 1_500_000_000))
-    from mavis.tools.integrations.native import gmail_mime, graph_html
-    html = sys.stdin.read()
-    out = {}
-    for name, fn in (("graph", graph_html.html_to_text_limited), ("gmail", None)):
-        start = time.perf_counter()
-        try:
-            r = fn(html, 10**6) if fn else (gmail_mime.html_to_text(html), False)
-            out[name] = [time.perf_counter() - start, r[1], len(r[0])]
-        except MemoryError:
-            out[name] = [time.perf_counter() - start, "memory", 0]
-    out["rss_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
-    print(json.dumps(out))
-""")
-
-
-def _measure(html: str) -> dict:
-    p = subprocess.run([sys.executable, "-c", _RUNNER], input=html[:CAP], capture_output=True, text=True,
-                       timeout=120, check=True)
-    return json.loads(p.stdout)
-
-
-def _fmt_prefix(n: int, wrap: str = "div") -> str:
-    return f"<{wrap}>" + "".join(f"<b id={i}>" for i in range(n)) + f"</{wrap}>"
-
-
-RECONSTRUCT = {
-    "li": _fmt_prefix(3000) + "<ul>" + "<li>x" * 100_000,
-    "li small": _fmt_prefix(1500) + "<ul>" + "<li>x" * 100_000,
-    "p": _fmt_prefix(3000) + "<p>x" * 100_000,
-    "dd": _fmt_prefix(3000) + "<dl>" + "<dd>x" * 100_000,
-    "dt": _fmt_prefix(3000) + "<dl>" + "<dt>x" * 100_000,
-    "td": _fmt_prefix(3000) + "<table><tr>" + "<td>x" * 100_000,
-    "option": _fmt_prefix(3000) + "<option>x" * 100_000,
-    "div rounds": _fmt_prefix(3000) + "<div>x</div>" * 40_000,
-    "text rounds": _fmt_prefix(3000) + "x<p>" * 100_000,
-    "nested tables": _fmt_prefix(3000) + "<table><tr><td>x</table>" * 20_000,
-    "in a cell": "<table><tr><td>" + "".join(f"<b id={i}>" for i in range(3000)) + "<li>x" * 100_000,
-}
-
-
-@pytest.mark.parametrize("name", list(RECONSTRUCT))
-def test_formatting_reconstruction_shapes_stay_cheap_in_time_and_memory(name):
-    m = _measure(RECONSTRUCT[name])
-    assert m["graph"][0] < 1.0 and m["gmail"][0] < 1.0, m
-    assert "memory" not in (m["graph"][1], m["gmail"][1]), m
-    assert m["rss_mb"] < 500, m
-
-
-DEPTH = {
-    "p pairs over deep divs": "<div>" * 8000 + "<p></p>" * 80_000,
-    "li pairs over deep divs": "<div>" * 8000 + "<li></li>" * 60_000,
-    "td over deep spans": "<table><tr>" + "<span>" * 8000 + "<td>x" * 80_000,
-}
-
-
-@pytest.mark.parametrize("name", list(DEPTH))
-def test_block_starts_that_do_not_deepen_the_stack_are_charged_for_the_walk(name):
-    m = _measure(DEPTH[name])
-    assert m["graph"][0] < 1.0 and m["gmail"][0] < 1.0, m
+CAP = graph_html.MAX_HTML
 
 
 @pytest.mark.parametrize("which", list(SANITIZERS))
@@ -138,18 +72,6 @@ def test_styles_after_a_cut_still_hide_what_came_before_it(html):
     assert "INJECT" not in text and "Hello" in text
 
 
-@pytest.mark.parametrize("html", [
-    "<table><tr><td><select><!--</select>--><col>SECRET",
-    '<table><tr><td><select title="</select>"><col>SECRET',
-    "<table><tr><td><select><script></select></script><col>SECRET",
-    "<table><tr><td><select><template></select></template><col>SECRET",
-    "<table><tr><td><select><option title='</select>'><col>SECRET",
-])
-@pytest.mark.parametrize("which", list(SANITIZERS))
-def test_a_fake_select_closer_does_not_defeat_the_select_guard(which, html):
-    assert "SECRET" not in SANITIZERS[which]("<p>seen</p>" + html)
-
-
 @pytest.mark.parametrize("which", list(SANITIZERS))
 @pytest.mark.parametrize("html", [
     "<!-- <select><b> --><p>after</p>", '<p title="<select><b>">after</p>',
@@ -163,27 +85,11 @@ def test_select_text_in_non_markup_does_not_cut(which, html):
     assert "after" in text and not cut
 
 
-@pytest.mark.parametrize("style", [
-    "display:none !important;display:block", "display:none;display:blck", "display:none;display:block\\9",
-    "visibility:hidden;visibility:xyz", "display:none ! important", "display:none !IMPORTANT ;display:inline",
-    "opacity:0;opacity:1", "font-size:0;font-size:12px",
-])
-def test_any_hiding_declaration_of_a_property_hides_even_if_a_later_one_would_unhide_it(style):
-    assert graph_html.html_to_text(f'<p>seen</p><p style="{style}">SECRET</p>') == "seen"
-
-
-def test_a_visible_later_value_for_a_property_that_never_hid_still_shows():
-    assert "S" in graph_html.html_to_text('<p style="display:block;color:red">S</p>')
-    assert "S" in graph_html.html_to_text('<p style="display:inline;display:block">S</p>')
-
-
 def test_gmail_reports_a_cut_through_body_text():
-    import base64
-
-    html = "<div>" * 20_000 + "deep" + "</div>" * 20_000
+    html = "<p>" + "a" * (graph_html.MAX_HTML + 1) + "</p>"
     data = base64.urlsafe_b64encode(html.encode()).decode()
     payload = {"mimeType": "text/html", "body": {"data": data}}
     text, truncated = gmail_mime.body_text(payload)
-    assert truncated is True
+    assert truncated is True and text == graph_html.NOTICE
     small = {"mimeType": "text/html", "body": {"data": base64.urlsafe_b64encode(b"<p>hi</p>").decode()}}
     assert gmail_mime.body_text(small) == ("hi", False)

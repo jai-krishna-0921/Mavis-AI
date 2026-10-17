@@ -23,6 +23,8 @@ from email.policy import SMTP
 from email.utils import formatdate, make_msgid
 from typing import Any
 
+from mavis.tools.integrations.native import html_core
+
 BODY_CAP = 20_000
 # Headers kept on a result: the ones normalize.py, sender authentication and replying read. Order is
 # preserved (the topmost Authentication-Results is the receiving server's own).
@@ -30,20 +32,8 @@ KEPT_HEADERS = frozenset({
     "from", "to", "cc", "bcc", "reply-to", "subject", "date", "message-id", "in-reply-to", "references",
     "list-unsubscribe", "list-id", "precedence", "auto-submitted", "authentication-results",
 })
-_BLOCK_TAGS = frozenset({
-    "p", "div", "br", "tr", "table", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote",
-    "pre", "hr", "section", "article", "header", "footer",
-})
-_SPACES = re.compile(r"[ \t\r\f\v ​-‍﻿]+")
-_BLANK_LINES = re.compile(r"\n[ \t]*(?:\n[ \t]*)+")
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-
-
-def tidy(text: str) -> str:
-    """Normalise newlines and runs of blanks; drop control characters."""
-    text = _CONTROL.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
-    lines = [_SPACES.sub(" ", line).strip() for line in text.split("\n")]
-    return _BLANK_LINES.sub("\n\n", "\n".join(lines)).strip()
+_BLOCK_TAGS = html_core._BLOCK
+tidy = html_core.tidy  # the shared text normaliser
 
 
 def html_to_text(markup: str, cuts: list[bool] | None = None) -> str:

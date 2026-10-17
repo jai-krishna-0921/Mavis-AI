@@ -32,8 +32,10 @@ HTML_TAGS = [
 # paragraph closer or block end tag for it), keygen (removed from the specification), summary and menu/dir end
 # tags (it ignores `</summary>` where the specification closes the summary), dialog (a paragraph closer),
 # rb/rtc (not in its implied-end-tag list), dd/dt/hgroup/figcaption (it foster-parents or misses the block
-# the specification has). sup and var are in: graph_html cuts the markup at an svg or math that a sup follows.
-STALE_IN_HTML5LIB = {"search", "keygen", "summary", "dialog", "rb", "rtc", "dd", "dt", "hgroup",
+# the specification has). select: graph_html shows a dropdown's option labels and html5lib 1.1 predates the
+# current select parsing (test_html_isolation.py covers select). sup and var are in: an svg or math that
+# Lexbor leaves a sup inside is cut from there on, checked on the DOM.
+STALE_IN_HTML5LIB = {"select", "search", "keygen", "summary", "dialog", "rb", "rtc", "dd", "dt", "hgroup",
                      "figcaption", "main"}
 # No HTML integration points (desc, foreignObject, annotation-xml): html5lib differs from the specification.
 FOREIGN_TAGS = ["svg", "math", "g", "path", "circle", "text", "mi", "mo", "mn", "ms", "mtext", "mglyph",
@@ -247,3 +249,84 @@ def test_well_formed_documents_leak_nothing_and_keep_every_visible_marker(which)
     assert not leaks
     assert seen > 500
     assert not lost, (len(lost), lost[0])
+
+
+# --- round 6: sup inside svg/math (Lexbor keeps it there, browsers do not) and dropdowns -----------------
+SUP_TAGS = ["svg", "math", "sup", "sup", "sup", "span", "div", "p", "b", "i", "g", "mi", "mtext", "var",
+            "table", "td", "font", "a"]
+SUP_HIDERS = ["hidden", 'style="display:none"']
+
+
+def _sup_doc(rng: random.Random) -> str:
+    parts, marks = [], 0
+    for _ in range(rng.randint(3, 14)):
+        r = rng.random()
+        if r < 0.45:
+            tag = rng.choice(SUP_TAGS)
+            attr = (" " + rng.choice(SUP_HIDERS)) if rng.random() < 0.35 else ""
+            parts.append(f"<{tag}{attr}>")
+        elif r < 0.7:
+            parts.append(f"</{rng.choice([t for t in SUP_TAGS if t != 'p'])}>")
+        else:
+            parts.append(f" mk{marks}z ")
+            marks += 1
+    return "".join(parts)
+
+
+@pytest.mark.parametrize("which", list(SANITIZERS))
+def test_sup_in_svg_and_math_leaks_nothing(which):
+    """The 94 distinct leak shapes of re-review 5 (2c) came from this generator with the guard disabled."""
+    fn, styles = SANITIZERS[which]
+    rng = random.Random(f"sup-{which}")
+    leaks, with_sup = [], 0
+    for _ in range(4000):
+        html = _sup_doc(rng)
+        hidden, _shown = _hidden_markers(html, styles)
+        with_sup += "<sup" in html and ("<svg" in html or "<math" in html)
+        text = fn(html)
+        bad = [m for m in hidden if m in text]
+        if bad:
+            leaks.append((bad, html))
+    assert with_sup > 500
+    assert not leaks, f"{len(leaks)} leaks, first: {leaks[0]}"
+
+
+def _select_doc(rng: random.Random, marks: list[int]) -> tuple[str, set[str], set[str]]:
+    """A well-formed dropdown: option labels are visible, stray text and hidden options are not."""
+    def mk() -> str:
+        marks[0] += 1
+        return f"mk{marks[0]}z"
+
+    shown, hidden, body = set(), set(), []
+    for _ in range(rng.randint(1, 5)):
+        r = rng.random()
+        word = mk()
+        if r < 0.15:
+            body.append(f" {word} ")
+            hidden.add(word)
+        elif r < 0.3:
+            body.append(f"<option hidden>{word}</option>")
+            hidden.add(word)
+        elif r < 0.45:
+            inner = mk()
+            body.append(f"<optgroup label=g><option>{inner}</option></optgroup>")
+            shown.add(inner)
+        else:
+            body.append(f"<option>{word}</option>")
+            shown.add(word)
+    return f"<p>{mk()}</p><select>{''.join(body)}</select>", shown, hidden
+
+
+@pytest.mark.parametrize("which", list(SANITIZERS))
+def test_a_dropdown_shows_its_options_and_nothing_else(which):
+    fn, _styles = SANITIZERS[which]
+    rng = random.Random(f"select-{which}")
+    marks = [0]
+    for _ in range(400):
+        html, shown, hidden = _select_doc(rng, marks)
+        text = fn(html)
+        if which == "graph":  # Gmail never reads the hidden attribute, so a hidden option stays there
+            assert not [m for m in hidden if m in text], html
+            assert all(m in text for m in shown), html
+        else:
+            assert not [m for m in hidden if m in text and f">{m}</option>" not in html], html

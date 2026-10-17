@@ -30,7 +30,6 @@ SEARCH_BODY_CAP = 2000  # body chars kept per message in a list (the full text i
 THREAD_BODY_CAP = 8000
 FETCH_CONCURRENCY = 5
 MAX_THREAD_MESSAGES = 200
-OFFLOAD_CHARS = 50_000  # more body text than this is converted off the event loop
 FOLDER_TTL_S = 600.0
 ANCHOR = "receivedDateTime ge 1900-01-01T00:00:00Z"  # $orderby properties must lead the $filter
 SELECT = (
@@ -414,12 +413,11 @@ class MailActions:
 
     @staticmethod
     async def _mapped(items: list[dict], folders: Mapping[str, str], cap: int) -> list[dict]:
-        """map_message over a page; a lot of body text is converted in a worker thread, not on the loop."""
+        """map_message over a page, in a worker thread: the HTML parse waits on its worker process."""
         def run() -> list[dict]:
             return [map_message(m, folders, cap) for m in items]
 
-        size = sum(len(str((m.get("body") or {}).get("content") or "")) for m in items)
-        return await asyncio.to_thread(run) if size > OFFLOAD_CHARS else run()
+        return await asyncio.to_thread(run)
 
     async def _pages(self, uid: int, url: str, params: dict, limit: int) -> tuple[list[dict], Any, Any]:
         return await self.graph.pages(uid, url, params, limit)

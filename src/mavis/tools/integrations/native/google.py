@@ -678,19 +678,21 @@ class GoogleExecutor:
             if isinstance(item, BaseException):
                 raise item
         out: dict[str, Any] = {
-            "messages": [self._message(r, SEARCH_BODY_CAP) for r in got if r],
+            "messages": await asyncio.to_thread(
+                lambda: [self._message(r, SEARCH_BODY_CAP) for r in got if r]),
             "resultSizeEstimate": page.get("resultSizeEstimate", len(ids)),
         }
         return out
 
     async def _mail_read(self, uid: int, a: Any) -> dict:
         raw = await self._json(uid, "GET", f"{GMAIL}/messages/{_q(a.message_id)}", params={"format": "full"})
-        return self._message(raw, gmail_mime.BODY_CAP)
+        return await asyncio.to_thread(self._message, raw, gmail_mime.BODY_CAP)  # the HTML parse blocks
 
     async def _mail_thread(self, uid: int, a: Any) -> dict:
         raw = await self._json(uid, "GET", f"{GMAIL}/threads/{_q(a.thread_id)}", params={"format": "full"})
         return {"threadId": raw.get("id", a.thread_id),
-                "messages": [self._message(m, THREAD_BODY_CAP) for m in raw.get("messages") or []]}
+                "messages": await asyncio.to_thread(
+                    lambda: [self._message(m, THREAD_BODY_CAP) for m in raw.get("messages") or []])}
 
     async def _mail_profile(self, uid: int, a: Any) -> dict:
         return await self._json(uid, "GET", f"{GMAIL}/profile")

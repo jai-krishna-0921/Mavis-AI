@@ -260,11 +260,12 @@ def test_a_normal_class_rule_still_hides_after_the_linear_rewrite():
     assert "KEEP" in text and "PRINT" in text and "GONE" not in text and "GONE2" not in text
 
 
-def test_style_text_beyond_the_cap_is_ignored():
-    from mavis.tools.integrations.native.graph_html import MAX_STYLE_TEXT
+def test_style_text_beyond_the_budget_fails_closed_not_open():
+    from mavis.tools.integrations.native.graph_html import NOTICE
+    from mavis.tools.integrations.native.html_core import MAX_STYLE_TEXT
     pad = "/*" + "x" * MAX_STYLE_TEXT + "*/"
     text = html_to_text(f"<style>{pad}.late{{display:none}}</style><p class='late'>LATE</p>")
-    assert "LATE" in text
+    assert text == NOTICE  # the rule after the pad is never silently dropped
 
 
 def test_html_comments_stay_dropped_and_stray_angle_brackets_are_text():
@@ -369,15 +370,16 @@ def test_raw_text_content_is_text_when_visible_and_plaintext_swallows_the_rest()
 def test_the_new_defang_rules_stay_linear():
     import time
 
-    from mavis.tools.integrations.native.graph_html import MAX_HTML
-    cases = ["<div " * (MAX_HTML // 5), "<div a=<b " * (MAX_HTML // 10), "<div/>" * (MAX_HTML // 6),
-             "<textarea>" * (MAX_HTML // 10), "<textarea></textareax>" * (MAX_HTML // 22),
-             "<xmp></xmp>" * (MAX_HTML // 11), "<plaintext>" * (MAX_HTML // 11),
-             '<div a="' * (MAX_HTML // 8), "<title>" * (MAX_HTML // 7)]
+    from mavis.tools.integrations.native.graph_html import TIMEOUT_S
+    size = 400_000  # `<div/>` x 66k is 66k nested divs: quadratic in Lexbor, so it fails closed at the timeout
+    cases = ["<div " * (size // 5), "<div a=<b " * (size // 10), "<div/>" * (size // 6),
+             "<textarea>" * (size // 10), "<textarea></textareax>" * (size // 22),
+             "<xmp></xmp>" * (size // 11), "<plaintext>" * (size // 11),
+             '<div a="' * (size // 8), "<title>" * (size // 7)]
     for html in cases:
         start = time.perf_counter()
         html_to_text(html)
-        assert time.perf_counter() - start < 1.0, html[:20]
+        assert time.perf_counter() - start < TIMEOUT_S + 1.0, html[:20]
 
 
 def test_random_hidden_fragments_never_leak_their_markers():

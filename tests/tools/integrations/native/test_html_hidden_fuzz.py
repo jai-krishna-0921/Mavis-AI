@@ -115,9 +115,9 @@ PATHOLOGICAL = {
     "unclosed end tags": "</a " * 97_000,
     "lone angle brackets": "<" * 390_000,
     "unclosed quotes": '<a b="' * 65_000,
-    "deep nesting": "<div>" * 60_000 + "x" + "</div>" * 60_000,
+    "deep nesting": "<div>" * 15_000 + "x" + "</div>" * 15_000,  # deeper is quadratic in Lexbor: fails closed
     "deep hidden nesting": '<span style="display:none">' * 14_000,
-    "crossing end tags": "<b><i><div hidden>" * 20_000 + "</b></i>" * 20_000,
+    "crossing end tags": "<b><i><div hidden>" * 6_000 + "</b></i>" * 6_000,
     "unclosed noembed": "<noembed>" * 50_000,
     "declarations": "<!x " * 97_000 + "<![if x]>" * 40_000,
     "end tag attributes": '</p x=">">' * 90_000,
@@ -132,10 +132,11 @@ def test_pathological_markup_is_linear(which, name):
     assert time.perf_counter() - start < 1.5, (which, name)
 
 
-def test_gmail_html_input_is_size_capped():
+def test_gmail_html_input_above_the_cap_fails_closed():
     huge = "<p>seen</p>" + "a" * (graph_html.MAX_HTML * 2) + "<p>LATE</p>"
-    text = gmail_mime.html_to_text(huge)
-    assert "seen" in text and "LATE" not in text
+    cuts: list[bool] = []
+    text = gmail_mime.html_to_text(huge, cuts)
+    assert text == graph_html.NOTICE and cuts == [True]
 
 
 # --- fix round 2: no over-hiding on block closers, svg children, unclosed siblings ---

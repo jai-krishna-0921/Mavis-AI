@@ -124,7 +124,8 @@ class TeamsActions:
                 except GraphError as exc:
                     if exc.kind is not FailureKind.INVALID_ARGUMENT or n == len(steps) - 1:
                         raise
-            chats = [chat_view(c, me_oid, me_mail) for c in raw]
+            # the HTML parse waits on its worker process: not on the event loop
+            chats = await asyncio.to_thread(lambda: [chat_view(c, me_oid, me_mail) for c in raw])
             if n >= 1:
                 await self._fill_members(uid, chats, raw, me_oid)
             if n == 2:
@@ -157,7 +158,7 @@ class TeamsActions:
                 on_forbidden=FailureKind.PERMISSION_MISSING)
         except GraphError as exc:
             raise self._unavailable(exc) from None
-        return chat_view(raw if isinstance(raw, dict) else {}, me_oid, me_mail)
+        return await asyncio.to_thread(chat_view, raw if isinstance(raw, dict) else {}, me_oid, me_mail)
 
     async def history(self, uid: int, a: Any) -> dict:
         me_oid, me_mail = await self._me(uid)
@@ -172,7 +173,7 @@ class TeamsActions:
                 on_forbidden=FailureKind.PERMISSION_MISSING)
         except GraphError as exc:
             raise self._unavailable(exc) from None
-        views = [message_view(m, a.chat_id, me_oid, me_mail) for m in raw]
+        views = await asyncio.to_thread(lambda: [message_view(m, a.chat_id, me_oid, me_mail) for m in raw])
         messages = [v for v in views if v is not None]
         full = len(raw) >= a.limit
         oldest = min((str(m.get("createdDateTime") or "") for m in raw), default="") if full else ""
