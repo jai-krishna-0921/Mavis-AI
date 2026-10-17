@@ -36,7 +36,8 @@ def test_spec_is_registered_and_claims_notion():
     assert spec.gone_codes == frozenset({"invalid_grant", "unauthorized_client"})
     assert spec.forget_prefixes == ("notion:",) and spec.state_cursors == ("notion_",)
     assert spec.memory_sources == {"notion": ("notion:",)}
-    assert spec.executor == ("notion", "NotionExecutor") and not spec.pollers
+    assert spec.executor == ("notion", "NotionExecutor")
+    assert spec.pollers == {C.NOTION: "mavis.tools.integrations.notion_sync.runner:poll_notion"}
     assert spec.account_label({"workspace_name": "Acme"}) == "Acme"
     assert spec.external_label({"workspace_name": "Acme"}) == "the Acme workspace"
 

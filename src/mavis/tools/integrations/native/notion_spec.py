@@ -79,6 +79,7 @@ NOTION_SPEC = providers.register(ProviderSpec(
     account_label=lambda a: a.get("workspace_name") or None,
     external_label=_external,
     capabilities=(C.NOTION,), anchor=C.NOTION, toolkits=frozenset({"notion"}),
+    pollers={C.NOTION: "mavis.tools.integrations.notion_sync.runner:poll_notion"},
     executor=("notion", "NotionExecutor"),
     abilities="your Todos, Meetings, Briefings, People and Projects databases",
     forget_prefixes=("notion:",), state_cursors=("notion_",), memory_sources={"notion": ("notion:",)},

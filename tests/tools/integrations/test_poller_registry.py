@@ -17,7 +17,8 @@ from tests.tools.integrations.fakes import NOW
 SB = Capability.SANDBOX
 BUILTIN_POLLED = frozenset({
     Capability.GMAIL, Capability.CALENDAR, Capability.SLACK,
-    Capability.OUTLOOK, Capability.OUTLOOK_CALENDAR, Capability.TEAMS, Capability.ONEDRIVE})
+    Capability.OUTLOOK, Capability.OUTLOOK_CALENDAR, Capability.TEAMS, Capability.ONEDRIVE,
+    Capability.NOTION})
 
 
 @pytest.fixture

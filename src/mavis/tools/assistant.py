@@ -20,7 +20,7 @@ from mavis.domain.errors import ActionFailed, FailureKind, LLMError
 from mavis.domain.events import Job, JobKind, Trust
 from mavis.domain.localtime import LocalTimes, wall_clock
 from mavis.domain.loops import Loop, LoopKind, LoopOrigin, LoopStatus, LoopUpsert
-from mavis.domain.policy import RiskClass
+from mavis.domain.policy import Capability, RiskClass
 from mavis.domain.results import ToolOutput
 from mavis.domain.tasks import ApprovalStatus, TaskStatus
 from mavis.domain.timefmt import DueStatus, relative_due, relative_past
@@ -208,6 +208,14 @@ async def track_loop(user_id: int, args: TrackLoopArgs) -> ToolOutput:
                    origin=LoopOrigin.CONVERSATION),
     )
     return ToolOutput(f"Keeping track of: {loop.title}", f"Tracking loop #{loop.id}.")
+
+
+async def notion_rebuild_home(user_id: int, args: NoArgs) -> str:
+    from mavis.tools.integrations.notion_sync.runner import rebuild_home
+
+    await rebuild_home(user_id)
+    return ("Rebuilding the Mavis AI home in Notion; it is ready in a few minutes. Pages Mavis made before "
+            "stay where they are, in case you want to keep anything from them.")
 
 
 async def list_tasks(user_id: int, args: NoArgs) -> str:
@@ -429,6 +437,9 @@ TOOLS = [
     MavisTool("track_loop", "Track an open loop: commitment, waiting-on, goal, concern, routine or watch.",
               TrackLoopArgs, RiskClass.WRITE_SELF, track_loop, _CONV, priority=55,
               preview=_preview_loop, on_taint=TaintPolicy.APPROVE, provenance=("title",)),
+    MavisTool("notion_rebuild_home", "Recreate the Mavis AI home (its databases) in the user's Notion after "
+              "part of it was deleted. Pages made before stay in Notion.", NoArgs, RiskClass.WRITE_SELF,
+              notion_rebuild_home, _CONV, requires=Capability.NOTION, priority=30),
     MavisTool("pending", "What is pending: actions and tasks that recently failed, open items with how "
               "due they are, approvals waiting for the user's OK and background work. Call it for any "
               "question about what is open, due, left or whether something went through.",

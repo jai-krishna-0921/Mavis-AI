@@ -280,6 +280,12 @@ async def _poll_job(job: Job) -> None:
     await get_poller().poll(job.user_id, Capability(job.payload["capability"]))
 
 
+async def _notion_sync_job(job: Job) -> None:
+    from mavis.tools.integrations.notion_sync.runner import notion_sync_job
+
+    await notion_sync_job(job)
+
+
 async def _notify_first_sync(event: Event) -> None:
     from mavis.store.repo import users
 
@@ -424,6 +430,7 @@ def register_integrations(registry: ToolRegistry | None = None) -> None:
     register_job_handler(JobKind.CONNECTION_CHECK, _connection_check_job)
     register_job_handler(JobKind.FIRST_SYNC, _first_sync_job)
     register_job_handler(JobKind.POLL_PROVIDER, _poll_job)
+    register_job_handler(JobKind.NOTION_SYNC, _notion_sync_job)
     register_system_wakeup(CHECK_KIND, flow.on_check_wakeup)
     register_system_wakeup(POLL_KIND, get_poller().on_wakeup)
     # Self-healing: the poll chain lives in the wakeups table, so re-arm it on start and each morning.

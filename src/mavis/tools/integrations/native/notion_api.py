@@ -243,12 +243,15 @@ class NotionApi:
         return await self.request(user_id, "PATCH", f"/pages/{_seg(page_id)}", json=body)
 
     async def create_database(self, user_id: int, page_id: str, title: str,
-                              properties: dict) -> tuple[str, str]:
-        db = await self.request(user_id, "POST", "/databases", json={
+                              properties: dict, description: str = "") -> tuple[str, str]:
+        body: dict[str, Any] = {
             "parent": {"type": "page_id", "page_id": page_id},
             "title": [{"type": "text", "text": {"content": title}}],
             "initial_data_source": {"properties": properties},
-        })
+        }
+        if description:
+            body["description"] = [{"type": "text", "text": {"content": description}}]
+        db = await self.request(user_id, "POST", "/databases", json=body)
         sources = db.get("data_sources") or []
         ds_id = sources[0].get("id") if sources and isinstance(sources[0], dict) else None
         if not db.get("id") or not ds_id:
