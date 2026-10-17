@@ -307,3 +307,17 @@ async def test_project_people_match_whole_words_only(env):
     await env.projects()
     [page] = env.pages("projects")
     assert page["properties"]["People"]["relation"] == []
+
+
+async def test_merged_away_page_is_unlinked_not_trashed(env):
+    env.state.aggs = [agg("dana@x.test", "Dana Cole", sent=1, received=1)]
+    await env.people()
+    old = env.fake.add_page("Dana (old slack page)")
+    await notion_links.upsert(env.uid, "person", "slack:U1", old["id"],
+                              meta={"name": "Dana Cole", "email": "", "keys": ["slack:U1"]})
+    env.state.aggs = [agg("dana@x.test", "Dana Cole", sent=1, received=1),
+                      agg("slack:U1", "Dana Cole", sent=1, received=1)]
+    await env.people()
+    assert await notion_links.get(env.uid, "person", "slack:U1") is None
+    assert not env.fake.pages[old["id"]]["in_trash"]  # the user's notes stay where they are
+    assert len(env.pages("people")) == 1

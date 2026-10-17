@@ -254,10 +254,15 @@ async def _archive_people(ctx: SyncCtx, aggs: list[PersonAgg], suppressed: set[s
         keys = set(link.meta.get("keys") or []) | {key}
         gone = not (keys & present) and normalize_name(str(link.meta.get("name") or "")) not in known
         merged_away = page_keys.get(key, key) != key  # now shown on another key's page
-        if any(_is_suppressed(k, suppressed) for k in keys) or gone or merged_away:
-            if not ctx.left():
-                return
+        forgotten = any(_is_suppressed(k, suppressed) for k in keys) or gone
+        if not (forgotten or merged_away):
+            continue
+        if not ctx.left():
+            return
+        if forgotten:
             await _trash(ctx, PERSON_LINK, key, link.page_id)
+        else:  # merged away: Mavis stops managing the page, it stays as the user's (their notes are theirs)
+            await notion_links.delete(ctx.user_id, PERSON_LINK, key)
 
 
 async def people_pass(ctx: SyncCtx) -> None:
