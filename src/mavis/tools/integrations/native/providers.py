@@ -257,4 +257,8 @@ def configured(spec: ProviderSpec) -> bool:
     return bool(cid and secret)
 
 
-from mavis.tools.integrations.native import builtin, microsoft_spec  # noqa: E402,F401  (register the vendors)
+from mavis.tools.integrations.native import (  # noqa: E402,F401  (register the vendors)
+    builtin,
+    microsoft_spec,
+    notion_spec,
+)

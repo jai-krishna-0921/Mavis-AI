@@ -188,7 +188,7 @@ async def test_tasks_and_meet_connect_through_the_native_google_sign_in(parts, t
     assert "accounts.google.com" in url and fallback.links == []
 
 
-@pytest.mark.parametrize("toolkit", ["notion"])
+@pytest.mark.parametrize("toolkit", ["github"])
 async def test_connect_link_stays_on_composio_for_the_rest(parts, toolkit):
     fallback, *_, router = parts
     await router.connect_link(U, toolkit, "https://mavis.test/cb")
@@ -259,7 +259,7 @@ def test_load_executors_skips_absent_modules_but_not_broken_ones(monkeypatch, cl
         seen.append(name)
         raise ModuleNotFoundError(name=name)
     monkeypatch.setattr(importlib, "import_module", fake_import)
-    assert _load_executors(None, client) == [] and len(seen) == 3  # google, slack, microsoft
+    assert _load_executors(None, client) == [] and len(seen) == 4  # google, slack, microsoft, notion
 
     def broken(name):
         raise ModuleNotFoundError(name="some_missing_dependency")

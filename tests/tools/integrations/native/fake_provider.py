@@ -170,6 +170,8 @@ COVERAGE = {
     "client_secret_setting": _E + "test_refresh_sends_the_specs_params_and_credentials",
     "refresh_params": _E + "test_refresh_sends_the_specs_params_and_credentials",
     "gone_codes": _E + "test_gone_codes_end_the_grant",
+    "token_auth": ("tests/tools/integrations/native/test_tokens_basic_auth.py::"
+                   "test_basic_json_refresh_sends_basic_header_and_json_body"),
     "soft_errors": _E + "test_soft_errors_override_reads_a_200_error_body",
     "exchange": _E + "test_connect_url_and_callback_page",
     "revoke": _E + "test_disconnect_forgets_the_prefixes_and_tells_the_vendor",

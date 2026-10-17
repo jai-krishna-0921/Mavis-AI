@@ -44,7 +44,7 @@ async def test_registered_provider_appears_with_icon_services_and_label(app, tok
 async def test_builtin_rows_carry_icon_and_chip_names(app):
     c, _ = await signed_in(app, 1)
     async with c:
-        google, slack, _microsoft = (await c.get(f"{API}/connectors")).json()
+        google, slack, *_rest = (await c.get(f"{API}/connectors")).json()
         assert google["icon"] == "google" and google["name"] == "Google Workspace"
         assert google["services"] == ["mail", "calendar", "drive", "docs", "sheets", "tasks", "meet",
                                       "contacts"]

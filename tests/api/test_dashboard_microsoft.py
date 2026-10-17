@@ -20,7 +20,7 @@ async def test_hidden_until_configured(app, monkeypatch):
     get_settings.cache_clear()
     c, _ = await signed_in(app, 1)
     async with c:
-        assert [r["id"] for r in (await c.get(f"{API}/connectors")).json()] == ["google", "slack"]
+        assert [r["id"] for r in (await c.get(f"{API}/connectors")).json()] == ["google", "slack", "notion"]
 
 
 async def test_listed_when_configured_with_icon_chips_and_admin_link(app):

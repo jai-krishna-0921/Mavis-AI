@@ -59,7 +59,7 @@ def test_every_probe_names_a_test_that_exists():
 def test_the_fake_sets_every_field_to_a_non_default_value():
     spec = fp.make_spec()
     # probed by an override in their own test
-    skipped = {"internal", "soft_errors", "legacy_capabilities", "companions", "executor"}
+    skipped = {"internal", "soft_errors", "legacy_capabilities", "companions", "executor", "token_auth"}
     same = []
     for f in dataclasses.fields(ProviderSpec):
         if f.name in skipped:

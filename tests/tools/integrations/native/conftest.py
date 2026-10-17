@@ -95,6 +95,7 @@ def isolated_registry():
     from mavis.tools.integrations.native import providers
 
     saved = dict(providers.PROVIDERS)
+    providers.PROVIDERS.pop("notion", None)  # fakes borrow Capability.NOTION; the real spec must not clash
     yield providers
     providers.PROVIDERS.clear()
     providers.PROVIDERS.update(saved)

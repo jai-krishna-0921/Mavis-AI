@@ -97,7 +97,6 @@ class FirstSync:
             Capability.GMAIL: self._gmail,
             Capability.CALENDAR: self._calendar,
             Capability.SLACK: self._slack,
-            Capability.NOTION: self._notion,
         }
         # Tasks, Drive and Contacts: registered by attention (EXTRA_HANDLERS); Docs, Sheets, Meet: nothing
         handler = handlers.get(capability) or EXTRA_HANDLERS.get(capability)
@@ -267,20 +266,3 @@ class FirstSync:
                 f"first_sync:{user_id}:slack:0",
             )
         return [f"You're in {len(names)} Slack channels"] if names else []
-
-    async def _notion(self, user_id: int) -> list[str]:
-        data = await self._execute(user_id, "notion.search", {"query": ""})
-        if data is None:
-            return []
-        titles = [
-            str(pick(p, "title", "properties.title.title.0.plain_text", default=""))
-            for p in extract_list(data, "results", "data.results", "pages")
-        ]
-        titles = [t for t in titles if t]
-        if titles:
-            await self.memory.learn(
-                user_id,
-                "Notion pages the user keeps: " + "; ".join(titles[:50]),
-                f"first_sync:{user_id}:notion:0",
-            )
-        return [f"Found {len(titles)} Notion pages"] if titles else []

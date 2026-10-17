@@ -9,7 +9,7 @@ from mavis.tools.integrations.native.providers import ProviderSpec
 
 def spec(**kw) -> ProviderSpec:
     base = dict(id="testing", display_name="Testco", brand="Testco",
-                capabilities=(Capability.NOTION, Capability.SANDBOX), anchor=Capability.NOTION)
+                capabilities=(Capability.WEB, Capability.SANDBOX), anchor=Capability.WEB)
     return ProviderSpec(**{**base, **kw})
 
 
@@ -17,7 +17,7 @@ def test_register_lookup_and_unregister():
     with providers.registered(spec()):
         assert providers.spec_of("testing").display_name == "Testco"
         assert providers.provider_of_capability(Capability.SANDBOX).id == "testing"
-        assert providers.family_of(Capability.NOTION).id == "testing"
+        assert providers.family_of(Capability.WEB).id == "testing"
     assert providers.spec_of("testing") is None
 
 
@@ -27,25 +27,25 @@ def test_rejects_duplicates_long_ids_and_stolen_capabilities():
             providers.register(spec())
     with pytest.raises(ValueError):
         providers.register(spec(id="x" * 17))
-    owner = spec(id="owner", capabilities=(Capability.NOTION,), anchor=Capability.NOTION)
+    owner = spec(id="owner", capabilities=(Capability.WEB,), anchor=Capability.WEB)
     with providers.registered(owner):
         try:
             with pytest.raises(ValueError, match="already belong to owner"):
                 providers.register(
-                    spec(id="other", capabilities=(Capability.NOTION,), anchor=Capability.NOTION))
+                    spec(id="other", capabilities=(Capability.WEB,), anchor=Capability.WEB))
         finally:
             providers.unregister("other")
 
 
 def test_single_capability_is_not_a_family():
-    with providers.registered(spec(capabilities=(Capability.NOTION,))):
-        assert providers.family_of(Capability.NOTION) is None
-        assert providers.provider_of_capability(Capability.NOTION).id == "testing"
+    with providers.registered(spec(capabilities=(Capability.WEB,))):
+        assert providers.family_of(Capability.WEB) is None
+        assert providers.provider_of_capability(Capability.WEB).id == "testing"
 
 
 def test_family_gate_off_means_no_family():
     with providers.registered(spec(family_enabled=lambda: False)):
-        assert providers.family_of(Capability.NOTION) is None
+        assert providers.family_of(Capability.WEB) is None
 
 
 def test_configured_needs_kek_and_both_credentials(monkeypatch, native_env):
@@ -60,7 +60,7 @@ def test_configured_needs_kek_and_both_credentials(monkeypatch, native_env):
 def test_toolkits_must_cover_every_capability_value():
     with pytest.raises(ValueError):
         providers.register(spec(toolkits=frozenset({"testco"})))
-    with providers.registered(spec(toolkits=frozenset({"testco", "notion", "sandbox"}))):
+    with providers.registered(spec(toolkits=frozenset({"testco", "web", "sandbox"}))):
         pass
 
 
@@ -89,16 +89,16 @@ def test_specs_are_keyword_only():
 
 def test_caps_for_defaults_to_all_and_honours_hook():
     s = spec()
-    assert s.caps_for(object()) == (Capability.NOTION, Capability.SANDBOX)
-    narrowed = spec(capabilities_for=lambda grant: (Capability.NOTION,))
-    assert narrowed.caps_for(object()) == (Capability.NOTION,)
+    assert s.caps_for(object()) == (Capability.WEB, Capability.SANDBOX)
+    narrowed = spec(capabilities_for=lambda grant: (Capability.WEB,))
+    assert narrowed.caps_for(object()) == (Capability.WEB,)
 
 
 def test_anchor_capability_falls_back_to_first_when_family_off():
-    assert spec(capabilities=(Capability.SANDBOX, Capability.NOTION)).anchor_capability() is Capability.NOTION
-    off = spec(capabilities=(Capability.SANDBOX, Capability.NOTION), family_enabled=lambda: False)
+    assert spec(capabilities=(Capability.SANDBOX, Capability.WEB)).anchor_capability() is Capability.WEB
+    off = spec(capabilities=(Capability.SANDBOX, Capability.WEB), family_enabled=lambda: False)
     assert off.anchor_capability() is Capability.SANDBOX
-    assert spec(anchor=None).anchor_capability() is Capability.NOTION
+    assert spec(anchor=None).anchor_capability() is Capability.WEB
 
 
 def test_a_poller_for_a_capability_the_spec_does_not_own_is_refused():

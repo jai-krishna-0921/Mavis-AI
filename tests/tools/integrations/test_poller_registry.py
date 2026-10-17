@@ -24,6 +24,7 @@ BUILTIN_POLLED = frozenset({
 def isolated_registry():
     """Snapshot PROVIDERS so a test may register fakes without leaking (the native suite has its own)."""
     saved = dict(providers.PROVIDERS)
+    providers.PROVIDERS.pop("notion", None)  # fakes borrow Capability.NOTION; the real spec must not clash
     yield providers
     providers.PROVIDERS.clear()
     providers.PROVIDERS.update(saved)
