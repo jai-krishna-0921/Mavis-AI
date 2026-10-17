@@ -29,7 +29,7 @@ MAX_RETRY_WAIT_S = 60.0
 DEFAULT_RETRY_WAIT_S = 1.0
 BACKOFF_S = 1.0
 MAX_LIST_REQUESTS = 20  # a runaway cursor cannot loop forever
-FIND_REQUESTS = 10  # pages scanned to find one meeting's details
+FIND_REQUESTS = 3  # pages scanned to find one meeting's details
 _CODE_OK = re.compile(r"[A-Za-z_]{1,64}")
 
 

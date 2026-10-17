@@ -158,7 +158,25 @@ async def test_meeting_returns_summary_and_action_items():
     assert r.data["url"].endswith("/calls/1") and r.data["start"]
     gone = await ex.execute(U, "fathom.meeting", {"recording_id": 404})
     assert not gone.ok and gone.error_kind is K.NOT_FOUND and gone.error_field == "recording_id"
-    assert "NotFound" not in gone.error or gone.error.startswith("fathom 404")
+    assert gone.error.startswith("fathom 404")
+
+
+async def test_meeting_outside_the_scan_says_details_not_found():
+    fake = FakeFathom()
+    fake.page_size = 2
+    fake.add_meeting(recent(1, summary="Old notes", action_items=("Send deck",)))
+    for n in range(2, 12):
+        fake.add_meeting(recent(n))
+    fake.meetings.reverse()  # recording 1 now sits on the last page
+    ex, _ = fake.executor()
+    r = await ex.execute(U, "fathom.meeting", {"recording_id": 1})
+    assert r.ok and r.data["found"] is False and r.data["summary"] == "Old notes"
+    assert len([q for q in fake.requests if q.url.path.endswith("/meetings")]) == 3
+    from mavis.tools.integrations.fathom_render import render_meeting
+
+    text = render_meeting(r.data)
+    assert "could not be loaded" in text and "Old notes" in text and "(untitled)" not in text
+    assert (await ex.execute(U, "fathom.meeting", {"recording_id": 11})).data["found"] is True
 
 
 async def test_429_401_and_5xx_rules():
@@ -204,12 +222,12 @@ async def test_429_401_and_5xx_rules():
     (400, K.INVALID_ARGUMENT), (403, K.PERMISSION_MISSING), (404, K.NOT_FOUND), (418, K.UNKNOWN)])
 async def test_error_mapping_and_no_body_leak(status, kind):
     fake = FakeFathom()
-    fake.script_error(status, "SecretVendorText")
+    fake.script_error(status, "SecretVendorText: do not leak 42")
     api, _ = api_for(fake)
     with pytest.raises(FathomError) as exc:
         await api.meetings(1, created_after=None, limit=1)
     assert exc.value.kind is kind and str(exc.value).startswith("fathom ")
-    assert "ignore" not in str(exc.value).lower()
+    assert "SecretVendorText" not in str(exc.value) and exc.value.code == ""
 
 
 async def test_meeting_render_is_wrapped_untrusted(monkeypatch, user):

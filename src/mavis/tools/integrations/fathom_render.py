@@ -33,13 +33,16 @@ def render_meetings(data: Any) -> str:
 
 def render_meeting(data: Any) -> str:
     data = data if isinstance(data, dict) else {}
-    head = f"{one_line(data.get('title') or '(untitled)')} | {str(data.get('start') or '')[:16]}"
+    found = data.get("found", True)
+    head = (f"{one_line(data.get('title') or '(untitled)')} | {str(data.get('start') or '')[:16]}" if found
+            else "Title, time and action items could not be loaded for this recording (not among the "
+                 "recent meetings); only the summary is available.")
     text = _BLANKS.sub("\n\n", strip_urls(str(data.get("summary") or ""))).strip()
     if len(text) > SUMMARY_CHARS:
         text = text[:SUMMARY_CHARS].rstrip() + " ...[truncated]"
     parts = [head, text or "(no summary yet)"]
     items = [i for i in data.get("action_items") or [] if isinstance(i, dict)]
-    if items:
+    if items and found:
         parts.append("Action items:")
         for i in items:
             who = one_line(i.get("assignee") or "") or "unassigned"

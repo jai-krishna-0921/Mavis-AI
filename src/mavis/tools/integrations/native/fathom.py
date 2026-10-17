@@ -96,5 +96,5 @@ class FathomExecutor:
         items = [{"description": str(i.get("description") or ""), "assignee": _assignee(i),
                   "completed": bool(i.get("completed"))}
                  for i in meta.get("action_items") or [] if isinstance(i, dict)]
-        return {"title": str(meta.get("title") or ""), "start": _start(meta), "summary": summary,
-                "action_items": items, "url": str(meta.get("url") or "")}
+        return {"found": bool(meta), "title": str(meta.get("title") or ""), "start": _start(meta),
+                "summary": summary, "action_items": items, "url": str(meta.get("url") or "")}
