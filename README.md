@@ -14,7 +14,7 @@ She is not a request and response chatbot. She greets you in the morning, checks
 | Proactive engine: pep talks before events, "how did it go?" afterwards, an adaptive morning check-in, quiet hours and a daily ping budget | Planned (Phase 3) |
 | Gmail and Calendar: connect from chat with one tap, inbox watcher that pings you only about what matters, morning brief with today's schedule | Planned (Gmail slice, after Phase 3) |
 | Multi-agent orchestration: a planner that fans work out to specialist agents in parallel, with approve, edit and cancel buttons for outward actions | Planned (Phase 4) |
-| Slack and Notion, plus connect prompts that pause a task and resume it once you connect | Planned (Phase 5) |
+| Slack, plus connect prompts that pause a task and resume it once you connect | Planned (Phase 5) |
 | Notion: Mavis AI keeps Todos, Meetings, Briefings, People and Projects databases up to date in your own Notion, and can search, read and write pages after your approval | Built |
 | Fathom: meeting notes and action items from your recordings flow into memory, your todos and your briefings (read-only) | Built |
 | Sandboxed code execution and documents: PPTX, PDF, DOCX, XLSX, charts, data analysis and cited deep research | Planned (Phase 6) |
@@ -56,7 +56,7 @@ Key design choices:
 | State | SQLAlchemy 2 async with Postgres (SQLite in dev), Alembic migrations |
 | Bus | Redis Streams (in-process in dev) |
 | Memory | Neo4j (SQLite fallback), Qdrant (embedded in dev), fastembed local embeddings |
-| Integrations | Composio for Gmail, Calendar, Notion and Slack, behind a swappable provider interface |
+| Integrations | Native OAuth connectors for Google, Microsoft, Notion and Fathom, with Composio for the rest (Slack), behind a swappable provider interface |
 | Sandbox | Docker with gVisor, AWS Bedrock AgentCore Code Interpreter as an option |
 | Observability | Langfuse, structlog |
 
