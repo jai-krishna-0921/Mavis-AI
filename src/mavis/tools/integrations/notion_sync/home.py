@@ -139,39 +139,51 @@ async def _pick_parent(api: NotionApi, user_id: int, account: dict) -> str | Non
     return str((top or pages)[0]["id"])  # search is newest edit first
 
 
-async def _build(api: NotionApi, user_id: int, parent_id: str) -> Home:
+async def _create_missing(api: NotionApi, user_id: int, page_id: str) -> None:
+    """Create the databases that have no link yet, saving each link the moment its database exists, so a
+    retry after a failure continues here instead of starting a second home."""
+    for name in DBS:
+        if await notion_links.get(user_id, "db", name) is not None:
+            continue
+        plain = {p: s for p, s in SCHEMAS[name].items() if not _is_relation(s)}
+        db_id, ds_id = await api.create_database(user_id, page_id, TITLES[name], plain, DESCRIPTION)
+        await notion_links.upsert(user_id, "db", name, db_id,
+                                  meta={"db_id": db_id, "ds_id": ds_id, "props": {}})
+
+
+async def _finish(api: NotionApi, user_id: int, page_id: str) -> Home | HomeProblem:
+    """Build or resume: create what is missing, add the relations (every target exists now) through the
+    repair path, then mark the home built."""
+    await _create_missing(api, user_id, page_id)
+    result = await _adopt(api, user_id, page_id)
+    if isinstance(result, Home):
+        link = await notion_links.get(user_id, *HOME_LINK)
+        meta = {**(link.meta if link else {}), "built": True}
+        await notion_links.upsert(user_id, *HOME_LINK, page_id, meta=meta)
+    return result
+
+
+async def _start(api: NotionApi, user_id: int, parent_id: str) -> Home | HomeProblem:
     page = await api.create_page(
         user_id, {"type": "page_id", "page_id": parent_id},
         {"title": {"title": [{"type": "text", "text": {"content": HOME_TITLE}}]}},
         blocks.para("Mavis AI keeps these databases up to date. Add your own columns and notes freely."))
-    page_id = page["id"]
-    ids: dict[str, tuple[str, str]] = {}
-    for name in DBS:
-        plain = {p: s for p, s in SCHEMAS[name].items() if not _is_relation(s)}
-        ids[name] = await api.create_database(user_id, page_id, TITLES[name], plain, DESCRIPTION)
-    ds_ids = {name: ids[name][1] for name in DBS}
-    for name in DBS:  # relations need every target to exist first
-        rels = {p: _resolved(s, ds_ids) for p, s in SCHEMAS[name].items() if _is_relation(s)}
-        if rels:
-            await api.update_data_source(user_id, ds_ids[name], rels)
-    props: dict[str, dict[str, str]] = {}
-    for name in DBS:
-        live = (await api.data_source(user_id, ds_ids[name])).get("properties") or {}
-        props[name] = _props_map(name, {}, live)
-    await notion_links.upsert(user_id, *HOME_LINK, page_id, meta={})
-    for name in DBS:
-        await notion_links.upsert(user_id, "db", name, ids[name][0],
-                                  meta={"db_id": ids[name][0], "ds_id": ds_ids[name], "props": props[name]})
-    return Home(page_id, ds_ids, props)
+    await notion_links.upsert(user_id, *HOME_LINK, page["id"], meta={})
+    return await _finish(api, user_id, page["id"])
 
 
 async def ensure_home(api: NotionApi, user_id: int, account: dict) -> Home | HomeProblem:
-    """Adopt the stored home (repairing missing columns), else build one. "gone": a database was deleted,
-    left for the user to rebuild. "no_page": the user has shared no page to build under."""
+    """Adopt the stored home (repairing missing columns, finishing a build that was cut short), else build
+    one. "gone": the home page or a database was deleted, left for the user to rebuild. "no_page": the user
+    has shared no page to build under."""
     link = await notion_links.get(user_id, *HOME_LINK)
-    if link is not None and await _reachable(api, user_id, link.page_id):
-        return await _adopt(api, user_id, link.page_id)
+    if link is not None:
+        if not await _reachable(api, user_id, link.page_id):
+            return "gone"
+        if link.meta.get("built"):
+            return await _adopt(api, user_id, link.page_id)
+        return await _finish(api, user_id, link.page_id)
     parent = await _pick_parent(api, user_id, account)
     if parent is None:
         return "no_page"
-    return await _build(api, user_id, parent)
+    return await _start(api, user_id, parent)

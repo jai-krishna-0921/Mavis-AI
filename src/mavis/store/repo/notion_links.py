@@ -100,3 +100,10 @@ async def delete_user_kinds(user_id: int, kinds: Iterable[str]) -> int:
         await s.commit()
         return res.rowcount or 0
 
+
+
+async def delete_all(user_id: int) -> int:
+    async with Session() as s:
+        res = await s.execute(sa_delete(NotionLink).where(NotionLink.user_id == user_id))
+        await s.commit()
+        return res.rowcount or 0

@@ -38,12 +38,14 @@ log = structlog.get_logger(__name__)
 BUDGET_S = 240
 CLAIM_TTL_S = 600
 PROBLEM_RETRY = timedelta(hours=24)
+STUCK_AFTER = 3
 SETUP_TEXT = "Mavis AI is still setting up. This takes a few minutes."
 PROBLEM_TEXT = {
     "no_page": "Tell the user Mavis AI could not set up its Notion home yet: they need to share one page "
                "with Mavis AI in Notion (link to reconnect).",
     "gone": "Tell the user a part of their Mavis AI home in Notion was deleted; they can say rebuild to "
             "recreate it.",
+    "stuck": "Tell the user setting up their Notion home keeps failing; reconnecting Notion may help.",
 }
 
 
@@ -130,18 +132,18 @@ async def enqueue_sync(user_id: int, force: Iterable[str] = (), *, again: int = 
 
 
 async def rebuild_home(user_id: int) -> None:
-    """Forget the home and its databases (the pages stay in Notion) and build a fresh one."""
-    await notion_links.delete_user_kinds(user_id, ["home", "db"])
+    """Forget every link (the pages stay in Notion) and build a fresh home."""
+    await notion_links.delete_all(user_id)
     await _put(user_id, notion_problem=None, notion_setup=None)
     await enqueue_sync(user_id)
 
 
-async def _notify(user_id: int, problem: str) -> None:
+async def _notify(user_id: int, problem: str, dedupe: str | None = None) -> None:
     from mavis.initiative import wiring
 
     user = await users.get(user_id)
     await wiring.current().executor.notify(user, NotifyIntent(
-        urgency=3, intent=PROBLEM_TEXT[problem], dedupe_key=f"notion_home:{problem}"))
+        urgency=3, intent=PROBLEM_TEXT[problem], dedupe_key=dedupe or f"notion_home:{problem}"))
 
 
 class NotionSync:
@@ -195,16 +197,29 @@ class NotionSync:
                 log.warning("notion_sync.pass_failed", user_id=user_id, name=name, kind=exc.kind.value,
                             code=exc.code)
                 finished = False
+                if setting_up:
+                    await self._failed_in_setup(user_id, name, cursors)
                 continue
             if not ctx.left():
                 finished = False  # cut short: not stamped, picked up again
                 break
-            await _put(user_id, **{f"notion_{name}_at": self._now().isoformat()})
+            stamp: dict = {f"notion_{name}_at": self._now().isoformat()}
+            if cursors.get(f"notion_fail_{name}"):
+                stamp[f"notion_fail_{name}"] = 0
+            await _put(user_id, **stamp)
         if not ctx.left() and not finished:
             await enqueue_sync(user_id, force, again=again + 1)
         if setting_up and finished:
             await self._hide_callout(api, user_id, home)
             await _put(user_id, notion_setup="done")
+
+    async def _failed_in_setup(self, user_id: int, name: str, cursors: dict) -> None:
+        """Count consecutive failed runs of a pass; the third one tells the user, once."""
+        n = int(cursors.get(f"notion_fail_{name}") or 0) + 1
+        cursors[f"notion_fail_{name}"] = n
+        await _put(user_id, **{f"notion_fail_{name}": n})
+        if n == STUCK_AFTER:
+            await _notify(user_id, "stuck", "notion_setup_stuck")
 
     async def _show_callout(self, api: NotionApi, user_id: int, home: Home) -> None:
         link = await notion_links.get(user_id, *HOME_LINK)

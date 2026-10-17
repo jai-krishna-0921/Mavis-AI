@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from mavis.store.repo import notion_links
 from mavis.tools.integrations.notion_sync import blocks
 from mavis.tools.integrations.notion_sync.home import DBS, SCHEMAS, Home, ensure_home
@@ -109,3 +111,37 @@ def test_block_helpers():
     assert len(blocks.content_hash([1])) == 32
     assert [b["type"] for b in blocks.bullets(["a", "b"])] == ["bulleted_list_item"] * 2
     assert blocks.callout("hi")["type"] == "callout" and blocks.divider()["type"] == "divider"
+
+
+async def test_trashed_or_missing_home_page_is_gone_not_rebuilt(fake, api):
+    home = await ensure_home(api, UID, {"template_page_id": fake.add_page("T")["id"]})
+    fake.pages[home.page_id]["in_trash"] = True
+    assert await ensure_home(api, UID, {}) == "gone"
+    del fake.pages[home.page_id]
+    assert await ensure_home(api, UID, {}) == "gone"
+    assert len(fake.databases) == 5 and len(fake.pages) == 1  # nothing new built
+
+
+async def test_build_cut_short_resumes_into_one_home(fake, api, monkeypatch):
+    from mavis.domain.errors import FailureKind
+    from mavis.tools.integrations.native.notion_api import NotionError
+
+    tpl = fake.add_page("T")["id"]
+    real, calls = api.create_database, []
+
+    async def flaky(*a, **kw):
+        calls.append(1)
+        if len(calls) == 3:
+            raise NotionError(FailureKind.UNAVAILABLE, "transport")
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(api, "create_database", flaky)
+    with pytest.raises(NotionError):
+        await ensure_home(api, UID, {"template_page_id": tpl})
+    assert len(fake.databases) == 2
+    home = await ensure_home(api, UID, {"template_page_id": tpl})
+    assert isinstance(home, Home)
+    assert len(fake.databases) == 5
+    assert len([p for p in fake.pages.values() if p["parent"].get("page_id") == tpl]) == 1
+    assert fake.data_sources[home.ds["todos"]]["properties"]["People"]["type"] == "relation"
+    assert (await notion_links.get(UID, "home", "home")).meta["built"] is True

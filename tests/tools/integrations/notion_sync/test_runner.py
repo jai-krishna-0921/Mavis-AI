@@ -194,3 +194,51 @@ async def test_poll_enqueues_when_needed(env):
     old = {**due, "notion_problem": {"kind": "gone", "at": (now - timedelta(hours=25)).isoformat()}}
     await runner.poll_notion(poller, env.uid, {"cursors": old})
     assert len(env.bus.jobs) == 3
+
+
+async def test_rebuild_deletes_every_link_kind(fake, env):
+    await NotionSync().run(env.uid)
+    await notion_links.upsert(env.uid, "person", "a@b.c", "page-x")
+    await runner.rebuild_home(env.uid)
+    for kind in ("home", "person"):
+        assert not await notion_links.all_of(env.uid, kind)
+    assert not await notion_links.all_of(env.uid, "db")
+
+
+async def test_failing_pass_is_logged_not_stamped_and_others_run(fake, env):
+    from structlog.testing import capture_logs
+
+    from mavis.domain.errors import FailureKind
+    from mavis.tools.integrations.native.notion_api import NotionError
+
+    log = []
+
+    async def bad(ctx):
+        raise NotionError(FailureKind.UNAVAILABLE, "boom")
+
+    register_pass("people", timedelta(hours=1), bad, order=10)
+    register_pass("projects", timedelta(hours=1), recorder(log, "projects"), order=20)
+    with capture_logs() as logs:
+        await NotionSync().run(env.uid)
+    assert log == ["projects"]
+    st = await cursors(env.uid)
+    assert "notion_people_at" not in st and "notion_projects_at" in st and st.get("notion_setup") != "done"
+    assert any(e["event"] == "notion_sync.pass_failed" and e["name"] == "people" for e in logs)
+
+
+async def test_setup_stuck_notifies_once_after_three_failed_runs(fake, env):
+    from mavis.domain.errors import FailureKind
+    from mavis.tools.integrations.native.notion_api import NotionError
+
+    async def bad(ctx):
+        raise NotionError(FailureKind.UNAVAILABLE, "boom")
+
+    register_pass("people", timedelta(hours=1), bad, order=10)
+    for _ in range(2):
+        await NotionSync().run(env.uid)
+    assert env.notices.sent == []
+    for _ in range(3):
+        await NotionSync().run(env.uid)
+    [intent] = env.notices.sent
+    assert intent.dedupe_key == "notion_setup_stuck" and intent.urgency == 3
+    assert "reconnecting Notion" in intent.intent
