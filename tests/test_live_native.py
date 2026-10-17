@@ -332,3 +332,169 @@ async def test_first_sync_runs_only_the_held_capabilities():
         s, 1, lambda _l: None,
         {NativeProvider.MICROSOFT: SimpleNamespace(account={"tid": PERSONAL_TENANT})})
     assert Capability.TEAMS not in s.ran and len(s.ran) == 3
+
+
+# ----- Notion and Fathom
+
+DBS = ("people", "projects", "meetings", "briefings", "todos")
+NOTION_ACCOUNT = {"workspace_id": "w-secret", "workspace_name": "Orbit HQ", "owner_id": "o-secret",
+                  "owner_email": "jai@orbit.test", "bot_user_id": "bot-secret", "scopes": ["notion"]}
+
+
+class FakeNotionApi:
+    def __init__(self, gone=(), rows=3):
+        self.gone, self.rows = set(gone), rows
+
+    async def page(self, uid, page_id):
+        from mavis.tools.integrations.native.notion_api import NotionError
+
+        if page_id in self.gone:
+            raise NotionError(FailureKind.NOT_FOUND, "object_not_found")
+        return {"id": page_id}
+
+    async def data_source(self, uid, ds_id):
+        from mavis.tools.integrations.native.notion_api import NotionError
+
+        if ds_id in self.gone:
+            raise NotionError(FailureKind.NOT_FOUND, "object_not_found")
+        return {"id": ds_id}
+
+    async def query(self, uid, ds_id, *, filter=None, sorts=None, limit=100):  # noqa: A002
+        return [{"id": str(i)} for i in range(self.rows)]
+
+
+class NotionProvider:
+    def __init__(self, api):
+        self.executors = {NativeProvider.NOTION: SimpleNamespace(api=api)}
+
+
+def _links(monkeypatch, present=DBS, home=True):
+    async def get(uid, kind, key):
+        if kind == "home":
+            return SimpleNamespace(page_id="home-secret", meta={}) if home else None
+        if key in present:
+            return SimpleNamespace(page_id=f"pg-{key}", meta={"ds_id": f"ds-{key}"})
+        return None
+
+    monkeypatch.setattr("mavis.store.repo.notion_links.get", get)
+
+
+def _notion_grants(account=NOTION_ACCOUNT):
+    return {NativeProvider.NOTION: SimpleNamespace(account=account)}
+
+
+def test_live_native_describes_notion_and_fathom_masked():
+    text = live_native.describe_account(NativeProvider.NOTION, NOTION_ACCOUNT)
+    assert "j***@orbit.test" in text and "jai@orbit.test" not in text
+    assert "w-secret" not in text and "o-secret" not in text and "bot-secret" not in text
+    assert live_native.describe_account(NativeProvider.NOTION, {}) == "a Notion workspace"
+    fathom = live_native.describe_account(NativeProvider.FATHOM, {"scopes": ["public_api"]})
+    assert fathom == "a Fathom account"
+    hook = live_native.describe_account(
+        NativeProvider.FATHOM_HOOK, {"webhook_id": "wh-secret", "route_token": "rt-secret"})
+    assert "secret" not in hook and "webhook" in hook
+
+
+async def test_notion_checks_pass_with_counts_only(monkeypatch):
+    _links(monkeypatch)
+    lines = []
+    failures = await live_native.notion_checks(
+        NotionProvider(FakeNotionApi(rows=3)), 1, _notion_grants(), lines.append)
+    text = "\n".join(lines)
+    assert failures == 0
+    for verdict in ("home: PASS", "data sources: PASS", "bot id: PASS"):
+        assert verdict in text
+    assert "people=3" in text and "todos=3" in text
+    for secret in ("home-secret", "ds-people", "bot-secret", "Orbit HQ", "jai@orbit.test"):
+        assert secret not in text
+
+
+async def test_notion_checks_unknown_before_the_first_sync_and_fail_when_gone(monkeypatch):
+    _links(monkeypatch, present=(), home=False)
+    lines = []
+    assert await live_native.notion_checks(NotionProvider(FakeNotionApi()), 1, _notion_grants(),
+                                           lines.append) == 0
+    assert "home: UNKNOWN" in "\n".join(lines) and "--sync" in "\n".join(lines)
+    _links(monkeypatch)
+    lines = []
+    failures = await live_native.notion_checks(
+        NotionProvider(FakeNotionApi(gone={"home-secret"})), 1, _notion_grants(), lines.append)
+    assert failures == 1 and "home: FAIL" in "\n".join(lines)
+    _links(monkeypatch, present=DBS[:3])
+    lines = []
+    failures = await live_native.notion_checks(NotionProvider(FakeNotionApi()), 1, _notion_grants(),
+                                               lines.append)
+    assert failures == 1 and "data sources: FAIL" in "\n".join(lines) and "3 of 5" in "\n".join(lines)
+
+
+async def test_notion_checks_fail_without_a_bot_id(monkeypatch):
+    _links(monkeypatch)
+    lines = []
+    failures = await live_native.notion_checks(
+        NotionProvider(FakeNotionApi()), 1, _notion_grants({"owner_id": "o"}), lines.append)
+    assert failures == 1 and "bot id: FAIL" in "\n".join(lines)
+
+
+class FathomProvider:
+    def __init__(self, data=None, kind=None):
+        self.calls, self.data, self.kind = [], data, kind
+
+    async def execute_native(self, provider, user, action, args):
+        self.calls.append((provider, action, args))
+        if self.kind:
+            return ToolResult(ok=False, error="boom secret-token", error_kind=self.kind)
+        return ToolResult(ok=True, data=self.data)
+
+
+def _fathom_grants(hook=True):
+    grants = {NativeProvider.FATHOM: SimpleNamespace(account={"scopes": ["public_api"]})}
+    if hook:
+        grants[NativeProvider.FATHOM_HOOK] = SimpleNamespace(account={"webhook_id": "wh-secret"})
+    return grants
+
+
+async def test_fathom_checks_report_meetings_and_the_webhook_companion():
+    p, lines = FathomProvider(data=[{"recording_id": 1, "title": "Secret roadmap"}, {"recording_id": 2}]), []
+    assert await live_native.fathom_checks(p, 1, _fathom_grants(), lines.append) == 0
+    text = "\n".join(lines)
+    assert p.calls[0][:2] == (NativeProvider.FATHOM, "fathom.meetings")
+    assert "meetings: PASS" in text and "2 recent" in text
+    assert "webhook: PASS" in text and "POST /webhooks was accepted" in text
+    assert "Secret roadmap" not in text and "wh-secret" not in text
+
+
+async def test_fathom_without_a_webhook_is_unknown_not_a_failure():
+    lines = []
+    assert await live_native.fathom_checks(FathomProvider(data=[]), 1, _fathom_grants(hook=False),
+                                           lines.append) == 0
+    text = "\n".join(lines)
+    assert "webhook: UNKNOWN" in text and "polling" in text
+
+
+async def test_fathom_meeting_list_failure_fails_and_hides_vendor_text():
+    lines = []
+    failures = await live_native.fathom_checks(
+        FathomProvider(kind=FailureKind.AUTH), 1, _fathom_grants(), lines.append)
+    assert failures == 1 and "meetings: FAIL" in "\n".join(lines) and "secret-token" not in "\n".join(lines)
+    lines = []
+    assert await live_native.fathom_checks(
+        FathomProvider(kind=FailureKind.RATE_LIMITED), 1, _fathom_grants(), lines.append) == 0
+    assert "meetings: UNKNOWN" in "\n".join(lines)
+
+
+async def test_first_sync_includes_notion_and_fathom_when_held():
+    from mavis.domain.policy import Capability
+
+    class Sync:
+        def __init__(self):
+            self.ran = []
+
+        async def run(self, uid, cap):
+            self.ran.append(cap)
+            return []
+
+    s = Sync()
+    await live_native.run_first_sync(s, 1, lambda _l: None, {
+        NativeProvider.NOTION: SimpleNamespace(account={}),
+        NativeProvider.FATHOM: SimpleNamespace(account={})})
+    assert s.ran == [Capability.NOTION, Capability.FATHOM]

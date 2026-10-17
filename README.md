@@ -15,6 +15,8 @@ She is not a request and response chatbot. She greets you in the morning, checks
 | Gmail and Calendar: connect from chat with one tap, inbox watcher that pings you only about what matters, morning brief with today's schedule | Planned (Gmail slice, after Phase 3) |
 | Multi-agent orchestration: a planner that fans work out to specialist agents in parallel, with approve, edit and cancel buttons for outward actions | Planned (Phase 4) |
 | Slack and Notion, plus connect prompts that pause a task and resume it once you connect | Planned (Phase 5) |
+| Notion: Mavis AI keeps Todos, Meetings, Briefings, People and Projects databases up to date in your own Notion, and can search, read and write pages after your approval | Built |
+| Fathom: meeting notes and action items from your recordings flow into memory, your todos and your briefings (read-only) | Built |
 | Sandboxed code execution and documents: PPTX, PDF, DOCX, XLSX, charts, data analysis and cited deep research | Planned (Phase 6) |
 | 24/7 deployment on AWS with HTTPS webhooks, metrics and evals | Planned (Phase 7) |
 
@@ -258,6 +260,22 @@ Roll back by setting `MACHINE_ENABLED=false` and restarting the worker. Slack do
 7. Check: connect your own account in Telegram, then `uv run python -m scripts.live_native <your user id> --sync` and confirm the Microsoft lines are all ok. The script is read-only and prints counts and masked accounts only. It also prints seven `live-check` lines, each PASS, FAIL or UNKNOWN with a one-line hint: (1) a quoted phrase in mail search, (2) the reply lookup filter with `$orderby`, (3) Exchange's `Authentication-Results` and `X-MS-Exchange-Organization-AuthAs` headers, (4) all-day events as midnight dates in UTC, (5) the mail delta baseline with a date filter, (6) the Teams chat list (or which fallback step it needed), (7) `sharedWithMe`. UNKNOWN usually means the mailbox lacks a sample (a received message, an all-day event, a Teams chat); add one and run again. A FAIL on 1 to 6 is a bug to report; a FAIL on 7 is informational (Microsoft is retiring that endpoint; everything else should pass).
 
 Rotate the client secret: create the new secret in Entra, `secrets.sh set MICROSOFT_CLIENT_SECRET --apply`, redeploy, delete the old secret in Entra.
+
+### Notion owner setup (public integration)
+
+1. Create a public integration at notion.so/profile/integrations. Name it "Mavis AI".
+2. Set the redirect URI to `https://<MAVIS_DOMAIN>/oauth/notion/callback`.
+3. Capabilities: read content, update content, insert content, and read user information including email addresses.
+4. Optional: in the template URL field, put the link of a public, empty Notion page named "Mavis AI". Each user who connects then gets a copy to build their databases under. Without it, Mavis AI builds under the first page the user shares during the consent step.
+5. Keys: `NOTION_CLIENT_ID` and `NOTION_CLIENT_SECRET` into your local `.env`, then `deploy/aws/secrets.sh push --apply` and `deploy/aws/deploy.sh`. The Notion card and tools appear only when both are set.
+6. Check: connect your own Notion in Telegram, then `uv run python -m scripts.live_native <your user id> --sync`. The script is read-only and prints counts and masked accounts only. It prints `live-check` lines (PASS, FAIL or UNKNOWN) for the Mavis AI home page, the five databases, their row counts and the bot id. UNKNOWN before the first sync is normal; run it again after `--sync`.
+
+### Fathom owner setup (OAuth app)
+
+1. Register an app at fathom.video/marketplace_applications/new with the redirect URI `https://<MAVIS_DOMAIN>/oauth/fathom/callback`.
+2. Keys: `FATHOM_CLIENT_ID` and `FATHOM_CLIENT_SECRET` into your local `.env`, then `deploy/aws/secrets.sh push --apply` and `deploy/aws/deploy.sh`. The Fathom card and tools appear only when both are set.
+3. Nothing to configure for webhooks: Mavis AI creates one per user when they connect and removes it when they disconnect. Each webhook has its own signing secret, so there is no shared secret to manage.
+4. Check with the same `uv run python -m scripts.live_native <your user id> --sync`. It prints `live-check` lines for the meetings list and for the webhook companion. UNKNOWN on the webhook line means Fathom did not accept `POST /webhooks` at connect time; polling covers the gap, and reconnecting retries it.
 
 ## Documentation
 

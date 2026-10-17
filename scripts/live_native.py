@@ -21,6 +21,12 @@ open live-check items, each as PASS, FAIL or UNKNOWN with a one-line hint:
   baseline with a receivedDateTime filter, 6 chat list with $expand=members and $orderby (or the fallback
   step used), 7 sharedWithMe. A FAIL counts as a failed check (except 7, informational); UNKNOWN does not.
 With --send-test a Microsoft grant also sends ONE self-addressed mail (no Teams message).
+
+Notion and Fathom (see "Notion owner setup" and "Fathom owner setup" in the README): a Notion grant prints
+PASS, FAIL or UNKNOWN for the Mavis AI home page, the five databases, their row counts and the bot id; a
+Fathom grant prints the same for the meetings list and for the per-user webhook companion (its presence means
+POST /webhooks was accepted at connect time; without it polling covers the gap, so that is UNKNOWN, not FAIL).
+Both are read-only and print counts and masked accounts only.
 """
 
 from __future__ import annotations
@@ -57,6 +63,13 @@ def describe_account(provider: NativeProvider, account: dict[str, Any]) -> str:
             return mask_email(str(account.get("mail") or "")) + " (personal account)" \
                 if account.get("mail") else "(personal account)"
         return mask_email(str(account.get("mail") or "")) + " (work tenant)"
+    if provider is NativeProvider.NOTION:
+        owner = str(account.get("owner_email") or "")
+        return "a Notion workspace" + (f" (owner {mask_email(owner)})" if owner else "")
+    if provider is NativeProvider.FATHOM:
+        return "a Fathom account"
+    if provider is NativeProvider.FATHOM_HOOK:
+        return "webhook registered"
     return f"team {account.get('team_id') or '?'} user {account.get('user_id') or '?'}"
 
 
@@ -160,6 +173,9 @@ async def run_first_sync(sync: Any, user_id: int, out: Out, grants: Any = None) 
     if grants is not None and NativeProvider.MICROSOFT in grants:
         personal = _is_personal(grants[NativeProvider.MICROSOFT].account)
         caps += [c for c in MICROSOFT_SYNC if not (personal and c is Capability.TEAMS)]
+    if grants is not None:
+        caps += [cap for provider, cap in ((NativeProvider.NOTION, Capability.NOTION),
+                                           (NativeProvider.FATHOM, Capability.FATHOM)) if provider in grants]
     for capability in caps:
         noticed = await sync.run(user_id, capability)
         out(f"first sync {capability.value}: queued, {len(noticed)} notices")
@@ -426,6 +442,99 @@ async def microsoft_checks(provider: Any, user_id: int, out: Out) -> tuple[int, 
     return failures, email
 
 
+def _verdict(out: Out, name: str, verdict: Verdict) -> int:
+    """Prints one live-check line; returns 1 for a FAIL (UNKNOWN never counts as a failure)."""
+    out(f"live-check {name}: {verdict[0]} - {verdict[1]}")
+    return int(verdict[0] == "FAIL")
+
+
+ROW_CAP = 500
+
+
+async def notion_checks(provider: Any, user_id: int, grants: dict[NativeProvider, Any], out: Out) -> int:
+    """Read-only Notion checks through the router's executor: the home page, the five databases, their row
+    counts and the bot id. Returns the failures. Counts only, never a title, id or workspace name."""
+    from mavis.domain.errors import FailureKind
+    from mavis.store.repo import notion_links
+    from mavis.tools.integrations.native.notion_api import NotionError
+    from mavis.tools.integrations.notion_sync.home import DBS, HOME_LINK
+
+    failures = 0
+    account = grants[NativeProvider.NOTION].account
+    failures += _verdict(out, "notion bot id", ("PASS", "the connecting integration's bot id is stored")
+                         if account.get("bot_user_id") else
+                         ("FAIL", "no bot id on the grant; disconnect and connect Notion again"))
+    executor = getattr(provider, "executors", {}).get(NativeProvider.NOTION)
+    api = getattr(executor, "api", None)
+    if api is None:
+        _verdict(out, "notion home", ("UNKNOWN", "the Notion checks need the native router in this process"))
+        return failures
+    home = await notion_links.get(user_id, *HOME_LINK)
+    if home is None:
+        _verdict(out, "notion home", ("UNKNOWN", "not built yet; run with --sync and check again"))
+        return failures
+    try:
+        page = await api.page(user_id, home.page_id)
+        gone = bool(page.get("in_trash") or page.get("is_archived"))
+        failures += _verdict(out, "notion home", ("FAIL", "the Mavis AI page is in the trash; the next sync "
+                                                  "leaves it for you to restore or rebuild") if gone else
+                             ("PASS", "the Mavis AI page is reachable"))
+    except NotionError as exc:
+        verdict = ("FAIL", "the Mavis AI page is gone or not shared with the integration") \
+            if exc.kind is FailureKind.NOT_FOUND else ("UNKNOWN", f"could not be tried ({exc.kind.value})")
+        failures += _verdict(out, "notion home", verdict)
+    found, counts, unknown = 0, [], False
+    for name in DBS:
+        link = await notion_links.get(user_id, "db", name)
+        ds_id = str((link.meta if link else {}).get("ds_id") or "")
+        if not ds_id:
+            continue
+        try:
+            await api.data_source(user_id, ds_id)
+            rows = await api.query(user_id, ds_id, limit=ROW_CAP)
+        except NotionError as exc:
+            unknown = unknown or exc.kind is not FailureKind.NOT_FOUND
+            continue
+        found += 1
+        counts.append(f"{name}={len(rows)}{'+' if len(rows) >= ROW_CAP else ''}")
+    if found == len(DBS):
+        failures += _verdict(out, "notion data sources", ("PASS", f"{found} of {len(DBS)} answer"))
+    elif unknown:
+        _verdict(out, "notion data sources", ("UNKNOWN", f"{found} of {len(DBS)} answered; run it again"))
+    else:
+        failures += _verdict(out, "notion data sources", (
+            "FAIL", f"{found} of {len(DBS)} found; run with --sync to repair, or rebuild after a delete"))
+    out("notion row counts: " + (" ".join(counts) or "none"))
+    return failures
+
+
+async def fathom_checks(provider: Any, user_id: int, grants: dict[NativeProvider, Any], out: Out) -> int:
+    """Read-only Fathom checks through the router's executor: the meetings list and the webhook companion.
+    Returns the failures. Counts only, never a title, attendee or webhook id."""
+    from mavis.domain.errors import FailureKind
+
+    res = await provider.execute_native(NativeProvider.FATHOM, UserRef(user_id=user_id), "fathom.meetings",
+                                        {"days": 30, "limit": 50})
+    failures = 0
+    if res.ok:
+        count = len(res.data) if isinstance(res.data, list) else 0
+        _verdict(out, "fathom meetings", ("PASS", f"{count} recent meetings listed (last 30 days)"))
+    elif res.error_kind in (FailureKind.RATE_LIMITED, FailureKind.UNAVAILABLE):
+        _verdict(out, "fathom meetings", ("UNKNOWN", f"could not be tried ({res.error_kind.value}); "
+                                                     "run it again"))
+    else:
+        kind = res.error_kind.value if res.error_kind else "error"
+        failures += _verdict(out, "fathom meetings", ("FAIL", f"the meetings list failed ({kind})"))
+    if NativeProvider.FATHOM_HOOK in grants:
+        _verdict(out, "fathom webhook", ("PASS", "the companion grant exists, so POST /webhooks was accepted "
+                                                 "at connect time"))
+    else:
+        _verdict(out, "fathom webhook", (
+            "UNKNOWN", "no webhook companion: POST /webhooks was not accepted at connect time; "
+                       "polling covers it, reconnect to retry"))
+    return failures
+
+
 async def send_microsoft_test(provider: Any, user_id: int, email: str, out: Out) -> int:
     """ONE self-addressed mail through Graph. No Teams message, no other recipient."""
     if not email:
@@ -476,7 +585,8 @@ async def main(user_id: int, *, sync: bool, send: bool, out: Out = print) -> int
         return 1
     grants = await grant_report(tokens, user_id, out)
     if not grants:
-        out("no native grant for this user: connect Google, Slack or Microsoft 365 in Telegram first")
+        out("no native grant for this user: connect Google, Slack, Microsoft 365, Notion or Fathom "
+            "in Telegram first")
         return 1
     failures, email, ms_email = 0, "", ""
     if grants.keys() & {NativeProvider.GOOGLE, NativeProvider.SLACK}:
@@ -484,6 +594,10 @@ async def main(user_id: int, *, sync: bool, send: bool, out: Out = print) -> int
     if NativeProvider.MICROSOFT in grants:
         ms_failures, ms_email = await microsoft_checks(provider, user_id, out)
         failures += ms_failures
+    if NativeProvider.NOTION in grants:
+        failures += await notion_checks(provider, user_id, grants, out)
+    if NativeProvider.FATHOM in grants:
+        failures += await fathom_checks(provider, user_id, grants, out)
     await state_report(user_id, out)
     if sync:
         await run_first_sync(get_first_sync(), user_id, out, grants)
