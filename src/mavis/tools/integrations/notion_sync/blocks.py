@@ -9,7 +9,7 @@ import json
 from typing import Any
 
 from mavis.domain.errors import FailureKind
-from mavis.tools.integrations.native.notion_api import NotionApi, NotionError
+from mavis.tools.integrations.native.notion_api import NotionApi, NotionError, rich_plain
 
 YOUR_NOTES = "Your notes"
 TEXT_LIMIT = 2000
@@ -68,3 +68,25 @@ async def init_page_body(api: NotionApi, user_id: int, page_id: str, owned: list
     Returns only the owned ids."""
     ids = await api.append(user_id, page_id, [*owned, divider(), heading(YOUR_NOTES), *para("")])
     return ids[:len(owned)]
+
+
+def rich_plain_of(block: dict) -> str:
+    inner = block.get(block.get("type") or "")
+    return rich_plain(inner.get("rich_text")) if isinstance(inner, dict) else ""
+
+
+async def user_content(api: NotionApi, user_id: int, page_id: str, owned_ids: list[str]) -> bool:
+    """True when the page holds anything the user wrote: any block that is not one Mavis wrote, the divider
+    or the "Your notes" heading, or an empty paragraph."""
+    own = set(owned_ids)
+    for block in await api.children(user_id, page_id, limit=500):
+        kind = block.get("type")
+        if block.get("id") in own or kind == "divider":
+            continue
+        text = rich_plain_of(block).strip()
+        if kind == "paragraph" and not text:
+            continue
+        if kind in ("heading_1", "heading_2", "heading_3") and text == YOUR_NOTES:
+            continue
+        return True
+    return False

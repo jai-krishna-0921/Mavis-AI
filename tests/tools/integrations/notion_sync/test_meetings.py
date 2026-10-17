@@ -113,6 +113,7 @@ async def env(fake, api, monkeypatch, recording_bus, user):
         await runner._put(user.id, notion_setup="done")
 
     e.run, e.ask, e.pages, e.body, e.setup_done = run, ask, pages, body, setup_done
+    e.bus = recording_bus
     yield e
     bus_mod.set_bus(None)
 
@@ -165,7 +166,9 @@ async def test_unchanged_meeting_makes_no_writes(env):
     await env.run()
     n = len(env.fake.requests)
     await env.run()
-    assert [r for r in env.fake.requests[n:] if r.method in ("POST", "PATCH", "DELETE")] == []
+    writes = [r for r in env.fake.requests[n:]
+              if r.method in ("POST", "PATCH", "DELETE") and not r.url.path.endswith("/query")]
+    assert writes == []
 
 
 async def test_fathom_notes_and_user_notes_side_by_side(env):
@@ -305,3 +308,75 @@ async def test_at_most_two_asks_per_pass(env):
     assert len(env.notices.sent) == 2
     await env.ask()
     assert len(env.notices.sent) == 4
+
+
+# ----- final review fix wave
+
+async def _forget(monkeypatch, keys):
+    async def suppressed(uid):
+        return set(keys)
+
+    monkeypatch.setattr(meetings.personal_repo, "suppressed_keys", suppressed)
+
+
+async def test_i5_forgotten_person_is_taken_out_of_a_frozen_prep(env, monkeypatch):
+    await notion_links.upsert(env.uid, "person", "arun", "page-arun",
+                              meta={"name": "Arun Rao", "email": "arun@x.test"})
+    env.graph.facts["Arun Rao"] = ["is allergic to nuts"]
+    env.state.events = [cal(start=-120, end=-90, attendees=(("Arun", "arun@x.test"), ("Raj", "raj@x.test")))]
+    await env.run()
+    [page] = env.pages()
+    assert "Arun Rao: is allergic to nuts" in [t for _, t in await env.body(page)]
+    await _forget(monkeypatch, {"arun@x.test"})
+    await notion_links.delete(env.uid, "person", "arun")  # what the People pass does on a forget
+    await env.run()
+    texts = [t for _, t in await env.body(page)]
+    assert not [t for t in texts if "Arun" in t] and "With: Raj" in texts
+    link = await notion_links.get(env.uid, "meeting", "evt-1")
+    assert "Arun" not in str(link.meta) and "allergic" not in str(link.meta)
+
+
+async def test_i5_old_meeting_pages_outside_the_window_are_scrubbed_too(env, monkeypatch):
+    await notion_links.upsert(env.uid, "person", "arun", "page-arun",
+                              meta={"name": "Arun Rao", "email": "arun@x.test"})
+    env.graph.facts["Arun Rao"] = ["is allergic to nuts"]
+    env.state.events = [cal(start=-120, end=-90, attendees=(("Arun", "arun@x.test"),))]
+    await env.run()
+    [page] = env.pages()
+    env.clock.advance(days=20)
+    env.state.events = []  # long out of the sync window: the pass never rewrites this page
+    await _forget(monkeypatch, {"arun@x.test"})
+    await env.run()
+    assert not [t for _, t in await env.body(page) if "Arun" in t or "allergic" in t]
+    assert "allergic" not in str((await notion_links.get(env.uid, "meeting", "evt-1")).meta)
+
+
+async def test_i7_meeting_your_notes_are_learned(env, monkeypatch):
+    from mavis.domain.events import JobKind
+    from mavis.tools.integrations.notion_sync import notes
+
+    monkeypatch.setattr(notes, "get_bus", lambda: env.bus)
+    env.state.events = [cal(start=-120, end=-90)]
+    await env.run()
+    [page] = env.pages()
+    env.fake.clock = lambda: T0 + timedelta(hours=2)
+    [block] = env.fake._insert(page["id"], [{"type": "paragraph", "paragraph": {"rich_text": [
+        {"type": "text", "text": {"content": "Dana wants the numbers by Friday"}}]}}], {"type": "end"})
+    block["last_edited_by"] = {"object": "user", "id": OWNER_ID}
+    env.fake.pages[page["id"]]["last_edited_time"] = env.fake._now()
+    await env.run()
+    [job] = [j for j in env.bus.jobs if j.kind is JobKind.LEARN]
+    assert job.payload["trust"] == "user" and job.payload["source_ref"].startswith("notion:")
+    assert "numbers by Friday" in job.payload["text"]
+
+
+async def test_t11_a_named_meeting_that_matches_nothing_asks_which(env):
+    from mavis.tools import assistant
+
+    await meeting_notes.upsert(env.uid, "evt-asked", title="Standup", starts_at=T0 - timedelta(hours=2),
+                               ends_at=T0 - timedelta(hours=1))
+    await users.update_state(env.uid, {"meeting_ask": {"event_key": "evt-asked",
+                                                       "asked_at": T0.isoformat()}})
+    assert await assistant._find_meeting(env.uid, "quarterly planning offsite") is None
+    found = await assistant._find_meeting(env.uid, "")
+    assert found is not None and found[0] == "evt-asked"

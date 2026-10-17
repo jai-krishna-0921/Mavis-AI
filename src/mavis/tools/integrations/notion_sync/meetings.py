@@ -17,19 +17,19 @@ import structlog
 
 from mavis.domain import timeutil
 from mavis.domain.decisions import NotifyIntent
-from mavis.domain.errors import FailureKind
 from mavis.domain.integrations import UserRef
 from mavis.memory.names import normalize_name
 from mavis.memory.service import get_memory
 from mavis.store.repo import loops as loop_repo
 from mavis.store.repo import meeting_notes, notion_links, users
+from mavis.store.repo import personal as personal_repo
 from mavis.tools.integrations import get_provider
 from mavis.tools.integrations.native.base import NativeProvider
-from mavis.tools.integrations.native.notion_api import NotionError
 from mavis.tools.integrations.native.tokens import ACTIVE, Grant
 from mavis.tools.integrations.normalize import extract_calendar_items, normalize_calendar_event, to_datetime
-from mavis.tools.integrations.notion_sync import blocks
+from mavis.tools.integrations.notion_sync import blocks, notes, rows
 from mavis.tools.integrations.notion_sync.blocks import TEXT_LIMIT, content_hash
+from mavis.tools.integrations.notion_sync.rows import is_suppressed
 from mavis.tools.integrations.notion_sync.runner import SyncCtx, _cursors, register_pass
 
 log = structlog.get_logger(__name__)
@@ -130,21 +130,72 @@ def _label(person: dict, link) -> str:
     return (link.meta.get("name") if link else "") or person["name"] or person["email"].split("@")[0]
 
 
-async def _prep(uid: int, m: Meeting, links: dict) -> list[dict]:
+async def _prep(uid: int, m: Meeting, links: dict) -> dict:
+    """What Prep says, as data: who is in the meeting and one item per graph fact or open loop, each tagged
+    with the attendee emails it is about. Stored in the link instead of rendered blocks, so forgetting a
+    person can take their lines out later (I5)."""
     people = [(p, links.get(p["email"])) for p in m.attendees]
     names = [_label(p, link) for p, link in people]
-    items = [f"With: {', '.join(n for n in names if n)}"] if any(names) else []
+    items: list[dict] = []
     graph = get_memory().graph
-    for (_, link), name in list(zip(people, names, strict=True))[:MAX_PEOPLE]:
+    for (p, link), name in list(zip(people, names, strict=True))[:MAX_PEOPLE]:
         if link is None or not name:
             continue
         for fact in await graph.neighborhood(uid, [name], hops=1, limit=FACTS_PER_PERSON):
-            items.append(f"{name}: {fact}")
-    wanted = {normalize_name(n) for n in names if n}
+            items.append({"t": f"{name}: {fact}", "e": [p["email"]]})
+    by_name: dict[str, list[str]] = {}
+    for (p, _), name in zip(people, names, strict=True):
+        if name:
+            by_name.setdefault(normalize_name(name), []).append(p["email"])
     open_loops = [lp for lp in await loop_repo.list_live(uid)
-                  if wanted & {normalize_name(e) for e in lp.entities}]
-    items += [f"Open: {lp.title}" for lp in open_loops[:MAX_LOOPS]]
-    return [blocks.heading("Prep"), *blocks.bullets(items)]
+                  if set(by_name) & {normalize_name(e) for e in lp.entities}]
+    for lp in open_loops[:MAX_LOOPS]:
+        emails = sorted({e for n in {normalize_name(x) for x in lp.entities} for e in by_name.get(n, [])})
+        items.append({"t": f"Open: {lp.title}", "e": emails})
+    return {"with": [{"n": n, "e": p["email"]} for (p, _), n in zip(people, names, strict=True) if n],
+            "items": items}
+
+
+def _hit(emails: list[str], suppressed: set[str]) -> bool:
+    return any(e and is_suppressed(e, suppressed) for e in emails)
+
+
+def _prep_texts(prep: dict, suppressed: set[str]) -> list[str]:
+    who = [w["n"] for w in prep.get("with") or [] if not _hit([w.get("e", "")], suppressed)]
+    return [*([f"With: {', '.join(who)}"] if who else []),
+            *(i["t"] for i in prep.get("items") or [] if not _hit(i.get("e") or [], suppressed))]
+
+
+def _prep_blocks(prep: dict, suppressed: set[str]) -> list[dict]:
+    return [blocks.heading("Prep"), *blocks.bullets(_prep_texts(prep, suppressed))]
+
+
+def _prep_hit(prep: dict, suppressed: set[str]) -> bool:
+    return any(_hit([w.get("e", "")], suppressed) for w in prep.get("with") or []) or any(
+        _hit(i.get("e") or [], suppressed) for i in prep.get("items") or [])
+
+
+async def _scrub(ctx: SyncCtx, suppressed: set[str]) -> None:
+    """Take a forgotten person's lines out of every Prep, in Notion and in the stored copy, including pages
+    outside the sync window that are never rewritten otherwise (I5)."""
+    if not suppressed:
+        return
+    uid = ctx.user_id
+    for link in await notion_links.all_of(uid, LINK):
+        prep = link.meta.get("prep")
+        if not isinstance(prep, dict) or not _prep_hit(prep, suppressed):
+            continue
+        if not ctx.left():
+            return
+        old_ids = list(link.meta.get("prep_ids") or [])
+        kept = {"with": [w for w in prep.get("with") or [] if not _hit([w.get("e", "")], suppressed)],
+                "items": [i for i in prep.get("items") or [] if not _hit(i.get("e") or [], suppressed)]}
+        rest = [b for b in link.meta.get("blocks") or [] if b not in set(old_ids)]
+        new_ids = await blocks.replace_owned(ctx.api, uid, link.page_id, old_ids,
+                                             _prep_blocks(kept, suppressed))
+        await notion_links.upsert(uid, LINK, link.local_key, link.page_id, pushed_hash="",
+                                  meta={**link.meta, "prep": kept, "prep_ids": new_ids,
+                                        "blocks": [*new_ids, *rest]})
 
 
 def _notes(m: Meeting) -> list[dict]:
@@ -166,41 +217,39 @@ def _notes(m: Meeting) -> list[dict]:
     return out
 
 
-async def _sync_one(ctx: SyncCtx, m: Meeting, links: dict) -> None:
+async def _sync_one(ctx: SyncCtx, m: Meeting, links: dict, suppressed: set[str]) -> None:
     uid = ctx.user_id
     link = await notion_links.get(uid, LINK, m.key)
     person_ids = sorted({links[p["email"]].page_id for p in m.attendees if p["email"] in links})
     props = _properties(m, person_ids)
-    if link is not None and link.meta.get("prep") and m.start <= ctx.now:
-        prep = link.meta["prep"]  # started: Prep stays as it was
+    stored = link.meta.get("prep") if link is not None else None
+    if isinstance(stored, dict) and m.start <= ctx.now:
+        prep = stored  # started: Prep stays as it was (minus anyone forgotten since)
     else:
         prep = await _prep(uid, m, links)
-    owned = [*prep, *_notes(m)]
+    prep_blocks = _prep_blocks(prep, suppressed)
+    owned = [*prep_blocks, *_notes(m)]
     digest = content_hash({"props": props, "body": owned})
     if link is not None and link.pushed_hash == digest:
         return
     page_id = link.page_id if link is not None else ""
     fresh = link is None or bool(link.meta.get("fresh"))
-    if link is not None:
-        try:
-            await ctx.api.update_page(uid, page_id, properties=props)
-        except NotionError as exc:
-            if exc.kind not in (FailureKind.NOT_FOUND, FailureKind.INVALID_ARGUMENT):
-                raise
-            await notion_links.delete(uid, LINK, m.key)  # the page is gone: make a new one
-            link, fresh = None, True
+    if link is not None and await rows.update_row(ctx.api, uid, ctx.home, "meetings", page_id, props) is None:
+        await notion_links.delete(uid, LINK, m.key)  # the page is gone: make a new one
+        link, fresh = None, True
     if link is None:
-        page = await ctx.api.create_page(
-            uid, {"type": "data_source_id", "data_source_id": ctx.home.ds["meetings"]}, props)
+        page = await rows.create_row(ctx.api, uid, ctx.home, "meetings", LINK, m.key, props)
         page_id = page["id"]
         # link first: if the body write fails, the retry finishes this page instead of making another
         await notion_links.upsert(uid, LINK, m.key, page_id, pushed_hash="", meta={"fresh": True})
+        await rows.created(uid, LINK, m.key)
     if fresh:
         ids = await blocks.init_page_body(ctx.api, uid, page_id, owned)
     else:
         ids = await blocks.replace_owned(ctx.api, uid, page_id, list(link.meta.get("blocks") or []), owned)
     await notion_links.upsert(uid, LINK, m.key, page_id, pushed_hash=digest, pushed_at=timeutil.now(),
-                              meta={"blocks": ids, "prep": prep, "title": m.title,
+                              meta={"blocks": ids, "prep": prep, "prep_ids": ids[:len(prep_blocks)],
+                                    "title": m.title,
                                     "start": m.start.isoformat(),
                                     "emails": sorted(p["email"] for p in m.attendees if p["email"])})
 
@@ -265,10 +314,14 @@ async def meetings_pass(ctx: SyncCtx) -> None:
             found[m.key] = m
     links = {str(r.meta.get("email") or "").lower(): r for r in await notion_links.all_of(uid, PERSON_LINK)
              if r.meta.get("email")}
+    suppressed = await personal_repo.suppressed_keys(uid)
+    await _scrub(ctx, suppressed)
     for m in sorted(found.values(), key=lambda x: x.start):
         if not ctx.left():
             return
-        await _sync_one(ctx, m, links)
+        await _sync_one(ctx, m, links, suppressed)
+    if ctx.left():
+        await notes.read_your_notes(ctx, "meetings", LINK)  # R12 / I7
     if ctx.left():
         await ask_due(ctx, events)
 

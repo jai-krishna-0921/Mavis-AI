@@ -5,8 +5,9 @@
 People are real humans only (two-way contact or shared meetings, not automated senders, not suppressed),
 capped at 200. Each page carries a cached one-line summary (regenerated only when the facts changed and the
 cached line is a day old). Projects are graph entities labelled Project that still have facts (entities carry
-no timestamps, so facts standing in memory stand in for "active"), capped at 50. A page whose person or
-project was forgotten is moved to the trash and its link dropped; people who merely went quiet keep theirs.
+no timestamps, so facts standing in memory stand in for "active"), capped at 50. A page whose
+person was forgotten is moved to the trash; a project that left memory is trashed only if the page holds
+nothing of the user's. People who merely went quiet keep theirs.
 Link kinds `person` (key = person key) and `project` (key = normalized name); link meta carries `name`
 (and `email` for people) because the Todos and Meetings passes match on it.
 """
@@ -24,7 +25,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from mavis.domain import timeutil
 from mavis.domain.errors import FailureKind
 from mavis.llm import models as llm
-from mavis.memory import itemids
 from mavis.memory.extractor import wrap_untrusted
 from mavis.memory.names import normalize_name
 from mavis.memory.personal import PersonAgg, aggregate_people
@@ -33,8 +33,9 @@ from mavis.store.repo import loops as loop_repo
 from mavis.store.repo import notion_links
 from mavis.store.repo import personal as personal_repo
 from mavis.tools.integrations.native.notion_api import NotionError
-from mavis.tools.integrations.notion_sync import blocks
+from mavis.tools.integrations.notion_sync import blocks, notes, rows
 from mavis.tools.integrations.notion_sync.blocks import TEXT_LIMIT, content_hash
+from mavis.tools.integrations.notion_sync.rows import is_suppressed
 from mavis.tools.integrations.notion_sync.runner import SyncCtx, register_pass
 
 log = structlog.get_logger(__name__)
@@ -62,10 +63,6 @@ class MergedPerson(PersonAgg):
     keys: list[str] = field(default_factory=list)
 
 
-def _is_suppressed(key: str, suppressed: set[str]) -> bool:
-    return key in suppressed or itemids.person_id(key) in suppressed
-
-
 def _merge(group: list[PersonAgg]) -> MergedPerson:
     lead = min(group, key=lambda a: (not ("@" in a.key and not a.key.startswith("slack:")), -a.score, a.key))
     counts: Counter[str] = Counter()
@@ -82,11 +79,11 @@ def _merge(group: list[PersonAgg]) -> MergedPerson:
 def real_people(aggs: list[PersonAgg], suppressed: set[str]) -> list[PersonAgg]:
     """Real humans, one entry per person: candidates with the same non-empty name become one. A person
     with any suppressed key is dropped whole."""
-    blocked = {normalize_name(a.name) for a in aggs if _is_suppressed(a.key, suppressed)} - {""}
+    blocked = {normalize_name(a.name) for a in aggs if is_suppressed(a.key, suppressed)} - {""}
     keep = [a for a in aggs
             if not a.automated
             and ((a.counts["sent"] > 0 and a.counts["received"] > 0) or a.counts["meeting"] > 0)
-            and not _is_suppressed(a.key, suppressed) and normalize_name(a.name) not in blocked]
+            and not is_suppressed(a.key, suppressed) and normalize_name(a.name) not in blocked]
     groups: dict[str, list[PersonAgg]] = {}
     for a in keep:
         groups.setdefault(normalize_name(a.name) or f"key:{a.key}", []).append(a)
@@ -135,6 +132,25 @@ async def _trash(ctx: SyncCtx, kind: str, key: str, page_id: str) -> None:
     await notion_links.delete(ctx.user_id, kind, key)
 
 
+async def _retire(ctx: SyncCtx, kind: str, link) -> None:
+    """The thing a page was about is gone from memory (forgotten, renamed or merged): Mavis stops managing
+    the page. It is trashed only when it holds nothing of the user's; otherwise Mavis takes its own blocks
+    off and leaves the page, with what the user wrote, where it is (I6)."""
+    uid, owned = ctx.user_id, list(link.meta.get("blocks") or [])
+    try:
+        keep = await blocks.user_content(ctx.api, uid, link.page_id, owned)
+        if keep:
+            await blocks.replace_owned(ctx.api, uid, link.page_id, owned, [])
+    except NotionError as exc:
+        if exc.kind is not FailureKind.NOT_FOUND:
+            raise
+        keep = True
+    if keep:
+        await notion_links.delete(uid, kind, link.local_key)
+    else:
+        await _trash(ctx, kind, link.local_key, link.page_id)
+
+
 async def _write(ctx: SyncCtx, kind: str, key: str, db: str, props: dict, owned: list[dict],
                  meta: dict) -> None:
     """Create or update one page; skip when nothing changed. `meta` is kept next to the block ids."""
@@ -148,20 +164,15 @@ async def _write(ctx: SyncCtx, kind: str, key: str, db: str, props: dict, owned:
         return
     page_id = link.page_id if link is not None else ""
     fresh = link is None or bool(link.meta.get("fresh"))
-    if link is not None:
-        try:
-            await ctx.api.update_page(uid, page_id, properties=props)
-        except NotionError as exc:
-            if exc.kind not in (FailureKind.NOT_FOUND, FailureKind.INVALID_ARGUMENT):
-                raise
-            await notion_links.delete(uid, kind, key)  # the page is gone: make a new one
-            link, fresh = None, True
+    if link is not None and await rows.update_row(ctx.api, uid, ctx.home, db, page_id, props) is None:
+        await notion_links.delete(uid, kind, key)  # the page is gone: make a new one
+        link, fresh = None, True
     if link is None:
-        page = await ctx.api.create_page(
-            uid, {"type": "data_source_id", "data_source_id": ctx.home.ds[db]}, props)
+        page = await rows.create_row(ctx.api, uid, ctx.home, db, kind, key, props)
         page_id = page["id"]
         # link first: if the body write fails, the retry finishes this page instead of making another
         await notion_links.upsert(uid, kind, key, page_id, pushed_hash="", meta={**meta, "fresh": True})
+        await rows.created(uid, kind, key)
     if fresh:
         ids = await blocks.init_page_body(ctx.api, uid, page_id, owned)
     else:
@@ -246,15 +257,13 @@ def _person_props(a: PersonAgg, name: str) -> dict:
     return props
 
 
-async def _archive_people(ctx: SyncCtx, aggs: list[PersonAgg], suppressed: set[str], mem: _Memory,
-                          page_keys: dict[str, str]) -> None:
-    present, known = {a.key for a in aggs}, mem.known_names()
+async def _archive_people(ctx: SyncCtx, suppressed: set[str], page_keys: dict[str, str]) -> None:
     for link in await notion_links.all_of(ctx.user_id, PERSON_LINK):
         key = link.local_key
         keys = set(link.meta.get("keys") or []) | {key}
-        gone = not (keys & present) and normalize_name(str(link.meta.get("name") or "")) not in known
         merged_away = page_keys.get(key, key) != key  # now shown on another key's page
-        forgotten = any(_is_suppressed(k, suppressed) for k in keys) or gone
+        # only an explicit forget trashes a page; someone who merely went quiet keeps theirs (I6)
+        forgotten = any(is_suppressed(k, suppressed) for k in keys)
         if not (forgotten or merged_away):
             continue
         if not ctx.left():
@@ -278,7 +287,7 @@ async def people_pass(ctx: SyncCtx) -> None:
         owner = next((r.local_key for r in existing
                       if keys & ({r.local_key} | set(r.meta.get("keys") or []))), a.key)
         page_keys.update({k: owner for k in keys})
-    await _archive_people(ctx, aggs, suppressed, mem, page_keys)
+    await _archive_people(ctx, suppressed, page_keys)
     meeting_links = await notion_links.all_of(uid, MEETING_LINK)
     for a in real:
         if not ctx.left():
@@ -297,6 +306,8 @@ async def people_pass(ctx: SyncCtx) -> None:
                  blocks.heading("Recent meetings"), *blocks.bullets(meetings)]
         await _write(ctx, PERSON_LINK, page_key, "people", _person_props(a, name), owned,
                      {"name": name, "email": a.email.lower(), "keys": getattr(a, "keys", [a.key]), **cache})
+    if ctx.left():
+        await notes.read_your_notes(ctx, "people", PERSON_LINK)  # R12 / I7
 
 
 # ----- projects
@@ -310,7 +321,7 @@ async def projects_pass(ctx: SyncCtx) -> None:
         if link.local_key not in existing:
             if not ctx.left():
                 return
-            await _trash(ctx, PROJECT_LINK, link.local_key, link.page_id)
+            await _retire(ctx, PROJECT_LINK, link)
     ranked = sorted(((len(mem.facts_of(e.name)), e) for e in projects), key=lambda x: -x[0])
     people_links = [(normalize_name(str(r.meta.get("name") or "")), r)
                     for r in await notion_links.all_of(uid, PERSON_LINK)]
@@ -338,6 +349,8 @@ async def projects_pass(ctx: SyncCtx) -> None:
                  blocks.heading("Open todos"), *blocks.bullets(todos),
                  blocks.heading("Meetings"), *blocks.bullets(meetings)]
         await _write(ctx, PROJECT_LINK, own, "projects", props, owned, {"name": e.name})
+    if ctx.left():
+        await notes.read_your_notes(ctx, "projects", PROJECT_LINK)  # R12 / I7
 
 
 register_pass("people", timedelta(hours=24), people_pass, order=10)
