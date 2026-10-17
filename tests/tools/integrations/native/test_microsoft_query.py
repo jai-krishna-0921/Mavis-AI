@@ -371,7 +371,7 @@ def test_the_new_defang_rules_stay_linear():
     import time
 
     from mavis.tools.integrations.native.graph_html import TIMEOUT_S
-    size = 400_000  # `<div/>` x 66k is 66k nested divs: quadratic in Lexbor, so it fails closed at the timeout
+    size = 400_000  # `<div/>` x 66k is 66k nested divs: quadratic in Lexbor, so it fails closed
     cases = ["<div " * (size // 5), "<div a=<b " * (size // 10), "<div/>" * (size // 6),
              "<textarea>" * (size // 10), "<textarea></textareax>" * (size // 22),
              "<xmp></xmp>" * (size // 11), "<plaintext>" * (size // 11),
