@@ -224,6 +224,9 @@ async def ensure_home(api: NotionApi, user_id: int, account: dict) -> Home | Hom
     attempt = await notion_links.get(user_id, "attempt", "home")
     # a retry looks where the lost create went, even if another page is the newest shared one now
     parent = str(attempt.meta.get("parent") or "") if attempt else ""
+    if parent and not await _reachable(api, user_id, parent):
+        parent = ""  # that page was deleted or unshared: choose again, once
+        await notion_links.delete(user_id, "attempt", "home")
     parent = parent or await _pick_parent(api, user_id, account)
     if parent is None:
         return "no_page"

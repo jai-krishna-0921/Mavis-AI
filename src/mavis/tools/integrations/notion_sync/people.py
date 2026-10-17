@@ -264,7 +264,8 @@ async def _archive_people(ctx: SyncCtx, aggs: list[PersonAgg], suppressed: set[s
         key = link.local_key
         keys = set(link.meta.get("keys") or []) | {key}
         merged_away = page_keys.get(key, key) != key  # now shown on another key's page
-        # only an explicit forget trashes a page; someone who merely went quiet keeps theirs (I6)
+        # a page is trashed on a forget (suppressed, or no signal and no graph entity left); someone who
+        # merely went quiet keeps theirs (I6)
         forgotten = any(is_suppressed(k, suppressed) for k in keys)
         # forgotten without a suppression key (the dashboard's default): no signal and no graph entity left
         gone = not (keys & present) and normalize_name(str(link.meta.get("name") or "")) not in known

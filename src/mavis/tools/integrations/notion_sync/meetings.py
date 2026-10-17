@@ -160,51 +160,63 @@ def _hit(emails: list[str], suppressed: set[str]) -> bool:
     return any(e and is_suppressed(e, suppressed) for e in emails)
 
 
-def _prep_texts(prep: dict, suppressed: set[str]) -> list[str]:
+def _drops(item: dict, suppressed: set[str], gone: set[str]) -> bool:
+    """A suppressed person's lines all go; a gone person (no page any more) loses only the fact lines, the
+    "With:" and "Open:" lines stay."""
+    emails = item.get("e") or []
+    return _hit(emails, suppressed) or (item.get("k") == "fact" and any(e in gone for e in emails))
+
+
+def _prep_texts(prep: dict, suppressed: set[str], gone: set[str]) -> list[str]:
     who = [w["n"] for w in prep.get("with") or [] if not _hit([w.get("e", "")], suppressed)]
     return [*([f"With: {', '.join(who)}"] if who else []),
-            *(i["t"] for i in prep.get("items") or [] if not _hit(i.get("e") or [], suppressed))]
+            *(i["t"] for i in prep.get("items") or [] if not _drops(i, suppressed, gone))]
 
 
-def _prep_blocks(prep: dict, suppressed: set[str]) -> list[dict]:
-    return [blocks.heading("Prep"), *blocks.bullets(_prep_texts(prep, suppressed))]
+def _prep_blocks(prep: dict, suppressed: set[str], gone: set[str]) -> list[dict]:
+    return [blocks.heading("Prep"), *blocks.bullets(_prep_texts(prep, suppressed, gone))]
 
 
-def _prep_hit(prep: dict, suppressed: set[str]) -> bool:
+def _prep_hit(prep: dict, suppressed: set[str], gone: set[str]) -> bool:
     return any(_hit([w.get("e", "")], suppressed) for w in prep.get("with") or []) or any(
-        _hit(i.get("e") or [], suppressed) for i in prep.get("items") or [])
+        _drops(i, suppressed, gone) for i in prep.get("items") or [])
 
 
-async def _gone_emails(uid: int, linked: dict) -> set[str]:
-    """Emails whose facts a frozen Prep holds but who no longer have a People page link: forgotten without
-    a suppression key (N1). Their fact lines are dropped like a suppressed person's."""
+async def _gone_emails(uid: int) -> set[str]:
+    """Emails whose facts a frozen Prep holds but who no longer have a People page: forgotten without a
+    suppression key (N1). A person is still there if any person link has the address as its key, one of its
+    merged keys or its email, so a merge that switches the stored email loses nothing."""
+    linked: set[str] = set()
+    for p in await notion_links.all_of(uid, PERSON_LINK):
+        linked |= {str(k).lower() for k in [p.local_key, p.meta.get("email"), *(p.meta.get("keys") or [])]
+                   if k}
     out: set[str] = set()
     for link in await notion_links.all_of(uid, LINK):
         prep = link.meta.get("prep")
         for item in (prep.get("items") or []) if isinstance(prep, dict) else []:
             if item.get("k") == "fact":
-                out |= {e for e in item.get("e") or [] if e and e not in linked}
+                out |= {e for e in item.get("e") or [] if e and e.lower() not in linked}
     return out
 
 
-async def _scrub(ctx: SyncCtx, suppressed: set[str]) -> None:
+async def _scrub(ctx: SyncCtx, suppressed: set[str], gone: set[str]) -> None:
     """Take a forgotten person's lines out of every Prep, in Notion and in the stored copy, including pages
     outside the sync window that are never rewritten otherwise (I5)."""
-    if not suppressed:
+    if not suppressed and not gone:
         return
     uid = ctx.user_id
     for link in await notion_links.all_of(uid, LINK):
         prep = link.meta.get("prep")
-        if not isinstance(prep, dict) or not _prep_hit(prep, suppressed):
+        if not isinstance(prep, dict) or not _prep_hit(prep, suppressed, gone):
             continue
         if not ctx.left():
             return
         old_ids = list(link.meta.get("prep_ids") or [])
         kept = {"with": [w for w in prep.get("with") or [] if not _hit([w.get("e", "")], suppressed)],
-                "items": [i for i in prep.get("items") or [] if not _hit(i.get("e") or [], suppressed)]}
+                "items": [i for i in prep.get("items") or [] if not _drops(i, suppressed, gone)]}
         rest = [b for b in link.meta.get("blocks") or [] if b not in set(old_ids)]
         new_ids = await blocks.replace_owned(ctx.api, uid, link.page_id, old_ids,
-                                             _prep_blocks(kept, suppressed))
+                                             _prep_blocks(kept, suppressed, gone))
         await notion_links.upsert(uid, LINK, link.local_key, link.page_id, pushed_hash="",
                                   meta={**link.meta, "prep": kept, "prep_ids": new_ids,
                                         "blocks": [*new_ids, *rest]})
@@ -229,7 +241,8 @@ def _notes(m: Meeting) -> list[dict]:
     return out
 
 
-async def _sync_one(ctx: SyncCtx, m: Meeting, links: dict, suppressed: set[str]) -> None:
+async def _sync_one(ctx: SyncCtx, m: Meeting, links: dict, suppressed: set[str],
+                    gone: set[str]) -> None:
     uid = ctx.user_id
     link = await notion_links.get(uid, LINK, m.key)
     person_ids = sorted({links[p["email"]].page_id for p in m.attendees if p["email"] in links})
@@ -239,7 +252,7 @@ async def _sync_one(ctx: SyncCtx, m: Meeting, links: dict, suppressed: set[str])
         prep = stored  # started: Prep stays as it was (minus anyone forgotten since)
     else:
         prep = await _prep(uid, m, links)
-    prep_blocks = _prep_blocks(prep, suppressed)
+    prep_blocks = _prep_blocks(prep, suppressed, gone)
     owned = [*prep_blocks, *_notes(m)]
     digest = content_hash({"props": props, "body": owned})
     if link is not None and link.pushed_hash == digest:
@@ -327,12 +340,12 @@ async def meetings_pass(ctx: SyncCtx) -> None:
     links = {str(r.meta.get("email") or "").lower(): r for r in await notion_links.all_of(uid, PERSON_LINK)
              if r.meta.get("email")}
     suppressed = await personal_repo.suppressed_keys(uid)
-    suppressed |= await _gone_emails(uid, links)
-    await _scrub(ctx, suppressed)
+    gone = await _gone_emails(uid)
+    await _scrub(ctx, suppressed, gone)
     for m in sorted(found.values(), key=lambda x: x.start):
         if not ctx.left():
             return
-        await _sync_one(ctx, m, links, suppressed)
+        await _sync_one(ctx, m, links, suppressed, gone)
     if ctx.left():
         await notes.read_your_notes(ctx, "meetings", LINK)  # R12 / I7
     if ctx.left():

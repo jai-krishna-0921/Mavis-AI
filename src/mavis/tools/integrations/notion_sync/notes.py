@@ -37,10 +37,11 @@ def _after_heading(children: list[dict]) -> list[dict]:
 
 
 def _subject(kind: str, meta: dict) -> str:
-    """Who or what the page is about, from the link: a name, or a meeting title and date."""
+    """Who or what the page is about, from the link: a name, or "a meeting on <date>". A meeting title is
+    set by whoever sent the invite, so it never goes into text learned at the user's own trust."""
     if kind == "meeting":
-        title = " ".join(str(meta.get("title") or "").split())[:100]
-        return f"{title} ({str(meta.get('start') or '')[:10]})" if meta.get("start") else title
+        day = str(meta.get("start") or "")[:10]
+        return f"a meeting on {day}" if day else "a meeting"
     return " ".join(str(meta.get("name") or "").split())[:100]
 
 
@@ -81,7 +82,7 @@ async def read_your_notes(ctx: SyncCtx, db: str, kind: str) -> None:
         mine = [b for b in children if (b.get("last_edited_by") or {}).get("id") == owner and owner]
         theirs = [b for b in children if b not in mine]
         subject = _subject(kind, link.meta)
-        label = f"{subject} ({kind})" if subject else kind
+        label = subject if kind == "meeting" else (f"{subject} ({kind})" if subject else kind)
         await _learn(uid, link.page_id, label, page_text(mine), True)
         await _learn(uid, link.page_id, label, page_text(theirs), False)
         await notion_links.upsert(uid, kind, link.local_key, link.page_id,

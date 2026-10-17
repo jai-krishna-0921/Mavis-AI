@@ -207,3 +207,17 @@ async def test_i1_retry_without_a_template_looks_under_the_same_parent(fake, api
     homes = [p for p in fake.pages.values() if p["parent"].get("page_id") in (first, newer)
              and p["properties"]["title"]["title"][0]["text"]["content"] == "Mavis AI"]
     assert len(homes) == 1 and fake.pages[home.page_id]["parent"]["page_id"] == first
+
+
+async def test_r15_a_stored_parent_that_is_gone_falls_back_to_the_normal_choice(fake, api):
+    from mavis.tools.integrations.native.notion_api import NotionError
+
+    first = fake.add_page("First")["id"]
+    account = {"bot_user_id": "bot-0000"}
+    fake.script_lost("POST", r"/pages")
+    with pytest.raises(NotionError):
+        await ensure_home(api, UID, account)
+    fake.pages[first]["in_trash"] = True
+    other = fake.add_page("Other")["id"]
+    home = await ensure_home(api, UID, account)
+    assert isinstance(home, Home) and fake.pages[home.page_id]["parent"]["page_id"] == other
