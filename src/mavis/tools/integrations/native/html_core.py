@@ -105,103 +105,56 @@ def strip_comments(text: str) -> str:
     return "".join(out)
 
 
-_GLOBAL = ("inherit", "initial", "unset", "revert", "revert-layer")
-_LENGTH = r"(?:-?(?:\d+\.?\d*|\.\d+)(?:px|pt|em|rem|%|ex|ch|cm|mm|in|pc|q|vw|vh|vmin|vmax)?)"
-_DISPLAY = frozenset({
-    "none", "block", "inline", "inline-block", "flex", "inline-flex", "grid", "inline-grid", "table",
-    "inline-table", "table-row", "table-cell", "table-row-group", "table-header-group",
-    "table-footer-group", "table-column", "table-column-group", "table-caption", "list-item", "contents",
-    "flow", "flow-root", "ruby", "ruby-base", "ruby-text", "ruby-base-container", "ruby-text-container",
-    *_GLOBAL})
+_OPEN, _CLOSE = "([{", ")]}"
 
 
-def _keywords(*words: str) -> re.Pattern[str]:
-    return re.compile("^(?:" + "|".join(re.escape(w) for w in (*words, *_GLOBAL)) + f"|{_LENGTH})$")
-
-
-_FONT_SIZE = _keywords("xx-small", "x-small", "small", "medium", "large", "x-large", "xx-large",
-                       "xxx-large", "smaller", "larger", "math")
-_SIZE = _keywords("auto", "min-content", "max-content", "fit-content", "stretch")
-_MAX_SIZE = _keywords("none", "min-content", "max-content", "fit-content", "stretch")
-_LINE_HEIGHT = _keywords("normal")
-_OFFSET = _keywords("auto")
-_INDENT = re.compile(rf"^(?:{_LENGTH}(?: (?:each-line|hanging))*|(?:each-line|hanging)(?: {_LENGTH})?"
-                     rf"(?: (?:each-line|hanging))?|{'|'.join(_GLOBAL)})$")
-_OPACITY = re.compile(r"^(?:-?(?:\d+\.?\d*|\.\d+)%?|" + "|".join(_GLOBAL) + ")$")
-_COLOR_VALUE = re.compile(r"^(?:#[0-9a-f]{3,8}|(?:rgb|hsl)a?\([^()]*\)|[a-z]+)$")
-_FUNCTIONS = re.compile(r"^(?:none|auto|(?:[a-z-]+\(.*\)\s*)+(?:[a-z-]+)?|" + "|".join(_GLOBAL) + ")$")
-
-
-def _valid(name: str, value: str) -> bool:
-    """Would a browser accept `value` for `name`, for the properties the hide policy reads (strict, by
-    whitelist: a value this does not recognise is ignored, so an earlier declaration keeps applying)?"""
-    if name == "display":
-        return bool(value) and all(w in _DISPLAY for w in value.split()) and len(value.split()) <= 3
-    if name == "visibility":
-        return value in ("visible", "hidden", "collapse", *_GLOBAL)
-    if name == "opacity":
-        return bool(_OPACITY.match(value))
-    if name == "mso-hide":
-        return bool(re.fullmatch(r"[a-z-]+", value))
-    if name == "font-size":
-        return bool(_FONT_SIZE.match(value))
-    if name in ("width", "height"):
-        return bool(_SIZE.match(value))
-    if name in ("max-width", "max-height"):
-        return bool(_MAX_SIZE.match(value))
-    if name == "line-height":
-        return bool(_LINE_HEIGHT.match(value))
-    if name in ("left", "top", "right", "bottom", "margin-left", "margin-top"):
-        return bool(_OFFSET.match(value))
-    if name == "text-indent":
-        return bool(_INDENT.match(value))
-    if name in ("clip", "clip-path", "transform"):
-        return bool(_FUNCTIONS.match(value))
-    if name == "color":
-        return bool(_COLOR_VALUE.match(value)) or value in _GLOBAL
-    if name in ("background", "background-color", "background-image"):
-        return "var(" not in value and "env(" not in value
-    return True
-
-
-_READ = frozenset({"display", "visibility", "opacity", "mso-hide", "font-size", "width", "height",
-                   "max-width", "max-height", "line-height", "left", "top", "right", "bottom",
-                   "margin-left", "margin-top", "text-indent", "clip", "clip-path", "transform", "color",
-                   "background", "background-color", "background-image"})
+def _split_declarations(css: str) -> list[str]:
+    """Split a declaration block at the `;` that end declarations: not inside a string, after a backslash, or
+    inside (), [] or {} (a url, a var() or a function). An unterminated string or bracket runs to the end of
+    the block, as in a browser, so nothing after it is invented as a declaration."""
+    items: list[str] = []
+    start = depth = 0
+    quote = ""
+    i, n = 0, len(css)
+    while i < n:
+        ch = css[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch in _OPEN:
+            depth += 1
+        elif ch in _CLOSE:
+            depth = max(depth - 1, 0)
+        elif ch == ";" and depth == 0:
+            items.append(css[start:i])
+            start = i + 1
+        i += 1
+    items.append(css[start:])
+    return items
 
 
 def declarations(css: str) -> dict[str, str]:
-    """name -> lowercase value of one declaration block, as a browser's cascade resolves it for the
-    properties the hide policy reads: the winner is the last valid `!important` declaration, else the last
-    valid one; a value the whitelist does not recognise is ignored. A value with a CSS escape is decoded
-    exactly (no trimming of an escaped blank) and then judged the same way, but one that decodes to a hiding
-    value is trusted as valid (a hex escape of `none` hides in a browser). A block too long to inspect
-    cheaply is treated as hiding."""
+    """name -> lowercase value of one declaration block, with comments removed and CSS escapes decoded. A
+    property that any of its declarations hides stays hidden whatever a later one says: a browser would drop
+    an invalid later value or honour `!important`, and which applies is not worth guessing (validity is not
+    modelled; when in doubt the text is hidden). A block too long to inspect cheaply is treated as hiding."""
     if len(css) > MAX_DECLARATIONS:
         return {"display": "none"}
-    css = strip_comments(css)
-    plain: dict[str, str] = {}
-    last_important: dict[str, str] = {}
-    for item in css.split(";"):
-        name, sep, value = item.partition(":")
-        if not sep:
-            continue
-        name = _CSS_ESCAPE.sub(_unescape, name).strip().lower()
-        value = value.strip()
-        important = bool(_IMPORTANT.search(value))
-        if important:
-            value = _IMPORTANT.sub("", value)
-        escaped = "\\" in value
-        if escaped:
-            value = _CSS_ESCAPE.sub(_unescape, value)  # no strip: an escaped blank is part of the value
-        value = value.lower()
-        if name in _READ:
-            if not _valid(name, value) or value != value.strip():
+    out: dict[str, str] = {}
+    for item in _split_declarations(strip_comments(css)):
+        name, sep, value = _CSS_ESCAPE.sub(_unescape, item).partition(":")
+        if sep:
+            name = name.strip().lower()
+            value = _IMPORTANT.sub("", value.strip()).lower()
+            if name in out and name != "color" and style_hides({name: out[name]}, None):
                 continue
-            if escaped and not style_hides({name: value}, None):
-                continue  # an escaped value that does not hide is ignored: fail toward hiding
-        (last_important if important else plain)[name] = value
-    return {**plain, **last_important}
+            out[name] = value
+    return out
 
 
 def _px(value: str) -> float | None:
@@ -337,22 +290,33 @@ def _tag(node) -> str:  # noqa: ANN001 - a selectolax node
 def _breaks_out(svg) -> bool:  # noqa: ANN001
     """Does this svg or math element hold, in Lexbor's tree, an element that ends foreign content in a
     browser? Lexbor keeps a sup inside svg and math where the specification ends them at it, so what follows
-    nests differently from a browser's tree and hidden text could surface. Integration points (foreignObject,
-    desc, mi ...) legitimately hold HTML; nested svg and math are checked on their own."""
+    nests differently from a browser's tree and hidden text could surface. A sup counts wherever it sits (an
+    exhaustive search found chains through foreignObject, desc, annotation-xml and nested math whose
+    "integration point" is none in a browser). The other breakout names are handled by Lexbor itself and
+    count only outside the integration points, where HTML is legitimate. Nested svg and math are checked on
+    their own."""
     root_id = svg.mem_id
     points = _INTEGRATION.get(_tag(svg), frozenset())
+    exempt: list[bool] = []  # per open ancestor below the root: inside an integration point
     node = svg.child
     while node is not None:
         tag = _tag(node)
         descend = True
+        inside = bool(exempt and exempt[-1])
         if tag[0] not in "-!":
-            if tag in _BREAKOUT:
+            if tag == "sup":
                 return True
-            if tag == "font" and any(a in node.attributes for a in ("color", "face", "size")):
-                return True
-            if tag in _FOREIGN or tag in points:
+            if not inside:
+                if tag in _BREAKOUT:
+                    return True
+                if tag == "font" and any(a in node.attributes for a in ("color", "face", "size")):
+                    return True
+            if tag in _FOREIGN:
                 descend = False
+            elif tag in points:
+                inside = True
         if descend and node.child is not None:
+            exempt.append(inside)
             node = node.child
             continue
         while node is not None:
@@ -362,6 +326,7 @@ def _breaks_out(svg) -> bool:  # noqa: ANN001
             node = node.parent
             if node is None or node.mem_id == root_id:
                 return False
+            exempt.pop()
     return False
 
 
@@ -452,7 +417,12 @@ class _Walk:
                         self._emit("\n")  # a hidden block still separates what is around it
                 else:
                     self._open(tag)
-                    if node.child is not None:
+                    label = (node.attributes.get("label") or "").strip() if tag in _DROPDOWN else ""
+                    if label and tag == "optgroup":
+                        self._emit("\n" + label)
+                    elif label:  # a browser lists an option by its label and never shows its content
+                        self._emit(label)
+                    if node.child is not None and not (label and tag == "option"):
                         open_tags.append(tag)
                         bgs.append(bg)
                         node = node.child
@@ -491,7 +461,7 @@ def render(markup: str, limit: int, styles: bool) -> tuple[str, bool]:
 # written once the worker is ready. The worker ends when stdin closes.
 
 CPU_SECONDS = 4  # CPU time one request may use (the parent's wall-clock timeout is the first line)
-AS_LIMIT = 256 * 1024 * 1024  # address space, in bytes (an idle worker uses 50 MB, a 1 MB newsletter +40 MB)
+AS_LIMIT = 160 * 1024 * 1024  # address space: idle 50 MB, the worst legitimate 1 MB input peaks at 95 MB
 
 
 def _read_exact(stream, n: int) -> bytes:  # noqa: ANN001
@@ -511,6 +481,12 @@ def serve() -> None:
     import struct
     import sys
 
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))  # SIGXCPU or a crash must not leave a core file
+    try:  # under memory pressure this process dies first, never the application that started it
+        with open("/proc/self/oom_score_adj", "w") as f:
+            f.write("1000")
+    except OSError:
+        pass
     inp = sys.stdin.buffer
     out_fd = os.dup(1)
     os.dup2(2, 1)  # stray prints can never corrupt the reply stream

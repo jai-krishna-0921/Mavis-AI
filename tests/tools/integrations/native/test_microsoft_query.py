@@ -370,7 +370,7 @@ def test_raw_text_content_is_text_when_visible_and_plaintext_swallows_the_rest()
 def test_the_new_defang_rules_stay_linear():
     import time
 
-    from mavis.tools.integrations.native.graph_html import TIMEOUT_S
+    from mavis.tools.integrations.native.graph_html import timeout_s
     size = 400_000  # `<div/>` x 66k is 66k nested divs: quadratic in Lexbor, so it fails closed
     cases = ["<div " * (size // 5), "<div a=<b " * (size // 10), "<div/>" * (size // 6),
              "<textarea>" * (size // 10), "<textarea></textareax>" * (size // 22),
@@ -379,7 +379,7 @@ def test_the_new_defang_rules_stay_linear():
     for html in cases:
         start = time.perf_counter()
         html_to_text(html)
-        assert time.perf_counter() - start < TIMEOUT_S + 1.0, html[:20]
+        assert time.perf_counter() - start < timeout_s() + 1.0, html[:20]
 
 
 def test_random_hidden_fragments_never_leak_their_markers():

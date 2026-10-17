@@ -279,15 +279,15 @@ async def test_reading_a_long_thread_says_it_is_cut():
     assert len(r.data["messages"]) == 200 and "only the first 200" in r.data["notes"][0]
 
 
-async def test_large_bodies_are_converted_off_the_event_loop(monkeypatch):
+async def test_bodies_are_converted_off_the_event_loop_on_the_parse_executor(monkeypatch):
     from mavis.tools.integrations.native import graph_mail
     seen = []
-    real = graph_mail.asyncio.to_thread
+    real = graph_mail.offload
 
     async def spy(fn, *a, **k):
         seen.append(fn)
         return await real(fn, *a, **k)
-    monkeypatch.setattr(graph_mail.asyncio, "to_thread", spy)
+    monkeypatch.setattr(graph_mail, "offload", spy)
     big = "<p>" + "word " * 20000 + "</p>"
     g = with_folders(FakeGraph()).on("GET", r"/v1.0/me/messages/m1$", httpx.Response(
         200, json=graph_message("m1", html=big)))

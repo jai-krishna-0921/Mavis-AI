@@ -192,6 +192,10 @@ class Settings(BaseSettings):
     workspace_poll_minutes: int = 30  # Tasks due/overdue and Drive shared-with-me safety-net polls
 
     # --- orchestration (Phase 4) ----------------------------------------------
+    # HTML mail bodies are parsed in a worker process: wall clock per parse, and the total one tool call may
+    # spend before the remaining bodies read as the "too complex" notice (raise on a slow or throttled box)
+    html_parse_timeout_s: float = Field(2.0, ge=0.1, le=30)
+    html_parse_budget_s: float = Field(4.0, ge=0.1, le=120)
     task_timeout_s: float = 480
     task_max_concurrency: int = 1
     # One "still on it" line, and only for a user who is chatting meanwhile (task_delivery.on_progress):

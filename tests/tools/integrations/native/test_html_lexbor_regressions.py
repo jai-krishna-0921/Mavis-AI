@@ -135,10 +135,10 @@ def test_hidden_list_items_then_visible_text(which):
     "<select><option title=\"</select>\"><col>SECRET",
 ])
 def test_select_oddities_are_parsed_like_the_current_specification(which, html):
-    # the select guard is gone: Lexbor (current WHATWG) decides where these end the select, and what lands
-    # outside it is visible text (older browsers may differ; see the A6 report)
+    # the select guard is gone: Lexbor (current WHATWG) closes the select at these tags and what lands outside
+    # it is visible text, as in Chrome 151 and Firefox 156 (older engines keep it inside the hidden select)
     text = SANITIZERS[which]("<p>seen</p>" + html)
-    assert "seen" in text
+    assert "seen" in text and "SECRET" in text
 
 
 def test_sup_leaves_svg_like_a_browser_so_its_style_still_applies():

@@ -22,7 +22,11 @@ from mavis.domain import timeutil
 from mavis.domain.errors import FailureKind
 from mavis.tools.integrations.native import gmail_mime
 from mavis.tools.integrations.native.graph import GRAPH, MAX_PAGES, GraphError, seg, strip_ms, with_ms
-from mavis.tools.integrations.native.graph_html import html_to_text, html_to_text_limited  # noqa: F401
+from mavis.tools.integrations.native.graph_html import (  # noqa: F401
+    html_to_text,
+    html_to_text_limited,
+    offload,
+)
 from mavis.tools.integrations.normalize import to_datetime
 
 BODY_CAP = gmail_mime.BODY_CAP
@@ -314,7 +318,10 @@ def _body(raw: dict, cap: int) -> tuple[str, bool]:
 def map_message(raw: dict, folders: Mapping[str, str], cap: int) -> dict[str, Any]:
     text, truncated = _body(raw, cap)
     labels = _labels(raw, folders)
-    snippet = str(raw.get("bodyPreview") or "")
+    body = raw.get("body") if isinstance(raw.get("body"), dict) else {}
+    # bodyPreview is built from the body text including hidden preheaders: with an HTML body it is neither a
+    # fallback for an empty (fully hidden or fail-closed) body nor passed along a parsed one
+    snippet = "" if str(body.get("contentType", "")).lower() == "html" else str(raw.get("bodyPreview") or "")
     when = raw.get("receivedDateTime") or raw.get("sentDateTime")
     return {
         "messageId": with_ms(str(raw.get("id") or "")),
@@ -417,7 +424,7 @@ class MailActions:
         def run() -> list[dict]:
             return [map_message(m, folders, cap) for m in items]
 
-        return await asyncio.to_thread(run)
+        return await offload(run)
 
     async def _pages(self, uid: int, url: str, params: dict, limit: int) -> tuple[list[dict], Any, Any]:
         return await self.graph.pages(uid, url, params, limit)

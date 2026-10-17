@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import contextlib
+import contextvars
 import os
 import queue
 import select
@@ -28,8 +30,14 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
+import structlog
+
+from mavis.config import get_settings
 from mavis.tools.integrations.native import html_core
 from mavis.tools.integrations.native.html_core import (  # noqa: F401 - re-exported for callers and tests
     _SKIP,
@@ -42,16 +50,42 @@ from mavis.tools.integrations.native.html_core import (  # noqa: F401 - re-expor
 )
 
 WORKERS = 2
-TIMEOUT_S = 2.0  # wall clock for one request (a 1 MB newsletter parses in about a tenth of it)
+TIMEOUT_S: float | None = None  # wall clock per request; None: the html_parse_timeout_s setting (2.0)
+PARSE_BUDGET_S: float | None = None  # per tool call (see parse_budget); None: html_parse_budget_s (4.0)
 START_TIMEOUT_S = 20.0  # a worker importing selectolax; not part of a request's timeout
 QUEUE_TIMEOUT_S = 30.0  # waiting for a free worker behind other requests
 RECYCLE_AFTER = 2000  # requests per worker before it is replaced (bounds any slow leak)
 _SCRIPT = str(Path(html_core.__file__).resolve())
+_ARGV = [sys.executable, "-I", _SCRIPT]
 FAILED = (NOTICE, True)
+log = structlog.get_logger(__name__)
+
+
+def timeout_s() -> float:
+    return TIMEOUT_S if TIMEOUT_S is not None else get_settings().html_parse_timeout_s
+
+
+def budget_s() -> float:
+    return PARSE_BUDGET_S if PARSE_BUDGET_S is not None else get_settings().html_parse_budget_s
 
 
 class _Failed(Exception):
-    pass
+    """A request that could not be answered; `reason` is what is logged (never any content)."""
+
+    def __init__(self, reason: str = "failed") -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _ready(fd: int, event: int, deadline: float) -> bool:
+    """Wait until `fd` is readable or writable (poll: select() fails for descriptors of 1024 and up). A
+    hang-up or error also counts: the next read or write then reports the death."""
+    wait = deadline - time.monotonic()
+    if wait <= 0:
+        return False
+    poller = select.poll()
+    poller.register(fd, event)
+    return bool(poller.poll(wait * 1000))
 
 
 class _Worker:
@@ -60,14 +94,14 @@ class _Worker:
     def __init__(self) -> None:
         self.calls = 0
         self.proc = subprocess.Popen(  # noqa: S603 - our own interpreter and file
-            [sys.executable, "-I", _SCRIPT], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            _ARGV, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, close_fds=True, cwd="/")
         self._in, self._out = self.proc.stdin.fileno(), self.proc.stdout.fileno()  # type: ignore[union-attr]
         os.set_blocking(self._in, False)
         os.set_blocking(self._out, False)
         try:
             if self._read(1, time.monotonic() + START_TIMEOUT_S) != b"R":
-                raise _Failed
+                raise _Failed("start_failed")
         except BaseException:
             self.kill()
             raise
@@ -75,15 +109,14 @@ class _Worker:
     def _read(self, n: int, deadline: float) -> bytes:
         chunks: list[bytes] = []
         while n > 0:
-            wait = deadline - time.monotonic()
-            if wait <= 0 or not select.select([self._out], [], [], wait)[0]:
-                raise _Failed
+            if not _ready(self._out, select.POLLIN, deadline):
+                raise _Failed("timeout")
             try:
                 chunk = os.read(self._out, min(n, 1 << 20))
             except BlockingIOError:
                 continue
             if not chunk:
-                raise _Failed  # the worker died
+                raise _Failed("worker_died")
             chunks.append(chunk)
             n -= len(chunk)
         return b"".join(chunks)
@@ -91,25 +124,24 @@ class _Worker:
     def _write(self, data: bytes, deadline: float) -> None:
         view = memoryview(data)
         while view:
-            wait = deadline - time.monotonic()
-            if wait <= 0 or not select.select([], [self._in], [], wait)[1]:
-                raise _Failed
+            if not _ready(self._in, select.POLLOUT, deadline):
+                raise _Failed("timeout")
             try:
                 view = view[os.write(self._in, view[:1 << 16]):]
             except BlockingIOError:
                 continue
             except BrokenPipeError as exc:
-                raise _Failed from exc
+                raise _Failed("worker_died") from exc
 
     def call(self, markup: str, limit: int, styles: bool) -> tuple[str, bool]:
-        deadline = time.monotonic() + TIMEOUT_S
+        deadline = time.monotonic() + timeout_s()
         data = markup.encode("utf-8", "replace")
         self._write(struct.pack(">BII", int(styles), min(limit, 2**32 - 1), len(data)) + data, deadline)
         status, size = struct.unpack(">BI", self._read(5, deadline))
         text = self._read(size, deadline).decode("utf-8", "replace")
         self.calls += 1
         if status == 3:  # a memory error or other fault: the process state is not trusted
-            raise _Failed
+            raise _Failed("worker_error")
         return text, status != 0
 
     def kill(self) -> None:
@@ -128,6 +160,12 @@ class _Worker:
             pass
 
 
+def _failed(reason: str, markup: str) -> tuple[str, bool]:
+    """The fail-closed answer; the reason and the size are logged, never the content."""
+    log.warning("html_parse_failed_closed", reason=reason, chars=len(markup))
+    return FAILED
+
+
 class _Pool:
     """At most WORKERS workers, created on demand. A slot is `None` until a worker is started for it."""
 
@@ -142,7 +180,7 @@ class _Pool:
         try:
             worker = self._slots.get(timeout=QUEUE_TIMEOUT_S)
         except queue.Empty:
-            return FAILED
+            return _failed("queue_timeout", markup)
         keep: _Worker | None = None
         try:
             if worker is not None and worker.proc.poll() is not None:  # died while idle
@@ -151,14 +189,21 @@ class _Pool:
                 worker.kill()
                 worker = None
             if worker is None:
-                worker = _Worker()
+                try:
+                    worker = _Worker()
+                except (_Failed, OSError):
+                    return _failed("start_failed", markup)
                 with self._lock:
                     self._live.add(worker)
             result = worker.call(markup, limit, styles)
             keep = worker
+            if result == FAILED:
+                _failed("too_complex", markup)
             return result
-        except (_Failed, OSError, ValueError, struct.error):
-            return FAILED
+        except _Failed as exc:
+            return _failed(exc.reason, markup)
+        except (OSError, ValueError, struct.error):
+            return _failed("protocol_error", markup)
         finally:
             if worker is not None and (keep is None or keep.calls >= RECYCLE_AFTER):
                 with self._lock:
@@ -178,6 +223,28 @@ _pool = _Pool()
 atexit.register(_pool.close)
 
 
+class _Budget:
+    """The parse time one tool call (one list, one thread) may spend in all."""
+
+    def __init__(self) -> None:
+        self.left = budget_s()
+
+
+_budget: contextvars.ContextVar[_Budget | None] = contextvars.ContextVar("html_parse_budget", default=None)
+
+
+@contextlib.contextmanager
+def parse_budget() -> Iterator[_Budget]:
+    """Within this scope the parses of one call share a time budget: once it is spent every further body
+    gets the notice without a parse, so a list of hostile mails costs the budget plus one timeout."""
+    budget = _Budget()
+    token = _budget.set(budget)
+    try:
+        yield budget
+    finally:
+        _budget.reset(token)
+
+
 def html_to_text_limited(markup: str, limit: int, *, styles: bool = True) -> tuple[str, bool]:
     """(text, cut): `cut` is True when the text hit `limit`, a browser's tree is known to differ from ours
     past some point, or the message could not be read safely (then the text is NOTICE). `styles=False` hides
@@ -185,17 +252,41 @@ def html_to_text_limited(markup: str, limit: int, *, styles: bool = True) -> tup
     if not markup.strip():
         return "", False
     if len(markup) > MAX_HTML:
-        return FAILED
-    return _pool.run(markup, limit, styles)
+        return _failed("too_large", markup)
+    budget = _budget.get()
+    if budget is None:
+        return _pool.run(markup, limit, styles)
+    if budget.left <= 0:
+        return _failed("budget_spent", markup)
+    started = time.monotonic()
+    try:
+        return _pool.run(markup, limit, styles)
+    finally:
+        budget.left -= time.monotonic() - started
 
 
 def html_to_text(markup: str, limit: int = MAX_HTML) -> str:
     return html_to_text_limited(markup, limit)[0]
 
 
+# Parses wait on a worker process, so async code runs them on this small executor of their own: a hostile
+# mail can hold a thread for the timeout, and the default executor is shared with embeddings, S3 and webhooks.
+_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="html-parse")
+atexit.register(_executor.shutdown, wait=False, cancel_futures=True)
+
+
+async def offload(fn: Callable[..., Any], *args: Any) -> Any:
+    """Run `fn(*args)` (which may parse any number of bodies) off the event loop, under one parse budget."""
+    def run() -> Any:
+        with parse_budget():
+            return fn(*args)
+
+    return await asyncio.get_running_loop().run_in_executor(_executor, run)
+
+
 async def ahtml_to_text_limited(markup: str, limit: int, *, styles: bool = True) -> tuple[str, bool]:
-    return await asyncio.to_thread(html_to_text_limited, markup, limit, styles=styles)
+    return await offload(lambda: html_to_text_limited(markup, limit, styles=styles))
 
 
 async def ahtml_to_text(markup: str, limit: int = MAX_HTML) -> str:
-    return await asyncio.to_thread(html_to_text, markup, limit)
+    return await offload(html_to_text, markup, limit)

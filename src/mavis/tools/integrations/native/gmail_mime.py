@@ -47,6 +47,15 @@ def html_to_text(markup: str, cuts: list[bool] | None = None) -> str:
     return text
 
 
+def has_html(part: dict) -> bool:
+    """Does the message carry a text/html part (attachments aside)?"""
+    if not isinstance(part, dict) or _is_attachment(part):
+        return False
+    if str(part.get("mimeType") or "").lower() == "text/html":
+        return True
+    return any(has_html(c) for c in part.get("parts") or [])
+
+
 def b64url_decode(data: str) -> bytes:
     try:
         return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))

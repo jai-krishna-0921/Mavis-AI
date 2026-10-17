@@ -4,6 +4,7 @@ a hang is not), a dead or slow worker fails closed and is replaced, the cascade 
 breakout tag fails closed on the DOM, a select shows its option labels, and the event loop stays free."""
 
 import asyncio
+import html
 import json
 import os
 import signal
@@ -82,7 +83,8 @@ _RUNNER = _SHAPES + textwrap.dedent('''
             rows[name] = {"graph": a.result(), "gmail": b.result(), "size": len(html)}
     out = {name: {k: (v if k == "size" else [round(v[0], 2), v[1], v[2][:80], len(v[2])])
                   for k, v in row.items()} for name, row in rows.items()}
-    out["_rss_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+    hwm = [l for l in open("/proc/self/status") if l.startswith("VmHWM")][0]
+    out["_rss_mb"] = int(hwm.split()[1]) // 1024  # VmHWM is per address space (ru_maxrss survives an exec)
     print(json.dumps(out))
 ''')
 
@@ -96,7 +98,7 @@ SLACK_S = 0.6 + 1.5  # the runner shortens the timeout to 0.6 s
 def shape_rows() -> dict:
     p = subprocess.run([sys.executable, "-c", _RUNNER], capture_output=True, text=True, timeout=300,
                        check=True)
-    return json.loads(p.stdout)
+    return json.loads(p.stdout.strip().splitlines()[-1])
 
 
 def test_the_shape_list_is_not_empty():
@@ -113,7 +115,7 @@ def test_pathological_shapes_finish_within_the_timeout_on_both_paths(shape_rows,
 
 
 def test_the_callers_memory_stays_flat_whatever_the_shapes_cost(shape_rows):
-    assert shape_rows["_rss_mb"] < 400, shape_rows["_rss_mb"]
+    assert shape_rows["_rss_mb"] < 200, shape_rows["_rss_mb"]  # measured about 115
 
 
 def test_a_message_over_the_input_cap_fails_closed_without_a_parse(shape_rows):
@@ -150,7 +152,11 @@ def test_a_timeout_fails_closed_and_the_worker_is_replaced(monkeypatch):
     assert graph_html.html_to_text_limited(slow, 10**6) == (NOTICE, True)
     monkeypatch.undo()
     assert graph_html.html_to_text("<p>after</p>") == "after"
-    assert not before & {w.proc.pid for w in _workers()} or len(_workers()) <= graph_html.WORKERS
+    after = {w.proc.pid for w in _workers()}
+    assert len(after) <= graph_html.WORKERS
+    for pid in before - after:  # the one that timed out is gone for good
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
 
 
 def test_a_killed_worker_fails_closed_once_and_the_next_call_works():
@@ -162,10 +168,175 @@ def test_a_killed_worker_fails_closed_once_and_the_next_call_works():
     assert graph_html.html_to_text("<p>fine</p>") == "fine"
 
 
-def test_an_exception_in_the_parse_fails_closed(monkeypatch):
-    monkeypatch.setattr(graph_html, "_pool", graph_html._Pool())
-    assert graph_html.html_to_text_limited("<p>ok</p>", 10**6) == ("ok", False)
-    graph_html._pool.close()
+FAKE_WORKER = textwrap.dedent('''
+    import os, struct, sys
+    mode = sys.argv[1]
+    os.write(1, b"R")
+    inp = sys.stdin.buffer
+    while True:
+        head = inp.read(9)
+        if len(head) < 9:
+            break
+        flags, limit, size = struct.unpack(">BII", head)
+        inp.read(size)
+        if mode == "status3":
+            os.write(1, struct.pack(">BI", 3, 2) + b"zz")
+        elif mode == "die_mid_reply":
+            os.write(1, struct.pack(">BI", 0, 100) + b"abc")
+            os._exit(0)
+        elif mode == "hang":
+            import time
+            time.sleep(60)
+        elif mode == "garbage":
+            os.write(1, b"\\xff")
+            os._exit(0)
+''')
+
+
+@pytest.fixture
+def fake_pool(monkeypatch, tmp_path):
+    """A fresh pool whose workers run a scripted fake: fake_pool("status3") ..."""
+    script = tmp_path / "fake_worker.py"
+    script.write_text(FAKE_WORKER)
+    pools = []
+
+    def make(mode: str) -> graph_html._Pool:
+        monkeypatch.setattr(graph_html, "_ARGV", [sys.executable, "-I", str(script), mode])
+        pool = graph_html._Pool()
+        pools.append(pool)
+        return pool
+
+    yield make
+    for pool in pools:
+        pool.close()
+
+
+@pytest.mark.parametrize("mode", ["status3", "die_mid_reply", "garbage"])
+def test_a_failed_status_a_death_mid_reply_or_garbage_fails_closed(fake_pool, mode):
+    pool = fake_pool(mode)
+    assert pool.run("<p>x</p>", 10**6, True) == (NOTICE, True)
+    assert pool.run("<p>x</p>", 10**6, True) == (NOTICE, True)  # and the replacement fails the same way
+    assert not pool._live  # a bad worker is killed, never kept
+
+
+def test_a_hung_worker_times_out_and_is_killed(fake_pool, monkeypatch):
+    pool = fake_pool("hang")
+    monkeypatch.setattr(graph_html, "TIMEOUT_S", 0.3)
+    start = time.perf_counter()
+    assert pool.run("<p>x</p>", 10**6, True) == (NOTICE, True)
+    assert time.perf_counter() - start < 2.0
+    assert not pool._live
+
+
+def test_waiting_too_long_for_a_free_worker_fails_closed(monkeypatch):
+    pool = graph_html._Pool()
+    monkeypatch.setattr(graph_html, "QUEUE_TIMEOUT_S", 0.2)
+    taken = [pool._slots.get() for _ in range(graph_html.WORKERS)]
+    start = time.perf_counter()
+    assert pool.run("<p>x</p>", 10**6, True) == (NOTICE, True)
+    assert 0.15 < time.perf_counter() - start < 2.0
+    assert len(taken) == graph_html.WORKERS
+
+
+def test_a_worker_that_cannot_start_fails_closed_and_logs(monkeypatch):
+    import structlog
+
+    monkeypatch.setattr(graph_html, "_ARGV", [sys.executable, "-I", "/nonexistent/worker.py"])
+    pool = graph_html._Pool()
+    with structlog.testing.capture_logs() as logs:
+        assert pool.run("<p>SECRET-BODY</p>", 10**6, True) == (NOTICE, True)
+    assert logs and logs[0]["log_level"] == "warning"
+    assert "SECRET-BODY" not in str(logs)  # the reason is logged, never the content
+    pool.close()
+
+
+def test_a_timeout_is_logged_without_content(monkeypatch):
+    import structlog
+
+    monkeypatch.setattr(graph_html, "TIMEOUT_S", 0.001)
+    with structlog.testing.capture_logs() as logs:
+        graph_html.html_to_text_limited("<table>" + "<tr><td>SECRETBODY" * 15_000, 10**6)
+    assert any(x.get("reason") == "timeout" for x in logs)
+    assert "SECRETBODY" not in str(logs)
+
+
+def test_descriptors_above_1024_still_work():
+    graph_html.html_to_text("<p>warm</p>")
+    fds = []
+    try:
+        for _ in range(1100):
+            fds.append(os.open("/dev/null", os.O_RDONLY))
+    except OSError:
+        pytest.skip("descriptor limit too low")
+    try:
+        assert graph_html.html_to_text("<p>high fds</p>") == "high fds"
+        assert max(fds) >= 1024
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def test_the_timeout_and_budget_are_settings(monkeypatch):
+    from mavis.config import get_settings
+
+    s = get_settings()
+    assert s.html_parse_timeout_s == 2.0 and s.html_parse_budget_s == 4.0
+    monkeypatch.setattr(graph_html, "TIMEOUT_S", None)
+    monkeypatch.setattr(s, "html_parse_timeout_s", 0.7)
+    assert graph_html.timeout_s() == 0.7
+
+
+def test_a_worker_is_first_to_die_under_memory_pressure_and_cannot_dump_core():
+    graph_html.html_to_text("<p>warm</p>")
+    pid = _workers()[0].proc.pid
+    assert open(f"/proc/{pid}/oom_score_adj").read().strip() == "1000"
+    limits = {x[:25].strip(): x[25:].split() for x in open(f"/proc/{pid}/limits").read().splitlines()}
+    assert limits["Max core file size"][:2] == ["0", "0"]
+    assert int(limits["Max address space"][0]) <= 170 * 1024 * 1024
+
+
+def test_a_parse_budget_gives_the_rest_of_a_list_the_notice(monkeypatch):
+    monkeypatch.setattr(graph_html, "TIMEOUT_S", 0.3)
+    monkeypatch.setattr(graph_html, "PARSE_BUDGET_S", 0.8)
+    slow = "<svg>" + "<td>" * 30_000 + "</q>" * 30_000
+
+    start = time.perf_counter()
+    with graph_html.parse_budget():
+        out = [graph_html.html_to_text_limited(h, 10**6) for h in ["<p>legit</p>"] + [slow] * 5]
+    elapsed = time.perf_counter() - start
+    assert out[0] == ("legit", False)
+    assert all(r == (NOTICE, True) for r in out[1:])
+    assert elapsed < 0.8 + 0.3 + 0.5, elapsed  # the budget plus one last timeout, not five timeouts
+
+
+def test_nothing_is_parsed_once_the_budget_is_spent(monkeypatch):
+    monkeypatch.setattr(graph_html, "PARSE_BUDGET_S", 0.0)
+    with graph_html.parse_budget():
+        assert graph_html.html_to_text_limited("<p>x</p>", 10**6) == (NOTICE, True)
+    assert graph_html.html_to_text("<p>x</p>") == "x"  # no budget outside a scope
+
+
+def test_offloaded_parses_run_on_their_own_executor():
+    import threading
+
+    async def main():
+        name = await graph_html.offload(lambda: threading.current_thread().name)
+        got = await graph_html.offload(
+            lambda: [graph_html.html_to_text_limited("<p>a</p>", 10**6) for _ in range(3)])
+        return name, got
+
+    name, got = asyncio.run(main())
+    assert name.startswith("html-parse") and got == [("a", False)] * 3
+
+
+def test_an_oserror_in_the_pipe_fails_closed(monkeypatch):
+    def boom(self, markup, limit, styles):
+        raise OSError("pipe gone")
+
+    monkeypatch.setattr(graph_html._Worker, "call", boom)
+    pool = graph_html._Pool()
+    assert pool.run("<p>ok</p>", 10**6, True) == (NOTICE, True)
+    pool.close()
 
 
 def test_many_threads_share_the_two_workers():
@@ -209,57 +380,76 @@ def test_the_loop_stays_responsive_while_a_slow_parse_runs(monkeypatch):
     assert asyncio.run(main()) < 0.2
 
 
-# --- cascade --------------------------------------------------------------------------------------------
+# --- cascade ---------------------------------------------------------------------------------------------
+# A property hides when ANY of its declarations has a hiding value (escapes decoded, !important irrelevant).
+# CSS validity is not modelled: when in doubt the text is hidden.
 
 
 def _style(css: str) -> str:
-    return graph_html.html_to_text(f'<p>A</p><p style="{css}">SHOWN</p><p>B</p>')
+    return graph_html.html_to_text(f'<p>A</p><p style="{html.escape(css)}">SHOWN</p><p>B</p>')
 
 
-@pytest.mark.parametrize("css", [
+HIDING = [
     "font-size:0;line-height:0;font-size:14px;line-height:20px",
     "opacity:0;opacity:1",
     "max-height:0;overflow:hidden;max-height:none",
     "display:none;display:block !important",
     "display:none; display : block ! important",
     "visibility:hidden;visibility:visible",
+    "visibility:hidden;visibility:xyz",
     "height:0;height:auto",
     "text-indent:-9999px;text-indent:0",
     "display:none;display:flex",
-])
-def test_a_later_valid_declaration_overrides_an_earlier_hiding_one(css):
-    assert "SHOWN" in _style(css)
-
-
-@pytest.mark.parametrize("css", [
-    "display:block !important;display:none",   # important wins over a later plain declaration, shown
-])
-def test_important_wins_over_a_later_plain_declaration(css):
-    assert "SHOWN" in _style(css)
-
-
-@pytest.mark.parametrize("css", [
     "display:none !important;display:block",
-    "display:none;display:block\\9",
+    "display:none !IMPORTANT ;display:inline",
     "display:none;display:blck",
+    "display:none;display:block\\9",
     "display:none;display:var(--x)",
-    "display:none;display:\\62 lock",  # an escaped value: judged strictly, hiding stays
     "display:\\6e one",
-    "display:none;display:block\\0",
+    "display:none !imp\\ortant;display:block",
+    "display:none !\\69mportant;display:block",
+    "display:none;display:block inline",
+    "display:none;display:inherit block",
+    "opacity:0;opacity:1.",
+    "font-size:0;font-size:14.px",
+    "font-size:0;font-size:14",
+    "transform:scale(0);transform:foo(1)",
+    'display:none;font-family:"a;display:block;b"',
+    "display:none;font-family:'x;display:block;'",
+    "display:none;background:url(x;display:block;)",
+    "display:none;width:var(--a;display:block;x)",
+    "display:none;font-family:a\\;display:block",
     "mso-hide:all",
-    "font-size:0;font-size:1.2foo",
-    "opacity:0;opacity:calc(1)",
     "display:none",
     "width:0px",
-])
-def test_invalid_or_losing_later_declarations_keep_the_text_hidden(css):
+]
+
+
+@pytest.mark.parametrize("css", HIDING)
+def test_any_hiding_declaration_of_a_property_hides_the_text(css):
     assert "SHOWN" not in _style(css)
 
 
+@pytest.mark.parametrize("css", [
+    "display:block;color:red",
+    "display:inline;display:block",
+    'font-family:"a;display:none;b"',            # a `;` inside a string is no declaration
+    "font-family:'x;display:none;'",
+    "background:url(x;display:none;)",
+    "width:var(--a;display:none;x)",
+    "content:\";display:none;\"",
+    "font-family:a\\;display:none",              # an escaped `;` is no declaration
+    "color:#333;font-size:14px;line-height:1.4",
+])
+def test_a_hiding_declaration_inside_a_string_or_block_is_not_invented(css):
+    assert "SHOWN" in _style(css)
+
+
 def test_a_style_rule_follows_the_same_cascade():
-    html = "<style>.t{font-size:0;font-size:16px}.h{display:none;display:bogus}</style>"
-    out = graph_html.html_to_text(html + '<p class="t">SEEN</p><p class="h">GONE</p>')
-    assert "SEEN" in out and "GONE" not in out
+    css = ("<style>.t{font-size:0;font-size:16px}.h{display:none;display:bogus}"
+           ".s{content:\";display:none;\"}</style>")
+    out = graph_html.html_to_text(css + '<p class="t">GONE1</p><p class="h">GONE</p><p class="s">SEEN</p>')
+    assert "SEEN" in out and "GONE" not in out and "GONE1" not in out
 
 
 def test_the_style_budget_fails_closed():
@@ -318,7 +508,7 @@ def test_svg_with_html_in_foreignobject_is_not_a_breakout(which):
 def test_a_dropdown_shows_its_option_labels_one_per_line(which):
     html = ("<p>Pick one</p><select><option>Red<option>Green<optgroup label=x><option>Blue</select>"
             "<p>Thanks</p>")
-    assert SANITIZERS[which](html) == "Pick one\n\nRed\nGreen\nBlue\n\nThanks"
+    assert SANITIZERS[which](html) == "Pick one\n\nRed\nGreen\nx\nBlue\n\nThanks"
 
 
 @pytest.mark.parametrize("which", list(SANITIZERS))
@@ -334,3 +524,41 @@ def test_a_hidden_ancestor_still_hides_a_select():
 
 def test_a_hidden_option_is_not_shown():
     assert "GONE" not in graph_html.html_to_text('<select><option hidden>GONE<option>Kept</select>')
+
+
+# --- round 7: sup under any svg/math chain, option labels ------------------------------------------------
+
+MIDS = ["<svg>", "<math>", "<g>", "<mi>", "<mtext>", "<annotation-xml>",
+        "<annotation-xml encoding=text/html>", "<foreignObject>", "<desc>", "<title>", "<text>", "<mglyph>"]
+
+
+def _chains():
+    import itertools
+
+    for depth in range(3):
+        for mids in itertools.product(MIDS, repeat=depth):
+            for root in ("<svg>", "<math>"):
+                yield root + "".join(mids)
+
+
+@pytest.mark.parametrize("tail", ["<sup hidden><i>SECRET", "<sup style=display:none><p>SECRET"])
+def test_a_sup_under_any_svg_or_math_chain_leaks_nothing(tail):
+    """The reviewer's exhaustive search (depth 2 or less): a browser hides all of these, integration points
+    included (44 shapes leaked before the exemption was dropped for sup)."""
+    leaks = [c for c in _chains() if "SECRET" in graph_html.html_to_text(f"<p>A</p>{c}{tail}")]
+    assert not leaks, leaks[:3]
+
+
+def test_other_html_inside_foreignobject_still_reads():
+    html = "<svg><foreignObject><div>x</div></foreignObject></svg><p>after</p>"
+    assert "after" in graph_html.html_to_text(html)
+
+
+@pytest.mark.parametrize("which", list(SANITIZERS))
+def test_an_option_with_a_label_shows_the_label_and_not_its_content(which):
+    text = SANITIZERS[which]("<select><option label=Choose>SECRET</option><option>Plain</option></select>")
+    assert "Choose" in text and "Plain" in text and "SECRET" not in text
+
+
+def test_an_optgroup_label_is_shown():
+    assert "Fruit" in graph_html.html_to_text('<select><optgroup label="Fruit"><option>Fig</select>')

@@ -37,9 +37,10 @@ HTML_TAGS = [
 # Lexbor leaves a sup inside is cut from there on, checked on the DOM.
 STALE_IN_HTML5LIB = {"select", "search", "keygen", "summary", "dialog", "rb", "rtc", "dd", "dt", "hgroup",
                      "figcaption", "main"}
-# No HTML integration points (desc, foreignObject, annotation-xml): html5lib differs from the specification.
+# Integration points (desc, foreignObject, title, annotation-xml and mi/mo/mn/ms/mtext) are in since round 7:
+# a sup under them is cut like any other, and the differential shows where html5lib disagrees.
 FOREIGN_TAGS = ["svg", "math", "g", "path", "circle", "text", "mi", "mo", "mn", "ms", "mtext", "mglyph",
-                "malignmark"]
+                "malignmark", "annotation-xml", "foreignObject", "desc", "title"]
 # Weighted toward the names that matter to nesting, so that tables, lists and formatting meet often.
 COMMON = ["div", "span", "p", "b", "i", "a", "font", "table", "tr", "td", "th", "ul", "ol", "li", "button",
           "select", "object", "caption", "noscript", "em", "h1", "h2", "h3", "blockquote", "form",
@@ -253,7 +254,7 @@ def test_well_formed_documents_leak_nothing_and_keep_every_visible_marker(which)
 
 # --- round 6: sup inside svg/math (Lexbor keeps it there, browsers do not) and dropdowns -----------------
 SUP_TAGS = ["svg", "math", "sup", "sup", "sup", "span", "div", "p", "b", "i", "g", "mi", "mtext", "var",
-            "table", "td", "font", "a"]
+            "table", "td", "font", "a", "annotation-xml", "foreignObject", "desc", "title"]
 SUP_HIDERS = ["hidden", 'style="display:none"']
 
 
@@ -287,7 +288,7 @@ def test_sup_in_svg_and_math_leaks_nothing(which):
         bad = [m for m in hidden if m in text]
         if bad:
             leaks.append((bad, html))
-    assert with_sup > 500
+    assert with_sup > 300
     assert not leaks, f"{len(leaks)} leaks, first: {leaks[0]}"
 
 

@@ -36,6 +36,7 @@ from mavis.tools.integrations.composio_map import input_option
 from mavis.tools.integrations.native import gmail_mime
 from mavis.tools.integrations.native.base import NativeProvider, ReauthRequired, TokenSource
 from mavis.tools.integrations.native.docs_markdown import MAX_MARKDOWN_CHARS, markdown_requests
+from mavis.tools.integrations.native.graph_html import offload
 from mavis.tools.integrations.native.office_text import OFFICE_MIMES, UnreadableFile, office_text
 from mavis.tools.integrations.native.slides_outline import parse_outline, slide_requests
 
@@ -645,7 +646,9 @@ class GoogleExecutor:
     def _message(raw: dict, cap: int) -> dict[str, Any]:
         payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
         text, truncated = gmail_mime.body_text(payload, cap)
-        snippet = html.unescape(str(raw.get("snippet") or ""))
+        # a snippet is built from the body text including hidden preheaders: with an HTML part it is neither
+        # a fallback for an empty (fully hidden or fail-closed) body nor passed along a parsed one
+        snippet = "" if gmail_mime.has_html(payload) else html.unescape(str(raw.get("snippet") or ""))
         head = lambda name: gmail_mime.header(payload, name)  # noqa: E731
         return {
             "messageId": raw.get("id", ""), "threadId": raw.get("threadId", ""),
@@ -678,7 +681,7 @@ class GoogleExecutor:
             if isinstance(item, BaseException):
                 raise item
         out: dict[str, Any] = {
-            "messages": await asyncio.to_thread(
+            "messages": await offload(
                 lambda: [self._message(r, SEARCH_BODY_CAP) for r in got if r]),
             "resultSizeEstimate": page.get("resultSizeEstimate", len(ids)),
         }
@@ -686,12 +689,12 @@ class GoogleExecutor:
 
     async def _mail_read(self, uid: int, a: Any) -> dict:
         raw = await self._json(uid, "GET", f"{GMAIL}/messages/{_q(a.message_id)}", params={"format": "full"})
-        return await asyncio.to_thread(self._message, raw, gmail_mime.BODY_CAP)  # the HTML parse blocks
+        return await offload(self._message, raw, gmail_mime.BODY_CAP)  # the HTML parse blocks
 
     async def _mail_thread(self, uid: int, a: Any) -> dict:
         raw = await self._json(uid, "GET", f"{GMAIL}/threads/{_q(a.thread_id)}", params={"format": "full"})
         return {"threadId": raw.get("id", a.thread_id),
-                "messages": await asyncio.to_thread(
+                "messages": await offload(
                     lambda: [self._message(m, THREAD_BODY_CAP) for m in raw.get("messages") or []])}
 
     async def _mail_profile(self, uid: int, a: Any) -> dict:
