@@ -210,7 +210,8 @@ async def test_vault_items_map_to_ui_kinds_with_source_and_trust(app, data):
         assert s["counts"]["organisations"] == 1 and s["counts"]["projects"] == 1 and s["counts"]["sources"] == 1
         assert s["profile"]["timezone"] and "token" not in str(s).lower()
         assert s["connectors"] == [
-            {"name": "calendar", "label": "Calendar"}, {"name": "gmail", "label": "Gmail"},
+            {"name": "calendar", "label": "Calendar"}, {"name": "fathom", "label": "Fathom"},
+            {"name": "gmail", "label": "Gmail"},
             {"name": "notion", "label": "Notion"}, {"name": "onedrive", "label": "Onedrive"}, {"name": "outlook", "label": "Outlook"},
             {"name": "outlook_calendar", "label": "Outlook Calendar"}, {"name": "slack", "label": "Slack"},
             {"name": "teams", "label": "Teams"}]

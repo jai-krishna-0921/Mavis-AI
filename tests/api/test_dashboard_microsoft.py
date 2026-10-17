@@ -9,6 +9,11 @@ API = "/api/v1"
 M = NativeProvider.MICROSOFT
 
 
+async def _microsoft(c) -> dict:
+    """The microsoft row, found by id: the rows around it depend on which providers are registered."""
+    return next(r for r in (await c.get(f"{API}/connectors")).json() if r["id"] == "microsoft")
+
+
 def _acct(tid: str, mail: str, scopes=MS_SCOPES) -> dict:
     return {"tid": tid, "oid": "o1", "mail": mail, "scopes": list(scopes)}
 
@@ -20,13 +25,14 @@ async def test_hidden_until_configured(app, monkeypatch):
     get_settings.cache_clear()
     c, _ = await signed_in(app, 1)
     async with c:
-        assert [r["id"] for r in (await c.get(f"{API}/connectors")).json()] == ["google", "slack", "notion"]
+        ids = [r["id"] for r in (await c.get(f"{API}/connectors")).json()]
+        assert "microsoft" not in ids and {"google", "slack", "fathom"} <= set(ids)
 
 
 async def test_listed_when_configured_with_icon_chips_and_admin_link(app):
     c, _ = await signed_in(app, 1)
     async with c:
-        ms = (await c.get(f"{API}/connectors")).json()[2]
+        ms = await _microsoft(c)
         assert ms["id"] == "microsoft" and ms["name"] == "Microsoft 365" and ms["icon"] == "microsoft"
         assert ms["services"] == ["outlook", "calendar", "teams", "onedrive"] and ms["status"] == "none"
         link = ms["admin_link"]
@@ -40,13 +46,13 @@ async def test_connected_work_and_personal_accounts(app, tokens):
     async with c:
         await tokens.save(1, M, account=_acct("11111111-2222-3333-4444-555555555555", "me@corp.test"),
                           access_token="a", refresh_token="r", expires_at=None)
-        ms = (await c.get(f"{API}/connectors")).json()[2]
+        ms = await _microsoft(c)
         assert ms["status"] == "active" and ms["account"] == "me@corp.test" and ms["note"] is None
         assert ms["unavailable"] == [] and "teams" in ms["scopes_granted"]
         assert ms["missing_scopes"] == []
         await tokens.save(1, M, account=_acct(PERSONAL_TENANT, "me@outlook.com"),
                           access_token="a", refresh_token="r", expires_at=None)
-        ms = (await c.get(f"{API}/connectors")).json()[2]
+        ms = await _microsoft(c)
         assert ms["account"] == "me@outlook.com"
         assert ms["note"] == "Teams is not available for personal Microsoft accounts."
         # the chip must not read "allowed" next to that note, and it is not "missing" either
@@ -60,7 +66,7 @@ async def test_work_account_without_chat_scope_gets_the_teams_note(app, tokens):
         scopes = [s for s in MS_SCOPES if s != "Chat.ReadWrite"]
         await tokens.save(1, M, account=_acct("11111111-2222-3333-4444-555555555555", "me@corp.test", scopes),
                           access_token="a", refresh_token="r", expires_at=None)
-        ms = (await c.get(f"{API}/connectors")).json()[2]
+        ms = await _microsoft(c)
         assert ms["note"] == "Teams was not allowed on this account." and ms["missing_scopes"] == ["teams"]
 
 
