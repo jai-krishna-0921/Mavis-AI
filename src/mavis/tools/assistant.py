@@ -163,6 +163,13 @@ def _preview_wake(args: WakeMeArgs, ctx: ToolContext) -> str:
     return f"Set a reminder for {at:%a %d %b %Y, %H:%M}: {args.reason}"
 
 
+class MeetingNoteArgs(ToolArgs):
+    text: str = Field(min_length=1, max_length=4000, description="What the user said about the meeting")
+    meeting: str = Field(default="", description=(
+        "Which meeting, in the user's words (its title), when they named one; leave empty to mean the "
+        "meeting Mavis just asked about"))
+
+
 def _preview_loop(args: TrackLoopArgs) -> str:
     return f"Keep track of this {args.kind.value.replace('_', ' ').lower()}: {args.title}"
 
@@ -208,6 +215,67 @@ async def track_loop(user_id: int, args: TrackLoopArgs) -> ToolOutput:
                    origin=LoopOrigin.CONVERSATION),
     )
     return ToolOutput(f"Keeping track of: {loop.title}", f"Tracking loop #{loop.id}.")
+
+
+MEETING_ASK_WITHIN = timedelta(hours=24)
+MEETING_LOOKBACK = timedelta(days=7)
+
+
+async def _find_meeting(user_id: int, query: str) -> tuple[str, str, datetime | None, datetime | None] | None:
+    """(event_key, title, starts_at, ends_at) of the meeting the user means, else None."""
+    from mavis.store.repo import meeting_notes
+    from mavis.store.repo.loops import similar_titles
+    from mavis.tools.integrations.notion_sync import meetings
+
+    now = timeutil.now()
+    query = query.strip()
+    if query:
+        row = await meeting_notes.get(user_id, query)
+        if row is not None:
+            return row.event_key, row.title, row.starts_at, row.ends_at
+    candidates = [(r.event_key, r.title, r.starts_at, r.ends_at)
+                  for r in await meeting_notes.in_window(user_id, now - MEETING_LOOKBACK, now)]
+    seen = {c[0] for c in candidates}
+    for raw in await meetings.calendar_events(user_id, now - MEETING_LOOKBACK, now):
+        m = meetings.from_event(raw) if meetings.qualifies(raw) else None
+        if m is not None and m.key not in seen and m.start <= now:
+            candidates.append((m.key, m.title, m.start, m.end))
+    if query:
+        for key, title, start, end in candidates:
+            if key == query:
+                return key, title, start, end
+        hits = [c for c in candidates if c[1] and similar_titles(query, c[1])]
+        if hits:
+            return max(hits, key=lambda c: c[2] or now - MEETING_LOOKBACK)
+    ask = (await users.get_state(user_id)).get("meeting_ask") or {}
+    try:
+        asked_at = timeutil.ensure_utc(datetime.fromisoformat(str(ask.get("asked_at"))))
+    except ValueError:
+        return None
+    if not ask.get("event_key") or now - asked_at > MEETING_ASK_WITHIN:
+        return None
+    key = str(ask["event_key"])
+    for c in candidates:
+        if c[0] == key:
+            return c
+    row = await meeting_notes.get(user_id, key)
+    return (key, row.title, row.starts_at, row.ends_at) if row is not None else None
+
+
+async def meeting_note(user_id: int, args: MeetingNoteArgs) -> str:
+    from mavis.store.repo import meeting_notes
+    from mavis.tools.integrations.notion_sync.runner import enqueue_sync
+
+    found = await _find_meeting(user_id, args.meeting)
+    if found is None:
+        return "Which meeting is this about? Name it and I will add the note."
+    key, title, start, end = found
+    row = await meeting_notes.get(user_id, key)
+    if row is None or not row.title:
+        await meeting_notes.upsert(user_id, key, title=title, starts_at=start, ends_at=end)
+    await meeting_notes.append_user_notes(user_id, key, args.text)
+    await enqueue_sync(user_id, {"meetings"})
+    return f"Saved to your notes for {title or 'that meeting'}."
 
 
 async def notion_rebuild_home(user_id: int, args: NoArgs) -> str:
@@ -437,6 +505,11 @@ TOOLS = [
     MavisTool("track_loop", "Track an open loop: commitment, waiting-on, goal, concern, routine or watch.",
               TrackLoopArgs, RiskClass.WRITE_SELF, track_loop, _CONV, priority=55,
               preview=_preview_loop, on_taint=TaintPolicy.APPROVE, provenance=("title",)),
+    MavisTool("meeting_note", "Save what the user says about how a meeting went to that meeting's notes. "
+              "Use it when they answer Mavis's question about a meeting or add a note about one.",
+              MeetingNoteArgs, RiskClass.WRITE_SELF, meeting_note, _CONV, requires=Capability.NOTION,
+              priority=45, preview=lambda a: f"Add to your meeting notes: {a.text[:120]}",
+              on_taint=TaintPolicy.APPROVE, provenance=("text",)),
     MavisTool("notion_rebuild_home", "Recreate the Mavis AI home (its databases) in the user's Notion after "
               "part of it was deleted. Pages made before stay in Notion.", NoArgs, RiskClass.WRITE_SELF,
               notion_rebuild_home, _CONV, requires=Capability.NOTION, priority=30),
