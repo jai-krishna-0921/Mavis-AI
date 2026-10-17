@@ -31,7 +31,7 @@ from mavis.api.routes import fathom as fathom_route
 from mavis.api.routes import oauth as oauth_route
 from mavis.bus import get_bus
 from mavis.domain import timeutil
-from mavis.domain.events import JobKind, Trust
+from mavis.domain.events import EventType, JobKind, Trust
 from mavis.domain.loops import LoopKind, LoopOrigin, LoopStatus, LoopUpsert
 from mavis.domain.memory import Entity
 from mavis.domain.messages import Role
@@ -47,13 +47,10 @@ from mavis.store.models import MeetingNote, NotionLink
 from mavis.store.repo import approvals, meeting_notes, messages, notion_links, tasks, users
 from mavis.store.repo import loops as loop_repo
 from mavis.store.repo import personal as personal_repo
-from mavis.store.repo.deletion import delete_user_rows
 from mavis.tools import assistant
-from mavis.tools.integrations import fathom_ingest, get_provider, wiring
+from mavis.tools.integrations import fathom_ingest, get_connection_cache, get_provider, wiring
 from mavis.tools.integrations import tools as tools_mod
-from mavis.tools.integrations.connect_flow import ConnectFlow
 from mavis.tools.integrations.connections import ConnectionCache
-from mavis.tools.integrations.fathom_ingest import fathom_recording_job
 from mavis.tools.integrations.native.base import NativeProvider
 from mavis.tools.integrations.native.fathom import FathomExecutor
 from mavis.tools.integrations.native.google import GoogleExecutor
@@ -63,10 +60,10 @@ from mavis.tools.integrations.native.router import NativeRouter
 from mavis.tools.integrations.native.tokens import GOOGLE_TOKEN_URL, NativeTokenStore
 from mavis.tools.integrations.notion_sync import meetings, people, runner
 from mavis.tools.integrations.notion_sync.briefings import NotionBriefSource
-from mavis.tools.integrations.notion_sync.runner import NotionSync, notion_sync_job
+from mavis.tools.integrations.notion_sync.runner import NotionSync
 from mavis.tools.integrations.tools import register_integration_tools
 from mavis.tools.registry import ToolRegistry
-from tests.tools.integrations.fakes import FakeProvider, Recorder
+from tests.tools.integrations.fakes import FakeProvider
 from tests.tools.integrations.native.conftest import *  # noqa: F403 - fixtures
 from tests.tools.integrations.native.fathomfake import FakeFathom, fathom_meeting
 from tests.tools.integrations.native.gfake import FakeGoogle
@@ -207,15 +204,30 @@ async def connect(router, bus, user_id, provider: NativeProvider) -> httpx.Respo
         return await c.get(f"/oauth/{provider.value}/callback", params={"code": "code-1", "state": query(link)["state"]})
 
 
+def production_handlers() -> dict:
+    return {JobKind.CONNECTION_CHECK: wiring._connection_check_job, JobKind.FIRST_SYNC: wiring._first_sync_job,
+            JobKind.NOTION_SYNC: wiring._notion_sync_job, JobKind.FATHOM_RECORDING: wiring._fathom_recording_job}
+
+
 async def drain(bus) -> None:
-    """Run the Notion sync and Fathom recording jobs the code queued, until none is left."""
-    for _ in range(12):
-        due = [j for j in bus.jobs if j.kind in (JobKind.NOTION_SYNC, JobKind.FATHOM_RECORDING)]
-        if not due:
-            return
+    """Run what the code queued through the handlers the worker registers (wiring.py), until nothing is left:
+    connection checks, the CONNECTION_CHANGED event, first syncs, Notion sync and Fathom recording jobs.
+    Each job kind that ran is recorded in `bus.ran`."""
+    handlers, flow = production_handlers(), wiring.get_connect_flow()
+    if not hasattr(bus, "ran"):
+        bus.ran = []
+    for _ in range(25):
+        events = [e for e in bus.events if e.type is EventType.CONNECTION_CHANGED]
+        bus.events[:] = [e for e in bus.events if e not in events]
+        due = [j for j in bus.jobs if j.kind in handlers]
         bus.jobs[:] = [j for j in bus.jobs if j not in due]
+        if not events and not due:
+            return
+        for event in events:
+            await flow.on_connection_changed(event)
         for job in due:
-            await (notion_sync_job(job) if job.kind is JobKind.NOTION_SYNC else fathom_recording_job(job))
+            bus.ran.append(job.kind)
+            await handlers[job.kind](job)
     raise AssertionError("jobs keep queueing each other")
 
 
@@ -253,9 +265,7 @@ async def block_connect_notion(router, world, user, bus):
     g = await router.tokens.grant(user.id, N)
     assert g.status == "ACTIVE" and g.account["owner_id"] == OWNER_ID and g.account["bot_user_id"] == BOT_ID
     assert g.account["template_page_id"] in world.notion.pages
-    lines = await wiring._notion_first_sync(user.id)
-    assert lines == ["Building your Mavis AI home in Notion."]
-    assert [j.kind for j in bus.jobs if j.kind is JobKind.NOTION_SYNC] == [JobKind.NOTION_SYNC]
+    assert [j for j in bus.jobs if j.kind is JobKind.CONNECTION_CHECK]  # the callback queues the activation check
     return g
 
 
@@ -267,7 +277,6 @@ async def block_connect_fathom(router, world, user, bus):
     assert hook["triggered_for"] == ["my_recordings"] and hook["include_action_items"] and hook["include_summary"]
     route = hook["url"].rsplit("/", 1)[1]
     assert hook["url"] == f"https://mavis.test/webhooks/fathom/{route}"
-    assert await wiring._fathom_first_sync(user.id) == []  # nothing recorded yet
     return hook, route
 
 
@@ -281,9 +290,12 @@ async def block_seed(router, world, user, bus, monkeypatch):
     await remember_identity(user.id, emails=(ME,))
     world.events[:] = [
         cal("e-budget", "Budget review", T0 + timedelta(days=1), T0 + timedelta(days=1, minutes=30), ("Dana Reyes", DANA)),
-        cal("e-kick", "Kickoff sync", T0 - timedelta(minutes=130), T0 - timedelta(minutes=100), ("Dana Reyes", DANA)),
+        cal("e-kick", "Kickoff sync", T0 - timedelta(minutes=110), T0 - timedelta(minutes=80), ("Dana Reyes", DANA)),
         cal("e-vendor", "Vendor call", T0 - timedelta(minutes=190), T0 - timedelta(minutes=160), ("Priya Nair", "priya@vend.test")),
     ]
+    old_start = T0 - timedelta(days=2)
+    world.fathom.add_meeting(fathom_meeting(400, "Intro call", iso(old_start), iso(old_start + timedelta(minutes=30)),
+                                            invitees=("Raj Patel <raj@x.test>",), summary="Met Raj, no follow ups."))
     svc = LoopService(bus)
     mine = await svc.upsert(user.id, LoopUpsert(kind=LoopKind.COMMITMENT, title="Send Dana the Q4 deck", entities=["Dana Reyes"],
                                                 trust=Trust.USER, origin=LoopOrigin.CONVERSATION))
@@ -311,6 +323,11 @@ async def block_seed(router, world, user, bus, monkeypatch):
 async def block_first_sync(world, user, bus, mine, theirs):
     uid = user.id
     await drain(bus)
+    ran = Counter(bus.ran)  # connect -> check -> CONNECTION_CHANGED -> FIRST_SYNC -> sync and ingest jobs
+    assert ran[JobKind.CONNECTION_CHECK] == 2 and ran[JobKind.FIRST_SYNC] == 2
+    assert ran[JobKind.NOTION_SYNC] >= 1 and ran[JobKind.FATHOM_RECORDING] == 1
+    intro = await meeting_notes.get(uid, "fathom:400")  # the older recording was read by the Fathom first sync
+    assert intro.recording_id == "400" and intro.summary == "Met Raj, no follow ups."
     assert len(world.notion.databases) == 5
     home = await current_home(uid)
     [person] = rows_of(world, home, "people")
@@ -318,14 +335,18 @@ async def block_first_sync(world, user, bus, mine, theirs):
     todo_names = sorted(text_of(p, "Name") for p in rows_of(world, home, "todos"))
     assert todo_names == ["Dana to return the vendor contract", "Send Dana the Q4 deck"]
     pages = {text_of(p, "Name"): p for p in rows_of(world, home, "meetings")}
-    assert set(pages) == {"Budget review", "Kickoff sync", "Vendor call"}
+    assert set(pages) == {"Budget review", "Kickoff sync", "Vendor call", "Intro call"}
     body = await body_of(world, uid, pages["Budget review"]["id"])
     assert ("heading_2", "Prep") in body
     assert any(t == "With: Dana Reyes" for _, t in body) and any(t == "Open: Send Dana the Q4 deck" for _, t in body)
     assert [r["id"] for r in pages["Budget review"]["properties"]["People"]["relation"]] == [
         (await notion_links.get(uid, "person", DANA)).page_id]
     page_id = (await notion_links.get(uid, *runner.HOME_LINK)).page_id
-    assert not [b for b in world.notion.blocks[page_id] if b["type"] == "callout" and not b["in_trash"]]  # setup callout removed
+    shown = [r for r in world.notion.requests if r.method == "PATCH" and r.url.path.endswith(f"/blocks/{page_id}/children")
+             and b'"callout"' in r.content]
+    removed = [r for r in world.notion.requests if r.method == "DELETE" and "/blocks/" in r.url.path]
+    assert len(shown) == 1 and removed  # the setup callout was shown during setup, then deleted
+    assert not [b for b in world.notion.blocks[page_id] if b["type"] == "callout"]  # and none is left
     assert (await users.get_state(uid))["cursors"]["notion_setup"] == "done"
     return home
 
@@ -354,7 +375,7 @@ async def block_todo_edits(world, user, clock, notices, home, mine, theirs):
 
 async def block_fathom_webhook(router, world, user, bus, hook, route):
     uid = user.id
-    start, end = T0 - timedelta(minutes=130), T0 - timedelta(minutes=100)
+    start, end = T0 - timedelta(minutes=110), T0 - timedelta(minutes=80)
     meeting = fathom_meeting(501, "Kickoff sync", iso(start), iso(end),
                              invitees=("Dana Reyes <dana@x.test>", f"Me <{ME}>"),
                              action_items=("Send Dana the revised budget", "Dana to confirm the venue booking"),
@@ -488,16 +509,15 @@ async def block_forget_person(world, user, home):
 
 async def block_disconnect_and_reconnect(router, world, user, bus, monkeypatch):
     uid = user.id
-    rec = Recorder()
     forgotten = []
 
     async def forget(user_id, prefix):
         forgotten.append(prefix)
         return 1
 
-    flow = ConnectFlow(provider=router, cache=ConnectionCache(router, ttl_s=0), bus=bus, notify=rec.notify,
-                       schedule=rec.schedule, state=wiring.RepoUserState(), base_url="https://mavis.test",
-                       forget_source=forget)
+    monkeypatch.setattr(wiring, "forget_learned_source", forget)
+    wiring.get_connect_flow.cache_clear()
+    flow = wiring.get_connect_flow()  # the production construction: activator, first sync claim, hooks
     assert await flow.disconnect(uid, C.FATHOM, forget=True) is True
     assert world.fathom.webhooks == {}  # the webhook at Fathom is deleted
     assert await router.tokens.grant(uid, F) is None
@@ -515,8 +535,9 @@ async def block_disconnect_and_reconnect(router, world, user, bus, monkeypatch):
     bus.jobs.clear()
     r = await connect(router, bus, uid, N)
     assert r.status_code == 200
-    await wiring._notion_first_sync(uid)
-    await drain(bus)
+    bus.ran.clear()
+    await drain(bus)  # the reconnect goes through the check and the FIRST_SYNC job again
+    assert JobKind.FIRST_SYNC in bus.ran and JobKind.NOTION_SYNC in bus.ran
     assert (await notion_links.get(uid, *runner.HOME_LINK)).page_id == home_before.page_id  # adopted
     assert len(world.notion.databases) == 5  # and there is no second home
     homes = [p for p in world.notion.pages.values() if text_of_title(p) == "Mavis AI" and not p["in_trash"]]
@@ -540,18 +561,34 @@ async def count(model, uid: int) -> int:
 async def block_deletion(router, user):
     uid = user.id
     assert await count(NotionLink, uid) > 0 and await count(MeetingNote, uid) > 0
-    out = await deletion._native(uid)
-    assert out["revoked"] >= 1 and await router.tokens.grant(uid, N) is None
-    await delete_user_rows(uid)
+    await deletion.run_steps(uid)  # the production deletion path, every step
+    assert await router.tokens.grant(uid, N) is None
     assert await count(NotionLink, uid) == 0 and await count(MeetingNote, uid) == 0
+    assert (await users.get(uid)).status == "deleted"
 
 
-async def test_notion_fathom_journey(router, world, vendor, user, rec_bus, clock, monkeypatch, fake_llm):
+def install(router, monkeypatch) -> None:
+    """The router is the process provider, and the production wiring objects are built fresh around it."""
     shim = lambda: router  # noqa: E731
     shim.cache_clear = lambda: None
-    monkeypatch.setattr("mavis.tools.integrations.get_provider", shim)
+    for target in ("mavis.tools.integrations.get_provider", "mavis.tools.integrations.wiring.get_provider"):
+        monkeypatch.setattr(target, shim)
     monkeypatch.setattr(meetings, "get_provider", shim)
     monkeypatch.setattr(fathom_ingest, "get_provider", shim)
+    for getter in (*wiring.WIRING_GETTERS, get_connection_cache):
+        getter.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_wiring():
+    yield
+    for getter in (*wiring.WIRING_GETTERS, get_connection_cache):
+        getter.cache_clear()
+
+
+async def test_notion_fathom_journey(router, world, vendor, user, rec_bus, clock, monkeypatch, fake_llm, memory,
+                                     memory_checkpointer, channel):
+    install(router, monkeypatch)
     notices, previous = Notices(), initiative._current
     initiative.set_current(SimpleNamespace(executor=notices))
     try:
@@ -582,3 +619,25 @@ def test_every_notion_and_fathom_action_has_a_handler():
         specs = {n for n in ACTIONS if ACTIONS[n].capability is cap}
         handled = set(ex._handlers)
         assert specs and specs <= handled and handled <= set(ACTIONS)
+
+
+async def test_account_deletion_with_a_live_fathom_webhook(router, world, user, rec_bus, clock, monkeypatch, memory,
+                                                           memory_checkpointer, channel):
+    """Deleting the account while Fathom is still connected removes the webhook at Fathom, both Mavis tables
+    and every grant, including the webhook companion."""
+    install(router, monkeypatch)
+    uid, bus = user.id, rec_bus
+    await connect(router, bus, uid, N)
+    await connect(router, bus, uid, F)
+    [hook] = world.fathom.webhooks.values()
+    await notion_links.upsert(uid, "home", "home", "page-home")
+    await meeting_notes.upsert(uid, "fathom:9", title="T", recording_id="9", summary="s")
+    assert await router.tokens.grant(uid, NativeProvider.FATHOM_HOOK) is not None
+    await deletion.run_steps(uid)
+    deletes = [r for r in world.fathom.requests if r.method == "DELETE"]
+    assert [r.url.path.rsplit("/", 1)[1] for r in deletes] == [hook["id"]]  # the DELETE reached Fathom
+    assert world.fathom.webhooks == {}
+    for provider in (N, F, NativeProvider.FATHOM_HOOK):
+        assert await router.tokens.grant(uid, provider) is None
+    assert await count(NotionLink, uid) == 0 and await count(MeetingNote, uid) == 0
+    world.fathom.assert_all_routed()
