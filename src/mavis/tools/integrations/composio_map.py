@@ -216,7 +216,7 @@ NATIVE_ONLY_ACTIONS: frozenset[str] = frozenset({
     "meet.recent", "drive.export_file",
     "teams.chats", "teams.history", "teams.send", "teams.chat",
     "onedrive.search", "onedrive.read", "onedrive.list_recent",
-    "notion.append",
+    "notion.append", "fathom.meetings", "fathom.meeting",
     "mail.inbox_delta", "calendar.delta",
 })
 

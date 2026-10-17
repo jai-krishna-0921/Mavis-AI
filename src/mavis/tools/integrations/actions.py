@@ -387,6 +387,15 @@ class NotionAppendArgs(ToolArgs):
     _content_fits = field_validator("content")(_fits_blocks)
 
 
+class FathomMeetingsArgs(ToolArgs):
+    days: int = Field(default=7, ge=1, le=60, description="How many days back to look")
+    limit: int = Field(default=10, ge=1, le=25)
+
+
+class FathomMeetingArgs(ToolArgs):
+    recording_id: int = Field(gt=0, description="Recording id from fathom_meetings")
+
+
 # --- Google Workspace argument models (spec 2026-10-03 section 4) ---------------------------------------
 
 
@@ -1099,6 +1108,14 @@ _SPECS: tuple[ActionSpec, ...] = (
                "Add plain text to the end of an existing Notion page. The user approves it first.",
                NotionAppendArgs, RiskClass.OUTWARD, _a("knowledge", "conversation", "spawn"),
                preview=_preview_notion_append, identity=("page_id", "content")),
+    ActionSpec("fathom.meetings", Capability.FATHOM,
+               "List the user's recent Fathom meetings: recording ids, titles, start times, attendees and "
+               "how many action items each has. Use it first to get the id fathom_meeting needs.",
+               FathomMeetingsArgs, RiskClass.READ, _a("knowledge", "conversation", "spawn")),
+    ActionSpec("fathom.meeting", Capability.FATHOM,
+               "Read one Fathom meeting by recording id (from fathom_meetings): its summary and action "
+               "items.",
+               FathomMeetingArgs, RiskClass.READ, _a("knowledge", "conversation", "spawn")),
 )
 
 # Workspace exposure (spec 4.4): chat gets reads plus a few self-only writes; spawned workers get all.
