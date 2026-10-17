@@ -13,6 +13,9 @@ Link kinds `person` (key = person key) and `project` (key = normalized name); li
 
 from __future__ import annotations
 
+import re
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 import structlog
@@ -52,18 +55,50 @@ _SYSTEM = (
 )
 
 
+@dataclass
+class MergedPerson(PersonAgg):
+    """A person seen under several keys (email, Slack id, name): one page, every key remembered."""
+
+    keys: list[str] = field(default_factory=list)
+
+
+def _is_suppressed(key: str, suppressed: set[str]) -> bool:
+    return key in suppressed or itemids.person_id(key) in suppressed
+
+
+def _merge(group: list[PersonAgg]) -> MergedPerson:
+    lead = min(group, key=lambda a: (not ("@" in a.key and not a.key.startswith("slack:")), -a.score, a.key))
+    counts: Counter[str] = Counter()
+    for a in group:
+        counts.update(a.counts)
+    lasts = [a.last for a in group if a.last is not None]
+    return MergedPerson(
+        key=lead.key, name=next((a.name for a in [lead, *group] if a.name), ""),
+        email=next((a.email for a in [lead, *group] if a.email), ""), counts=counts,
+        score=sum(a.score for a in group), last=max(lasts) if lasts else None,
+        refs=[r for a in group for r in a.refs], keys=sorted({a.key for a in group}))
+
+
 def real_people(aggs: list[PersonAgg], suppressed: set[str]) -> list[PersonAgg]:
+    """Real humans, one entry per person: candidates with the same non-empty name become one. A person
+    with any suppressed key is dropped whole."""
+    blocked = {normalize_name(a.name) for a in aggs if _is_suppressed(a.key, suppressed)} - {""}
     keep = [a for a in aggs
             if not a.automated
             and ((a.counts["sent"] > 0 and a.counts["received"] > 0) or a.counts["meeting"] > 0)
-            and a.key not in suppressed and itemids.person_id(a.key) not in suppressed]
-    return sorted(keep, key=lambda a: (-a.score, a.key))[:MAX_PEOPLE]
+            and not _is_suppressed(a.key, suppressed) and normalize_name(a.name) not in blocked]
+    groups: dict[str, list[PersonAgg]] = {}
+    for a in keep:
+        groups.setdefault(normalize_name(a.name) or f"key:{a.key}", []).append(a)
+    merged = [_merge(g) for g in groups.values()]
+    return sorted(merged, key=lambda a: (-a.score, a.key))[:MAX_PEOPLE]
 
 
 async def summary_line(user_id: int, name: str, facts: list[str]) -> str:
     if not facts:
         return ""
-    prompt = f"Person: {name}\nFacts:\n" + wrap_untrusted("\n".join(f"- {f}" for f in facts), "notion:people")
+    prompt = wrap_untrusted(f"Person: {name}\nFacts:\n" + "\n".join(f"- {f}" for f in facts),
+                            "notion:people")
     try:
         out = await llm.complete([SystemMessage(_SYSTEM), HumanMessage(prompt)], llm.Tier.FAST, 0.2,
                                  name="notion:summary", priority="best_effort")
@@ -88,7 +123,7 @@ def _when(value: object) -> datetime | None:
 
 
 def _mentions(statement: str, name: str) -> bool:
-    return bool(name) and name in normalize_name(statement)
+    return bool(name) and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", normalize_name(statement)) is not None
 
 
 async def _trash(ctx: SyncCtx, kind: str, key: str, page_id: str) -> None:
@@ -192,11 +227,12 @@ async def _summary(ctx: SyncCtx, link, name: str, facts: list[str]) -> tuple[str
     at = _when(old.get("summary_at"))
     if not facts:
         return "", {}
-    if cached and (old.get("facts_hash") == digest or (at is not None and ctx.now - at < SUMMARY_EVERY)):
-        return cached, {k: old[k] for k in ("summary", "facts_hash", "summary_at") if k in old}
+    keep = {k: old[k] for k in ("summary", "facts_hash", "summary_at") if k in old}
+    if (cached and old.get("facts_hash") == digest) or (at is not None and ctx.now - at < SUMMARY_EVERY):
+        return cached, keep
     line = await summary_line(ctx.user_id, name, facts[:SUMMARY_FACTS])
-    if not line:
-        return cached, {k: old[k] for k in ("summary", "facts_hash", "summary_at") if k in old}
+    if not line:  # a failed attempt waits a day too, and the old line (if any) stays
+        return cached, {**keep, "summary_at": ctx.now.isoformat()}
     return line, {"summary": line, "facts_hash": digest, "summary_at": ctx.now.isoformat()}
 
 
@@ -210,12 +246,15 @@ def _person_props(a: PersonAgg, name: str) -> dict:
     return props
 
 
-async def _archive_people(ctx: SyncCtx, aggs: list[PersonAgg], suppressed: set[str], mem: _Memory) -> None:
+async def _archive_people(ctx: SyncCtx, aggs: list[PersonAgg], suppressed: set[str], mem: _Memory,
+                          page_keys: dict[str, str]) -> None:
     present, known = {a.key for a in aggs}, mem.known_names()
     for link in await notion_links.all_of(ctx.user_id, PERSON_LINK):
         key = link.local_key
-        gone = key not in present and normalize_name(str(link.meta.get("name") or "")) not in known
-        if key in suppressed or itemids.person_id(key) in suppressed or gone:
+        keys = set(link.meta.get("keys") or []) | {key}
+        gone = not (keys & present) and normalize_name(str(link.meta.get("name") or "")) not in known
+        merged_away = page_keys.get(key, key) != key  # now shown on another key's page
+        if any(_is_suppressed(k, suppressed) for k in keys) or gone or merged_away:
             if not ctx.left():
                 return
             await _trash(ctx, PERSON_LINK, key, link.page_id)
@@ -226,13 +265,22 @@ async def people_pass(ctx: SyncCtx) -> None:
     aggs = await aggregate_people(uid, ctx.now)
     suppressed = await personal_repo.suppressed_keys(uid)
     mem = await _Memory.load(uid)
-    await _archive_people(ctx, aggs, suppressed, mem)
+    real = real_people(aggs, suppressed)
+    existing = await notion_links.all_of(uid, PERSON_LINK)
+    page_keys = {}
+    for a in real:  # an existing page keeps its key, so a quiet email does not move the page
+        keys = set(getattr(a, "keys", [a.key]))
+        owner = next((r.local_key for r in existing
+                      if keys & ({r.local_key} | set(r.meta.get("keys") or []))), a.key)
+        page_keys.update({k: owner for k in keys})
+    await _archive_people(ctx, aggs, suppressed, mem, page_keys)
     meeting_links = await notion_links.all_of(uid, MEETING_LINK)
-    for a in real_people(aggs, suppressed):
+    for a in real:
         if not ctx.left():
             return
         name = a.name or a.email or a.key
-        link = await notion_links.get(uid, PERSON_LINK, a.key)
+        page_key = page_keys[a.key]
+        link = await notion_links.get(uid, PERSON_LINK, page_key)
         facts = _statements(mem.facts_of(name))[:MAX_FACTS]
         todos = mem.todos_of(name)
         emails = {a.email.lower()} - {""}
@@ -242,8 +290,8 @@ async def people_pass(ctx: SyncCtx) -> None:
                  blocks.heading("What Mavis knows"), *blocks.bullets(facts),
                  blocks.heading("Open todos"), *blocks.bullets(todos),
                  blocks.heading("Recent meetings"), *blocks.bullets(meetings)]
-        await _write(ctx, PERSON_LINK, a.key, "people", _person_props(a, name), owned,
-                     {"name": name, "email": a.email.lower(), **cache})
+        await _write(ctx, PERSON_LINK, page_key, "people", _person_props(a, name), owned,
+                     {"name": name, "email": a.email.lower(), "keys": getattr(a, "keys", [a.key]), **cache})
 
 
 # ----- projects
