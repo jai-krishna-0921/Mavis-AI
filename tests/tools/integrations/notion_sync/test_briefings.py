@@ -6,8 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from mavis.domain import timeutil
+from mavis.domain.errors import FailureKind
 from mavis.domain.messages import Role
 from mavis.store.repo import messages, notion_links
+from mavis.tools.integrations.native.notion_api import NotionError
 from mavis.tools.integrations.native.tokens import ACTIVE, Grant
 from mavis.tools.integrations.notion_sync import briefings, runner
 from mavis.tools.integrations.notion_sync.briefings import NotionBriefSource, briefings_pass
@@ -21,8 +23,9 @@ async def env(fake, api, user):
                "bot_user_id": BOT_ID}
     home = await ensure_home(api, user.id, account)
 
-    def ctx():
-        return runner.SyncCtx(user.id, api, home, account, timeutil.now(), 1e18, frozenset(), lambda: 0.0)
+    def ctx(now=None):
+        return runner.SyncCtx(user.id, api, home, account, now or timeutil.now(), 1e18, frozenset(),
+                              lambda: 0.0)
 
     def pages():
         return [p for p in fake.pages.values()
@@ -77,8 +80,43 @@ async def test_delivered_forces_briefings_only_when_connected(db, monkeypatch):
     assert calls == [(1, {"briefings"})]
 
 
-async def test_old_briefings_outside_the_window_are_skipped(env):
+async def test_dated_briefing_older_than_the_window_is_skipped(env):
+    await brief(env.uid, "2026-10-10", "Old news")
+    await briefings_pass(env.ctx(timeutil.now() + timedelta(days=3)))
+    assert env.pages() == []
+    await briefings_pass(env.ctx())
+    assert len(env.pages()) == 1
+
+
+async def test_message_without_a_date_is_skipped(env):
     await brief(env.uid, "no-date-here", "x")
     await briefings_pass(env.ctx())
     assert env.pages() == []
-    assert timedelta(days=2) == briefings.WINDOW
+
+
+async def test_failed_body_append_retries_onto_the_same_page(env, monkeypatch):
+    await brief(env.uid, "2026-10-17", "Hello\nWorld")
+    real, calls = env.api.append, []
+
+    async def flaky(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise NotionError(FailureKind.UNAVAILABLE, "boom")
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(env.api, "append", flaky)
+    with pytest.raises(NotionError):
+        await briefings_pass(env.ctx())
+    assert len(env.pages()) == 1
+    await briefings_pass(env.ctx())
+    [page] = env.pages()
+    assert len(await env.api.children(env.uid, page["id"])) == 2
+    await briefings_pass(env.ctx())
+    assert len(env.pages()) == 1 and len(calls) == 2
+
+
+async def test_a_150_line_briefing_is_appended_whole(env):
+    await brief(env.uid, "2026-10-17", "\n".join(f"line {i}" for i in range(150)))
+    await briefings_pass(env.ctx())
+    [page] = env.pages()
+    assert len(await env.api.children(env.uid, page["id"])) == 150

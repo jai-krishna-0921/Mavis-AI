@@ -50,19 +50,26 @@ async def briefings_pass(ctx: SyncCtx) -> None:
             continue
         day = found.group()
         seen.add(day)
-        if await notion_links.get(uid, LINK, day) is not None:
+        link = await notion_links.get(uid, LINK, day)
+        if link is not None and not link.meta.get("fresh"):
             continue
         if not ctx.left():
             return
-        props = {
-            "Name": {"title": _rich(f"Briefing {day}")},
-            "Mavis key": {"rich_text": _rich(f"briefing:{day}")},
-            "Date": {"date": {"start": day}},
-        }
-        page = await ctx.api.create_page(
-            uid, {"type": "data_source_id", "data_source_id": ctx.home.ds["briefings"]}, props,
-            _body(msg.content))
-        await notion_links.upsert(uid, LINK, day, page["id"], pushed_hash="")
+        if link is None:
+            props = {
+                "Name": {"title": _rich(f"Briefing {day}")},
+                "Mavis key": {"rich_text": _rich(f"briefing:{day}")},
+                "Date": {"date": {"start": day}},
+            }
+            page = await ctx.api.create_page(
+                uid, {"type": "data_source_id", "data_source_id": ctx.home.ds["briefings"]}, props)
+            # link first: if the body write fails, the retry finishes this page instead of making another
+            await notion_links.upsert(uid, LINK, day, page["id"], pushed_hash="", meta={"fresh": True})
+            page_id = page["id"]
+        else:
+            page_id = link.page_id
+        await ctx.api.append(uid, page_id, _body(msg.content))
+        await notion_links.upsert(uid, LINK, day, page_id, pushed_hash="", meta={"fresh": False})
 
 
 class NotionBriefSource:
