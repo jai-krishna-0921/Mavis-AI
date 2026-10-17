@@ -9,7 +9,7 @@ guarded by membership checks.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -48,7 +48,7 @@ from mavis.tools.integrations.actions import (
 from mavis.tools.integrations.activation import Activator
 from mavis.tools.integrations.connect_flow import CHECK_KIND, ConnectFlow, RepoUserState
 from mavis.tools.integrations.connections import failed_alias
-from mavis.tools.integrations.first_sync import FirstSync
+from mavis.tools.integrations.first_sync import FirstSync, register_first_sync_handler
 from mavis.tools.integrations.poller import POLL_KIND, WORKSPACE_POLL_KIND, Poller
 from mavis.worker.runner import register_event_handler, register_job_handler, register_startup_hook
 
@@ -246,6 +246,44 @@ def get_poller() -> Poller:
                   user_ids=all_user_ids)
 
 
+FATHOM_FIRST_DAYS, FATHOM_FIRST_MAX = 14, 20
+
+
+async def _notion_first_sync(user_id: int) -> list[str]:
+    """Build the Mavis AI home in the background; the sync job does the work."""
+    from mavis.tools.integrations.notion_sync.runner import enqueue_sync
+
+    await enqueue_sync(user_id)
+    return ["Building your Mavis AI home in Notion."]
+
+
+async def _fathom_first_sync(user_id: int) -> list[str]:
+    """Queue the last two weeks of Fathom meetings through the same job the poll fallback uses."""
+    from mavis.tools.integrations import fathom_ingest
+    from mavis.tools.integrations.native.base import ReauthRequired
+    from mavis.tools.integrations.native.fathom_api import FathomError
+
+    api = fathom_ingest.fathom_api()
+    if api is None:
+        return []
+    since = timeutil.now() - timedelta(days=FATHOM_FIRST_DAYS)
+    try:
+        meetings = await api.meetings(user_id, created_after=since, limit=FATHOM_FIRST_MAX)
+    except (ReauthRequired, FathomError):
+        return []  # the poll fallback picks recent meetings up later
+    queued = 0
+    for m in meetings[:FATHOM_FIRST_MAX]:
+        rid = m.get("recording_id")
+        if isinstance(rid, bool) or not isinstance(rid, int) or rid < 1:
+            continue
+        await get_bus().enqueue(Job(id=f"fathom:{user_id}:{rid}", user_id=user_id,
+                                    kind=JobKind.FATHOM_RECORDING, payload={"meeting": m, "source": "poll"}))
+        queued += 1
+    if not queued:
+        return []
+    return [f"Reading {queued} recent Fathom meeting{'' if queued == 1 else 's'} for notes and action items."]
+
+
 @lru_cache
 def get_first_sync() -> FirstSync:
     # Phase 4 / later: loops stay unused, third-party content never creates loops.
@@ -257,6 +295,8 @@ def get_first_sync() -> FirstSync:
                    bus=_LazyBus(), tz_of=user_timezone, connectors=get_connector_ingest(),
                    meetings=personal_layer.record_meetings, after_sync=personal_layer.schedule)
     MicrosoftSync(fs).register()  # harmless unconfigured: only an ACTIVE Microsoft capability runs a sync
+    register_first_sync_handler(Capability.NOTION, _notion_first_sync)
+    register_first_sync_handler(Capability.FATHOM, _fathom_first_sync)
     return fs
 
 
@@ -465,3 +505,7 @@ def register_integrations(registry: ToolRegistry | None = None) -> None:
         routines.register_brief_source(
             InboxBrief(get_provider(), get_connection_cache(), on_failed=reconnect_prompt)
         )
+    if "notion" not in present:
+        from mavis.tools.integrations.notion_sync.briefings import NotionBriefSource
+
+        routines.register_brief_source(NotionBriefSource())

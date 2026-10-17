@@ -734,6 +734,8 @@ class ConnectFlow:
             await self.state.update(user_id, {"polling": polling})
         await self._clear_provider_state(user_id, capability)
         forgotten = await self._forget_learned(user_id, capability) if forget else 0
+        if forget and capability is Capability.FATHOM:  # Fathom's notes live in meeting_notes, not memory
+            forgotten += await self._clear_fathom_notes(user_id)
         await self.send(user_id, f"Disconnected {name}. I can't see it anymore."
                         + (" I also removed what I had learned from it." if forgotten else ""))
         return True
@@ -768,6 +770,17 @@ class ConnectFlow:
                 await self.state.modify_nested(user_id, key, change)
         except Exception as exc:  # noqa: BLE001 - the disconnect itself already succeeded
             log.warning("connect.clear_state_failed", provider=spec.id, error=type(exc).__name__)
+
+    async def _clear_fathom_notes(self, user_id: int) -> int:
+        """Rows the user wrote notes on keep them (only the Fathom parts go); the rest are deleted. A Notion
+        disconnect touches no `notion_links`, so a reconnect adopts the existing home."""
+        from mavis.store.repo import meeting_notes
+
+        try:
+            return await meeting_notes.clear_fathom(user_id)
+        except Exception as exc:  # noqa: BLE001 - the disconnect itself already succeeded
+            log.warning("connect.clear_fathom_failed", error=type(exc).__name__)
+            return 0
 
     async def _forget_learned(self, user_id: int, capability: Capability) -> int:
         """Forget is the default: what was learned from mail or Slack records goes with the connection."""

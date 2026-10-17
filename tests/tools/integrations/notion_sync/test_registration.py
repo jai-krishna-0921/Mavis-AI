@@ -13,4 +13,5 @@ def test_importing_the_job_handler_module_registers_every_pass():
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
     registered = eval(out.strip())  # noqa: S307 - our own subprocess output
-    assert {(10, "people"), (20, "projects"), (30, "meetings"), (40, "todos")} <= set(registered)
+    assert {(10, "people"), (20, "projects"), (30, "meetings"), (40, "todos"),
+                                (50, "briefings")} <= set(registered)
