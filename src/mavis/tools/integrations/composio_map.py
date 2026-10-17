@@ -216,6 +216,7 @@ NATIVE_ONLY_ACTIONS: frozenset[str] = frozenset({
     "meet.recent", "drive.export_file",
     "teams.chats", "teams.history", "teams.send", "teams.chat",
     "onedrive.search", "onedrive.read", "onedrive.list_recent",
+    "notion.append",
     "mail.inbox_delta", "calendar.delta",
 })
 
@@ -250,7 +251,7 @@ COMPOSIO_ACTIONS: dict[str, SlugMapping] = {
         "NOTION_CREATE_NOTION_PAGE",
         # The live action creates an EMPTY page and has no body argument; content needs a follow-up
         # NOTION_ADD_PAGE_CONTENT call (not built; Notion is outside the Gmail slice).
-        lambda a: {"parent_id": a.parent_id, "title": a.title},
+        lambda a: {"parent_id": a.parent_page_id, "title": a.title},
     ),
     # Google Workspace: googlesuper only, so the stored slug already carries the GOOGLESUPER_ prefix.
     # drive.read has no mapping: workspace_tools.drive_read calls drive.meta and drive.download.

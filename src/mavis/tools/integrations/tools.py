@@ -40,6 +40,7 @@ from mavis.tools.integrations.connections import ConnectionCache, failed_alias
 from mavis.tools.integrations.failures import adapter_kind, classify
 from mavis.tools.integrations.mail_render import RENDERERS
 from mavis.tools.integrations.microsoft_render import MICROSOFT_RENDERERS
+from mavis.tools.integrations.notion_render import NOTION_RENDERERS
 from mavis.tools.integrations.workspace_render import RENDERERS as WORKSPACE_RENDERERS
 from mavis.tools.registry import MavisTool, TaintPolicy, ToolContext, ToolRegistry, contextual
 
@@ -143,7 +144,7 @@ def _make_tool(spec: ActionSpec) -> MavisTool:
 
     custom = workspace_tools.CUSTOM_FNS.get(spec.name)
     render = (RENDERERS.get(spec.name) or WORKSPACE_RENDERERS.get(spec.name)
-              or MICROSOFT_RENDERERS.get(spec.name))
+              or MICROSOFT_RENDERERS.get(spec.name) or NOTION_RENDERERS.get(spec.name))
 
     async def fn(ctx: ToolContext, args: BaseModel) -> str:
         localized = localize(args, ctx.timezone)

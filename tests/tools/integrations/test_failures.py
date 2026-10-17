@@ -74,7 +74,7 @@ class _Failing(FakeProvider):
      FailureKind.RATE_LIMITED),
     ("slack.send", SlackSendArgs(channel="#x", text="hi"), Capability.SLACK,
      json.dumps({"ok": False, "error": "channel_not_found"}), FailureKind.NOT_FOUND),
-    ("notion.create_page", NotionCreateArgs(parent_id="p", title="T"), Capability.NOTION,
+    ("notion.create_page", NotionCreateArgs(parent_page_id="p", title="T"), Capability.NOTION,
      "{\"status\": 401, \"code\": \"unauthorized\", \"message\": \"API token is invalid.\"}",
      FailureKind.AUTH),
 ])

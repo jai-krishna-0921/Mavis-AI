@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, Field, model_serializer, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from mavis.config import get_settings
@@ -343,18 +343,48 @@ class OnedriveRecentArgs(ToolArgs):
     max_results: int = Field(default=25, ge=1, le=50)
 
 
+NOTION_TEXT_CHARS = 2000  # one Notion rich text object
+NOTION_MAX_BLOCKS = 100  # blocks one write may carry
+
+
+def notion_paragraphs(content: str) -> list[str]:
+    """Split on blank lines into paragraphs of at most NOTION_TEXT_CHARS characters (longer ones are cut)."""
+    out: list[str] = []
+    for part in re.split(r"\n\s*\n", content.replace("\r\n", "\n")):
+        part = part.strip()
+        out += [part[i:i + NOTION_TEXT_CHARS] for i in range(0, len(part), NOTION_TEXT_CHARS)]
+    return out
+
+
+def _fits_blocks(content: str) -> str:
+    if len(notion_paragraphs(content)) > NOTION_MAX_BLOCKS:
+        raise ValueError(f"content is more than {NOTION_MAX_BLOCKS} paragraphs; split it into several writes")
+    return content
+
+
 class NotionSearchArgs(ToolArgs):
-    query: str = ""
+    query: str = Field(default="", max_length=200,
+                       description="Words in the page title or text; empty lists recent")
+    limit: int = Field(default=10, ge=1, le=25)
 
 
 class NotionReadArgs(ToolArgs):
-    page_id: str
+    page_id: str = Field(min_length=1, description="Page id from notion_search")
 
 
 class NotionCreateArgs(ToolArgs):
-    parent_id: str = Field(description="Parent page id")
-    title: str
-    content: str = Field(default="", description="Markdown body")
+    parent_page_id: str = Field(min_length=1, description="Id of the page to create the new page under")
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(default="", description="Plain text; blank lines separate paragraphs")
+
+    _content_fits = field_validator("content")(_fits_blocks)
+
+
+class NotionAppendArgs(ToolArgs):
+    page_id: str = Field(min_length=1, description="Id of the page to add to")
+    content: str = Field(min_length=1, description="Plain text; blank lines separate paragraphs")
+
+    _content_fits = field_validator("content")(_fits_blocks)
 
 
 # --- Google Workspace argument models (spec 2026-10-03 section 4) ---------------------------------------
@@ -753,7 +783,11 @@ def _preview_teams(args: TeamsSendArgs, tz: str) -> str:
 
 
 def _preview_notion(args: NotionCreateArgs, tz: str) -> str:
-    return f"🗒️ New Notion page: {args.title}\n{args.content[:400]}"
+    return f'Add a page "{args.title}" in Notion'
+
+
+def _preview_notion_append(args: NotionAppendArgs, tz: str) -> str:
+    return f"Add to a Notion page: {args.content[:120]}"
 
 
 def _preview_folder(args: FolderCreateArgs, tz: str) -> str:
@@ -1049,13 +1083,22 @@ _SPECS: tuple[ActionSpec, ...] = (
                "it first.",
                TeamsSendArgs, RiskClass.OUTWARD, _a("comms", "conversation", "spawn"),
                preview=_preview_teams, identity=("chat_id", "text"), target=("chat_id",)),
-    ActionSpec("notion.search", Capability.NOTION, "Search Notion pages by text.",
+    ActionSpec("notion.search", Capability.NOTION,
+               "Search the user's Notion pages by title or text. Returns page ids, titles, links and when "
+               "each was last edited. Use it first to get the id notion_read needs.",
                NotionSearchArgs, RiskClass.READ, _a("knowledge", "conversation", "spawn")),
-    ActionSpec("notion.read", Capability.NOTION, "Read a Notion page.",
+    ActionSpec("notion.read", Capability.NOTION,
+               "Read one Notion page by id (from notion_search): its title and text.",
                NotionReadArgs, RiskClass.READ, _a("knowledge", "conversation", "spawn")),
-    ActionSpec("notion.create_page", Capability.NOTION, "Create a Notion page with markdown content.",
-               NotionCreateArgs, RiskClass.WRITE_SELF, _a("knowledge", "conversation", "spawn"),
-               preview=_preview_notion),
+    ActionSpec("notion.create_page", Capability.NOTION,
+               "Create a Notion page with a title and plain text under another page. The user approves it "
+               "first.",
+               NotionCreateArgs, RiskClass.OUTWARD, _a("knowledge", "conversation", "spawn"),
+               preview=_preview_notion, identity=("parent_page_id", "title")),
+    ActionSpec("notion.append", Capability.NOTION,
+               "Add plain text to the end of an existing Notion page. The user approves it first.",
+               NotionAppendArgs, RiskClass.OUTWARD, _a("knowledge", "conversation", "spawn"),
+               preview=_preview_notion_append, identity=("page_id", "content")),
 )
 
 # Workspace exposure (spec 4.4): chat gets reads plus a few self-only writes; spawned workers get all.

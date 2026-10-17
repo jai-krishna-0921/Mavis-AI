@@ -23,7 +23,7 @@ def test_catalog_covers_spec_actions():
         "calendar.list", "calendar.find", "calendar.free_slots", "calendar.create_event",
         "calendar.update_event",
         "slack.channels", "slack.history", "slack.send",
-        "notion.search", "notion.read", "notion.create_page",
+        "notion.search", "notion.read", "notion.create_page", "notion.append",
         # Google Workspace reads (spec 2026-10-03 section 4) and their internal helpers
         "drive.search", "drive.list_recent", "drive.read", "docs.read", "sheets.find", "sheets.read",
         "tasks.list", "contacts.search", "meet.transcript",
