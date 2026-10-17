@@ -340,14 +340,14 @@ async def test_same_minute_conflict_goes_to_the_owner(env):
 
 
 async def test_push_continues_past_the_changed_cap(env, monkeypatch):
+    await env.add("Renew insurance")
+    await env.run()  # stores the push cursor
+    assert len(env.rows()) == 1
     monkeypatch.setattr(loop_repo, "CHANGED_LIMIT", 2)
+    env.clock.advance(minutes=5)
     for word in ("plumber", "invoice", "passport", "dentist", "garden"):
         await env.add(f"Call about {word}")
         env.clock.advance(seconds=1)
-    await env.run()
-    assert len(env.rows()) == 5
-    env.clock.advance(minutes=5)
-    await env.add("Renew insurance")
     await env.run()
     assert len(env.rows()) == 6
 
