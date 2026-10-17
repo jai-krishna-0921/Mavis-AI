@@ -35,6 +35,8 @@ PASSTHROUGH: set[str] = {
     "MCP_ENABLED",
     # Provider registry (spec 2026-10-15)
     "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET",
+    # Notion and Fathom connectors (spec 2026-10-17)
+    "NOTION_CLIENT_ID", "NOTION_CLIENT_SECRET", "FATHOM_CLIENT_ID", "FATHOM_CLIENT_SECRET",
 }
 
 
@@ -133,7 +135,6 @@ def test_every_registered_provider_credential_reaches_prod():
     env_example = (ROOT / ".env.example").read_text()
     wanted = {s.client_id_setting for s in providers.user_providers() if s.client_id_setting}
     wanted |= {s.client_secret_setting for s in providers.user_providers() if s.client_secret_setting}
-    wanted |= {"microsoft_client_id", "microsoft_client_secret"}  # registered by the Microsoft spec in Part B
     for setting in sorted(wanted):
         env = setting.upper()
         assert setting in fields, f"Settings.{setting} missing"

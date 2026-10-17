@@ -166,6 +166,10 @@ class Settings(BaseSettings):
     slack_client_secret: str = ""
     microsoft_client_id: str = ""  # Entra app (multi-tenant); empty hides the Microsoft card (Part B)
     microsoft_client_secret: str = ""
+    notion_client_id: str = ""  # public Notion integration; empty hides the Notion card
+    notion_client_secret: str = ""
+    fathom_client_id: str = ""  # Fathom OAuth app; empty hides the Fathom card
+    fathom_client_secret: str = ""
     slack_signing_secret: str = ""
     native_token_kek: str = ""  # 32 random bytes, base64: wraps the data key of every sealed grant token
     # The Google OAuth app is External and unverified until Google reviews it; the connect prompt warns about

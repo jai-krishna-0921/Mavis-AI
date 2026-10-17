@@ -120,6 +120,7 @@ class ProviderSpec:
     extra_auth_params: Mapping[str, str] = field(default_factory=dict)  # static query params
     client_id_setting: str = ""  # attribute name on Settings, e.g. "google_oauth_client_id"
     client_secret_setting: str = ""
+    token_auth: str = "body"  # "body" (credentials in the form) or "basic_json" (HTTP Basic + JSON)
     refresh_params: Mapping[str, str] = field(default_factory=dict)  # extra form fields on a refresh
     gone_codes: frozenset[str] = frozenset()  # refresh error codes that mean the grant is dead
     soft_errors: bool = False  # True: HTTP 200 with {"ok": false, "error": code} is an error (Slack)
@@ -180,6 +181,7 @@ class ProviderSpec:
 PROVIDERS: dict[str, ProviderSpec] = {}
 _HOOK_PATH = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*:[A-Za-z_]\w*")
 _MAX_ID = 16
+_TOKEN_AUTH = frozenset({"body", "basic_json"})
 
 
 def register(spec: ProviderSpec) -> ProviderSpec:
@@ -189,6 +191,8 @@ def register(spec: ProviderSpec) -> ProviderSpec:
         raise ValueError(f"provider id {spec.id!r} must be 1 to {_MAX_ID} characters")
     if not spec.capabilities and not spec.internal:
         raise ValueError(f"provider {spec.id} must declare at least one capability")
+    if spec.token_auth not in _TOKEN_AUTH:
+        raise ValueError(f"provider {spec.id} token_auth must be one of {sorted(_TOKEN_AUTH)}")
     if spec.anchor is not None and spec.anchor not in spec.capabilities:
         raise ValueError(f"provider {spec.id} anchor {spec.anchor.value} is not one of its capabilities")
     for other in PROVIDERS.values():

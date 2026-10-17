@@ -103,6 +103,32 @@ def ms_env(settings, monkeypatch) -> Iterator:
 
 
 @pytest.fixture
+def notion_env(settings, monkeypatch) -> Iterator:
+    """Notion configured on the native provider (client id, secret and token key)."""
+    from mavis.config import get_settings
+
+    for key, value in {"NOTION_CLIENT_ID": "nid", "NOTION_CLIENT_SECRET": "nsecret",
+                       "NATIVE_TOKEN_KEK": "a" * 44, "INTEGRATION_PROVIDER": "native"}.items():
+        monkeypatch.setenv(key, value)
+    get_settings.cache_clear()
+    yield get_settings()
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def fathom_env(settings, monkeypatch) -> Iterator:
+    """Fathom configured on the native provider (client id, secret and token key)."""
+    from mavis.config import get_settings
+
+    for key, value in {"FATHOM_CLIENT_ID": "fid", "FATHOM_CLIENT_SECRET": "fsecret",
+                       "NATIVE_TOKEN_KEK": "a" * 44, "INTEGRATION_PROVIDER": "native"}.items():
+        monkeypatch.setenv(key, value)
+    get_settings.cache_clear()
+    yield get_settings()
+    get_settings.cache_clear()
+
+
+@pytest.fixture
 def settings(tmp_path, monkeypatch) -> Iterator:
     """Isolated Settings: temp data dir, temp SQLite, no external services, no developer .env."""
     from mavis.config import get_settings

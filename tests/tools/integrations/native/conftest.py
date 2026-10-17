@@ -23,6 +23,8 @@ def native_env(settings, monkeypatch):
         "GOOGLE_OAUTH_CLIENT_SECRET": "gsecret",
         "SLACK_CLIENT_ID": "sid", "SLACK_CLIENT_SECRET": "ssecret",
         "MICROSOFT_CLIENT_ID": "mid", "MICROSOFT_CLIENT_SECRET": "msecret", "PUBLIC_BASE_URL": "https://mavis.test",
+        "NOTION_CLIENT_ID": "cid", "NOTION_CLIENT_SECRET": "secret",
+        "FATHOM_CLIENT_ID": "fid", "FATHOM_CLIENT_SECRET": "fsecret",
     }.items():
         monkeypatch.setenv(key, value)
     get_settings.cache_clear()

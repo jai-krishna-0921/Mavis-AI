@@ -19,6 +19,9 @@ class NativeProvider(StrEnum):
     GOOGLE = "google"
     SLACK = "slack"
     MICROSOFT = "microsoft"
+    NOTION = "notion"
+    FATHOM = "fathom"
+    FATHOM_HOOK = "fathom_hook"  # the per-grant webhook secret companion; never a user-data capability
     SLACK_BOT = "slack_bot"  # the workspace bot token (chat as Mavis); never a user-data capability
     TESTING = "testing"  # reserved for the registry test fake; never present in PROVIDERS in production
 

@@ -15,6 +15,7 @@ IntegrationError with a status only.
 from __future__ import annotations
 
 import asyncio
+import base64
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -299,11 +300,18 @@ class NativeTokenStore:
         if spec is None or not spec.token_url:
             raise IntegrationError(f"{provider.value} has no token endpoint")
         client_id, client_secret = providers.client_credentials(spec)
-        data = {"grant_type": "refresh_token", "refresh_token": refresh_token,
-                "client_id": client_id, "client_secret": client_secret, **spec.refresh_params}
+        if spec.token_auth == "basic_json":
+            basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+            request: dict = {"headers": {"Authorization": f"Basic {basic}"},
+                             "json": {"grant_type": "refresh_token", "refresh_token": refresh_token,
+                                      **spec.refresh_params}}
+        else:
+            request = {"data": {"grant_type": "refresh_token", "refresh_token": refresh_token,
+                                "client_id": client_id, "client_secret": client_secret,
+                                **spec.refresh_params}}
         gone = spec.gone_codes
         try:
-            r = await send_capped(self._http, "POST", spec.token_url, data=data, max_bytes=TOKEN_BYTES)
+            r = await send_capped(self._http, "POST", spec.token_url, max_bytes=TOKEN_BYTES, **request)
         except ResponseTooLarge:
             raise IntegrationError(f"{provider.value} token endpoint: response too large") from None
         except httpx.HTTPError:
